@@ -1,0 +1,20 @@
+[package]
+name = "paros"
+version = "0.1.0"
+edition = "2024"
+description = "Learning the Paxos consensus algorithm by implementing it in Rust"
+license = "Apache-2.0"
+repository = "https://github.com/PierreZ/paros"
+documentation = "https://docs.rs/paros"
+authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
+keywords = ["paxos", "consensus", "distributed-systems", "replication"]
+categories = ["algorithms", "network-programming"]
+readme = "README.md"
+
+[dependencies]
+
+[lints.rust]
+async_fn_in_trait = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
