@@ -1,0 +1,18 @@
+[package]
+name = "paros"
+description = "Paxos in Rust — user-facing facade; the client API and binary land here"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/paros"
+readme = "../README.md"
+
+[dependencies]
+paros-core = { path = "../paros-core", version = "0.1.0" }
+
+[lints]
+workspace = true

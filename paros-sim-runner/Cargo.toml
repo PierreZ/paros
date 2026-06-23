@@ -1,0 +1,15 @@
+[package]
+name = "paros-sim-runner"
+description = "Native runner for paros deterministic simulations (full features, incl. fork explorer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+paros-sim = { path = "../paros-sim", version = "0.1.0" }
+
+[lints]
+workspace = true
