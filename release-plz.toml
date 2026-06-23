@@ -16,15 +16,52 @@ pr_labels = ["release"]
 # Enable changelog updates
 changelog_update = true
 
+# Update dependencies during release
+dependencies_update = true
+
 # Disable semver checks (pre-1.0, API is unstable)
 semver_check = false
 
 # Features always bump minor version (even in 0.x)
 features_always_increment_minor = true
 
+# Package-specific configurations (ordered by dependency hierarchy: bottom → top).
+# All publishable crates share a version group so they bump in lockstep.
+[[package]]
+name = "paros-core"
+changelog_path = "paros-core/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-storage"
+changelog_path = "paros-storage/CHANGELOG.md"
+version_group = "paros"
+
+[[package]]
+name = "paros-sim"
+changelog_path = "paros-sim/CHANGELOG.md"
+version_group = "paros"
+
 [[package]]
 name = "paros"
-changelog_path = "CHANGELOG.md"
+changelog_path = "paros/CHANGELOG.md"
+version_group = "paros"
+
+# Binaries and demos are not published or released.
+[[package]]
+name = "paros-sim-runner"
+release = false
+publish = false
+
+[[package]]
+name = "paros-wasm-demo"
+release = false
+publish = false
+
+[[package]]
+name = "xtask"
+release = false
+publish = false
 
 # Changelog configuration
 [changelog]

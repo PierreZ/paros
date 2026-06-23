@@ -1,0 +1,19 @@
+[package]
+name = "paros-wasm-demo"
+description = "Browser/wasm demo of a paros Paxos simulation under network chaos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm32 build (wasm-bindgen), rlib for native bin/tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+paros-core = { path = "../paros-core", version = "0.1.0" }
+
+[lints]
+workspace = true

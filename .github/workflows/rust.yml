@@ -43,3 +43,14 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
+
+  # paros-core is the sans-IO state machine: zero deps, std-only, no clock/IO.
+  # It must stay portable to wasm32 so the browser demo can run it unchanged.
+  portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Build paros-core for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core

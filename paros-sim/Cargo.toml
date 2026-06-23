@@ -1,0 +1,17 @@
+[package]
+name = "paros-sim"
+description = "Deterministic-simulation driver, workloads, and oracles for paros (moonpool-backed)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+paros-core = { path = "../paros-core", version = "0.1.0" }
+paros-storage = { path = "../paros-storage", version = "0.1.0" }
+
+[lints]
+workspace = true

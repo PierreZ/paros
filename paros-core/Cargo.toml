@@ -1,0 +1,17 @@
+[package]
+name = "paros-core"
+description = "Sans-IO Multi-Paxos state machine core: no I/O, no clock, no randomness, zero dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# Intentionally empty: paros-core is std-only with zero dependencies, which is
+# what keeps it portable to wasm32-unknown-unknown and trivially deterministic.
+[dependencies]
+
+[lints]
+workspace = true

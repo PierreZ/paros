@@ -55,6 +55,10 @@
             # Set environment variables
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
+            # RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
+            # gated by SANCOV_CRATES (see scripts/sancov-rustc.sh). No-op unless
+            # SANCOV_CRATES is set (e.g. by `cargo xtask sim run`).
+            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
 
             # Inform about available tools
             echo "Available tools:"
