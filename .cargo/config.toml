@@ -1,2 +1,8 @@
+# moonpool-sim drives a single-thread tokio runtime via named-task instrumentation
+# (TokioTaskProvider), which needs tokio's unstable `task::Builder`. moonpool sets
+# the same flag; paros-core (zero-dep, no tokio) is unaffected.
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+
 [alias]
 xtask = "run --package xtask --"

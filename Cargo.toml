@@ -2,7 +2,6 @@
 members = [
     "paros",
     "paros-core",
-    "paros-storage",
     "paros-sim",
     "paros-sim-runner",
     "paros-wasm-demo",

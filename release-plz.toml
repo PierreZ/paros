@@ -33,11 +33,6 @@ changelog_path = "paros-core/CHANGELOG.md"
 version_group = "paros"
 
 [[package]]
-name = "paros-storage"
-changelog_path = "paros-storage/CHANGELOG.md"
-version_group = "paros"
-
-[[package]]
 name = "paros-sim"
 changelog_path = "paros-sim/CHANGELOG.md"
 version_group = "paros"

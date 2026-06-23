@@ -3,16 +3,13 @@
 //!
 //! The runner machinery (`run_binaries`) sets `SANCOV_CRATES` and a separate
 //! `--target-dir target/sancov` so cargo doesn't serve a cached
-//! non-instrumented build. `SIM_BINARIES` is empty until Stage 1 (#14)
-//! registers the first deterministic-simulation binary.
+//! non-instrumented build. `SIM_BINARIES` lists the deterministic-simulation
+//! binaries to drive under coverage.
 
 use std::process::{self, Command};
 use std::time::Instant;
 
 /// A simulation binary with its name and the crates to instrument with sancov.
-// `SIM_BINARIES` is empty until Stage 1 (#14) registers the first binary, so the
-// struct is not yet constructed anywhere.
-#[allow(dead_code)]
 struct SimBinary {
     name: &'static str,
     sancov_crates: &'static str,
@@ -25,9 +22,11 @@ impl SimBinary {
     }
 }
 
-/// Registry of simulation binaries. Stage 1 (#14) adds the first entry, e.g.
-/// `SimBinary { name: "sim-...", sancov_crates: "paros_core" }`.
-const SIM_BINARIES: &[SimBinary] = &[];
+/// Registry of simulation binaries instrumented for coverage-guided runs.
+const SIM_BINARIES: &[SimBinary] = &[SimBinary {
+    name: "paros-sim-runner",
+    sancov_crates: "paros_core,paros,paros_sim",
+}];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

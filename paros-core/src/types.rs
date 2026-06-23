@@ -4,28 +4,34 @@ use core::cmp::Ordering;
 
 /// Stable identity of a node in the cluster.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeId(pub u64);
 
 /// A replicated-log slot index. Multi-Paxos chooses one [`Value`] per slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot(pub u64);
 
 /// Opaque client-supplied identity, used to dedupe requests for at-most-once
 /// execution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClientId(pub u64);
 
 /// Per-client monotonically increasing request sequence number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClientSeq(pub u64);
 
 /// An opaque value proposed into / chosen for a slot. The core never interprets
 /// the bytes; the application owns their meaning.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Value(pub Vec<u8>);
 
 /// An opaque client command: a proposal payload before it is assigned a slot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Command(pub Vec<u8>);
 
 /// A Paxos ballot (a.k.a. proposal / round number), forming a **total order**.
@@ -36,6 +42,7 @@ pub struct Command(pub Vec<u8>);
 /// acceptor can always decide whether an incoming ballot is `>=` the one it has
 /// promised.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ballot {
     /// The round number. Higher rounds dominate.
     pub round: u64,

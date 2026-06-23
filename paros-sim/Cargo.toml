@@ -1,6 +1,6 @@
 [package]
 name = "paros-sim"
-description = "Deterministic-simulation driver, workloads, and oracles for paros (moonpool-backed)"
+description = "Deterministic-simulation harness for paros: the moonpool Process adapter, workloads, and oracles"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,36 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+# `native` (default-on) re-enables moonpool's production providers + fork-based
+# exploration. Building with `--no-default-features` drops both for the wasm-able
+# configuration the demo reuses (CI enforces this; see .github/workflows/rust.yml).
+[features]
+default = ["native"]
+native = [
+    "moonpool-sim/tokio-providers",
+    "moonpool-sim/exploration",
+    "moonpool-transport/tokio",
+]
+
 [dependencies]
-paros-core = { path = "../paros-core", version = "0.1.0" }
-paros-storage = { path = "../paros-storage", version = "0.1.0" }
+# The node driver + RPC contract + MemStorage live in `paros` (the library); this
+# crate is just the DST harness on top: the `Process` adapter, workloads, oracles.
+paros = { path = "../paros", version = "0.1.0" }
+
+# moonpool is pinned to a commit on `main` (not the crates.io release): it evolves
+# fast and we track it deliberately, bumping `rev` by hand. Both crates come in
+# without their production (tokio net/fs) features so the sim stays wasm-able; the
+# `native` feature above layers those back on for the native runner.
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# `macros` for `tokio::select!` in the driver/workload loops. The runtime itself
+# comes from moonpool-sim.
+tokio = { version = "1", features = ["macros"] }
 
 [lints]
 workspace = true

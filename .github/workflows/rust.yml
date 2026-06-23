@@ -44,8 +44,11 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
 
-  # paros-core is the sans-IO state machine: zero deps, std-only, no clock/IO.
-  # It must stay portable to wasm32 so the browser demo can run it unchanged.
+  # The sans-IO core, the library driver, and the sim's workloads/oracles must
+  # stay portable to wasm32 so the browser demo runs them unchanged. paros-core is
+  # zero-dep/std-only; paros (the provider-generic driver) must build for wasm32;
+  # paros-sim must build in its wasm-able `--no-default-features` configuration;
+  # paros-wasm-demo must compile the whole stack to wasm32.
   portability:
     runs-on: ubuntu-latest
     steps:
@@ -54,3 +57,9 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build paros-core for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
+      - name: Build paros (the library driver) for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
+      - name: Lint paros-sim in its wasm-able configuration
+        run: nix develop --command cargo clippy -p paros-sim --no-default-features --all-targets -- --deny warnings
+      - name: Build paros-wasm-demo for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-wasm-demo

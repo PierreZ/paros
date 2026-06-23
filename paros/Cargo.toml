@@ -1,6 +1,6 @@
 [package]
 name = "paros"
-description = "Paxos in Rust — user-facing facade; the client API and binary land here"
+description = "Paxos in Rust — the node library: sans-IO core re-export + the provider-generic driver; client API and binary land here"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,31 @@ documentation = "https://docs.rs/paros"
 readme = "../README.md"
 
 [dependencies]
-paros-core = { path = "../paros-core", version = "0.1.0" }
+# The `serde` feature lets the provider-generic driver put the same
+# `paros_core::Message` on the wire (no DTO).
+paros-core = { path = "../paros-core", version = "0.1.0", features = ["serde"] }
+
+# The driver is generic over moonpool's `Providers` abstraction + transport, so
+# the SAME code runs in production (TokioProviders) and simulation (SimProviders).
+# Both come in without their production (tokio net/fs) features so `paros` stays
+# wasm-safe; a future `native` feature + `parosd` binary layer tokio back on.
+# Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
+# release) — same rev as paros-sim.
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Required by the `#[service]` macro's generated handler trait.
+async-trait = "0.1"
+# The driver emits standard observability events (node_tick, peer_message_received).
+tracing = "0.1"
+# `macros` for `tokio::select!` in the driver loop; the runtime is supplied by
+# whichever `Providers` the caller passes.
+tokio = { version = "1", features = ["macros"] }
+# `CancellationToken` is the driver's shutdown signal (what `ctx.shutdown()`
+# hands back in sim; production constructs its own).
+tokio-util = "0.7"
 
 [lints]
 workspace = true

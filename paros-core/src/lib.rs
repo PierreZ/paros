@@ -1,7 +1,11 @@
 //! `paros-core` — a sans-IO Multi-Paxos state machine.
 //!
-//! No I/O, no clock, no randomness, and zero external dependencies (std only).
-//! The application drives it: feed events via [`RawNode::step`] and logical time
+//! No I/O, no clock, no randomness, and no *default* dependencies (std only) —
+//! which keeps it portable to wasm32 and trivially deterministic. The optional,
+//! default-off `serde` feature adds `Serialize`/`Deserialize` derives on the
+//! public protocol types (e.g. [`Message`]) so a driver can put the same type on
+//! the wire; it adds derives only, no runtime, and serde is itself wasm-safe.
+//! The application drives the core: feed events via [`RawNode::step`] and logical time
 //! via [`RawNode::tick`], drain a batch of work via [`RawNode::ready`], and
 //! acknowledge it via [`Ready::advance`]. The core *describes* the side effects
 //! to perform; the caller *performs* them.
