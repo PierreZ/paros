@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
+use paros::EV_NODE_TICK;
 use serde::Serialize;
 
 /// Standard transport-client observability events (same names as moonpool's
@@ -16,8 +17,6 @@ use serde::Serialize;
 const EV_ISSUED: &str = "client_issued";
 const EV_ACKED: &str = "client_acknowledged";
 const EV_FAILED: &str = "client_failed";
-/// Node logical-clock tick event (emitted by the driver).
-const EV_TICK: &str = "node_tick";
 
 /// Node A — the client.
 const NODE_A: u8 = 0;
@@ -137,7 +136,7 @@ impl Invariant for TimelineRecorder {
         d.issued = collect_seq(q, EV_ISSUED);
         d.acked = collect_seq(q, EV_ACKED);
         d.failed = collect_seq(q, EV_FAILED);
-        d.ticks = u64::try_from(q.len(EV_TICK)).unwrap_or(u64::MAX);
+        d.ticks = u64::try_from(q.len(EV_NODE_TICK)).unwrap_or(u64::MAX);
     }
 }
 

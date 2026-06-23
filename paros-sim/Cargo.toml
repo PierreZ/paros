@@ -1,6 +1,6 @@
 [package]
 name = "paros-sim"
-description = "Deterministic-simulation driver, workloads, and oracles for paros (moonpool-backed)"
+description = "Deterministic-simulation harness for paros: the moonpool Process adapter, workloads, and oracles"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,9 +21,9 @@ native = [
 ]
 
 [dependencies]
-# `serde` feature: the driver puts the same `paros_core::Message` on the wire.
-paros-core = { path = "../paros-core", version = "0.1.0", features = ["serde"] }
-paros-storage = { path = "../paros-storage", version = "0.1.0" }
+# The node driver + RPC contract + MemStorage live in `paros` (the library); this
+# crate is just the DST harness on top: the `Process` adapter, workloads, oracles.
+paros = { path = "../paros", version = "0.1.0" }
 
 # moonpool is pinned to a commit on `main` (not the crates.io release): it evolves
 # fast and we track it deliberately, bumping `rev` by hand. Both crates come in

@@ -25,7 +25,7 @@ impl SimBinary {
 /// Registry of simulation binaries instrumented for coverage-guided runs.
 const SIM_BINARIES: &[SimBinary] = &[SimBinary {
     name: "paros-sim-runner",
-    sancov_crates: "paros_core,paros_sim",
+    sancov_crates: "paros_core,paros,paros_sim",
 }];
 
 fn main() {

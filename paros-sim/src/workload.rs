@@ -9,12 +9,10 @@ use moonpool_sim::{
     SimContext, SimulationError, SimulationResult, TimeProvider, Workload, assert_always,
     assert_sometimes,
 };
-use moonpool_transport::{
-    Endpoint, JsonCodec, NetTransportBuilder, ReplyError, RequestEnvelope, get_reply,
-    make_decode_fn, make_encode_fn,
-};
+use moonpool_transport::NetTransportBuilder;
 
-use crate::node::{Propose, ProposeAck, parse_sim_addr, propose_method_uid};
+use paros::{Paros, Propose, WLTOKEN_PAROS, parse_addr};
+
 use crate::{GAP_MS, REQUESTS, TIMEOUT_MS};
 
 /// A client that sends a fixed number of proposals to the first node in the
@@ -34,16 +32,16 @@ impl Workload for ProposeClient {
             return Ok(());
         };
 
-        let my_addr = parse_sim_addr(ctx.my_ip())?;
+        let my_addr = parse_addr(ctx.my_ip())?;
         let transport = NetTransportBuilder::new(ctx.providers().clone())
             .local_address(my_addr)
             .build_listening()
             .await
             .map_err(|e| SimulationError::InvalidState(format!("client transport: {e}")))?;
 
-        let endpoint = Endpoint::new(parse_sim_addr(&server_ip)?, propose_method_uid());
-        let encode = make_encode_fn::<RequestEnvelope<Propose>, _>(JsonCodec);
-        let decode = make_decode_fn::<Result<ProposeAck, ReplyError>, _>(JsonCodec);
+        // A typed client for the node's Paros interface, addressed by the server's
+        // address + the well-known token — no discovery, no magic ids.
+        let client = Paros::client_well_known(parse_addr(&server_ip)?, WLTOKEN_PAROS, &transport);
 
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -56,23 +54,15 @@ impl Workload for ProposeClient {
 
             tracing::info!(seq_id = seq, "client_issued");
 
+            let proposal = Propose {
+                seq,
+                command: seq.to_le_bytes().to_vec(),
+            };
             // Reliable RPC, abandoned if it doesn't return within the deadline.
-            let result: Option<Result<ProposeAck, ReplyError>> = match get_reply(
-                &*transport,
-                &endpoint,
-                Propose {
-                    seq,
-                    command: seq.to_le_bytes().to_vec(),
-                },
-                &encode,
-                decode.clone(),
-            ) {
-                Ok(fut) => tokio::select! {
-                    r = fut => Some(r),
-                    () = shutdown.cancelled() => None,
-                    _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
-                },
-                Err(_) => None,
+            let result = tokio::select! {
+                r = client.propose.get_reply(proposal) => Some(r),
+                () = shutdown.cancelled() => None,
+                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
             };
 
             if let Some(Ok(ack)) = result {
