@@ -13,7 +13,20 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-paros-core = { path = "../paros-core", version = "0.1.0" }
+# The demo reuses paros-sim's workloads + oracles unchanged, in the wasm-able
+# configuration (no native moonpool features). The real RPC stack runs over the
+# simulated network.
+paros-sim = { path = "../paros-sim", version = "0.1.0", default-features = false }
+serde_json = "1"
+
+# wasm-only glue. The crate version MUST exactly match the flake's
+# wasm-bindgen-cli (0.2.117) — a mismatch is the #1 wasm-bindgen footgun and
+# produces an opaque "schema version" error at bindgen time. Bump both together
+# when `nix flake update` moves the CLI (run `nix develop --command
+# wasm-bindgen --version` and match it here).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.117"
+console_error_panic_hook = "0.1"
 
 [lints]
 workspace = true

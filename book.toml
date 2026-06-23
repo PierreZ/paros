@@ -1,0 +1,12 @@
+[book]
+title = "The paros book"
+authors = ["Pierre Zemb"]
+language = "en"
+src = "book/src"
+
+[build]
+build-dir = "book/output"
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]

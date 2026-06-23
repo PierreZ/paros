@@ -11,6 +11,7 @@ use crate::types::{Ballot, NodeId, Slot, Value};
 /// `#[non_exhaustive]` so later stages can add variants (e.g. snapshot transfer,
 /// reconfiguration) without a breaking change.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum Message {
     // ---- Phase 1 (prepare / promise) ----

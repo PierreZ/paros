@@ -9,9 +9,18 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# Intentionally empty: paros-core is std-only with zero dependencies, which is
-# what keeps it portable to wasm32-unknown-unknown and trivially deterministic.
+# paros-core is std-only with zero *default* dependencies — what keeps it
+# portable to wasm32-unknown-unknown and trivially deterministic. The optional
+# `serde` feature (below) only adds derives, no runtime; default builds (and the
+# wasm CI gate) stay dependency-free.
+[features]
+# Derive Serialize/Deserialize on the public protocol types so a driver can put
+# the *same* `Message` on the wire (no duplicate DTO). Off by default; enabled by
+# paros-sim. serde is itself wasm-safe, so the portability guarantee holds.
+serde = ["dep:serde"]
+
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
 
 [lints]
 workspace = true
