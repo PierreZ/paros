@@ -5,11 +5,13 @@
 //! - [`ClientLivenessOracle`] wires the `assert_*` contract macros off the same
 //!   event stream — a worked example of moonpool's oracle harness.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
-use paros::{EV_CHOSEN, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK};
+use paros::{
+    EV_APPLIED, EV_CHOSEN, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+};
 use serde::Serialize;
 
 /// Standard transport-client observability events (same names as moonpool's
@@ -461,6 +463,119 @@ impl Invariant for SafetyOracle {
                     "a node's accepted ballot never exceeds its promised ballot"
                 );
             }
+        }
+    }
+}
+
+/// No-gaps oracle: each node's applied (contiguous chosen) prefix advances one
+/// slot at a time, starting at slot 0 — it never skips a slot. Reads the
+/// `log_applied` stream the driver emits as the commit index moves.
+pub(crate) struct NoGapsOracle;
+
+impl Invariant for NoGapsOracle {
+    fn name(&self) -> &'static str {
+        "log_no_gaps"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut last: HashMap<u64, u64> = HashMap::new();
+        let mut max_applied = 0_u64;
+        for e in q.snapshot(EV_APPLIED) {
+            let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
+                continue;
+            };
+            max_applied = max_applied.max(idx);
+            if let Some(prev) = last.insert(node, idx) {
+                assert_always!(
+                    idx == prev + 1,
+                    "a node's applied prefix advances one slot at a time (no gaps)"
+                );
+            } else {
+                assert_always!(idx == 0, "a node's applied prefix starts at slot 0");
+            }
+        }
+        // The log is multi-slot (a stable leader streamed past slot 0).
+        assert_sometimes!(max_applied >= 2, "a multi-slot prefix is applied");
+        if max_applied >= 2 {
+            assert_reachable!("a multi-slot log prefix is applied");
+        }
+    }
+}
+
+/// Leadership oracle: a node's leadership ballots strictly increase (it never
+/// becomes leader again at a round at or below one it already led), and elections
+/// do happen. Reads the `leader_elected` stream.
+///
+/// Note: two nodes *can* lead the same round with different ballots (a ballot is
+/// `(round, node)`, ordered by node id) under a partition — that is safe, because
+/// quorum intersection lets only the higher ballot commit (prefix agreement,
+/// asserted by [`SafetyOracle`]). So "≤1 leader per ballot" is structural (the
+/// ballot carries the node); what is worth asserting is the genuinely-true
+/// per-node monotonicity, which catches a node re-leading at a stale ballot.
+pub(crate) struct LeadershipOracle;
+
+impl Invariant for LeadershipOracle {
+    fn name(&self) -> &'static str {
+        "leadership"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut last_round: HashMap<u64, u64> = HashMap::new();
+        let mut any = false;
+        for e in q.snapshot(EV_LEADER) {
+            let (Some(node), Some(round)) = (e.u64("node"), e.u64("round")) else {
+                continue;
+            };
+            any = true;
+            if let Some(prev) = last_round.insert(node, round) {
+                assert_always!(
+                    round > prev,
+                    "a node's leadership ballots strictly increase"
+                );
+            }
+        }
+        assert_sometimes!(any, "a leader is elected");
+        if any {
+            assert_reachable!("a leader is elected");
+        }
+    }
+}
+
+/// Progress / liveness oracle: the dueling-proposer livelock is fixed, so under
+/// eventual synchrony a stable leader streams several slots, and under chaos
+/// leadership turns over and the cluster recovers. These are `sometimes` +
+/// `reachable` gates: the `UntilCoverageStable` sweep only saturates once they
+/// fire, so a saturated sweep (no `convergence_timeout`) is the proof of progress.
+pub(crate) struct ProgressOracle;
+
+impl Invariant for ProgressOracle {
+    fn name(&self) -> &'static str {
+        "progress_liveness"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let max_applied = q
+            .snapshot(EV_APPLIED)
+            .into_iter()
+            .filter_map(|e| e.u64("applied_index"))
+            .max()
+            .unwrap_or(0);
+        let rounds: HashSet<u64> = q
+            .snapshot(EV_LEADER)
+            .into_iter()
+            .filter_map(|e| e.u64("round"))
+            .collect();
+
+        assert_sometimes!(max_applied >= 3, "a stable leader streams several slots");
+        if max_applied >= 3 {
+            assert_reachable!("the chosen prefix advances under a stable leader");
+        }
+        assert_sometimes!(
+            rounds.len() >= 2,
+            "leadership turns over and the cluster recovers"
+        );
+        if rounds.len() >= 2 {
+            assert_reachable!("leadership turns over (re-election)");
         }
     }
 }

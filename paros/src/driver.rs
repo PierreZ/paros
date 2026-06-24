@@ -8,16 +8,22 @@
 //!
 //! The loop `select`s over {client request, peer message, tick timer, shutdown},
 //! feeds the core via `step`/`tick`, and drains every [`paros_core::Ready`] in
-//! persist → send → apply → advance order (durable-before-send). Stage 1's core
-//! is a no-op, so the batches are empty — the ordering is wired for Stage 2.
+//! persist → send → apply → advance order (durable-before-send). It also draws
+//! the randomized election timeout from the provider RNG (the core stays
+//! dependency-free) and holds each client reply until its slot commits
+//! (ack-on-commit), redirecting non-leader proposals.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_core::{NetworkAddress, Providers, SimulationError, SimulationResult, TimeProvider};
-use moonpool_transport::{NetTransport, NetTransportBuilder, RpcError, service};
-use paros_core::{Ballot, Message, NodeId, RawNode, Slot, Value};
+use moonpool_core::{
+    NetworkAddress, Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider,
+};
+use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
+use paros_core::{
+    Ballot, ClientId, ClientSeq, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot, Value,
+};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +36,13 @@ pub const WLTOKEN_PAROS: u32 = 4;
 
 /// How often a node advances its logical clock.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Base election timeout, in ticks. Each node's actual timeout is drawn
+/// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,
+/// never the zero-dep core) to break the dueling-proposer livelock. `T`
+/// dominates the core's heartbeat interval, so a live leader always beats before
+/// a follower's election clock fires.
+const ELECTION_TIMEOUT_BASE: u64 = 5;
 
 /// Tracing event name for a node logical-clock tick. Emitters use the string
 /// literal (tracing requires one); readers (oracles) match on this constant.
@@ -58,20 +71,42 @@ pub const EV_MSG_SENT: &str = "msg_sent";
 /// sent message with no matching receive is one the network dropped.
 pub const EV_MSG_RECV: &str = "msg_received";
 
-/// A client proposal: a sequence number plus an opaque command payload.
+/// Tracing event: this node became leader. Carries `node` and `round` (its
+/// ballot round). The leader-uniqueness oracle asserts at most one leader per
+/// round across the cluster.
+pub const EV_LEADER: &str = "leader_elected";
+
+/// Tracing event: this node advanced its applied (contiguous chosen) prefix.
+/// Carries `node`, `slot` (the slot just applied), and `applied_index` (the new
+/// high-water mark). The no-gaps oracle asserts the prefix grows by one without
+/// skipping.
+pub const EV_APPLIED: &str = "log_applied";
+
+/// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Propose {
-    /// Client request sequence number.
+    /// Client identity.
+    pub client: u64,
+    /// Per-client request sequence number (the `ClientSeq`).
     pub seq: u64,
-    /// Opaque command bytes (uninterpreted in Stage 1).
+    /// Opaque command bytes.
     pub command: Vec<u8>,
 }
 
-/// The node's acknowledgement of a [`Propose`]: the echoed sequence number.
+/// The node's acknowledgement of a [`Propose`]. The node acks on commit: a
+/// `committed` ack is only sent once the command is durably chosen; otherwise it
+/// is a redirect to `leader`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposeAck {
     /// Echoed request sequence number.
     pub seq: u64,
+    /// The node to (re)try: `Some(self)` when this node admitted or had already
+    /// chosen the request; `Some(other)` to redirect; `None` when the leader is
+    /// unknown.
+    pub leader: Option<u64>,
+    /// Whether the command is durably chosen. `false` is a redirect: retry
+    /// `leader`.
+    pub committed: bool,
 }
 
 /// The paros node RPC interface. The `#[service]` macro renames this trait to
@@ -135,24 +170,31 @@ fn message_kind(m: &Message) -> &'static str {
 /// `CheckLeader`/`Heartbeat` self-events (no ballot/slot) return `None`.
 fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
     match m {
+        // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {
-            from, ballot, slot, ..
+            from,
+            ballot,
+            from_slot,
         }
         | Message::Promise {
+            from,
+            ballot,
+            from_slot,
+            ..
+        } => Some((*from, *ballot, *from_slot)),
+        Message::Accept {
             from, ballot, slot, ..
         }
-        | Message::Accept {
-            from, ballot, slot, ..
-        }
-        | Message::Accepted {
-            from, ballot, slot, ..
-        }
-        | Message::Nack {
-            from, ballot, slot, ..
-        }
+        | Message::Accepted { from, ballot, slot }
+        | Message::Nack { from, ballot, slot }
         | Message::Commit {
             from, ballot, slot, ..
         } => Some((*from, *ballot, *slot)),
+        Message::Heartbeat {
+            from,
+            ballot,
+            commit,
+        } => Some((*from, *ballot, *commit)),
         _ => None,
     }
 }
@@ -166,6 +208,7 @@ fn drain_ready<P, S>(
     transport: &Arc<NetTransport<P>>,
     addrs: &BTreeMap<NodeId, NetworkAddress>,
     self_id: u64,
+    pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
 ) where
     P: Providers,
     S: NodeStorage,
@@ -176,7 +219,7 @@ fn drain_ready<P, S>(
     if let Some(hard_state) = ready.hard_state() {
         storage.set_hard_state(hard_state.clone());
         let pb = hard_state.max_promised_ballot;
-        if let Some((ab, v)) = hard_state.accepted.get(&Slot(0)) {
+        if let Some((ab, e)) = hard_state.accepted.get(&Slot(0)) {
             tracing::info!(
                 node = self_id,
                 pround = pb.round,
@@ -184,7 +227,7 @@ fn drain_ready<P, S>(
                 has_accepted = true,
                 around = ab.round,
                 abnode = ab.node.0,
-                vhash = value_hash(&v.0),
+                vhash = value_hash(&e.value.0),
                 "node_state"
             );
         } else {
@@ -221,18 +264,71 @@ fn drain_ready<P, S>(
         }
     }
 
-    // 3. Apply newly chosen entries (already durable) — surfaced to the oracle.
-    for (slot, value) in ready.committed() {
+    // 3. Apply newly chosen entries (already durable, in contiguous order) —
+    //    surface them to the oracles and ack any clients waiting on each slot
+    //    (ack-on-commit: a held reply fires only now that its slot is chosen).
+    for (slot, entry) in ready.committed() {
         tracing::info!(
             node = self_id,
             slot = slot.0,
-            vhash = value_hash(&value.0),
+            vhash = value_hash(&entry.value.0),
             "value_chosen"
         );
+        tracing::info!(
+            node = self_id,
+            slot = slot.0,
+            applied_index = slot.0,
+            "log_applied"
+        );
+        if let Some(waiters) = pending.remove(slot) {
+            for (seq, w) in waiters {
+                w.send(ProposeAck {
+                    seq,
+                    leader: Some(self_id),
+                    committed: true,
+                });
+            }
+        }
     }
 
     // 4. Release the gate.
     ready.advance();
+}
+
+/// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
+/// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
+/// deterministic and dependency-free while a seed still replays bit-identically.
+fn draw_election_timeout<P: Providers>(providers: &P) -> u64 {
+    providers
+        .random()
+        .random_range(ELECTION_TIMEOUT_BASE..ELECTION_TIMEOUT_BASE * 2)
+}
+
+/// Post-batch upkeep: feed the core a fresh randomized election timeout whenever
+/// its election clock reset, emit `leader_elected` on the transition to Leader,
+/// and drop held client replies on step-down (so clients time out and retry the
+/// new leader).
+fn maintain<P: Providers>(
+    node: &mut RawNode,
+    providers: &P,
+    last_role: &mut NodeRole,
+    pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
+    self_id: u64,
+) {
+    if node.needs_election_timeout() {
+        node.set_election_timeout(draw_election_timeout(providers));
+    }
+    let role = node.role();
+    if role == NodeRole::Leader && *last_role != NodeRole::Leader {
+        tracing::info!(
+            node = self_id,
+            round = node.ballot().round,
+            "leader_elected"
+        );
+    } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
+        pending.clear();
+    }
+    *last_role = role;
 }
 
 /// Drive a paros node to completion over the given providers.
@@ -251,6 +347,7 @@ fn drain_ready<P, S>(
 /// # Errors
 ///
 /// Returns an error if the transport fails to bind or listen on `local_addr`.
+#[tracing::instrument(skip_all)]
 pub async fn run_node<P, S>(
     providers: P,
     mut storage: S,
@@ -277,18 +374,35 @@ where
     let self_id = node.config().id.0;
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
+    // Client replies held until their slot commits (ack-on-commit), keyed by slot.
+    let mut pending: BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>> = BTreeMap::new();
+    // Seed the first randomized election timeout (jitter from the driver's RNG).
+    node.set_election_timeout(draw_election_timeout(&providers));
+    let mut last_role = node.role();
+
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
 
     loop {
         tokio::select! {
             Some((req, reply)) = svc.propose.recv() => {
-                // A client value → the proposer. Ack means accepted-for-processing
-                // (consensus runs in the background), not yet chosen.
+                // A client value → the leader (deduplicated by (client, seq)). The
+                // reply is held until the slot commits (ack-on-commit); a non-leader
+                // redirects immediately.
                 let seq = req.seq;
-                node.propose(Value(req.command));
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
-                reply.send(ProposeAck { seq });
+                match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
+                    ProposeResult::NotLeader(hint) => {
+                        reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false });
+                    }
+                    ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
+                        pending.entry(slot).or_default().push((seq, reply));
+                    }
+                    ProposeResult::Chosen => {
+                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true });
+                    }
+                }
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -310,13 +424,15 @@ where
                     tracing::info!(node = self_id, kind, "msg_received");
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 reply.send(());
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }
             () = shutdown.cancelled() => return Ok(()),

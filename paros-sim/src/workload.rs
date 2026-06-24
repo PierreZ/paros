@@ -15,11 +15,11 @@ use paros::{Paros, Propose, WLTOKEN_PAROS, parse_addr};
 
 use crate::{GAP_MS, REQUESTS, TIMEOUT_MS};
 
-/// A client that sends a fixed number of proposals, **round-robin across all
-/// nodes**, and records the outcome of each. Spreading proposals over the
-/// cluster makes several nodes propose concurrently — competing proposers that
-/// genuinely exercise the value-selection rule and the at-most-one-chosen
-/// invariant (under chaos, dueling/livelock is observable here).
+/// A client that sends a fixed number of proposals and records each outcome.
+/// Each proposal is deduplicated by `(client_id, seq)`; on a redirect (a
+/// non-leader replies `committed = false`) the client cycles to the next node
+/// until the leader holds and commits it (ack-on-commit). This exercises the
+/// redirect path and, under chaos, leader loss and re-election.
 pub struct ProposeClient;
 
 #[async_trait]
@@ -56,6 +56,8 @@ impl Workload for ProposeClient {
 
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
+        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+        let n = clients.len();
         let mut acknowledged: u32 = 0;
 
         for seq in 0..u64::from(REQUESTS) {
@@ -65,20 +67,35 @@ impl Workload for ProposeClient {
 
             tracing::info!(seq_id = seq, "client_issued");
 
-            let proposal = Propose {
-                seq,
-                command: seq.to_le_bytes().to_vec(),
+            // Send to a node; on a redirect (a non-leader replies `committed =
+            // false`) cycle to the next node until the leader holds the request and
+            // commits it (ack-on-commit), all bounded by the per-proposal deadline.
+            // Dedup by `(client_id, seq)` makes the cycling safe (at-most-once).
+            let attempt = async {
+                let mut target = usize::try_from(seq).unwrap_or(0) % n;
+                loop {
+                    let proposal = Propose {
+                        client: client_id,
+                        seq,
+                        command: seq.to_le_bytes().to_vec(),
+                    };
+                    if let Ok(ack) = clients[target].propose.get_reply(proposal).await {
+                        assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
+                        if ack.committed {
+                            break true;
+                        }
+                    }
+                    target = (target + 1) % n;
+                    time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                }
             };
-            let client = &clients[usize::try_from(seq).unwrap_or(0) % clients.len()];
-            // Reliable RPC, abandoned if it doesn't return within the deadline.
-            let result = tokio::select! {
-                r = client.propose.get_reply(proposal) => Some(r),
-                () = shutdown.cancelled() => None,
-                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
+            let acked = tokio::select! {
+                v = attempt => v,
+                () = shutdown.cancelled() => false,
+                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => false,
             };
 
-            if let Some(Ok(ack)) = result {
-                assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
+            if acked {
                 acknowledged += 1;
                 tracing::info!(seq_id = seq, "client_acknowledged");
             } else {
@@ -89,11 +106,11 @@ impl Workload for ProposeClient {
             time.sleep(Duration::from_millis(GAP_MS)).await.ok();
         }
 
-        // Without chaos every proposal comes back; this also wires the
-        // `assert_sometimes!` contract into the harness.
+        // Under eventual synchrony a stable leader commits proposals; this also
+        // wires the `assert_sometimes!` contract into the harness.
         assert_sometimes!(
             acknowledged > 0,
-            "a client run acknowledges at least one proposal"
+            "a client run acknowledges at least one committed proposal"
         );
         Ok(())
     }

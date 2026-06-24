@@ -2,7 +2,7 @@
 //! plus the [`NodeStorage`] write extension the driver persists through, and the
 //! default in-memory [`MemStorage`] implementing both.
 
-use paros_core::{Ballot, Config, HardState, Slot, Storage, Value};
+use paros_core::{Ballot, Config, Entry, HardState, Slot, Storage};
 
 /// The write side of node storage.
 ///
@@ -53,7 +53,7 @@ impl Storage for MemStorage {
         (self.hard_state.clone(), self.config.clone())
     }
 
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Value)> {
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
         self.hard_state.accepted.get(&slot).cloned()
     }
 

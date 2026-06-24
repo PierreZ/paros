@@ -14,19 +14,21 @@ mod driver;
 mod storage;
 
 pub use driver::{
-    EV_CHOSEN, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, Paros, Propose, ProposeAck,
-    WLTOKEN_PAROS, parse_addr, run_node,
+    EV_APPLIED, EV_CHOSEN, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, Paros,
+    Propose, ProposeAck, WLTOKEN_PAROS, parse_addr, run_node,
 };
 pub use storage::{MemStorage, NodeStorage};
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, HardState, Message, NodeId, RawNode, Ready, Slot,
-    Storage, Value,
+    Ballot, ClientId, ClientSeq, Command, Config, Entry, HardState, Message, NodeId, NodeRole,
+    ProposeResult, RawNode, Ready, Slot, Storage, Value,
 };
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{Ballot, Message, NodeId, Slot, Value};
+    use std::collections::BTreeMap;
+
+    use paros_core::{Ballot, ClientId, ClientSeq, Entry, Message, NodeId, Slot, Value};
 
     /// One representative of every `Message` variant.
     fn every_variant() -> Vec<Message> {
@@ -34,23 +36,30 @@ mod tests {
             round: 7,
             node: NodeId(3),
         };
+        let entry = Entry {
+            client: ClientId(1),
+            seq: ClientSeq(2),
+            value: Value(vec![1, 2, 3]),
+        };
+        let mut accepted = BTreeMap::new();
+        accepted.insert(Slot(5), (ballot, entry.clone()));
         vec![
             Message::Prepare {
                 from: NodeId(1),
                 ballot,
-                slot: Slot(5),
+                from_slot: Slot(5),
             },
             Message::Promise {
                 from: NodeId(1),
                 ballot,
-                slot: Slot(5),
-                accepted: Some((ballot, Value(vec![9, 9]))),
+                from_slot: Slot(5),
+                accepted,
             },
             Message::Accept {
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
-                value: Value(vec![1, 2, 3]),
+                entry: entry.clone(),
             },
             Message::Accepted {
                 from: NodeId(2),
@@ -66,10 +75,14 @@ mod tests {
                 from: NodeId(0),
                 ballot,
                 slot: Slot(6),
-                value: Value(vec![4]),
+                entry,
             },
             Message::CheckLeader { from: NodeId(0) },
-            Message::Heartbeat { from: NodeId(0) },
+            Message::Heartbeat {
+                from: NodeId(0),
+                ballot,
+                commit: Slot(2),
+            },
         ]
     }
 
