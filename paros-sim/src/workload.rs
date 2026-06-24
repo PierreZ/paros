@@ -15,9 +15,11 @@ use paros::{Paros, Propose, WLTOKEN_PAROS, parse_addr};
 
 use crate::{GAP_MS, REQUESTS, TIMEOUT_MS};
 
-/// A client that sends a fixed number of proposals to the first node in the
-/// cluster and records the outcome of each. With no chaos (Stage 1), every
-/// proposal is acknowledged.
+/// A client that sends a fixed number of proposals, **round-robin across all
+/// nodes**, and records the outcome of each. Spreading proposals over the
+/// cluster makes several nodes propose concurrently — competing proposers that
+/// genuinely exercise the value-selection rule and the at-most-one-chosen
+/// invariant (under chaos, dueling/livelock is observable here).
 pub struct ProposeClient;
 
 #[async_trait]
@@ -28,9 +30,9 @@ impl Workload for ProposeClient {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
-        let Some(server_ip) = servers.first().cloned() else {
+        if servers.is_empty() {
             return Ok(());
-        };
+        }
 
         let my_addr = parse_addr(ctx.my_ip())?;
         let transport = NetTransportBuilder::new(ctx.providers().clone())
@@ -39,9 +41,18 @@ impl Workload for ProposeClient {
             .await
             .map_err(|e| SimulationError::InvalidState(format!("client transport: {e}")))?;
 
-        // A typed client for the node's Paros interface, addressed by the server's
-        // address + the well-known token — no discovery, no magic ids.
-        let client = Paros::client_well_known(parse_addr(&server_ip)?, WLTOKEN_PAROS, &transport);
+        // A typed client per node (addressed by address + well-known token, no
+        // discovery), so proposals can round-robin across proposers.
+        let clients = servers
+            .iter()
+            .map(|ip| {
+                Ok(Paros::client_well_known(
+                    parse_addr(ip)?,
+                    WLTOKEN_PAROS,
+                    &transport,
+                ))
+            })
+            .collect::<SimulationResult<Vec<_>>>()?;
 
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -58,6 +69,7 @@ impl Workload for ProposeClient {
                 seq,
                 command: seq.to_le_bytes().to_vec(),
             };
+            let client = &clients[usize::try_from(seq).unwrap_or(0) % clients.len()];
             // Reliable RPC, abandoned if it doesn't return within the deadline.
             let result = tokio::select! {
                 r = client.propose.get_reply(proposal) => Some(r),

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
-use paros::EV_NODE_TICK;
+use paros::{EV_CHOSEN, EV_NODE_STATE, EV_NODE_TICK};
 use serde::Serialize;
 
 /// Standard transport-client observability events (same names as moonpool's
@@ -164,6 +164,65 @@ impl Invariant for ClientLivenessOracle {
         assert_sometimes!(acked > 0, "at least one proposal is acknowledged");
         if acked > 0 {
             assert_reachable!("a client proposal is acknowledged");
+        }
+    }
+}
+
+/// The Paxos safety oracle — the heart of the project. Reads the driver's
+/// protocol events ([`EV_CHOSEN`], [`EV_NODE_STATE`]) and asserts the three
+/// single-decree safety invariants on every step.
+pub(crate) struct SafetyOracle;
+
+impl Invariant for SafetyOracle {
+    fn name(&self) -> &'static str {
+        "paxos_safety"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // Invariant 1 (the crown jewel): at most one value is ever chosen per
+        // slot — across the whole cluster.
+        let mut chosen_value: HashMap<u64, u64> = HashMap::new();
+        let mut any_chosen = false;
+        for e in q.snapshot(EV_CHOSEN) {
+            let (Some(slot), Some(vhash)) = (e.u64("slot"), e.u64("vhash")) else {
+                continue;
+            };
+            any_chosen = true;
+            if let Some(prev) = chosen_value.insert(slot, vhash) {
+                assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
+            }
+        }
+        // Liveness reachability: a value does get chosen (gates `UntilCoverageStable`).
+        assert_sometimes!(any_chosen, "a value is eventually chosen");
+        if any_chosen {
+            assert_reachable!("a value is chosen");
+        }
+
+        // Invariants 2 & 3 are per-node, reconstructed from the node-state stream
+        // in capture (time) order.
+        let mut last_promised: HashMap<u64, (u64, u64)> = HashMap::new();
+        for e in q.snapshot(EV_NODE_STATE) {
+            let Some(node) = e.u64("node") else { continue };
+            let (Some(pr), Some(pn)) = (e.u64("pround"), e.u64("pbnode")) else {
+                continue;
+            };
+            let promised = (pr, pn);
+
+            // Invariant 2: a node's promised ballot is monotonic (never decreases).
+            if let Some(prev) = last_promised.insert(node, promised) {
+                assert_always!(promised >= prev, "a node's promised ballot never decreases");
+            }
+
+            // Invariant 3: a node never accepts above its promised ballot (i.e.
+            // it only accepts ballots it has promised — never below the promise).
+            if e.bool("has_accepted") == Some(true)
+                && let (Some(ar), Some(an)) = (e.u64("around"), e.u64("abnode"))
+            {
+                assert_always!(
+                    (ar, an) <= promised,
+                    "a node's accepted ballot never exceeds its promised ballot"
+                );
+            }
         }
     }
 }

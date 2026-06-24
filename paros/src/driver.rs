@@ -11,11 +11,13 @@
 //! persist → send → apply → advance order (durable-before-send). Stage 1's core
 //! is a no-op, so the batches are empty — the ordering is wired for Stage 2.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use moonpool_core::{NetworkAddress, Providers, SimulationError, SimulationResult, TimeProvider};
-use moonpool_transport::{NetTransportBuilder, RpcError, service};
-use paros_core::{Message, RawNode};
+use moonpool_transport::{NetTransport, NetTransportBuilder, RpcError, service};
+use paros_core::{Message, NodeId, RawNode, Slot, Value};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +34,21 @@ const TICK_INTERVAL: Duration = Duration::from_millis(50);
 /// Tracing event name for a node logical-clock tick. Emitters use the string
 /// literal (tracing requires one); readers (oracles) match on this constant.
 pub const EV_NODE_TICK: &str = "node_tick";
+
+/// Tracing event: this node's durable state changed. Carries `node` (id), the
+/// promised ballot (`pround`/`pbnode`), and — when `has_accepted` — the slot-0
+/// accepted ballot (`around`/`abnode`) + value hash (`vhash`). The safety oracle
+/// reads it for the monotonic-promise and never-accept-below-promise invariants.
+pub const EV_NODE_STATE: &str = "node_state";
+
+/// Tracing event: this node applied a chosen value. Carries `node`, `slot`, and
+/// the value hash (`vhash`). The safety oracle reads it for the
+/// at-most-one-value-chosen invariant.
+pub const EV_CHOSEN: &str = "value_chosen";
+
+/// Tracing event: this node sent a protocol message. Carries `node`, `to`, and
+/// `kind` — timeline/debug only.
+pub const EV_MSG_SENT: &str = "msg_sent";
 
 /// A client proposal: a sequence number plus an opaque command payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +95,18 @@ pub fn parse_addr(ip: &str) -> SimulationResult<NetworkAddress> {
         .map_err(|e| SimulationError::InvalidState(format!("bad addr: {e}")))
 }
 
+/// A stable `u64` digest of a value's bytes (FNV-1a), emitted on observability
+/// events so the safety oracle can compare chosen values by equality without
+/// carrying the raw payload through the trace.
+fn value_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// A short, stable label for a [`Message`] variant, for observability.
 fn message_kind(m: &Message) -> &'static str {
     match m {
@@ -93,23 +122,72 @@ fn message_kind(m: &Message) -> &'static str {
     }
 }
 
-/// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send.
-/// Stage 1's no-op core produces empty batches; the ordering is wired for
-/// Stage 2.
-fn drain_ready<S: NodeStorage>(node: &mut RawNode, storage: &mut S) {
+/// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
+/// persist `hard_state`, *then* send the addressed messages, *then* surface the
+/// chosen entries — and emit the observability events the safety oracle reads.
+fn drain_ready<P, S>(
+    node: &mut RawNode,
+    storage: &mut S,
+    transport: &Arc<NetTransport<P>>,
+    addrs: &BTreeMap<NodeId, NetworkAddress>,
+    self_id: u64,
+) where
+    P: Providers,
+    S: NodeStorage,
+{
     let ready = node.ready();
-    // 1. Persist durable state FIRST.
+
+    // 1. Persist durable state FIRST, and surface it for the safety oracles.
     if let Some(hard_state) = ready.hard_state() {
         storage.set_hard_state(hard_state.clone());
+        let pb = hard_state.max_promised_ballot;
+        if let Some((ab, v)) = hard_state.accepted.get(&Slot(0)) {
+            tracing::info!(
+                node = self_id,
+                pround = pb.round,
+                pbnode = pb.node.0,
+                has_accepted = true,
+                around = ab.round,
+                abnode = ab.node.0,
+                vhash = value_hash(&v.0),
+                "node_state"
+            );
+        } else {
+            tracing::info!(
+                node = self_id,
+                pround = pb.round,
+                pbnode = pb.node.0,
+                has_accepted = false,
+                "node_state"
+            );
+        }
     }
-    // 2. Send messages — only after (1) is durable. 3. Apply committed entries.
-    // Both empty under the Stage-1 core; this asserts that invariant so a future
-    // stage cannot silently leak output before the driver ships it.
-    debug_assert!(
-        ready.messages().is_empty(),
-        "Stage 1 core emits no messages"
-    );
-    debug_assert!(ready.committed().is_empty(), "Stage 1 core commits nothing");
+
+    // 2. Send messages — only after (1) is durable. The core addresses each one;
+    //    the driver just maps NodeId → address and fires (fire-and-forget).
+    for (to, msg) in ready.messages() {
+        tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind = message_kind(msg),
+            "msg_sent"
+        );
+        if let Some(addr) = addrs.get(to) {
+            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
+            let _ = client.deliver.send(msg.clone());
+        }
+    }
+
+    // 3. Apply newly chosen entries (already durable) — surfaced to the oracle.
+    for (slot, value) in ready.committed() {
+        tracing::info!(
+            node = self_id,
+            slot = slot.0,
+            vhash = value_hash(&value.0),
+            "value_chosen"
+        );
+    }
+
     // 4. Release the gate.
     ready.advance();
 }
@@ -118,8 +196,14 @@ fn drain_ready<S: NodeStorage>(node: &mut RawNode, storage: &mut S) {
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
 /// differ) and `S: NodeStorage` (the injected durable storage). The loop owns a
-/// [`RawNode`], serves the [`Paros`] RPC interface, and ticks until `shutdown`
-/// fires.
+/// [`RawNode`], serves the [`Paros`] RPC interface, feeds client proposals and
+/// peer messages into the core, sends the core's outbound messages to the peers
+/// named in `members`, and ticks until `shutdown` fires.
+///
+/// `members` is the full cluster membership (`NodeId` → address, *including*
+/// this node): the core addresses each outbound message by `NodeId`, and the
+/// driver resolves it here. It must be consistent across the cluster and agree
+/// with the `Config` the node read from `storage`.
 ///
 /// # Errors
 ///
@@ -128,6 +212,7 @@ pub async fn run_node<P, S>(
     providers: P,
     mut storage: S,
     local_addr: NetworkAddress,
+    members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
 ) -> SimulationResult<()>
 where
@@ -144,8 +229,10 @@ where
     // `svc.deliver` are typed receive streams the loop selects over.
     let svc = Paros::well_known(&transport, WLTOKEN_PAROS);
 
-    // The sans-IO core: a fresh, empty node (no protocol logic in Stage 1).
+    // The sans-IO core, bootstrapped from durable storage.
     let mut node = RawNode::new(&storage);
+    let self_id = node.config().id.0;
+    let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -153,10 +240,11 @@ where
     loop {
         tokio::select! {
             Some((req, reply)) = svc.propose.recv() => {
-                // Stage 1: no consensus yet — run the handshake to exercise the
-                // durable-before-send path, then acknowledge.
+                // A client value → the proposer. Ack means accepted-for-processing
+                // (consensus runs in the background), not yet chosen.
                 let seq = req.seq;
-                drain_ready(&mut node, &mut storage);
+                node.propose(Value(req.command));
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
                 reply.send(ProposeAck { seq });
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -164,13 +252,13 @@ where
                 // `paros_core::Message` is sent and received (no DTO).
                 tracing::info!(kind = message_kind(&msg), "peer_message_received");
                 node.step(msg);
-                drain_ready(&mut node, &mut storage);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
                 reply.send(());
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }
             () = shutdown.cancelled() => return Ok(()),

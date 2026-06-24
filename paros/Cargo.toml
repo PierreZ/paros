@@ -22,8 +22,8 @@ paros-core = { path = "../paros-core", version = "0.1.0", features = ["serde"] }
 # wasm-safe; a future `native` feature + `parosd` binary layer tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
 # release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
-moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "05402071497b21f306b220586af4a16e8a708ed5", default-features = false }
+moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "05402071497b21f306b220586af4a16e8a708ed5", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

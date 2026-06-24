@@ -29,8 +29,8 @@ paros = { path = "../paros", version = "0.1.0" }
 # fast and we track it deliberately, bumping `rev` by hand. Both crates come in
 # without their production (tokio net/fs) features so the sim stays wasm-able; the
 # `native` feature above layers those back on for the native runner.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
-moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "394d1019749c95ad3ffb151e68a2b65e60091011", default-features = false }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "05402071497b21f306b220586af4a16e8a708ed5", default-features = false }
+moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "05402071497b21f306b220586af4a16e8a708ed5", default-features = false }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
