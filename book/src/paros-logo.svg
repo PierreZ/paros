@@ -1,0 +1,30 @@
+<svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="paros logo">
+  <title>paros</title>
+  <desc>An archipelago of six islands connected by dotted travel routes, one island red, beneath a moon.</desc>
+  <circle cx="322" cy="78" r="24" fill="#F4ECD6"/>
+  <g stroke="#90AECB" stroke-width="2" stroke-dasharray="1 7" stroke-linecap="round" fill="none">
+    <line x1="121" y1="146" x2="272" y2="122"/>
+    <line x1="121" y1="146" x2="200" y2="186"/>
+    <line x1="272" y1="122" x2="200" y2="186"/>
+    <line x1="272" y1="122" x2="293" y2="240"/>
+    <line x1="200" y1="186" x2="110" y2="256"/>
+    <line x1="200" y1="186" x2="293" y2="240"/>
+    <line x1="200" y1="186" x2="215" y2="298"/>
+    <line x1="110" y1="256" x2="215" y2="298"/>
+    <line x1="293" y1="240" x2="215" y2="298"/>
+  </g>
+  <path d="M96 176 Q121 116 146 176 Z" fill="#74B2E4"/>
+  <path d="M242 162 Q272 82 302 162 Z" fill="#E24B4A"/>
+  <path d="M150 240 Q200 132 250 240 Z" fill="#3C8AD0"/>
+  <path d="M78 292 Q110 220 142 292 Z" fill="#4F9AD6"/>
+  <path d="M268 272 Q293 208 318 272 Z" fill="#74B2E4"/>
+  <path d="M178 336 Q215 260 252 336 Z" fill="#4F9AD6"/>
+  <g fill="#E3EEF9">
+    <circle cx="121" cy="146" r="4"/>
+    <circle cx="200" cy="186" r="4.5"/>
+    <circle cx="110" cy="256" r="4"/>
+    <circle cx="293" cy="240" r="4"/>
+    <circle cx="215" cy="298" r="4"/>
+  </g>
+  <circle cx="272" cy="122" r="4.5" fill="#FBE3E1"/>
+</svg>
