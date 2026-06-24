@@ -14,8 +14,8 @@ mod driver;
 mod storage;
 
 pub use driver::{
-    EV_CHOSEN, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, Paros, Propose, ProposeAck, WLTOKEN_PAROS,
-    parse_addr, run_node,
+    EV_CHOSEN, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, Paros, Propose, ProposeAck,
+    WLTOKEN_PAROS, parse_addr, run_node,
 };
 pub use storage::{MemStorage, NodeStorage};
 
