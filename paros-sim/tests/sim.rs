@@ -50,6 +50,28 @@ fn chaotic_run_is_well_formed() {
             "a message arrived before it left"
         );
     }
+
+    // The protocol timeline (the wasm demo's star) is populated and well-formed:
+    // proposals drive a real inter-node Paxos exchange, every leg's arrival is
+    // after its departure, and senders/receivers are cluster node ids.
+    assert!(
+        !r.protocol.is_empty(),
+        "the inter-node Paxos exchange was recorded"
+    );
+    for shot in &r.protocol {
+        assert!(
+            shot.arrive_ms >= shot.depart_ms,
+            "a protocol message arrived before it left"
+        );
+        assert!(
+            (shot.from as usize) < 3 && (shot.to as usize) < 3,
+            "protocol legs are between cluster nodes"
+        );
+    }
+    assert!(
+        !r.node_states.is_empty(),
+        "per-node durable state was recorded"
+    );
 }
 
 /// The crown jewel: drive the `UntilCoverageStable` sweep under swarm network

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
-use paros::{EV_CHOSEN, EV_NODE_STATE, EV_NODE_TICK};
+use paros::{EV_CHOSEN, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK};
 use serde::Serialize;
 
 /// Standard transport-client observability events (same names as moonpool's
@@ -54,6 +54,70 @@ pub struct Shot {
     pub outcome: Outcome,
 }
 
+/// One inter-node Paxos message (Prepare/Promise/Accept/Accepted/Nack/Commit),
+/// reconstructed by pairing a send with its matching receive. This is the
+/// protocol timeline the single-decree visualization animates — distinct from the
+/// client-level [`Shot`] above (whose `from`/`to` of 0/1 mean client/node).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProtocolShot {
+    /// Message kind: `prepare`, `promise`, `accept`, `accepted`, `nack`, `commit`.
+    pub kind: String,
+    /// Ballot round this message carries.
+    pub bround: u64,
+    /// Ballot node (proposer) this message carries.
+    pub bnode: u64,
+    /// Log slot this message concerns (always 0 in single-decree).
+    pub slot: u64,
+    /// Sending node id (`0..CLUSTER_SIZE`).
+    pub from: u8,
+    /// Receiving node id (`0..CLUSTER_SIZE`).
+    pub to: u8,
+    /// Simulated time the message left `from`, in milliseconds.
+    pub depart_ms: u64,
+    /// Simulated time it reached `to` (synthesized for a drop), in milliseconds.
+    pub arrive_ms: u64,
+    /// In-flight latency, in milliseconds.
+    pub latency_ms: u64,
+    /// Whether a matching receive was found (delivered) or not (dropped).
+    pub outcome: Outcome,
+}
+
+/// A snapshot of one node's durable state at a point in time, from `node_state`
+/// events. Drives the per-node promised-ballot label and accepted-value marker.
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeStateShot {
+    /// Simulated time this state was observed, in milliseconds.
+    pub time_ms: u64,
+    /// The node whose state this is.
+    pub node: u64,
+    /// Promised-ballot round.
+    pub pround: u64,
+    /// Promised-ballot node (proposer).
+    pub pbnode: u64,
+    /// Whether the node has an accepted value (slot 0).
+    pub has_accepted: bool,
+    /// Accepted-ballot round (meaningful only when `has_accepted`).
+    pub around: u64,
+    /// Accepted-ballot node (meaningful only when `has_accepted`).
+    pub abnode: u64,
+    /// Hash of the accepted value (meaningful only when `has_accepted`).
+    pub vhash: u64,
+}
+
+/// A "this node learned a chosen value" marker, from `value_chosen` events.
+/// Drives the chosen glow.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChosenShot {
+    /// Simulated time the value was learned, in milliseconds.
+    pub time_ms: u64,
+    /// The node that applied the chosen value.
+    pub node: u64,
+    /// The slot that was chosen (always 0 in single-decree).
+    pub slot: u64,
+    /// Hash of the chosen value.
+    pub vhash: u64,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +128,12 @@ pub struct RunResult {
     pub requests: u32,
     /// Every message leg exchanged, in time order.
     pub shots: Vec<Shot>,
+    /// The inter-node Paxos protocol exchange, in send order.
+    pub protocol: Vec<ProtocolShot>,
+    /// Per-node durable-state snapshots, in observation order.
+    pub node_states: Vec<NodeStateShot>,
+    /// Chosen-value markers, in observation order.
+    pub chosen: Vec<ChosenShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -83,6 +153,9 @@ impl RunResult {
             seed,
             requests: 0,
             shots: Vec::new(),
+            protocol: Vec::new(),
+            node_states: Vec::new(),
+            chosen: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -138,6 +211,171 @@ impl Invariant for TimelineRecorder {
         d.failed = collect_seq(q, EV_FAILED);
         d.ticks = u64::try_from(q.len(EV_NODE_TICK)).unwrap_or(u64::MAX);
     }
+}
+
+/// One captured inter-node message leg (a send or a receive), before sends and
+/// receives are paired into a [`ProtocolShot`]. `from`/`to` are always the
+/// sender/receiver node ids, whichever side recorded it.
+#[derive(Clone)]
+struct RawLeg {
+    time_ms: u64,
+    from: u8,
+    to: u8,
+    kind: String,
+    bround: u64,
+    bnode: u64,
+    slot: u64,
+}
+
+/// Raw protocol timeline the [`ProtocolRecorder`] accumulates from the trace:
+/// the inter-node sends and receives (paired later) plus the node-state and
+/// chosen streams (used as-is).
+#[derive(Default)]
+pub(crate) struct ProtocolData {
+    sends: Vec<RawLeg>,
+    recvs: Vec<RawLeg>,
+    node_states: Vec<NodeStateShot>,
+    chosen: Vec<ChosenShot>,
+}
+
+/// Pull the ballot-carrying message legs named `name`. `self_field` names the
+/// trace field holding *this* leg's own node id (`node` for both sends and
+/// receives); `peer_field` names the other endpoint (`to` for sends, `from` for
+/// receives). Legs missing the ballot/slot fields (the tick self-events) are
+/// skipped, leaving only the six Paxos kinds.
+fn collect_legs(q: &dyn TraceQuery, name: &str, self_is_from: bool) -> Vec<RawLeg> {
+    q.snapshot(name)
+        .into_iter()
+        .filter_map(|e| {
+            let kind = e.str("kind")?.to_string();
+            let this = u8::try_from(e.u64("node")?).ok()?;
+            let peer = u8::try_from(e.u64(if self_is_from { "to" } else { "from" })?).ok()?;
+            let (from, to) = if self_is_from {
+                (this, peer)
+            } else {
+                (peer, this)
+            };
+            Some(RawLeg {
+                time_ms: e.time_ms,
+                from,
+                to,
+                kind,
+                bround: e.u64("bround")?,
+                bnode: e.u64("bnode")?,
+                slot: e.u64("slot")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the per-node durable-state snapshots from the `node_state` stream.
+fn collect_node_states(q: &dyn TraceQuery) -> Vec<NodeStateShot> {
+    q.snapshot(EV_NODE_STATE)
+        .into_iter()
+        .filter_map(|e| {
+            let has_accepted = e.bool("has_accepted").unwrap_or(false);
+            Some(NodeStateShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                pround: e.u64("pround")?,
+                pbnode: e.u64("pbnode")?,
+                has_accepted,
+                around: if has_accepted { e.u64("around")? } else { 0 },
+                abnode: if has_accepted { e.u64("abnode")? } else { 0 },
+                vhash: if has_accepted { e.u64("vhash")? } else { 0 },
+            })
+        })
+        .collect()
+}
+
+/// Pull the chosen-value markers from the `value_chosen` stream.
+fn collect_chosen(q: &dyn TraceQuery) -> Vec<ChosenShot> {
+    q.snapshot(EV_CHOSEN)
+        .into_iter()
+        .filter_map(|e| {
+            Some(ChosenShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                slot: e.u64("slot")?,
+                vhash: e.u64("vhash")?,
+            })
+        })
+        .collect()
+}
+
+/// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
+/// inter-node Paxos messages and the node-state / chosen streams the single-decree
+/// visualization needs (the client recorder above stays focused on client events).
+pub(crate) struct ProtocolRecorder {
+    data: Arc<Mutex<ProtocolData>>,
+}
+
+impl ProtocolRecorder {
+    pub(crate) fn new(data: Arc<Mutex<ProtocolData>>) -> Self {
+        Self { data }
+    }
+}
+
+impl Invariant for ProtocolRecorder {
+    fn name(&self) -> &'static str {
+        "protocol_recorder"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        d.sends = collect_legs(q, EV_MSG_SENT, true);
+        d.recvs = collect_legs(q, EV_MSG_RECV, false);
+        d.node_states = collect_node_states(q);
+        d.chosen = collect_chosen(q);
+    }
+}
+
+/// Pair each send with the earliest unmatched receive sharing its route, in send
+/// order. A paired send is `Delivered` (its receive's time is the arrival); an
+/// unpaired send is one the network `Dropped`. Deterministic: the trace is
+/// captured in deterministic order and the pairing is a stable FIFO over it.
+fn build_protocol(data: &ProtocolData) -> (Vec<ProtocolShot>, Vec<NodeStateShot>, Vec<ChosenShot>) {
+    let mut sends: Vec<&RawLeg> = data.sends.iter().collect();
+    sends.sort_by_key(|s| s.time_ms); // stable: ties keep capture order
+
+    let mut recv_used = vec![false; data.recvs.len()];
+    let mut protocol = Vec::with_capacity(sends.len());
+
+    for s in sends {
+        let matched = data.recvs.iter().enumerate().find(|(i, r)| {
+            !recv_used[*i]
+                && r.from == s.from
+                && r.to == s.to
+                && r.kind == s.kind
+                && r.bround == s.bround
+                && r.bnode == s.bnode
+                && r.slot == s.slot
+                && r.time_ms >= s.time_ms
+        });
+
+        let (outcome, arrive_ms) = match matched {
+            Some((i, r)) => {
+                recv_used[i] = true;
+                (Outcome::Delivered, r.time_ms)
+            }
+            None => (Outcome::Dropped, s.time_ms.saturating_add(MIN_DROP_SPAN_MS)),
+        };
+
+        protocol.push(ProtocolShot {
+            kind: s.kind.clone(),
+            bround: s.bround,
+            bnode: s.bnode,
+            slot: s.slot,
+            from: s.from,
+            to: s.to,
+            depart_ms: s.time_ms,
+            arrive_ms,
+            latency_ms: arrive_ms.saturating_sub(s.time_ms),
+            outcome,
+        });
+    }
+
+    (protocol, data.node_states.clone(), data.chosen.clone())
 }
 
 /// Liveness oracle: wires the `assert_*` contract macros off the standard client
@@ -230,9 +468,16 @@ impl Invariant for SafetyOracle {
 /// Turn the recorded timeline into the animation [`RunResult`]: match each issued
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.
-pub(crate) fn build_result(seed: u64, data: &RecorderData) -> RunResult {
+pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData) -> RunResult {
+    let (protocol, node_states, chosen) = build_protocol(proto);
+
     if data.issued.is_empty() {
-        return RunResult::empty(seed);
+        return RunResult {
+            protocol,
+            node_states,
+            chosen,
+            ..RunResult::empty(seed)
+        };
     }
 
     let ack: HashMap<u64, u64> = data.acked.iter().copied().collect();
@@ -285,12 +530,24 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData) -> RunResult {
         }
     }
 
-    let sim_duration_ms = shots.iter().map(|s| s.arrive_ms).max().unwrap_or(0);
+    // The animation spans the latest of any observable event: a client leg, a
+    // protocol leg, a node-state change, or a chosen marker.
+    let sim_duration_ms = shots
+        .iter()
+        .map(|s| s.arrive_ms)
+        .chain(protocol.iter().map(|s| s.arrive_ms))
+        .chain(node_states.iter().map(|s| s.time_ms))
+        .chain(chosen.iter().map(|s| s.time_ms))
+        .max()
+        .unwrap_or(0);
 
     RunResult {
         seed,
         requests: u32::try_from(issued.len()).unwrap_or(u32::MAX),
         shots,
+        protocol,
+        node_states,
+        chosen,
         delivered,
         dropped,
         ticks: data.ticks,

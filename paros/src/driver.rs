@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use moonpool_core::{NetworkAddress, Providers, SimulationError, SimulationResult, TimeProvider};
 use moonpool_transport::{NetTransport, NetTransportBuilder, RpcError, service};
-use paros_core::{Message, NodeId, RawNode, Slot, Value};
+use paros_core::{Ballot, Message, NodeId, RawNode, Slot, Value};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -46,9 +46,17 @@ pub const EV_NODE_STATE: &str = "node_state";
 /// at-most-one-value-chosen invariant.
 pub const EV_CHOSEN: &str = "value_chosen";
 
-/// Tracing event: this node sent a protocol message. Carries `node`, `to`, and
-/// `kind` — timeline/debug only.
+/// Tracing event: this node sent a protocol message. Carries `node` (sender),
+/// `to` (destination), and `kind`; for the six ballot-carrying Paxos kinds it
+/// also carries the ballot (`bround`/`bnode`) and `slot`. The wasm demo pairs it
+/// with [`EV_MSG_RECV`] to draw the protocol timeline.
 pub const EV_MSG_SENT: &str = "msg_sent";
+
+/// Tracing event: this node received a protocol message (the mirror of
+/// [`EV_MSG_SENT`]). Carries `node` (receiver), `from` (sender), and `kind`; for
+/// the six ballot-carrying Paxos kinds it also carries `bround`/`bnode`/`slot`. A
+/// sent message with no matching receive is one the network dropped.
+pub const EV_MSG_RECV: &str = "msg_received";
 
 /// A client proposal: a sequence number plus an opaque command payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +130,33 @@ fn message_kind(m: &Message) -> &'static str {
     }
 }
 
+/// The `(sender, ballot, slot)` triple a ballot-carrying Paxos message routes on,
+/// for observability. The six consensus kinds return `Some`; the tick-injected
+/// `CheckLeader`/`Heartbeat` self-events (no ballot/slot) return `None`.
+fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
+    match m {
+        Message::Prepare {
+            from, ballot, slot, ..
+        }
+        | Message::Promise {
+            from, ballot, slot, ..
+        }
+        | Message::Accept {
+            from, ballot, slot, ..
+        }
+        | Message::Accepted {
+            from, ballot, slot, ..
+        }
+        | Message::Nack {
+            from, ballot, slot, ..
+        }
+        | Message::Commit {
+            from, ballot, slot, ..
+        } => Some((*from, *ballot, *slot)),
+        _ => None,
+    }
+}
+
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
@@ -166,12 +201,20 @@ fn drain_ready<P, S>(
     // 2. Send messages — only after (1) is durable. The core addresses each one;
     //    the driver just maps NodeId → address and fires (fire-and-forget).
     for (to, msg) in ready.messages() {
-        tracing::info!(
-            node = self_id,
-            to = to.0,
-            kind = message_kind(msg),
-            "msg_sent"
-        );
+        let kind = message_kind(msg);
+        if let Some((_, ballot, slot)) = message_route(msg) {
+            tracing::info!(
+                node = self_id,
+                to = to.0,
+                kind,
+                bround = ballot.round,
+                bnode = ballot.node.0,
+                slot = slot.0,
+                "msg_sent"
+            );
+        } else {
+            tracing::info!(node = self_id, to = to.0, kind, "msg_sent");
+        }
         if let Some(addr) = addrs.get(to) {
             let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
             let _ = client.deliver.send(msg.clone());
@@ -249,8 +292,23 @@ where
             }
             Some((msg, reply)) = svc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
-                // `paros_core::Message` is sent and received (no DTO).
-                tracing::info!(kind = message_kind(&msg), "peer_message_received");
+                // `paros_core::Message` is sent and received (no DTO). Surface the
+                // arrival (mirror of `msg_sent`) so the demo can pair sends with
+                // receives and mark the unmatched ones as network drops.
+                let kind = message_kind(&msg);
+                if let Some((from, ballot, slot)) = message_route(&msg) {
+                    tracing::info!(
+                        node = self_id,
+                        from = from.0,
+                        kind,
+                        bround = ballot.round,
+                        bnode = ballot.node.0,
+                        slot = slot.0,
+                        "msg_received"
+                    );
+                } else {
+                    tracing::info!(node = self_id, kind, "msg_received");
+                }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id);
                 reply.send(());

@@ -17,7 +17,7 @@ mod oracle;
 mod workload;
 
 pub use node::NodeProcess;
-pub use oracle::{Outcome, RunResult, Shot};
+pub use oracle::{ChosenShot, NodeStateShot, Outcome, ProtocolShot, RunResult, Shot};
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -25,7 +25,8 @@ use moonpool_sim::runner::builder::ProcessCount;
 use moonpool_sim::{Chaos, ChaosMode, SimulationBuilder, SimulationReport, WorkloadCount};
 
 use crate::oracle::{
-    ClientLivenessOracle, RecorderData, SafetyOracle, TimelineRecorder, build_result,
+    ClientLivenessOracle, ProtocolData, ProtocolRecorder, RecorderData, SafetyOracle,
+    TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -56,10 +57,12 @@ pub(crate) const MAX_ITERATIONS: usize = 2000;
 #[must_use]
 pub fn run_seed(seed: u64) -> RunResult {
     let data = Arc::new(Mutex::new(RecorderData::default()));
+    let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(TimelineRecorder::new(data.clone()))
+        .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
@@ -74,7 +77,8 @@ pub fn run_seed(seed: u64) -> RunResult {
     );
 
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
-    build_result(seed, &data)
+    let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
+    build_result(seed, &data, &proto)
 }
 
 /// Run the DST bug-finding sweep: swarm network chaos + the safety oracle under

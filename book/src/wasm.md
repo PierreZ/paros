@@ -11,7 +11,7 @@ and reused unchanged by the native runner (`cargo run -p paros-sim-runner`) and
 this demo (`paros-wasm-demo`, built with `default-features = false`).
 
 <iframe
-  src="wasm-demo/index.html?embed=1&seed=42"
+  src="wasm-demo/index.html?embed=1&seed=0"
   title="paros browser demo"
   style="width:100%;height:560px;border:1px solid #30363d;border-radius:12px"
   loading="lazy">
@@ -24,7 +24,8 @@ the raw JSON `runSeed(seed)` returns — it matches, byte for byte, what the nat
 runner prints for the same seed. `?seed=<n>` picks a seed and `?still=<k>` renders
 a single frozen frame (useful for screenshots).
 
-> **Stage 1.** There is no consensus logic yet: each node acknowledges the
-> client's proposals and advances its logical clock. Network chaos turns on in a
-> later stage, the moment the mechanism that tolerates it exists — that is when
-> dropped proposals start appearing in this animation.
+> **Stage 2.** Three acceptors now run single-decree Paxos under network chaos:
+> dropped, delayed, and reordered messages, plus dueling proposers, are all in
+> play. The safety oracle asserts on every seed that no two acceptors ever choose
+> different values. For a guided tour, read
+> [How Paxos chooses one value](choose-one-value.md).
