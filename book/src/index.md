@@ -29,3 +29,38 @@ CI runs in your browser tab. The next chapter embeds it live.
 > network, and a safety oracle proves that at most one value is ever chosen.
 > Leader election, a replicated log, and storage faults arrive in later stages and
 > will extend this same demo.
+
+## How to read this book
+
+This book is meant to be read **before** you open the code. It teaches Paxos
+**through diagrams**: each chapter is built around a large annotated schema where
+every term is defined inline (look for `TERM …`) and every safety rule is called
+out exactly where it bites (`INVARIANT …`). Where a concept exists in the code,
+the diagram is labelled with its `file:line` so you can jump straight to it.
+
+```mermaid
+mindmap
+  root((paros book))
+    Part I — Foundations
+      Why consensus?
+      Single-decree Paxos
+      Choosing one value - live demo
+      Failures and failover
+    Part II — Architecture
+      The sans-IO contract
+      Persist-before-send
+      One driver, prod and sim
+      Deterministic simulation
+      The browser demo
+    Part III — Multi-Paxos - planned
+      From one value to a log
+      Leaders, election, liveness
+    Reference
+      Glossary
+      Further reading
+```
+
+Read it top to bottom: Part I is the algorithm, Part II is the *shape* paros gives
+it (a pure core plus a driver), and Part III sketches where the codebase is going.
+New to consensus? Start at [Why consensus?](why-consensus.md). Want to see it run
+right now? Jump to [How Paxos chooses one value](choose-one-value.md).

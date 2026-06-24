@@ -56,6 +56,9 @@
             # mdBook: the GitHub Pages demo book (embeds the wasm demo).
             mdbook
             mdbook-toc
+            # mdbook-mermaid: renders ```mermaid diagrams in the book. The book
+            # leans on these heavily as its primary teaching surface.
+            mdbook-mermaid
           ];
 
           shellHook = ''

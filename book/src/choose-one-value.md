@@ -21,6 +21,18 @@ node)`, so a higher round always wins and ties are broken by the proposer's node
 id (two proposers can therefore never hold the same ballot). The demo shows the
 current ballot top-left and on the proposer's badge.
 
+```mermaid
+flowchart LR
+    subgraph order["Ballots are totally ordered — types.rs Ballot:46"]
+        direction LR
+        b1["(1, 0)"] -->|"&lt;"| b2["(1, 2)<br/>same round, higher node-id wins"]
+        b2 -->|"&lt;"| b3["(2, 0)<br/>higher round always wins"]
+        b3 -->|"&lt;"| b4["(2, 1)"]
+    end
+    order -. "INVARIANT: any two ballots are comparable, so an acceptor can<br/>always decide if an incoming ballot outranks its promise" .-> inv([" "])
+    style inv fill:#eef,stroke:#44a
+```
+
 ## Two phases
 
 A proposer drives two round trips, each needing a **majority** (2 of 3) to make
@@ -38,6 +50,28 @@ Why a majority? Any two majorities of three share at least one acceptor. That on
 overlapping acceptor is what makes it impossible for two different values to both
 be chosen.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Proposer (node 0)
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    Note over P,A2: PHASE 1 — claim the ballot
+    P->>A1: Prepare(b)
+    P->>A2: Prepare(b)
+    A1-->>P: Promise(b)
+    A2-->>P: Promise(b)
+    Note over P: majority promised → I own ballot b
+    Note over P,A2: PHASE 2 — get a value chosen
+    P->>A1: Accept(b, v)
+    P->>A2: Accept(b, v)
+    A1-->>P: Accepted(b, v)
+    A2-->>P: Accepted(b, v)
+    Note over P,A2: majority accepted → v is CHOSEN (acceptors glow green)
+    P->>A1: Commit(v)
+    P->>A2: Commit(v)
+```
+
 ## The value-selection rule
 
 A proposer does not always get to propose its own value. If any acceptor's Promise
@@ -45,6 +79,17 @@ reports an already-accepted value, the proposer must **adopt the highest-ballot
 value it saw** instead of its own. This is the rule that protects a value that may
 already be chosen: a later proposer, forced to re-propose the same value, can
 never change the choice.
+
+```mermaid
+flowchart TD
+    q["Promise quorum reached"] --> c{"Any Promise carried<br/>an accepted value?"}
+    c -->|"yes"| adopt["Adopt the highest-ballot value seen<br/>(re-propose it) — node.rs:316"]
+    c -->|"no"| own["Propose your own value"]
+    adopt --> go["Accept(b, chosen-or-adopted value)"]
+    own --> go
+    adopt -. "INVARIANT: a maybe-chosen value is preserved across proposers" .-> inv([" "])
+    style inv fill:#fee,stroke:#c00
+```
 
 Try seed **19** to watch it happen. Node 0 starts proposing at ballot `(1,0)`, but
 node 1 cuts in with a higher ballot `(2,1)`. Node 0's late Accept is **nacked**
