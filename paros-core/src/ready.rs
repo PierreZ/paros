@@ -4,7 +4,7 @@
 use crate::message::Message;
 use crate::node::RawNode;
 use crate::state::HardState;
-use crate::types::{Slot, Value};
+use crate::types::{NodeId, Slot, Value};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -52,9 +52,12 @@ impl<'a> Ready<'a> {
     }
 
     /// Outbound messages to send **after** [`Ready::hard_state`] is durable
-    /// (step 2).
+    /// (step 2). Each entry is `(destination, message)`: the core decides where
+    /// every message goes (`Promise`/`Accepted`/`Nack` reply to the proposer;
+    /// `Prepare`/`Accept`/`Commit` fan out to peers), so the driver only maps the
+    /// `NodeId` to an address and sends — it makes no routing decision.
     #[must_use]
-    pub fn messages(&self) -> &[Message] {
+    pub fn messages(&self) -> &[(NodeId, Message)] {
         self.node.pending_messages()
     }
 
