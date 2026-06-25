@@ -56,6 +56,7 @@
             # mdBook: the GitHub Pages demo book (embeds the wasm demo).
             mdbook
             mdbook-toc
+            mdbook-mermaid
           ];
 
           shellHook = ''

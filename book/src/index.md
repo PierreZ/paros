@@ -22,10 +22,13 @@ side effects in the order the `Ready` documents, honoring the persist-before-sen
 durability rule at the heart of Paxos safety.
 
 Because the core is portable to WebAssembly, the *same* simulation that runs in
-CI runs in your browser tab. The next chapter embeds it live.
+CI runs in your browser tab. The [Watch it live](wasm.md) page runs it there.
 
-> **Where we are.** This book is built from Stage 2, the single-decree safety
-> kernel: three acceptors run Prepare/Promise/Accept/Accepted under a chaotic
-> network, and a safety oracle proves that at most one value is ever chosen.
-> Leader election, a replicated log, and storage faults arrive in later stages and
-> will extend this same demo.
+> **How to read this book.** It is a guided tour of the algorithm, grounded in the
+> papers and mapped onto the real `paros-core` code. Part one,
+> *Single-decree Paxos*, covers [how a value is chosen](choose-one-value.md) and
+> [why that choice is safe](safety.md). Part two, *Multi-Paxos*, builds the
+> [replicated log](replicated-log.md), elects a [stable leader](stable-leader.md),
+> and works through a [crash and restart safety](restart-safety.md) bug the
+> simulation caught. Every chapter explains with diagrams; to watch the
+> single-decree kernel actually run, open [Watch it live](wasm.md).
