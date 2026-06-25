@@ -72,7 +72,7 @@ See also the sibling sans-IO core model:
 4. **Quorums** — `flexible-paxos` (Q1/Q2 split; the theory behind frankenpaxos's grid quorums).
 5. **Durability** — `ceph/mon-paxos-patterns.md` + `paxos-made-live` (what to persist; the
    apply-with-commit pattern) and `protocol-aware-recovery` for corruption edge cases.
-6. **Later / horizons** — `paxos-vs-raft` (election trade-offs) + `foundationdb/` (production
+6. **Later / horizons**: `paxos-vs-raft` (election trade-offs) + `foundationdb/` (production
    leader-election dynamics), `matchmaker-paxos` +
    `frankenpaxos/05` (reconfiguration), `scaling-rsm-compartmentalization` + `frankenpaxos/04`
    (throughput). Deferred past v1.

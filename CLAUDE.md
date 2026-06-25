@@ -35,6 +35,30 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
+## Simulation-driven development
+
+This project is simulation-first: the deterministic simulation (moonpool DST + the `paros-sim`
+oracles) is the source of truth for correctness, not hand-written unit tests.
+
+When reading code surfaces a *potential* safety or liveness bug, do NOT reach for a classic unit
+test. Reproduce it as a **failing simulation**:
+
+1. State the invariant it would violate (e.g. "at most one value is chosen per slot").
+2. Make the scenario reachable. Add the chaos it needs (network loss/reorder, crash/restart via
+   `Chaos::Attrition`, storage faults) and use `buggify!()` / `buggify_knob!()` to make the rare
+   interleaving likely. If the harness lacks a capability (e.g. persistent storage across restart),
+   **build that capability**, do not downgrade to a unit test.
+3. Add or strengthen an oracle (an `Invariant` using `assert_always!`) so the violation surfaces as
+   a `SimulationReport.assertion_violation`.
+4. Run the sweep, confirm it goes **red** on the unfixed code, and record the failing seed.
+5. Fix `paros-core`.
+6. Run the sweep, confirm it goes **green** and saturates.
+
+A regression unit test may *pin* the bug afterward, but it never replaces step 4. A critical claim
+the simulation cannot reproduce is treated as **unproven** (it is probably not a real bug: safety is
+often preserved by an invariant you missed). Do not add speculative defensive code for an
+unreproducible claim.
+
 ## Layout
 
 Cargo workspace (mirrors moonpool). Dependency stack: `paros-core` ← `paros` ← `paros-sim` ←

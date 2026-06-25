@@ -78,13 +78,13 @@ and leaves "who should lead" to timing. Worth noting if paros ever wants preferr
 ## 3. Candidate side: candidacy, quorum, win
 
 ```cpp
-// fdbserver/core/LeaderElection.actor.cpp:151-161  — blast candidacy to ALL coordinators
+// fdbserver/core/LeaderElection.actor.cpp:151-161  - blast candidacy to ALL coordinators
 for (int i = 0; i < coordinators.leaderElectionServers.size(); i++)
     cand.push_back(submitCandidacy(coordinators.clusterKey,
                                    coordinators.leaderElectionServers[i],
                                    myInfo, prevChangeID, &nomineeChange, &nominees[i]));
 
-// :196  — the win condition
+// :196  - the win condition
 if (leader.present() && leader.get().second && leader.get().first.equalInternalId(myInfo)) {
     // a quorum of coordinators nominated *me*  => I am leader
     iAmLeader = true; break;
@@ -115,11 +115,11 @@ oracle** paros Stage 3 asserts is the same property FDB gets here from majority 
 ## 4. Coordinator side: the register and sticky selection
 
 ```cpp
-// fdbserver/coordinator/Coordination.cpp:393-406  — register a candidacy
+// fdbserver/coordinator/Coordination.cpp:393-406  - register a candidacy
 availableCandidates.erase(LeaderInfo(req.prevChangeID));
 availableCandidates.insert(req.myInfo);
 
-// :470-472  — pick the nominee each interval
+// :470-472  - pick the nominee each interval
 if (availableCandidates.size() &&
     (!availableLeaders.size() ||
      availableLeaders.begin()->leaderChangeRequired(*availableCandidates.begin())))
@@ -142,12 +142,12 @@ starting Phase 1. Same outcome (stable leader), different mechanism (timing vs. 
 ## 5. Anti-dueling: backoff plus bad-candidate timeout (the livelock-fix analog)
 
 ```cpp
-// fdbserver/coordinator/Coordination.cpp:500-502  — exponential backoff when NO leader exists
+// fdbserver/coordinator/Coordination.cpp:500-502  - exponential backoff when NO leader exists
 setNextInterval(delay(candidateDelay));
 candidateDelay = std::min(SERVER_KNOBS->CANDIDATE_MAX_DELAY,
                           candidateDelay * SERVER_KNOBS->CANDIDATE_GROWTH_RATE);
 
-// fdbserver/core/LeaderElection.actor.cpp:211-219 — nominated but can't win => give up, NEW id
+// fdbserver/core/LeaderElection.actor.cpp:211-219 - nominated but can't win => give up, NEW id
 if ((!leader.present() || !leader.get().second) &&
     std::find(nominees.begin(), nominees.end(), myInfo) != nominees.end()) {
     if (!badCandidateTimeout.isValid())
@@ -185,7 +185,7 @@ choose {
 ```
 
 ```cpp
-// fdbserver/coordinator/Coordination.cpp:44-62 — coordinator-side liveness lease
+// fdbserver/coordinator/Coordination.cpp:44-62 - coordinator-side liveness lease
 class LivenessChecker { void confirmLiveness(){ lastTime.set(now()); } Future<Void> checkStuck() const; };
 // armed with COORDINATOR_LEADER_CONNECTION_TIMEOUT = 20s
 ```
@@ -207,7 +207,7 @@ paros leader whose promise was raised by a competing higher `Prepare` must stop 
 ## 7. Discovery is partition-safe by the same quorum rule
 
 ```cpp
-// fdbclient/MonitorLeader.cpp:495-530 — one watcher actor per coordinator, re-uses getLeader()
+// fdbclient/MonitorLeader.cpp:495-530 - one watcher actor per coordinator, re-uses getLeader()
 // a watcher only commits to a leader when getLeader(nominees).second == true (a majority agrees)
 ```
 

@@ -519,3 +519,51 @@ fn acceptor_rejects_below_promised_ballot() {
     let out = drain(&mut n);
     assert!(matches!(out.as_slice(), [(_, Message::Nack { .. })]));
 }
+
+/// SDD regression for the "stale chosen value resurrected on restart" bug, first
+/// proven as a DST safety-oracle violation under crash/restart chaos. A node holds
+/// a stale lower-ballot accept from a failed earlier ballot, then learns via
+/// `Commit` that a *different* value was chosen for that slot. `mark_chosen` must
+/// record the chosen value as the authoritative accepted entry, because a restart
+/// rebuilds `chosen` from `accepted`; keeping the stale entry would resurrect a
+/// value the cluster never chose for the slot.
+#[test]
+fn chosen_value_survives_restart_over_a_stale_accept() {
+    let mut n = node(0, &[0, 1, 2]);
+
+    // Accept a value at a low ballot that is never chosen (its proposer died
+    // before reaching a quorum); this node was the only acceptor.
+    n.step(Message::Accept {
+        from: NodeId(1),
+        ballot: ballot(1, 1),
+        slot: Slot(0),
+        entry: entry(9, 9, 1),
+    });
+
+    // Learn a DIFFERENT value was chosen for slot 0 at a higher ballot (this node
+    // was not in the choosing quorum, so it never accepted that value).
+    n.step(Message::Commit {
+        from: NodeId(2),
+        ballot: ballot(2, 2),
+        slot: Slot(0),
+        entry: entry(7, 7, 2),
+    });
+    assert_eq!(
+        chosen_at(&n, 0),
+        Some(val(2)),
+        "learns the chosen value live"
+    );
+
+    // Restart: rebuild from the durable HardState.
+    let storage = TestStorage {
+        hard_state: n.hard_state().clone(),
+        config: n.config().clone(),
+    };
+    let restarted = RawNode::new(&storage);
+
+    assert_eq!(
+        chosen_at(&restarted, 0),
+        Some(val(2)),
+        "restart must rebuild the chosen value, not the stale never-chosen accept"
+    );
+}

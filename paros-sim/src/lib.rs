@@ -20,9 +20,12 @@ pub use node::NodeProcess;
 pub use oracle::{ChosenShot, NodeStateShot, Outcome, ProtocolShot, RunResult, Shot};
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use moonpool_sim::runner::builder::ProcessCount;
-use moonpool_sim::{Chaos, ChaosMode, SimulationBuilder, SimulationReport, WorkloadCount};
+use moonpool_sim::{
+    Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport, WorkloadCount,
+};
 
 use crate::oracle::{
     ClientLivenessOracle, LeadershipOracle, NoGapsOracle, ProgressOracle, ProtocolData,
@@ -51,6 +54,32 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
 /// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
 pub const COVERAGE_ITERATIONS: usize = 64;
+/// Simulated window over which chaos (network faults + attrition reboots) fires.
+/// Wide enough to span a run's proposal phase so crashes land mid-protocol.
+const CHAOS_DURATION: Duration = Duration::from_secs(30);
+
+/// The chaos surfaces every run exercises: swarm network faults plus single-node
+/// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
+/// `HardState` mirrored into the per-iteration `StateHandle`) survives a restart,
+/// modelling a clean process crash with intact disk. Shared by [`run_seed`] and
+/// [`explore`] so a failing seed replays identically.
+fn chaos_surfaces() -> [Chaos; 2] {
+    [
+        Chaos::Network(ChaosMode::Swarm),
+        Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.0,
+                prob_crash: 1.0,
+                prob_wipe: 0.0,
+                recovery_delay_ms: Some(50..200),
+                grace_period_ms: None,
+                scope: AttritionScope::PerProcess,
+            },
+            mode: ChaosMode::Swarm,
+        },
+    ]
+}
 
 /// Run one deterministic seed and return its timeline. Network chaos (swarm) is
 /// always on, so a run exercises the real protocol under faults; the same seed
@@ -74,7 +103,8 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
-        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run();
@@ -107,7 +137,8 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
-        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
         .run()
 }

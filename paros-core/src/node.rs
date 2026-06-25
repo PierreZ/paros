@@ -668,10 +668,15 @@ impl RawNode {
         if self.chosen.contains_key(&slot) {
             return;
         }
+        // Record the *chosen* value as the authoritative accepted entry. Using
+        // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
+        // lower-ballot accept it picked up from a failed earlier ballot, and
+        // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
+        // would resurrect a value the cluster never chose for this slot. A chosen
+        // value is durable and safe to record at its choosing ballot.
         self.hard_state
             .accepted
-            .entry(slot)
-            .or_insert_with(|| (ballot, entry.clone()));
+            .insert(slot, (ballot, entry.clone()));
         if ballot > self.hard_state.max_promised_ballot {
             self.hard_state.max_promised_ballot = ballot;
         }

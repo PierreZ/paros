@@ -372,6 +372,27 @@ where
     // The sans-IO core, bootstrapped from durable storage.
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
+
+    // On restart the core rebuilt its chosen log from durable `HardState`. Re-emit
+    // each rebuilt chosen entry as `value_chosen` so the safety oracle sees this
+    // node's post-restart belief and catches any divergence from the value the
+    // cluster actually chose for that slot. A clean first boot has an empty log, so
+    // this is a no-op. (This is what makes a "stale chosen value resurrected on
+    // restart" bug observable in the simulation.)
+    {
+        let hs = node.hard_state();
+        if let Some(ci) = hs.chosen_index {
+            for (slot, (_b, entry)) in hs.accepted.range(..=ci) {
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    vhash = value_hash(&entry.value.0),
+                    "value_chosen"
+                );
+            }
+        }
+    }
+
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
     // Client replies held until their slot commits (ack-on-commit), keyed by slot.

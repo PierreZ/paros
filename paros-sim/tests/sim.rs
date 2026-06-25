@@ -110,8 +110,10 @@ fn log_grows_under_a_stable_leader() {
 /// The crown jewel: drive the `UntilCoverageStable` sweep under swarm network
 /// chaos and assert every invariant holds. Empty `assertion_violations` means the
 /// safety `always`-assertions all held across every seed: at-most-one-value-chosen
-/// (prefix agreement), no gaps in the applied prefix, at most one leader per
-/// ballot, monotonic promised ballots, and never-accept-below-promised. Saturating
+/// (prefix agreement), no gaps in the applied prefix, per-node monotonic leadership
+/// (a ballot is `(round, node)`, so two nodes can lead the same round under a
+/// partition; safety still holds by quorum intersection, not a single-leader rule),
+/// monotonic promised ballots, and never-accept-below-promised. Saturating
 /// (no `convergence_timeout`) means every `sometimes`/`reachable` fired, including
 /// the `ProgressOracle` gates (a stable leader streams several slots, and
 /// leadership turns over and recovers): the dueling-proposer livelock is gone and

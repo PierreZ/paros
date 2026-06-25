@@ -9,8 +9,11 @@
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult};
-use paros::{Config, MemStorage, NodeId, parse_addr, run_node};
+use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle};
+use paros::{
+    Ballot, Config, Entry, HardState, MemStorage, NodeId, NodeStorage, Slot, Storage, parse_addr,
+    run_node,
+};
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
@@ -54,13 +57,74 @@ impl Process for NodeProcess {
             peers: members.iter().map(|(id, _)| *id).collect(),
         };
 
+        // Durable storage that survives a chaos `Crash`/restart: it mirrors the
+        // node's `HardState` into the per-iteration `StateHandle` (shared across a
+        // process's reboots, fresh per seed), keyed by this node's IP. This is the
+        // sim's stand-in for real durable disk; the storage stage swaps in a faulty
+        // fake without touching the driver.
+        let storage = DurableStorage::restore(
+            config,
+            ctx.state().clone(),
+            format!("paros-hardstate:{my_ip}"),
+        );
+
         run_node(
             ctx.providers().clone(),
-            MemStorage::new(config),
+            storage,
             parse_addr(&my_ip)?,
             members,
             ctx.shutdown().clone(),
         )
         .await
+    }
+}
+
+/// A [`NodeStorage`] whose durable [`HardState`] is mirrored into the moonpool
+/// per-iteration [`StateHandle`], keyed by the node's IP. The `StateHandle` is
+/// shared across a process's reboots within an iteration (and fresh per seed), so
+/// state written before a chaos `Crash` is read back on restart, exactly like a
+/// real disk, while staying deterministic across the seed sweep.
+struct DurableStorage {
+    inner: MemStorage,
+    state: StateHandle,
+    key: String,
+}
+
+impl DurableStorage {
+    /// Build storage for `config`, seeding it from any [`HardState`] a prior boot
+    /// of this node (same IP, same iteration) persisted into `state`.
+    fn restore(config: Config, state: StateHandle, key: String) -> Self {
+        let mut inner = MemStorage::new(config);
+        if let Some(hard_state) = state.get::<HardState>(&key) {
+            inner.set_hard_state(hard_state);
+        }
+        Self { inner, state, key }
+    }
+}
+
+impl Storage for DurableStorage {
+    fn initial_state(&self) -> (HardState, Config) {
+        self.inner.initial_state()
+    }
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
+        self.inner.accepted(slot)
+    }
+    fn first_slot(&self) -> Slot {
+        self.inner.first_slot()
+    }
+    fn last_slot(&self) -> Slot {
+        self.inner.last_slot()
+    }
+    fn snapshot(&self) -> Option<Vec<u8>> {
+        self.inner.snapshot()
+    }
+}
+
+impl NodeStorage for DurableStorage {
+    fn set_hard_state(&mut self, hard_state: HardState) {
+        // Persist to the per-iteration StateHandle FIRST (survives restart), then
+        // update the in-memory mirror the driver reads back.
+        self.state.publish(&self.key, hard_state.clone());
+        self.inner.set_hard_state(hard_state);
     }
 }
