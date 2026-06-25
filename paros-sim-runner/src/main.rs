@@ -3,7 +3,7 @@
 //! safety invariants), then runs one seed and prints its message timeline. The
 //! browser calls the exact same [`paros_sim::run_seed`] under the hood.
 
-use paros_sim::{Outcome, explore, run_seed, run_seed_json};
+use paros_sim::{COVERAGE_ITERATIONS, Outcome, explore, run_seed, run_seed_json};
 
 fn main() {
     let seed = std::env::args()
@@ -13,7 +13,7 @@ fn main() {
 
     // 1. The DST bug-finding sweep: many seeds of swarm chaos, asserting safety.
     println!("--- safety sweep (UntilCoverageStable, swarm network chaos) ---");
-    let report = explore();
+    let report = explore(COVERAGE_ITERATIONS);
     let stop = if report.convergence_timeout {
         "hit the iteration cap (did NOT saturate)"
     } else {

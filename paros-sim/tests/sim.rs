@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use paros_sim::{explore, run_seed, run_seed_json};
+use paros_sim::{SWEEP_ITERATIONS, explore, run_seed, run_seed_json};
 
 /// The determinism proof: the same seed produces a bit-identical timeline across
 /// two independent runs. Network chaos is on, but it is seeded, so replay still
@@ -114,11 +114,13 @@ fn log_grows_under_a_stable_leader() {
 /// ballot, monotonic promised ballots, and never-accept-below-promised. Saturating
 /// (no `convergence_timeout`) means every `sometimes`/`reachable` fired, including
 /// the `ProgressOracle` gates (a stable leader streams several slots, and
-/// leadership turns over and recovers) — i.e. the dueling-proposer livelock is
-/// gone and the cluster makes progress under eventual synchrony within the cap.
+/// leadership turns over and recovers): the dueling-proposer livelock is gone and
+/// the cluster makes progress under eventual synchrony within the cap. The test
+/// uses the full [`SWEEP_ITERATIONS`] cap so `AssertionCoverage` saturates (the
+/// sancov runner uses the smaller `COVERAGE_ITERATIONS` cap instead).
 #[test]
 fn safety_and_progress_hold_under_chaos() {
-    let report = explore();
+    let report = explore(SWEEP_ITERATIONS);
 
     assert!(
         report.assertion_violations.is_empty(),

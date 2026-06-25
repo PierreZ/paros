@@ -45,9 +45,12 @@ pub(crate) const CLUSTER_SIZE: usize = 3;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
 pub(crate) const PLATEAU_SEEDS: usize = 64;
-/// Hard cap on the adaptive sweep's seed count. Higher than single-decree: the
-/// multi-slot + re-election reachability gates need more seeds to all fire.
-pub(crate) const MAX_ITERATIONS: usize = 5000;
+/// Cap on the full sweep used by the nextest safety+progress test (no sancov):
+/// high enough for `AssertionCoverage` to saturate (all gates fire, then a plateau).
+pub const SWEEP_ITERATIONS: usize = 5000;
+/// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
+/// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
+pub const COVERAGE_ITERATIONS: usize = 64;
 
 /// Run one deterministic seed and return its timeline. Network chaos (swarm) is
 /// always on, so a run exercises the real protocol under faults; the same seed
@@ -89,10 +92,13 @@ pub fn run_seed(seed: u64) -> RunResult {
 
 /// Run the DST bug-finding sweep: swarm network chaos + the safety oracle under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
-/// coverage plateaus, capped at [`MAX_ITERATIONS`]). Returns the report so the
-/// caller can assert no `assertion_violations` and that it saturated.
+/// coverage plateaus, capped at `max_iterations`). The cap is a parameter because
+/// the two modes saturate differently: the nextest test passes [`SWEEP_ITERATIONS`]
+/// (`AssertionCoverage`), the sancov runner passes [`COVERAGE_ITERATIONS`]
+/// (`CodeCoverage`). Returns the report so the caller can assert no
+/// `assertion_violations` and inspect progress.
 #[must_use]
-pub fn explore() -> SimulationReport {
+pub fn explore(max_iterations: usize) -> SimulationReport {
     SimulationBuilder::new()
         .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
@@ -102,7 +108,7 @@ pub fn explore() -> SimulationReport {
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
-        .until_coverage_stable(PLATEAU_SEEDS, MAX_ITERATIONS)
+        .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
         .run()
 }
 
