@@ -12,6 +12,7 @@ we study, and analyses of external consensus codebases. This file is the map; re
   house style **(a) verbatim code + `file:line` → (b) principle → (c) maps-to-sans-IO**.
 - Our own design notes (not tied to a specific external source) live one level up in
   [`../analysis/`](../analysis/), e.g. `../analysis/go-raft/`.
+- `talks/<name>.md` — a transcript of a talk or video (no PDF). Head it with the source URL.
 - When adding a paper, keep the `paper.pdf` + `transcript.md` pair and cross-link related entries.
 
 ## Papers
@@ -61,6 +62,14 @@ we study, and analyses of external consensus codebases. This file is the map; re
 
 See also the sibling sans-IO core model:
 [`../analysis/go-raft/etcd-raft-sans-io-patterns.md`](../analysis/go-raft/etcd-raft-sans-io-patterns.md).
+
+## Talks
+
+- [`talks/paxos-google.md`](talks/paxos-google.md) — Luis Quesada Torres (Google SRE),
+  ["The Paxos Algorithm"](https://www.youtube.com/watch?v=d7nAGI_NZPk). A gentle,
+  diagram-driven walkthrough of single-decree Paxos (Prepare/Promise/Accept, the dueling
+  proposers cured by exponential backoff) and a Megastore-style replicated log. The source
+  of the book's bank-balance example ([`../../book/src/replicated-log.md`](../../book/src/replicated-log.md)).
 
 ## Suggested reading order (for the sans-IO Multi-Paxos goal)
 

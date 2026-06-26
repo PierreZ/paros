@@ -68,12 +68,12 @@ sequenceDiagram
     Note over N,D: 2. learn the cluster chose a DIFFERENT value
     N->>N: Commit: slot 0 is (ballot 2, value Y)
     Note over N: chosen[0] = Y, in memory
-    rect rgb(120, 50, 50)
+    rect rgba(200, 70, 70, 0.25)
     Note over N,D: BUG: durable accepted[0] still holds the stale (ballot 1, X)
     end
     Note over N,D: 3. crash, then rebuild chosen from accepted on restart
     D->>N: accepted[0] = (ballot 1, X)
-    rect rgb(120, 50, 50)
+    rect rgba(200, 70, 70, 0.25)
     Note over N: chosen[0] rebuilds to X, contradicting the cluster's choice of Y
     end
 ```
@@ -112,12 +112,12 @@ sequenceDiagram
     participant D as Durable storage
     N->>D: accepted[0] = (ballot 1, value X)
     N->>N: Commit: slot 0 is (ballot 2, value Y)
-    rect rgb(40, 90, 60)
+    rect rgba(70, 170, 110, 0.25)
     N->>D: mark_chosen OVERWRITES accepted[0] = (ballot 2, value Y)
     end
     Note over N,D: crash, then rebuild on restart
     D->>N: accepted[0] = (ballot 2, Y)
-    rect rgb(40, 90, 60)
+    rect rgba(70, 170, 110, 0.25)
     Note over N: chosen[0] rebuilds to Y, the value the cluster chose
     end
 ```

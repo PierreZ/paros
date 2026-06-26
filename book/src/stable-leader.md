@@ -185,6 +185,60 @@ uses of piggybacking. Here is the list, and where paros stands:
 The "not yet" rows are the roadmap past this part: they are what turns a correct
 log into a system you can run for months without the disk filling up.
 
+## The whole flow, end to end
+
+Putting the pieces together, here is the whole protocol in one picture: one node
+wins an election (Phase 1, run **once** for the whole log), then streams a sequence
+of client values into the log, one Accept round per slot, never paying for Phase 1
+again. Notice the **pipelining**: the leader fires the Accept for slot 1 before
+slot 0 has come back, so several values are in flight at once, and the commit index
+walks forward as quorums land.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as Client
+    participant N0 as Node 0
+    participant N1 as Node 1
+    participant N2 as Node 2
+
+    Note over N0,N2: Election, Phase 1, run once for the whole log
+    Note over N0: no leader heard from, election timeout fires:<br/>become Candidate, bump ballot to (1,0)
+    N0->>N1: Prepare(ballot (1,0), from_slot 0)
+    N0->>N2: Prepare(ballot (1,0), from_slot 0)
+    N1-->>N0: Promise(ballot (1,0), nothing accepted yet)
+    N2-->>N0: Promise(ballot (1,0), nothing accepted yet)
+    Note over N0: a majority promised, Node 0 is Leader.<br/>(any accepted entries reported here would be re-proposed first)
+
+    Note over Cl,N2: Storing values, Phase 2, streamed per slot, no Prepare again
+    Cl->>N0: Propose(x = 1)
+    N0->>N1: Accept(ballot (1,0), slot 0, x = 1)
+    N0->>N2: Accept(ballot (1,0), slot 0, x = 1)
+    Cl->>N0: Propose(y = 2)
+    N0->>N1: Accept(ballot (1,0), slot 1, y = 2)
+    N0->>N2: Accept(ballot (1,0), slot 1, y = 2)
+    N1-->>N0: Accepted(slot 0)
+    N2-->>N0: Accepted(slot 0)
+    Note over N0: slot 0 has a quorum, chosen. commit index = 0
+    N0-->>Cl: ProposeAck(x = 1 committed)
+    Cl->>N0: Propose(z = 3)
+    N0->>N1: Accept(ballot (1,0), slot 2, z = 3)
+    N0->>N2: Accept(ballot (1,0), slot 2, z = 3)
+    N1-->>N0: Accepted(slot 1)
+    N2-->>N0: Accepted(slot 1)
+    Note over N0: slot 1 chosen. commit index = 1
+    N0-->>Cl: ProposeAck(y = 2 committed)
+    N1-->>N0: Accepted(slot 2)
+    N2-->>N0: Accepted(slot 2)
+    Note over N0: slot 2 chosen. commit index = 2
+    N0-->>Cl: ProposeAck(z = 3 committed)
+
+    Note over N0,N2: Heartbeat, carry the commit index so followers advance
+    N0->>N1: Heartbeat(ballot (1,0), commit 2)
+    N0->>N2: Heartbeat(ballot (1,0), commit 2)
+    Note over N1,N2: followers apply the log prefix [x=1, y=2, z=3]
+```
+
 With a stable leader streaming a log, one question remains: what happens when a
 node crashes mid-stream and comes back? That is [Crash and restart
 safety](restart-safety.md).
