@@ -56,10 +56,11 @@ config with `--no-sandbox`).
 - Keep every symbol named in a diagram real: it should exist in `paros-core` / `paros-sim`
   so the figure stays mapped to the code, like the rest of the book.
 
-## Live demos (Watch it live)
+## Live demos
 
-The **"Watch it live"** section embeds the wasm demo. Today it holds two pages:
-`single-decree.md` (single-decree) and `multi-paxos.md` (Multi-Paxos). One file,
+Each protocol chapter ends with a **"Watch it live"** demo page embedding the wasm demo:
+`single-decree.md` under *Single-decree Paxos*, `multi-paxos.md` under *Multi-Paxos* (so a
+reader meets the live demo right after the concept it shows). One file,
 `paros-wasm-demo/web/index.html`, serves both via a `?mode=` switch (`single` is the
 default, `?mode=multi` selects the leader-and-log column scene). The two modes share the
 scenario digest, the narration, and the time-warp playback machinery; only the canvas
