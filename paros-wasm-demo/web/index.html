@@ -417,7 +417,9 @@ function deriveScenario() {
     chips.push(['accepted quorum', `${acceptedK}/3`]);
     chips.push(['chosen by', `${choosers}/3`]);
     chips.push(['dueling proposers', dueling ? 'yes (resolved)' : 'no']);
-    chips.push(['network drops', String(drops)]);
+    // scope to the slot-0 decree the single-decree court actually shows
+    const drops0 = run.protocol.filter((p) => p.outcome === 'dropped' && p.slot === 0).length;
+    chips.push(['network drops', String(drops0)]);
   }
   return chips;
 }
@@ -560,7 +562,13 @@ function buildLegs() {
   // gets a visible flight; legs with real latency are untouched. In multi mode the
   // legs fly between the column headers (NODES_M); in single mode the triangle court.
   const POS = MULTI ? NODES_M : NODES;
-  legs = run.protocol.map((s) => {
+  // The sim runs full Multi-Paxos (12 proposals -> 12 slots). Multi mode shows the
+  // whole log; the single-decree court teaches *one* value, so it animates only the
+  // slot-0 decree -- otherwise slots 1..11 keep streaming yellow Accept/Accepted
+  // (and heartbeats) long after slot 0 is chosen and the client is acked.
+  const shown = MULTI ? run.protocol
+    : run.protocol.filter((s) => s.slot === 0 && s.kind !== 'heartbeat');
+  legs = shown.map((s) => {
     const depart = s.depart_ms + LEAD_MS;
     return { from: POS[s.from], to: POS[s.to], depart_ms: depart,
              arrive_ms: Math.max(s.arrive_ms + LEAD_MS, depart + 1), kind: s.kind, outcome: s.outcome };
