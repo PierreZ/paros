@@ -3,7 +3,9 @@
 //! [`crate::RawNode::step`], and encodes [`crate::Ready::messages`] after
 //! draining a batch.
 
-use crate::types::{Ballot, NodeId, Slot, Value};
+use std::collections::BTreeMap;
+
+use crate::types::{Ballot, Entry, NodeId, Slot};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -14,41 +16,43 @@ use crate::types::{Ballot, NodeId, Slot, Value};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum Message {
-    // ---- Phase 1 (prepare / promise) ----
-    /// Proposer → acceptors: "promise not to accept anything below `ballot`."
+    // ---- Phase 1 (prepare / promise), per ballot, covering a whole log suffix ----
+    /// Proposer → acceptors: "promise not to accept anything below `ballot`, for
+    /// every slot at or after `from_slot`." One Phase 1 per ballot covers the
+    /// whole log suffix (the stable-leader optimization).
     Prepare {
         /// Sender.
         from: NodeId,
         /// The ballot being prepared.
         ballot: Ballot,
-        /// The slot being prepared.
-        slot: Slot,
+        /// First slot this prepare covers (the candidate's `chosen_index + 1`).
+        from_slot: Slot,
     },
-    /// Acceptor → proposer: a promise, optionally reporting a previously
-    /// accepted `(ballot, value)` for `slot` so the proposer can re-propose it.
+    /// Acceptor → proposer: a promise covering every slot at or after `from_slot`,
+    /// reporting all previously accepted `(ballot, entry)` in that suffix so the
+    /// new leader can re-propose in-flight values (gap fill).
     Promise {
         /// Sender.
         from: NodeId,
         /// The ballot promised.
         ballot: Ballot,
-        /// The slot promised.
-        slot: Slot,
-        /// Any value already accepted for `slot`, with the ballot it was
-        /// accepted at.
-        accepted: Option<(Ballot, Value)>,
+        /// First slot this promise covers (echoes the prepare's `from_slot`).
+        from_slot: Slot,
+        /// All accepted entries for slots `>= from_slot`. Empty if none.
+        accepted: BTreeMap<Slot, (Ballot, Entry)>,
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----
-    /// Proposer → acceptors: "accept `value` for `slot` at `ballot`."
+    /// Proposer → acceptors: "accept `entry` for `slot` at `ballot`."
     Accept {
         /// Sender.
         from: NodeId,
-        /// The ballot under which the value is proposed.
+        /// The ballot under which the entry is proposed.
         ballot: Ballot,
         /// The target slot.
         slot: Slot,
-        /// The proposed value.
-        value: Value,
+        /// The proposed entry (value plus its client tag).
+        entry: Entry,
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
@@ -71,16 +75,16 @@ pub enum Message {
     },
 
     // ---- Learning ----
-    /// Any → any: `value` is chosen for `slot` (decided at `ballot`).
+    /// Any → any: `entry` is chosen for `slot` (decided at `ballot`).
     Commit {
         /// Sender.
         from: NodeId,
-        /// The ballot at which the value was chosen.
+        /// The ballot at which the entry was chosen.
         ballot: Ballot,
         /// The chosen slot.
         slot: Slot,
-        /// The chosen value.
-        value: Value,
+        /// The chosen entry.
+        entry: Entry,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
@@ -90,9 +94,15 @@ pub enum Message {
         /// The node checking on itself.
         from: NodeId,
     },
-    /// Leader → self: time to broadcast heartbeats / re-send un-acked `Accept`s.
+    /// Leader → peers (and a leader self-trigger from `tick`): a liveness beat
+    /// carrying the leader's commit index so followers advance their chosen
+    /// prefix; also the trigger to re-send un-acked `Accept`s.
     Heartbeat {
         /// The leader heartbeating.
         from: NodeId,
+        /// The leader's current ballot (lets a follower adopt or refuse it).
+        ballot: Ballot,
+        /// The leader's highest contiguous chosen slot.
+        commit: Slot,
     },
 }

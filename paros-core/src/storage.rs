@@ -1,7 +1,7 @@
 //! The read-only [`Storage`] port the core depends on.
 
 use crate::state::{Config, HardState};
-use crate::types::{Ballot, Slot, Value};
+use crate::types::{Ballot, Entry, Slot};
 
 /// A read-only recovery/serving port. The **application** implements it and owns
 /// *all* writes; the core only ever *reads back* state the application has
@@ -23,8 +23,8 @@ pub trait Storage {
     /// with. Called once, at construction.
     fn initial_state(&self) -> (HardState, Config);
 
-    /// The `(ballot, value)` accepted for `slot`, if any.
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Value)>;
+    /// The `(ballot, entry)` accepted for `slot`, if any.
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)>;
 
     /// The first slot still available (slots below it have been compacted away).
     fn first_slot(&self) -> Slot;

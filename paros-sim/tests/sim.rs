@@ -1,8 +1,11 @@
-//! Stage-2 simulation tests: seed-replay determinism, a chaos-aware well-formed
-//! single-seed run, and the safety sweep (single-decree Paxos chooses at most one
-//! value under arbitrary network faults).
+//! Stage-3 simulation tests: seed-replay determinism, a chaos-aware well-formed
+//! single-seed run, multi-slot log progress under a stable leader, and the
+//! safety-and-progress sweep under arbitrary network faults (prefix agreement, no
+//! gaps, monotonic leadership, and progress under eventual synchrony).
 
-use paros_sim::{explore, run_seed, run_seed_json};
+use std::collections::HashMap;
+
+use paros_sim::{SWEEP_ITERATIONS, explore, run_seed, run_seed_json};
 
 /// The determinism proof: the same seed produces a bit-identical timeline across
 /// two independent runs. Network chaos is on, but it is seeded, so replay still
@@ -44,6 +47,20 @@ fn chaotic_run_is_well_formed() {
     );
     assert!(r.ticks > 0, "the cluster advanced its logical clock");
 
+    // Prefix agreement spot-check at the data level: any slot two nodes both
+    // chose carries the same value hash (a readable failure complementing the
+    // oracle).
+    let mut by_slot: HashMap<u64, u64> = HashMap::new();
+    for c in &r.chosen {
+        if let Some(prev) = by_slot.insert(c.slot, c.vhash) {
+            assert_eq!(
+                prev, c.vhash,
+                "nodes disagree on the value chosen at slot {}",
+                c.slot
+            );
+        }
+    }
+
     for shot in &r.shots {
         assert!(
             shot.arrive_ms >= shot.depart_ms,
@@ -74,15 +91,38 @@ fn chaotic_run_is_well_formed() {
     );
 }
 
-/// The crown jewel: drive the `UntilCoverageStable` sweep under swarm network
-/// chaos and assert the three safety invariants never break. No
-/// `assertion_violations` means at-most-one-value-chosen, monotonic promised
-/// ballots, and never-accept-below-promised all held across every seed. Saturating
-/// (no `convergence_timeout`) means the "a value is chosen" reachability fired, so
-/// the protocol made progress within the cap.
+/// A stable leader streams a multi-slot log: across a handful of seeds the chosen
+/// log grows past slot 0 (Stage 3's stable-leader Phase-2 streaming). A concrete,
+/// cheap complement to the sweep's `ProgressOracle` reachability gate.
 #[test]
-fn safety_holds_under_chaos() {
-    let report = explore();
+fn log_grows_under_a_stable_leader() {
+    let mut max_slot = 0;
+    for seed in [1_u64, 7, 42, 99, 12_345] {
+        let r = run_seed(seed);
+        max_slot = max_slot.max(r.chosen.iter().map(|c| c.slot).max().unwrap_or(0));
+    }
+    assert!(
+        max_slot >= 2,
+        "a stable leader streamed a multi-slot log (highest chosen slot was {max_slot})"
+    );
+}
+
+/// The crown jewel: drive the `UntilCoverageStable` sweep under swarm network
+/// chaos and assert every invariant holds. Empty `assertion_violations` means the
+/// safety `always`-assertions all held across every seed: at-most-one-value-chosen
+/// (prefix agreement), no gaps in the applied prefix, per-node monotonic leadership
+/// (a ballot is `(round, node)`, so two nodes can lead the same round under a
+/// partition; safety still holds by quorum intersection, not a single-leader rule),
+/// monotonic promised ballots, and never-accept-below-promised. Saturating
+/// (no `convergence_timeout`) means every `sometimes`/`reachable` fired, including
+/// the `ProgressOracle` gates (a stable leader streams several slots, and
+/// leadership turns over and recovers): the dueling-proposer livelock is gone and
+/// the cluster makes progress under eventual synchrony within the cap. The test
+/// uses the full [`SWEEP_ITERATIONS`] cap so `AssertionCoverage` saturates (the
+/// sancov runner uses the smaller `COVERAGE_ITERATIONS` cap instead).
+#[test]
+fn safety_and_progress_hold_under_chaos() {
+    let report = explore(SWEEP_ITERATIONS);
 
     assert!(
         report.assertion_violations.is_empty(),
@@ -92,6 +132,6 @@ fn safety_holds_under_chaos() {
     assert_eq!(report.failed_runs, 0, "no run failed");
     assert!(
         !report.convergence_timeout,
-        "the sweep saturated within the cap (a value is reliably chosen)"
+        "the sweep saturated within the cap (safety + progress reachables all fired)"
     );
 }

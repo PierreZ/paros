@@ -34,6 +34,21 @@ pub struct Value(pub Vec<u8>);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Command(pub Vec<u8>);
 
+/// A log entry: the [`Value`] chosen for a slot, tagged with the client request
+/// that produced it. Carrying `(client, seq)` in the entry is what lets the core
+/// deduplicate client retries for at-most-once execution, even for an in-flight
+/// command a recovering leader inherits during Phase 1.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Entry {
+    /// The client that issued the command.
+    pub client: ClientId,
+    /// The client's per-request sequence number.
+    pub seq: ClientSeq,
+    /// The opaque command payload chosen for the slot.
+    pub value: Value,
+}
+
 /// A Paxos ballot (a.k.a. proposal / round number), forming a **total order**.
 ///
 /// Ordering is keyed on `(round, node)`: a strictly higher `round` always wins;

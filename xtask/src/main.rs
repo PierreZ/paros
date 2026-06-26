@@ -6,6 +6,7 @@
 //! non-instrumented build. `SIM_BINARIES` lists the deterministic-simulation
 //! binaries to drive under coverage.
 
+use std::collections::HashSet;
 use std::process::{self, Command};
 use std::time::Instant;
 
@@ -25,7 +26,11 @@ impl SimBinary {
 /// Registry of simulation binaries instrumented for coverage-guided runs.
 const SIM_BINARIES: &[SimBinary] = &[SimBinary {
     name: "paros-sim-runner",
-    sancov_crates: "paros_core,paros,paros_sim",
+    // The shipped library is the system under test: the sans-IO state machine plus
+    // the provider-generic driver. NOT `paros_sim` — that is the test harness
+    // (oracles, workload, viz serde), and instrumenting it would inflate the edge
+    // denominator and misdirect coverage-guided exploration onto harness code.
+    sancov_crates: "paros_core,paros",
 }];
 
 fn main() {
@@ -154,6 +159,58 @@ fn sim_run_all() {
     run_binaries(&binaries, &[]);
 }
 
+/// Path under the sancov target dir where we stamp the active instrumentation set.
+const SANCOV_STAMP: &str = "target/sancov/.sancov-crates";
+
+/// Make `target/sancov` reflect `sancov_crates` before building.
+///
+/// `SANCOV_CRATES` is not part of cargo's fingerprint (that is why we use a
+/// separate target dir at all), so changing *which* crates are instrumented does
+/// not invalidate the cached, differently-instrumented artifacts — cargo would
+/// silently serve a stale build. We stamp the active whitelist; when it changes we
+/// `cargo clean` only the crates whose membership flipped (the symmetric
+/// difference), so they rebuild with (or without) instrumentation and everything
+/// else is left cached.
+fn ensure_instrumentation_fresh(sancov_crates: &str) {
+    let stamp = std::path::Path::new(SANCOV_STAMP);
+    let prev = std::fs::read_to_string(stamp).unwrap_or_default();
+    if prev == sancov_crates {
+        return;
+    }
+
+    // Crate names use underscores in `SANCOV_CRATES`; cargo package specs use the
+    // hyphenated package name. Normalize before diffing/cleaning.
+    let to_pkgs = |s: &str| -> HashSet<String> {
+        s.split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| c.replace('_', "-"))
+            .collect()
+    };
+    let flipped: Vec<String> = to_pkgs(&prev)
+        .symmetric_difference(&to_pkgs(sancov_crates))
+        .cloned()
+        .collect();
+
+    if !flipped.is_empty() {
+        eprintln!(
+            "SANCOV_CRATES changed ({prev:?} -> {sancov_crates:?}); cleaning {flipped:?} so they \
+             rebuild with the right instrumentation"
+        );
+        let mut clean = Command::new("cargo");
+        clean.args(["clean", "--target-dir", "target/sancov"]);
+        for pkg in &flipped {
+            clean.args(["-p", pkg]);
+        }
+        let _ = clean.status();
+    }
+
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(stamp, sancov_crates);
+}
+
 fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
     eprintln!(
         "Running {} simulation binaries (sancov enabled)",
@@ -167,6 +224,7 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
 
     for bin in binaries {
         eprintln!("--- {} ---", bin.display_name());
+        ensure_instrumentation_fresh(bin.sancov_crates);
         let bin_start = Instant::now();
 
         let mut cmd = Command::new("cargo");

@@ -63,3 +63,18 @@ jobs:
         run: nix develop --command cargo clippy -p paros-sim --no-default-features --all-targets -- --deny warnings
       - name: Build paros-wasm-demo for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-wasm-demo
+
+  # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
+  # the Paxos sim with sancov instrumentation on the shipped library (paros_core +
+  # the driver, not the harness) and explores seeds up to the bounded cap,
+  # asserting safety on every one. A dedicated job because the instrumented build +
+  # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
+  # job.
+  sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run sancov simulation sweep
+        run: nix develop --command cargo xtask sim run-all

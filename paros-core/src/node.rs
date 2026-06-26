@@ -1,5 +1,5 @@
-//! The [`RawNode`] handle: the sans-IO state machine and the `step`/`tick`/
-//! `ready`/`advance` contract.
+//! The [`RawNode`] handle: the sans-IO Multi-Paxos state machine and the
+//! `step`/`tick`/`ready`/`advance` contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,35 +7,64 @@ use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, NodeId, Slot, Value};
+use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
 
-/// Phase of an in-flight proposer round.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
-    /// Gathering a promise quorum (Phase 1).
-    Promise,
-    /// Gathering an accept quorum (Phase 2).
-    Accept,
+/// Leader heartbeat interval, in ticks. The driver always supplies an election
+/// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
+/// always beats before any follower's election clock fires.
+const HEARTBEAT_TICKS: u64 = 1;
+
+/// This node's role in the cluster. A read-only view for drivers / oracles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum NodeRole {
+    /// Following a (believed) leader; resets its election clock on leader traffic.
+    #[default]
+    Follower,
+    /// Ran out of election timeout, bumped its ballot, gathering a Phase-1 quorum.
+    Candidate,
+    /// Holds a Phase-1 quorum for its ballot; streams Phase-2 `Accept`s per slot.
+    Leader,
 }
 
-/// Volatile state of one in-flight proposer round. Single-decree, so it tracks a
-/// single slot; never persisted (a crash simply abandons the round).
+/// The outcome of [`RawNode::propose`], telling the driver how to answer the
+/// client. The driver acks on commit: it holds the reply for `Accepted`/
+/// `Duplicate` until that slot commits, redirects on `NotLeader`, and acks
+/// immediately on `Chosen`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposeResult {
+    /// This node is not the leader; the client should retry the hinted node
+    /// (`None` if leadership is currently unknown).
+    NotLeader(Option<NodeId>),
+    /// Newly admitted at this slot; ack when the slot commits.
+    Accepted(Slot),
+    /// A retry already in flight at this slot; ack when the slot commits.
+    Duplicate(Slot),
+    /// Already chosen and applied; the driver acks immediately (idempotent).
+    Chosen,
+}
+
+/// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
 struct Proposing {
-    /// The ballot this round runs under.
+    /// The ballot this slot is being accepted under.
     ballot: Ballot,
-    /// The slot being decided.
-    slot: Slot,
-    /// The value we will try to get chosen. Replaced by the highest previously
-    /// accepted value seen in Phase 1 (the value-selection rule).
-    value: Value,
-    /// Which phase the round is in.
-    phase: Phase,
-    /// Acceptors (incl. self) that have promised this ballot.
-    promised_by: BTreeSet<NodeId>,
-    /// Highest `(ballot, value)` any promiser had already accepted, if any.
-    best_accepted: Option<(Ballot, Value)>,
-    /// Acceptors (incl. self) that have accepted this ballot's value.
+    /// The entry being accepted for this slot.
+    entry: Entry,
+    /// Acceptors (incl. self) that have accepted this slot's entry at `ballot`.
     accepted_by: BTreeSet<NodeId>,
+}
+
+/// Volatile per-ballot Phase-1 state while a Candidate recovers the log suffix.
+struct Election {
+    /// The ballot this election runs under.
+    ballot: Ballot,
+    /// First slot this election recovers (`chosen_index + 1`, or `Slot(0)`).
+    from_slot: Slot,
+    /// Acceptors (incl. self) that have promised `ballot`.
+    promised_by: BTreeSet<NodeId>,
+    /// Highest-ballot accepted entry per slot seen across the promise quorum,
+    /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
+    recovered: BTreeMap<Slot, (Ballot, Entry)>,
 }
 
 /// The pure, synchronous, single-threaded Multi-Paxos state machine.
@@ -43,48 +72,106 @@ struct Proposing {
 /// No I/O, no clock, no randomness. Inputs arrive via [`RawNode::step`] (peer
 /// messages and tick-injected self-events), [`RawNode::tick`] (logical time),
 /// and [`RawNode::propose`] (a client value). Output is drained via
-/// [`RawNode::ready`] and acknowledged via [`Ready::advance`]. This is the
-/// sans-IO object; a driver (an async runtime or a deterministic simulator)
-/// wraps it and performs all side effects in the order the [`Ready`] documents.
+/// [`RawNode::ready`] and acknowledged via [`Ready::advance`].
 ///
-/// Stage 2 is **single-decree**: one instance (slot `0`). It plays all three
-/// Paxos roles — acceptor (`Prepare`→`Promise`, `Accept`→`Accepted`/`Nack`),
-/// proposer (Phase 1 quorum + value-selection, Phase 2), and learner (chosen on
-/// an accept quorum, propagated by `Commit`). Liveness (retransmission, leader
-/// election, the dueling-proposer livelock fix) is deferred to Stage 3.
+/// Stage 3 is **Multi-Paxos**: a per-slot replicated log with a stable leader.
+/// A node times out (randomized election timeout supplied by the driver),
+/// becomes a Candidate, runs **one** Phase 1 for its ballot over the whole log
+/// suffix, and on a promise quorum becomes Leader: it re-proposes recovered
+/// in-flight slots (gap fill) and then streams Phase-2 `Accept`s for fresh
+/// client values. Heartbeats hold leadership; a `Nack` or a higher ballot makes
+/// a node step down (the dueling-proposer livelock fix). Client requests are
+/// deduplicated by `(ClientId, ClientSeq)` for at-most-once execution.
 pub struct RawNode {
     /// This node's static identity and membership.
     config: Config,
-    /// The must-be-durable state. Mutated by `step`/`propose`; surfaced for
-    /// persistence via [`Ready::hard_state`].
+    /// The must-be-durable state, surfaced for persistence via [`Ready`].
     hard_state: HardState,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
     // ---- `ready`, cleared by `advance`.
-    /// `Some` when `hard_state` changed and must be persisted this batch.
     pending_hard_state: Option<HardState>,
-    /// Outbound `(destination, message)` pairs buffered for this batch.
     pending_messages: Vec<(NodeId, Message)>,
-    /// Newly chosen entries to apply this batch.
-    pending_committed: Vec<(Slot, Value)>,
+    pending_committed: Vec<(Slot, Entry)>,
 
-    /// Logical clock, advanced by [`RawNode::tick`]. Stage 2: a bare counter
-    /// (no timeouts until Stage 3).
+    /// Logical clock, advanced by [`RawNode::tick`].
     tick_count: u64,
 
-    /// The in-flight proposer round, if this node is currently proposing.
-    /// Volatile: never persisted.
-    proposer: Option<Proposing>,
-    /// Values this node has learned are chosen, per slot. Volatile: dedupes
-    /// commits and makes [`RawNode::propose`] a no-op once the slot is decided.
-    chosen: BTreeMap<Slot, Value>,
+    // ---- leadership / election (all volatile) ----
+    /// Current role.
+    role: NodeRole,
+    /// The node we currently believe is leader (`None` = unknown / electing).
+    leader: Option<NodeId>,
+    /// The ballot this node operates under as Candidate/Leader (and the highest
+    /// leader ballot it has adopted as a Follower).
+    ballot: Ballot,
+    /// Ticks since the last leader contact (reset on `Prepare`/`Accept`/
+    /// `Heartbeat`/`Commit` at a ballot `>=` ours, and on becoming Leader).
+    election_elapsed: u64,
+    /// Driver-supplied randomized election timeout, in ticks. `0` disables the
+    /// election clock (the sentinel until the driver seeds one).
+    election_timeout: u64,
+    /// Set when the election clock resets (fired or stepped down); the driver
+    /// reads it to feed a fresh randomized `election_timeout`. Jitter is drawn in
+    /// the driver, never here (the core stays zero-dep).
+    needs_election_timeout: bool,
+    /// Ticks since the leader last beat. Leader-only.
+    heartbeat_elapsed: u64,
+    /// Fixed heartbeat interval in ticks (not randomized).
+    heartbeat_timeout: u64,
+
+    // ---- proposer (multi-decree) ----
+    /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
+    proposer: BTreeMap<Slot, Proposing>,
+    /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
+    election: Option<Election>,
+    /// Next slot the leader allocates to a fresh client proposal.
+    next_slot: Slot,
+
+    // ---- learner / dedup ----
+    /// Entries this node has learned are chosen, per slot. Volatile.
+    chosen: BTreeMap<Slot, Entry>,
+    /// Highest applied `ClientSeq` per client (for at-most-once dedup). Rebuilt
+    /// from `HardState` on construction.
+    applied_seq: BTreeMap<ClientId, ClientSeq>,
+    /// In-flight client requests mapped to the slot they were proposed at, so a
+    /// retry dedups against the existing slot (including recovered entries a new
+    /// leader inherits). Rebuilt from `HardState` on construction.
+    inflight: BTreeMap<(ClientId, ClientSeq), Slot>,
 }
 
 impl RawNode {
     /// Construct from a read-only [`Storage`] by reading durable state back in.
-    /// Bootstrap and restart share this path: adopt `initial_state()` and resume.
+    /// Bootstrap and restart share this path. The volatile dedup tables
+    /// (`applied_seq`, `inflight`) and the `chosen` map are rebuilt from the
+    /// durable `accepted` log and `chosen_index`.
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
+        let ballot = hard_state.max_promised_ballot;
+
+        let mut chosen = BTreeMap::new();
+        let mut applied_seq: BTreeMap<ClientId, ClientSeq> = BTreeMap::new();
+        let mut inflight = BTreeMap::new();
+        for (slot, (_b, entry)) in &hard_state.accepted {
+            let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
+            if is_chosen {
+                chosen.insert(*slot, entry.clone());
+                let bump = applied_seq
+                    .get(&entry.client)
+                    .is_none_or(|c| entry.seq > *c);
+                if bump {
+                    applied_seq.insert(entry.client, entry.seq);
+                }
+            } else {
+                inflight.insert((entry.client, entry.seq), *slot);
+            }
+        }
+        let next_slot = hard_state
+            .accepted
+            .keys()
+            .next_back()
+            .map_or(Slot(0), |s| Slot(s.0 + 1));
+
         Self {
             config,
             hard_state,
@@ -92,110 +179,257 @@ impl RawNode {
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
             tick_count: 0,
-            proposer: None,
-            chosen: BTreeMap::new(),
+            role: NodeRole::Follower,
+            leader: None,
+            ballot,
+            election_elapsed: 0,
+            election_timeout: 0,
+            needs_election_timeout: true,
+            heartbeat_elapsed: 0,
+            heartbeat_timeout: HEARTBEAT_TICKS,
+            proposer: BTreeMap::new(),
+            election: None,
+            next_slot,
+            chosen,
+            applied_seq,
+            inflight,
         }
     }
 
-    /// The single input entry point: every peer stimulus is a [`Message`], routed
-    /// by variant and role.
+    /// The single input entry point: every stimulus is a [`Message`], routed by
+    /// variant and role. Tick-injected self-events (`CheckLeader`/`Heartbeat`)
+    /// enter here too.
     pub fn step(&mut self, msg: Message) {
         match msg {
-            Message::Prepare { from, ballot, slot } => self.on_prepare(from, ballot, slot),
+            Message::Prepare {
+                from,
+                ballot,
+                from_slot,
+            } => self.on_prepare(from, ballot, from_slot),
+            Message::Promise {
+                from,
+                ballot,
+                from_slot,
+                accepted,
+            } => self.on_promise(from, ballot, from_slot, accepted),
             Message::Accept {
                 from,
                 ballot,
                 slot,
-                value,
-            } => self.on_accept(from, ballot, slot, value),
-            Message::Promise {
-                from,
-                ballot,
-                slot,
-                accepted,
-            } => self.on_promise(from, ballot, slot, accepted),
+                entry,
+            } => self.on_accept(from, ballot, slot, entry),
             Message::Accepted { from, ballot, slot } => self.on_accepted(from, ballot, slot),
             Message::Nack { ballot, slot, .. } => self.on_nack(ballot, slot),
             Message::Commit {
                 ballot,
                 slot,
-                value,
+                entry,
                 ..
-            } => self.on_commit(ballot, slot, value),
-            // Tick-injected self-events: no leader/heartbeat logic until Stage 3.
-            Message::CheckLeader { .. } | Message::Heartbeat { .. } => {}
+            } => self.on_commit(ballot, slot, &entry),
+            Message::CheckLeader { .. } => self.on_check_leader(),
+            Message::Heartbeat { from, ballot, .. } => self.on_heartbeat(from, ballot),
         }
     }
 
-    /// Client entry point: try to get `value` chosen for the single-decree slot.
-    /// Starts a fresh Phase 1 under a ballot above anything seen, superseding any
-    /// stalled round. A no-op once the slot is decided (the value is fixed).
-    pub fn propose(&mut self, value: Value) {
-        let slot = Slot(0);
-        if self.chosen.contains_key(&slot) {
-            return;
+    /// Client entry point: try to get `value` chosen, deduplicated by
+    /// `(client, seq)`. Only the leader admits proposals; a non-leader returns
+    /// [`ProposeResult::NotLeader`] with a redirect hint.
+    pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
+        if self.role != NodeRole::Leader {
+            return ProposeResult::NotLeader(self.leader);
         }
-        let me = self.config.id;
-        let ballot = Ballot {
-            round: self.hard_state.max_promised_ballot.round + 1,
-            node: me,
-        };
-        // We are an acceptor too: promise our own ballot, then seed the round
-        // with our own prior acceptance (if any) for the value-selection rule.
-        self.hard_state.max_promised_ballot = ballot;
-        self.mark_dirty();
-        let own_accepted = self.hard_state.accepted.get(&slot).cloned();
-        let mut promised_by = BTreeSet::new();
-        promised_by.insert(me);
-        self.proposer = Some(Proposing {
-            ballot,
-            slot,
-            value,
-            phase: Phase::Promise,
-            promised_by,
-            best_accepted: own_accepted,
-            accepted_by: BTreeSet::new(),
-        });
-        self.broadcast(&Message::Prepare {
-            from: me,
-            ballot,
-            slot,
-        });
-        // A single-node cluster reaches the promise quorum immediately.
-        self.try_accept_phase();
+        if let Some(&slot) = self.inflight.get(&(client, seq)) {
+            return ProposeResult::Duplicate(slot);
+        }
+        if self.applied_seq.get(&client).is_some_and(|c| seq <= *c) {
+            return ProposeResult::Chosen;
+        }
+        let slot = self.next_slot;
+        self.next_slot = Slot(slot.0 + 1);
+        let entry = Entry { client, seq, value };
+        self.inflight.insert((client, seq), slot);
+        self.start_accept_round(slot, entry);
+        ProposeResult::Accepted(slot)
     }
 
-    /// Advance logical time by one tick. Stage 2 just counts; Stage 3 will
-    /// synthesize `CheckLeader`/`Heartbeat` self-events here.
+    /// Advance logical time by one tick, synthesizing `CheckLeader`/`Heartbeat`
+    /// self-events when the election / heartbeat counters cross their thresholds.
     pub fn tick(&mut self) {
         self.tick_count += 1;
+        let me = self.config.id;
+        if self.role == NodeRole::Leader {
+            self.heartbeat_elapsed += 1;
+            if self.heartbeat_elapsed >= self.heartbeat_timeout {
+                self.heartbeat_elapsed = 0;
+                let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
+                self.step(Message::Heartbeat {
+                    from: me,
+                    ballot: self.ballot,
+                    commit,
+                });
+            }
+        } else {
+            self.election_elapsed += 1;
+            if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
+                self.election_elapsed = 0;
+                self.needs_election_timeout = true;
+                self.step(Message::CheckLeader { from: me });
+            }
+        }
+    }
+
+    /// The driver supplies a randomized election timeout (in ticks, jitter drawn
+    /// from its `RandomProvider`). Clears the [`RawNode::needs_election_timeout`]
+    /// flag.
+    pub fn set_election_timeout(&mut self, ticks: u64) {
+        self.election_timeout = ticks;
+        self.needs_election_timeout = false;
     }
 
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
     /// the unique `&mut` borrow, so a second `ready()` before [`Ready::advance`]
-    /// is a **compile error**. See [`Ready`] for the persist-before-send ordering
-    /// the caller must honor.
+    /// is a **compile error**.
     pub fn ready(&mut self) -> Ready<'_> {
         Ready::new(self)
     }
 
+    // ---- election / leadership --------------------------------------------
+
+    /// Election clock fired: become a Candidate and run one Phase 1 (per ballot)
+    /// over the whole uncommitted log suffix.
+    fn on_check_leader(&mut self) {
+        if self.role == NodeRole::Leader {
+            return;
+        }
+        let me = self.config.id;
+        let round = self
+            .hard_state
+            .max_promised_ballot
+            .round
+            .max(self.ballot.round)
+            + 1;
+        self.role = NodeRole::Candidate;
+        self.leader = None;
+        self.ballot = Ballot { round, node: me };
+        self.hard_state.max_promised_ballot = self.ballot;
+        self.mark_dirty();
+
+        let from_slot = self.first_unchosen();
+        let recovered: BTreeMap<Slot, (Ballot, Entry)> = self
+            .hard_state
+            .accepted
+            .range(from_slot..)
+            .map(|(s, v)| (*s, v.clone()))
+            .collect();
+        let mut promised_by = BTreeSet::new();
+        promised_by.insert(me);
+        self.election = Some(Election {
+            ballot: self.ballot,
+            from_slot,
+            promised_by,
+            recovered,
+        });
+        self.proposer.clear();
+        self.broadcast(&Message::Prepare {
+            from: me,
+            ballot: self.ballot,
+            from_slot,
+        });
+        self.try_become_leader();
+    }
+
+    /// Candidate: collect a `Promise`, merging the reported accepted suffix
+    /// (highest ballot per slot wins).
+    fn on_promise(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        from_slot: Slot,
+        accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    ) {
+        {
+            let Some(e) = self.election.as_mut() else {
+                return;
+            };
+            if e.ballot != ballot || e.from_slot != from_slot {
+                return;
+            }
+            e.promised_by.insert(from);
+            for (slot, (ab, entry)) in accepted {
+                let supersedes = e.recovered.get(&slot).is_none_or(|(rb, _)| ab > *rb);
+                if supersedes {
+                    e.recovered.insert(slot, (ab, entry));
+                }
+            }
+        }
+        self.try_become_leader();
+    }
+
+    /// Candidate -> Leader once a promise quorum holds: re-propose every
+    /// recovered in-flight slot under the new ballot (gap fill), then stream.
+    fn try_become_leader(&mut self) {
+        let quorum = self.quorum();
+        let won = self.role == NodeRole::Candidate
+            && self
+                .election
+                .as_ref()
+                .is_some_and(|e| e.promised_by.len() >= quorum);
+        if !won {
+            return;
+        }
+        let me = self.config.id;
+        let e = self.election.take().expect("won implies an election");
+        self.role = NodeRole::Leader;
+        self.leader = Some(me);
+        self.ballot = e.ballot;
+        self.heartbeat_elapsed = 0;
+        self.election_elapsed = 0;
+        self.proposer.clear();
+
+        for (slot, (_old, entry)) in e.recovered {
+            if self.chosen.contains_key(&slot) {
+                continue;
+            }
+            self.inflight.insert((entry.client, entry.seq), slot);
+            self.start_accept_round(slot, entry);
+        }
+        self.next_slot = self
+            .hard_state
+            .accepted
+            .keys()
+            .next_back()
+            .map_or(self.first_unchosen(), |s| Slot(s.0 + 1));
+    }
+
     // ---- acceptor ---------------------------------------------------------
 
-    /// Acceptor: a proposer asks us to promise `ballot`. Promote and reply
-    /// `Promise` (carrying any value we already accepted) if it is strictly
-    /// higher than our promise; otherwise reject with `Nack`.
-    fn on_prepare(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
+    /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
+    /// Promote and reply `Promise` (carrying the accepted suffix) if strictly
+    /// higher than our promise; otherwise `Nack`.
+    fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
         if ballot > self.hard_state.max_promised_ballot {
+            if ballot.node != me && self.role != NodeRole::Follower {
+                self.become_follower(None);
+            }
+            self.election_elapsed = 0;
             self.hard_state.max_promised_ballot = ballot;
+            if ballot > self.ballot {
+                self.ballot = ballot;
+            }
             self.mark_dirty();
-            let accepted = self.hard_state.accepted.get(&slot).cloned();
+            let accepted: BTreeMap<Slot, (Ballot, Entry)> = self
+                .hard_state
+                .accepted
+                .range(from_slot..)
+                .map(|(s, v)| (*s, v.clone()))
+                .collect();
             self.pending_messages.push((
                 from,
                 Message::Promise {
                     from: me,
                     ballot,
-                    slot,
+                    from_slot,
                     accepted,
                 },
             ));
@@ -205,19 +439,28 @@ impl RawNode {
                 Message::Nack {
                     from: me,
                     ballot,
-                    slot,
+                    slot: from_slot,
                 },
             ));
         }
     }
 
-    /// Acceptor: a proposer asks us to accept `(ballot, value)`. Accept (and
-    /// persist) if we have not promised a higher ballot; otherwise `Nack`.
-    fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, value: Value) {
+    /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
+    /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
+    fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, entry: Entry) {
         let me = self.config.id;
         if ballot >= self.hard_state.max_promised_ballot {
+            if ballot.node != me && self.role != NodeRole::Follower {
+                self.become_follower(Some(ballot.node));
+            } else {
+                self.leader = Some(ballot.node);
+                self.election_elapsed = 0;
+            }
+            if ballot > self.ballot {
+                self.ballot = ballot;
+            }
             self.hard_state.max_promised_ballot = ballot;
-            self.hard_state.accepted.insert(slot, (ballot, value));
+            self.hard_state.accepted.insert(slot, (ballot, entry));
             self.mark_dirty();
             self.pending_messages.push((
                 from,
@@ -241,134 +484,136 @@ impl RawNode {
 
     // ---- proposer / learner ----------------------------------------------
 
-    /// Proposer: collect a `Promise`. Once a quorum has promised, select the
-    /// value and move to Phase 2.
-    fn on_promise(
-        &mut self,
-        from: NodeId,
-        ballot: Ballot,
-        slot: Slot,
-        accepted: Option<(Ballot, Value)>,
-    ) {
-        {
-            let Some(p) = self.proposer.as_mut() else {
-                return;
-            };
-            if p.phase != Phase::Promise || p.ballot != ballot || p.slot != slot {
-                return;
-            }
-            p.promised_by.insert(from);
-            if let Some((ab, av)) = accepted {
-                let supersedes = p.best_accepted.as_ref().is_none_or(|(bb, _)| ab > *bb);
-                if supersedes {
-                    p.best_accepted = Some((ab, av));
-                }
-            }
-        }
-        self.try_accept_phase();
-    }
-
-    /// Proposer/learner: collect an `Accepted`. Once a quorum has accepted, the
-    /// value is chosen.
+    /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
     fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
         {
-            let Some(p) = self.proposer.as_mut() else {
+            let Some(p) = self.proposer.get_mut(&slot) else {
                 return;
             };
-            if p.phase != Phase::Accept || p.ballot != ballot || p.slot != slot {
+            if p.ballot != ballot {
                 return;
             }
             p.accepted_by.insert(from);
         }
-        self.try_decide();
+        self.try_decide(slot);
     }
 
-    /// Proposer: a rejection of our in-flight ballot. Abandon the round. Stage 2
-    /// does **not** retry with a higher ballot — that (and the resulting
-    /// dueling-proposer livelock fix) is Stage 3.
+    /// A rejection of an in-flight ballot. Step down to Follower and let the
+    /// randomized election timeout reschedule us. We do **not** immediately
+    /// re-prepare: that (with the randomized timeout) is the dueling-proposer
+    /// livelock fix.
     fn on_nack(&mut self, ballot: Ballot, slot: Slot) {
-        if let Some(p) = self.proposer.as_ref()
-            && p.ballot == ballot
-            && p.slot == slot
-        {
-            self.proposer = None;
+        let superseded = self.election.as_ref().is_some_and(|e| e.ballot == ballot)
+            || self.proposer.get(&slot).is_some_and(|p| p.ballot == ballot);
+        if superseded {
+            self.become_follower(None);
         }
     }
 
-    /// Learner: a value was chosen elsewhere. Record it durably and apply it.
-    fn on_commit(&mut self, ballot: Ballot, slot: Slot, value: Value) {
-        self.mark_chosen(slot, value, ballot);
+    /// Learner: an entry was chosen elsewhere. Record it; advance the prefix.
+    fn on_commit(&mut self, ballot: Ballot, slot: Slot, entry: &Entry) {
+        if ballot >= self.ballot {
+            self.election_elapsed = 0;
+        }
+        self.mark_chosen(slot, entry, ballot);
     }
 
-    /// If we hold a promise quorum in Phase 1, run the value-selection rule and
-    /// broadcast `Accept` (entering Phase 2). Idempotent / safe to call when not
-    /// applicable.
-    fn try_accept_phase(&mut self) {
+    /// Leader self-beat or a follower receiving a peer beat.
+    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot) {
         let me = self.config.id;
-        let quorum = self.quorum();
-        let (ballot, slot, value) = {
-            let Some(p) = self.proposer.as_mut() else {
-                return;
-            };
-            if p.phase != Phase::Promise || p.promised_by.len() < quorum {
-                return;
+        if from == me {
+            // Leader self-trigger: broadcast the beat and re-send un-acked
+            // `Accept`s so lagging peers catch up.
+            let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
+            self.broadcast(&Message::Heartbeat {
+                from: me,
+                ballot: self.ballot,
+                commit,
+            });
+            let pending: Vec<(Slot, Ballot, Entry)> = self
+                .proposer
+                .iter()
+                .map(|(s, p)| (*s, p.ballot, p.entry.clone()))
+                .collect();
+            for (slot, ballot, entry) in pending {
+                self.broadcast(&Message::Accept {
+                    from: me,
+                    ballot,
+                    slot,
+                    entry,
+                });
             }
-            // Value-selection: adopt the highest previously accepted value, else
-            // keep our own.
-            if let Some((_, v)) = p.best_accepted.clone() {
-                p.value = v;
+            return;
+        }
+        // Follower receiving the leader's beat.
+        if ballot >= self.hard_state.max_promised_ballot {
+            if self.role == NodeRole::Follower {
+                self.leader = Some(from);
+                self.election_elapsed = 0;
+            } else {
+                self.become_follower(Some(from));
             }
-            p.phase = Phase::Accept;
-            (p.ballot, p.slot, p.value.clone())
-        };
-        // Self-accept as an acceptor would: only if we have not promised a higher
-        // ballot since this round began. A competing proposer's `Prepare` can raise
-        // our promise while this round is in flight; lowering it back here (to
-        // self-accept our own older ballot) would break safety, so we just skip the
-        // self-accept and let this round stall (no retry until Stage 3).
+            if ballot > self.ballot {
+                self.ballot = ballot;
+            }
+        }
+        // We do not fabricate chosen-ness from the heartbeat's `commit`; the
+        // prefix only advances over slots we have actually chosen.
+    }
+
+    /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
+    fn start_accept_round(&mut self, slot: Slot, entry: Entry) {
+        let me = self.config.id;
+        let ballot = self.ballot;
+        let mut accepted_by = BTreeSet::new();
+        // Never lower our promise: if a competing higher `Prepare` raised it
+        // since we became leader, skip the self-accept (the round relies on
+        // peer `Accepted`s and will stall, then we step down on the `Nack`).
         if ballot >= self.hard_state.max_promised_ballot {
             self.hard_state.max_promised_ballot = ballot;
             self.hard_state
                 .accepted
-                .insert(slot, (ballot, value.clone()));
+                .insert(slot, (ballot, entry.clone()));
             self.mark_dirty();
-            if let Some(p) = self.proposer.as_mut() {
-                p.accepted_by.insert(me);
-            }
+            accepted_by.insert(me);
         }
+        self.proposer.insert(
+            slot,
+            Proposing {
+                ballot,
+                entry: entry.clone(),
+                accepted_by,
+            },
+        );
         self.broadcast(&Message::Accept {
             from: me,
             ballot,
             slot,
-            value,
+            entry,
         });
-        // A single-node cluster (or one whose self-accept completed the quorum)
-        // reaches the accept quorum immediately.
-        self.try_decide();
+        self.try_decide(slot);
     }
 
-    /// If we hold an accept quorum in Phase 2, the value is chosen: record it and
-    /// tell the peers via `Commit`.
-    fn try_decide(&mut self) {
-        let me = self.config.id;
+    /// If an accept quorum holds for `slot`, the entry is chosen: record it and
+    /// `Commit` to the peers.
+    fn try_decide(&mut self, slot: Slot) {
         let quorum = self.quorum();
-        let decided = match self.proposer.as_ref() {
-            Some(p) if p.phase == Phase::Accept && p.accepted_by.len() >= quorum => {
-                Some((p.slot, p.value.clone(), p.ballot))
-            }
+        let me = self.config.id;
+        let decided = match self.proposer.get(&slot) {
+            Some(p) if p.accepted_by.len() >= quorum => Some((p.ballot, p.entry.clone())),
             _ => None,
         };
-        let Some((slot, value, ballot)) = decided else {
+        let Some((ballot, entry)) = decided else {
             return;
         };
-        self.mark_chosen(slot, value.clone(), ballot);
+        self.mark_chosen(slot, &entry, ballot);
         self.broadcast(&Message::Commit {
             from: me,
             ballot,
             slot,
-            value,
+            entry,
         });
-        self.proposer = None;
+        self.proposer.remove(&slot);
     }
 
     // ---- helpers ----------------------------------------------------------
@@ -378,8 +623,7 @@ impl RawNode {
         self.config.peers.len() / 2 + 1
     }
 
-    /// Snapshot `hard_state` into the pending bucket so the next `ready()`
-    /// surfaces it for persistence.
+    /// Snapshot `hard_state` into the pending bucket for the next `ready()`.
     fn mark_dirty(&mut self) {
         self.pending_hard_state = Some(self.hard_state.clone());
     }
@@ -399,28 +643,66 @@ impl RawNode {
         }
     }
 
-    /// Record `(slot, value)` as chosen: persist, bump the commit index, surface
-    /// it for the application, and remember it (so we neither re-decide nor
-    /// re-propose). Idempotent.
-    fn mark_chosen(&mut self, slot: Slot, value: Value, ballot: Ballot) {
+    /// Step down to Follower, abandoning any campaign or in-flight rounds, and
+    /// ask the driver for a fresh randomized election timeout.
+    fn become_follower(&mut self, leader: Option<NodeId>) {
+        self.role = NodeRole::Follower;
+        self.leader = leader;
+        self.election = None;
+        self.proposer.clear();
+        self.election_elapsed = 0;
+        self.needs_election_timeout = true;
+    }
+
+    /// First slot not in the contiguous chosen prefix.
+    fn first_unchosen(&self) -> Slot {
+        match self.hard_state.chosen_index {
+            Some(s) => Slot(s.0 + 1),
+            None => Slot(0),
+        }
+    }
+
+    /// Record `(slot, entry)` as chosen: persist, update dedup tables, and
+    /// advance the contiguous chosen prefix. Idempotent.
+    fn mark_chosen(&mut self, slot: Slot, entry: &Entry, ballot: Ballot) {
         if self.chosen.contains_key(&slot) {
             return;
         }
+        // Record the *chosen* value as the authoritative accepted entry. Using
+        // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
+        // lower-ballot accept it picked up from a failed earlier ballot, and
+        // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
+        // would resurrect a value the cluster never chose for this slot. A chosen
+        // value is durable and safe to record at its choosing ballot.
         self.hard_state
             .accepted
-            .entry(slot)
-            .or_insert_with(|| (ballot, value.clone()));
-        // Keep our promise at least as high as the accept we just recorded: a
-        // learner adopting a `Commit` may never have promised that ballot, but the
-        // value is already chosen, so raising the promise is safe and keeps the
-        // never-accept-above-promised invariant intact. (Never lowers it.)
+            .insert(slot, (ballot, entry.clone()));
         if ballot > self.hard_state.max_promised_ballot {
             self.hard_state.max_promised_ballot = ballot;
         }
-        self.hard_state.chosen_index = slot;
+        self.chosen.insert(slot, entry.clone());
+        self.inflight.remove(&(entry.client, entry.seq));
+        let bump = self
+            .applied_seq
+            .get(&entry.client)
+            .is_none_or(|c| entry.seq > *c);
+        if bump {
+            self.applied_seq.insert(entry.client, entry.seq);
+        }
         self.mark_dirty();
-        self.chosen.insert(slot, value.clone());
-        self.pending_committed.push((slot, value));
+        self.advance_chosen_index();
+    }
+
+    /// Walk the contiguous chosen prefix forward, surfacing each newly-applied
+    /// `(slot, entry)` for the application in order (no gaps).
+    fn advance_chosen_index(&mut self) {
+        let mut next = self.first_unchosen();
+        while let Some(entry) = self.chosen.get(&next).cloned() {
+            self.hard_state.chosen_index = Some(next);
+            self.pending_committed.push((next, entry));
+            self.mark_dirty();
+            next = Slot(next.0 + 1);
+        }
     }
 
     // ---- accessors --------------------------------------------------------
@@ -431,8 +713,7 @@ impl RawNode {
         &self.config
     }
 
-    /// The current durable state. (The pending, to-be-persisted view is exposed
-    /// through [`Ready::hard_state`].)
+    /// The current durable state.
     #[must_use]
     pub fn hard_state(&self) -> &HardState {
         &self.hard_state
@@ -442,6 +723,37 @@ impl RawNode {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.tick_count
+    }
+
+    /// This node's current role.
+    #[must_use]
+    pub fn role(&self) -> NodeRole {
+        self.role
+    }
+
+    /// The node this one believes is leader, if any.
+    #[must_use]
+    pub fn leader(&self) -> Option<NodeId> {
+        self.leader
+    }
+
+    /// Whether this node is currently the leader.
+    #[must_use]
+    pub fn is_leader(&self) -> bool {
+        self.role == NodeRole::Leader
+    }
+
+    /// This node's current operating ballot.
+    #[must_use]
+    pub fn ballot(&self) -> Ballot {
+        self.ballot
+    }
+
+    /// Whether the driver should feed a fresh randomized election timeout (the
+    /// election clock just reset).
+    #[must_use]
+    pub fn needs_election_timeout(&self) -> bool {
+        self.needs_election_timeout
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----
@@ -454,7 +766,7 @@ impl RawNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Value)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Entry)] {
         &self.pending_committed
     }
 
@@ -466,284 +778,4 @@ impl RawNode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A minimal in-memory [`Storage`] for driving a node in tests: it only has
-    /// to hand back an initial `(HardState, Config)`.
-    struct TestStorage {
-        config: Config,
-    }
-
-    impl TestStorage {
-        fn new(id: u64, members: &[u64]) -> Self {
-            Self {
-                config: Config {
-                    id: NodeId(id),
-                    peers: members.iter().copied().map(NodeId).collect(),
-                },
-            }
-        }
-    }
-
-    impl Storage for TestStorage {
-        fn initial_state(&self) -> (HardState, Config) {
-            (HardState::default(), self.config.clone())
-        }
-        fn accepted(&self, _slot: Slot) -> Option<(Ballot, Value)> {
-            None
-        }
-        fn first_slot(&self) -> Slot {
-            Slot(0)
-        }
-        fn last_slot(&self) -> Slot {
-            Slot(0)
-        }
-        fn snapshot(&self) -> Option<Vec<u8>> {
-            None
-        }
-    }
-
-    fn node(id: u64, members: &[u64]) -> RawNode {
-        RawNode::new(&TestStorage::new(id, members))
-    }
-
-    fn val(b: u8) -> Value {
-        Value(vec![b])
-    }
-
-    /// Drain `node`'s pending messages as `(to, msg)` and clear the batch.
-    fn drain(node: &mut RawNode) -> Vec<(NodeId, Message)> {
-        let ready = node.ready();
-        let msgs = ready.messages().to_vec();
-        ready.advance();
-        msgs
-    }
-
-    /// The chosen value this node has applied for slot 0, if any.
-    fn chosen0(node: &RawNode) -> Option<Value> {
-        node.chosen.get(&Slot(0)).cloned()
-    }
-
-    /// Run a cluster to quiescence by shuttling messages to their addressed
-    /// recipient, **dropping** any `(to, msg)` for which `keep` returns false (a
-    /// reliable network with a caller-controlled partition). Reply traffic from a
-    /// delivered message is enqueued and itself filtered.
-    fn deliver_filtered(
-        nodes: &mut [RawNode],
-        mut queue: Vec<(NodeId, Message)>,
-        keep: impl Fn(NodeId, &Message) -> bool,
-    ) {
-        while let Some((to, msg)) = queue.pop() {
-            if !keep(to, &msg) {
-                continue;
-            }
-            let idx = nodes
-                .iter()
-                .position(|n| n.config().id == to)
-                .expect("message addressed to a cluster member");
-            nodes[idx].step(msg);
-            queue.extend(drain(&mut nodes[idx]));
-        }
-    }
-
-    /// Deliver every message (no drops).
-    fn deliver_all(nodes: &mut [RawNode], queue: Vec<(NodeId, Message)>) {
-        deliver_filtered(nodes, queue, |_, _| true);
-    }
-
-    #[test]
-    fn promised_ballot_is_monotonic_and_rejects_lower_prepare() {
-        let mut n = node(0, &[0, 1, 2]);
-        let high = Ballot {
-            round: 5,
-            node: NodeId(1),
-        };
-        n.step(Message::Prepare {
-            from: NodeId(1),
-            ballot: high,
-            slot: Slot(0),
-        });
-        assert_eq!(n.hard_state().max_promised_ballot, high);
-        let out = drain(&mut n);
-        assert!(matches!(out.as_slice(), [(to, Message::Promise { .. })] if *to == NodeId(1)));
-
-        // A lower prepare is Nacked and leaves the promise untouched.
-        let low = Ballot {
-            round: 2,
-            node: NodeId(2),
-        };
-        n.step(Message::Prepare {
-            from: NodeId(2),
-            ballot: low,
-            slot: Slot(0),
-        });
-        assert_eq!(
-            n.hard_state().max_promised_ballot,
-            high,
-            "promise never decreases"
-        );
-        let out = drain(&mut n);
-        assert!(matches!(out.as_slice(), [(to, Message::Nack { .. })] if *to == NodeId(2)));
-    }
-
-    #[test]
-    fn never_accepts_below_promised_ballot() {
-        let mut n = node(0, &[0, 1, 2]);
-        let promised = Ballot {
-            round: 5,
-            node: NodeId(1),
-        };
-        n.step(Message::Prepare {
-            from: NodeId(1),
-            ballot: promised,
-            slot: Slot(0),
-        });
-        let _ = drain(&mut n);
-
-        // An Accept under a lower ballot is rejected; nothing is accepted.
-        n.step(Message::Accept {
-            from: NodeId(2),
-            ballot: Ballot {
-                round: 3,
-                node: NodeId(2),
-            },
-            slot: Slot(0),
-            value: val(9),
-        });
-        assert!(
-            !n.hard_state().accepted.contains_key(&Slot(0)),
-            "must not accept below the promised ballot"
-        );
-        let out = drain(&mut n);
-        assert!(matches!(out.as_slice(), [(_, Message::Nack { .. })]));
-    }
-
-    #[test]
-    fn proposer_never_lowers_its_promise_when_superseded() {
-        // Node 0 opens a round at {1,0} (so max_promised = {1,0}), then a higher
-        // competing `Prepare` {2,2} raises its promise. When node 0's *earlier*
-        // round finally reaches a promise quorum, its self-accept must NOT pull the
-        // promise back down to {1,0} (that would break the monotonic-promise and
-        // never-accept-above-promised invariants).
-        let mut n = node(0, &[0, 1, 2]);
-        n.propose(val(7));
-        let _ = drain(&mut n);
-
-        let higher = Ballot {
-            round: 2,
-            node: NodeId(2),
-        };
-        n.step(Message::Prepare {
-            from: NodeId(2),
-            ballot: higher,
-            slot: Slot(0),
-        });
-        assert_eq!(n.hard_state().max_promised_ballot, higher);
-        let _ = drain(&mut n);
-
-        // Node 1 promises the old {1,0} round → quorum {0,1}, node 0 self-accepts.
-        n.step(Message::Promise {
-            from: NodeId(1),
-            ballot: Ballot {
-                round: 1,
-                node: NodeId(0),
-            },
-            slot: Slot(0),
-            accepted: None,
-        });
-        assert_eq!(
-            n.hard_state().max_promised_ballot,
-            higher,
-            "a superseded proposer must not lower its own promise on self-accept"
-        );
-    }
-
-    #[test]
-    fn learning_a_commit_keeps_accept_at_or_below_promise() {
-        // A learner that never promised the chosen ballot still records the chosen
-        // value; the recorded accept must not sit above its promise (the promise is
-        // raised to match, which is safe since the value is already chosen).
-        let mut n = node(1, &[0, 1, 2]);
-        let chosen_ballot = Ballot {
-            round: 4,
-            node: NodeId(0),
-        };
-        n.step(Message::Commit {
-            from: NodeId(0),
-            ballot: chosen_ballot,
-            slot: Slot(0),
-            value: val(5),
-        });
-        let (ab, _) = n
-            .hard_state()
-            .accepted
-            .get(&Slot(0))
-            .expect("commit is recorded as accepted");
-        assert!(
-            *ab <= n.hard_state().max_promised_ballot,
-            "a recorded accept never exceeds the promised ballot"
-        );
-        assert_eq!(chosen0(&n), Some(val(5)), "the committed value is learned");
-    }
-
-    #[test]
-    fn single_decree_happy_path_chooses_one_value() {
-        let mut nodes = [
-            node(0, &[0, 1, 2]),
-            node(1, &[0, 1, 2]),
-            node(2, &[0, 1, 2]),
-        ];
-        nodes[0].propose(val(42));
-        let initial = drain(&mut nodes[0]);
-        deliver_all(&mut nodes, initial);
-
-        for n in &nodes {
-            assert_eq!(
-                chosen0(n),
-                Some(val(42)),
-                "every node learns the one chosen value"
-            );
-        }
-    }
-
-    #[test]
-    fn value_selection_adopts_previously_accepted_value() {
-        let mut nodes = [
-            node(0, &[0, 1, 2]),
-            node(1, &[0, 1, 2]),
-            node(2, &[0, 1, 2]),
-        ];
-
-        // Round 1: node 0 gets val(1) accepted by the quorum {0, 1}, but node 2
-        // is partitioned off and the `Commit`s are lost — so node 1 has *accepted*
-        // val(1) without learning it is chosen, and node 2 knows nothing.
-        nodes[0].propose(val(1));
-        let first = drain(&mut nodes[0]);
-        deliver_filtered(&mut nodes, first, |to, msg| {
-            to != NodeId(2) && !matches!(msg, Message::Commit { .. })
-        });
-        assert_eq!(
-            nodes[1].hard_state().accepted.get(&Slot(0)).map(|(_, v)| v),
-            Some(&val(1)),
-            "node 1 accepted val(1)"
-        );
-        assert_eq!(chosen0(&nodes[2]), None, "node 2 is in the dark");
-
-        // Round 2: node 2 (higher ballot, since its round counter is fresh and it
-        // is a higher node id) proposes a *different* value. The value-selection
-        // rule must force it to re-propose the already-accepted val(1), never its
-        // own val(2) — this is the safety guarantee under contention.
-        nodes[2].propose(val(2));
-        let second = drain(&mut nodes[2]);
-        deliver_all(&mut nodes, second);
-
-        for n in &nodes {
-            assert_eq!(
-                chosen0(n),
-                Some(val(1)),
-                "a new proposer adopts the already-accepted value (safety)"
-            );
-        }
-    }
-}
+mod tests;

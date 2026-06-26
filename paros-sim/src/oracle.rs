@@ -5,11 +5,13 @@
 //! - [`ClientLivenessOracle`] wires the `assert_*` contract macros off the same
 //!   event stream — a worked example of moonpool's oracle harness.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
-use paros::{EV_CHOSEN, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK};
+use paros::{
+    EV_APPLIED, EV_CHOSEN, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+};
 use serde::Serialize;
 
 /// Standard transport-client observability events (same names as moonpool's
@@ -118,6 +120,30 @@ pub struct ChosenShot {
     pub vhash: u64,
 }
 
+/// A "this node became leader" marker, from `leader_elected` events. Drives the
+/// leader badge and the multi-decree election animation.
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderShot {
+    /// Simulated time the node took leadership, in milliseconds.
+    pub time_ms: u64,
+    /// The node that became leader.
+    pub node: u64,
+    /// The ballot round it leads at.
+    pub round: u64,
+}
+
+/// A "this node advanced its applied (contiguous chosen) prefix" marker, from
+/// `log_applied` events. Drives the per-node committed-prefix boundary.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedShot {
+    /// Simulated time the slot was applied, in milliseconds.
+    pub time_ms: u64,
+    /// The node that applied the slot.
+    pub node: u64,
+    /// The slot just applied (the applied prefix grows one slot at a time).
+    pub slot: u64,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +160,10 @@ pub struct RunResult {
     pub node_states: Vec<NodeStateShot>,
     /// Chosen-value markers, in observation order.
     pub chosen: Vec<ChosenShot>,
+    /// Leadership-takeover markers, in observation order (multi-decree).
+    pub leaders: Vec<LeaderShot>,
+    /// Applied-prefix advancement markers, in observation order (multi-decree).
+    pub applied: Vec<AppliedShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -156,6 +186,8 @@ impl RunResult {
             protocol: Vec::new(),
             node_states: Vec::new(),
             chosen: Vec::new(),
+            leaders: Vec::new(),
+            applied: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -236,6 +268,8 @@ pub(crate) struct ProtocolData {
     recvs: Vec<RawLeg>,
     node_states: Vec<NodeStateShot>,
     chosen: Vec<ChosenShot>,
+    leaders: Vec<LeaderShot>,
+    applied: Vec<AppliedShot>,
 }
 
 /// Pull the ballot-carrying message legs named `name`. `self_field` names the
@@ -303,6 +337,34 @@ fn collect_chosen(q: &dyn TraceQuery) -> Vec<ChosenShot> {
         .collect()
 }
 
+/// Pull the leadership-takeover markers from the `leader_elected` stream.
+fn collect_leaders(q: &dyn TraceQuery) -> Vec<LeaderShot> {
+    q.snapshot(EV_LEADER)
+        .into_iter()
+        .filter_map(|e| {
+            Some(LeaderShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                round: e.u64("round")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the applied-prefix advancement markers from the `log_applied` stream.
+fn collect_applied(q: &dyn TraceQuery) -> Vec<AppliedShot> {
+    q.snapshot(EV_APPLIED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(AppliedShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                slot: e.u64("slot")?,
+            })
+        })
+        .collect()
+}
+
 /// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
 /// inter-node Paxos messages and the node-state / chosen streams the single-decree
 /// visualization needs (the client recorder above stays focused on client events).
@@ -327,6 +389,8 @@ impl Invariant for ProtocolRecorder {
         d.recvs = collect_legs(q, EV_MSG_RECV, false);
         d.node_states = collect_node_states(q);
         d.chosen = collect_chosen(q);
+        d.leaders = collect_leaders(q);
+        d.applied = collect_applied(q);
     }
 }
 
@@ -334,7 +398,16 @@ impl Invariant for ProtocolRecorder {
 /// order. A paired send is `Delivered` (its receive's time is the arrival); an
 /// unpaired send is one the network `Dropped`. Deterministic: the trace is
 /// captured in deterministic order and the pairing is a stable FIFO over it.
-fn build_protocol(data: &ProtocolData) -> (Vec<ProtocolShot>, Vec<NodeStateShot>, Vec<ChosenShot>) {
+#[allow(clippy::type_complexity)]
+fn build_protocol(
+    data: &ProtocolData,
+) -> (
+    Vec<ProtocolShot>,
+    Vec<NodeStateShot>,
+    Vec<ChosenShot>,
+    Vec<LeaderShot>,
+    Vec<AppliedShot>,
+) {
     let mut sends: Vec<&RawLeg> = data.sends.iter().collect();
     sends.sort_by_key(|s| s.time_ms); // stable: ties keep capture order
 
@@ -375,7 +448,13 @@ fn build_protocol(data: &ProtocolData) -> (Vec<ProtocolShot>, Vec<NodeStateShot>
         });
     }
 
-    (protocol, data.node_states.clone(), data.chosen.clone())
+    (
+        protocol,
+        data.node_states.clone(),
+        data.chosen.clone(),
+        data.leaders.clone(),
+        data.applied.clone(),
+    )
 }
 
 /// Liveness oracle: wires the `assert_*` contract macros off the standard client
@@ -465,17 +544,132 @@ impl Invariant for SafetyOracle {
     }
 }
 
+/// No-gaps oracle: each node's applied (contiguous chosen) prefix advances one
+/// slot at a time, starting at slot 0 — it never skips a slot. Reads the
+/// `log_applied` stream the driver emits as the commit index moves.
+pub(crate) struct NoGapsOracle;
+
+impl Invariant for NoGapsOracle {
+    fn name(&self) -> &'static str {
+        "log_no_gaps"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut last: HashMap<u64, u64> = HashMap::new();
+        let mut max_applied = 0_u64;
+        for e in q.snapshot(EV_APPLIED) {
+            let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
+                continue;
+            };
+            max_applied = max_applied.max(idx);
+            if let Some(prev) = last.insert(node, idx) {
+                assert_always!(
+                    idx == prev + 1,
+                    "a node's applied prefix advances one slot at a time (no gaps)"
+                );
+            } else {
+                assert_always!(idx == 0, "a node's applied prefix starts at slot 0");
+            }
+        }
+        // The log is multi-slot (a stable leader streamed past slot 0).
+        assert_sometimes!(max_applied >= 2, "a multi-slot prefix is applied");
+        if max_applied >= 2 {
+            assert_reachable!("a multi-slot log prefix is applied");
+        }
+    }
+}
+
+/// Leadership oracle: a node's leadership ballots strictly increase (it never
+/// becomes leader again at a round at or below one it already led), and elections
+/// do happen. Reads the `leader_elected` stream.
+///
+/// Note: two nodes *can* lead the same round with different ballots (a ballot is
+/// `(round, node)`, ordered by node id) under a partition — that is safe, because
+/// quorum intersection lets only the higher ballot commit (prefix agreement,
+/// asserted by [`SafetyOracle`]). So "≤1 leader per ballot" is structural (the
+/// ballot carries the node); what is worth asserting is the genuinely-true
+/// per-node monotonicity, which catches a node re-leading at a stale ballot.
+pub(crate) struct LeadershipOracle;
+
+impl Invariant for LeadershipOracle {
+    fn name(&self) -> &'static str {
+        "leadership"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut last_round: HashMap<u64, u64> = HashMap::new();
+        let mut any = false;
+        for e in q.snapshot(EV_LEADER) {
+            let (Some(node), Some(round)) = (e.u64("node"), e.u64("round")) else {
+                continue;
+            };
+            any = true;
+            if let Some(prev) = last_round.insert(node, round) {
+                assert_always!(
+                    round > prev,
+                    "a node's leadership ballots strictly increase"
+                );
+            }
+        }
+        assert_sometimes!(any, "a leader is elected");
+        if any {
+            assert_reachable!("a leader is elected");
+        }
+    }
+}
+
+/// Progress / liveness oracle: the dueling-proposer livelock is fixed, so under
+/// eventual synchrony a stable leader streams several slots, and under chaos
+/// leadership turns over and the cluster recovers. These are `sometimes` +
+/// `reachable` gates: the `UntilCoverageStable` sweep only saturates once they
+/// fire, so a saturated sweep (no `convergence_timeout`) is the proof of progress.
+pub(crate) struct ProgressOracle;
+
+impl Invariant for ProgressOracle {
+    fn name(&self) -> &'static str {
+        "progress_liveness"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let max_applied = q
+            .snapshot(EV_APPLIED)
+            .into_iter()
+            .filter_map(|e| e.u64("applied_index"))
+            .max()
+            .unwrap_or(0);
+        let rounds: HashSet<u64> = q
+            .snapshot(EV_LEADER)
+            .into_iter()
+            .filter_map(|e| e.u64("round"))
+            .collect();
+
+        assert_sometimes!(max_applied >= 3, "a stable leader streams several slots");
+        if max_applied >= 3 {
+            assert_reachable!("the chosen prefix advances under a stable leader");
+        }
+        assert_sometimes!(
+            rounds.len() >= 2,
+            "leadership turns over and the cluster recovers"
+        );
+        if rounds.len() >= 2 {
+            assert_reachable!("leadership turns over (re-election)");
+        }
+    }
+}
+
 /// Turn the recorded timeline into the animation [`RunResult`]: match each issued
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.
 pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData) -> RunResult {
-    let (protocol, node_states, chosen) = build_protocol(proto);
+    let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
 
     if data.issued.is_empty() {
         return RunResult {
             protocol,
             node_states,
             chosen,
+            leaders,
+            applied,
             ..RunResult::empty(seed)
         };
     }
@@ -538,6 +732,8 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         .chain(protocol.iter().map(|s| s.arrive_ms))
         .chain(node_states.iter().map(|s| s.time_ms))
         .chain(chosen.iter().map(|s| s.time_ms))
+        .chain(leaders.iter().map(|s| s.time_ms))
+        .chain(applied.iter().map(|s| s.time_ms))
         .max()
         .unwrap_or(0);
 
@@ -548,6 +744,8 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         protocol,
         node_states,
         chosen,
+        leaders,
+        applied,
         delivered,
         dropped,
         ticks: data.ticks,

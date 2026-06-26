@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, NodeId, Slot, Value};
+use crate::types::{Ballot, Entry, NodeId, Slot};
 
 /// The must-be-durable triple of Multi-Paxos: the *exact* state that has to hit
 /// stable storage **before any message predicated on it is sent**.
@@ -24,12 +24,16 @@ pub struct HardState {
     /// Highest ballot this node has promised (Phase 1). Monotonically
     /// non-decreasing across the node's lifetime.
     pub max_promised_ballot: Ballot,
-    /// Per-slot accepted proposal: the `(ballot, value)` this node has accepted
-    /// for each slot (Phase 2).
-    pub accepted: BTreeMap<Slot, (Ballot, Value)>,
-    /// Highest contiguous chosen slot (the commit index). Everything `<=` this
-    /// is chosen and safe to apply once durable.
-    pub chosen_index: Slot,
+    /// Per-slot accepted proposal: the `(ballot, entry)` this node has accepted
+    /// for each slot (Phase 2). The [`Entry`] carries the client `(id, seq)` so
+    /// dedup state survives restart (rebuilt from this map).
+    pub accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    /// Highest contiguous chosen slot (the commit index), or `None` when nothing
+    /// is chosen yet. When `Some(s)`, every slot `<=` s is chosen and safe to
+    /// apply. `Option` (rather than a `Slot(0)` sentinel) keeps genesis
+    /// unambiguous: `None` is "nothing applied", `Some(Slot(0))` is "slot 0
+    /// applied".
+    pub chosen_index: Option<Slot>,
 }
 
 /// Static, immutable-for-this-instance configuration: who *I* am and who my

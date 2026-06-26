@@ -4,7 +4,7 @@
 use crate::message::Message;
 use crate::node::RawNode;
 use crate::state::HardState;
-use crate::types::{NodeId, Slot, Value};
+use crate::types::{Entry, NodeId, Slot};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -61,10 +61,10 @@ impl<'a> Ready<'a> {
         self.node.pending_messages()
     }
 
-    /// Newly chosen `(slot, value)` pairs to apply **after** they are durable
-    /// (step 3).
+    /// Newly chosen `(slot, entry)` pairs to apply **after** they are durable
+    /// (step 3), surfaced in contiguous slot order (no gaps).
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Value)] {
+    pub fn committed(&self) -> &[(Slot, Entry)] {
         self.node.pending_committed()
     }
 

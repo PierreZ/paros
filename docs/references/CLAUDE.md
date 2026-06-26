@@ -12,6 +12,7 @@ we study, and analyses of external consensus codebases. This file is the map; re
   house style **(a) verbatim code + `file:line` → (b) principle → (c) maps-to-sans-IO**.
 - Our own design notes (not tied to a specific external source) live one level up in
   [`../analysis/`](../analysis/), e.g. `../analysis/go-raft/`.
+- `talks/<name>.md` — a transcript of a talk or video (no PDF). Head it with the source URL.
 - When adding a paper, keep the `paper.pdf` + `transcript.md` pair and cross-link related entries.
 
 ## Papers
@@ -52,9 +53,23 @@ we study, and analyses of external consensus codebases. This file is the map; re
 - [`ceph/`](ceph/) — [`ceph/mon-paxos-patterns.md`](ceph/mon-paxos-patterns.md). Ceph's production
   monitor Paxos: the **durability/persistence boundary**, recovery of uncommitted values, and
   **lease-based reads**. Sequential single-decree + I/O-coupled — a deliberate contrast to paros.
+- [`foundationdb/`](foundationdb/): [`foundationdb/cluster-controller-election.md`](foundationdb/cluster-controller-election.md).
+  FoundationDB's **Cluster Controller leader election**: a register-based quorum election (*not*
+  Paxos) with randomized ids plus exponential backoff (anti-dueling), a heartbeat **lease** with
+  step-down on lost quorum, and majority-based discovery. The production reference for Stage 3's
+  tick-driven randomized election; election is **separated** from the data plane (contrast paros's
+  unified ballot core).
 
 See also the sibling sans-IO core model:
 [`../analysis/go-raft/etcd-raft-sans-io-patterns.md`](../analysis/go-raft/etcd-raft-sans-io-patterns.md).
+
+## Talks
+
+- [`talks/paxos-google.md`](talks/paxos-google.md) — Luis Quesada Torres (Google SRE),
+  ["The Paxos Algorithm"](https://www.youtube.com/watch?v=d7nAGI_NZPk). A gentle,
+  diagram-driven walkthrough of single-decree Paxos (Prepare/Promise/Accept, the dueling
+  proposers cured by exponential backoff) and a Megastore-style replicated log. The source
+  of the book's bank-balance example ([`../../book/src/replicated-log.md`](../../book/src/replicated-log.md)).
 
 ## Suggested reading order (for the sans-IO Multi-Paxos goal)
 
@@ -66,6 +81,7 @@ See also the sibling sans-IO core model:
 4. **Quorums** — `flexible-paxos` (Q1/Q2 split; the theory behind frankenpaxos's grid quorums).
 5. **Durability** — `ceph/mon-paxos-patterns.md` + `paxos-made-live` (what to persist; the
    apply-with-commit pattern) and `protocol-aware-recovery` for corruption edge cases.
-6. **Later / horizons** — `paxos-vs-raft` (election trade-offs), `matchmaker-paxos` +
+6. **Later / horizons**: `paxos-vs-raft` (election trade-offs) + `foundationdb/` (production
+   leader-election dynamics), `matchmaker-paxos` +
    `frankenpaxos/05` (reconfiguration), `scaling-rsm-compartmentalization` + `frankenpaxos/04`
    (throughput). Deferred past v1.
