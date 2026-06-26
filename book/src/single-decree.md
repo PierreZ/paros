@@ -1,4 +1,4 @@
-# Watch it live
+# Single-decree Paxos, live
 
 The rest of this book explains with diagrams. This page is the real thing. The
 whole paros simulation, the node driver, the client workload, the oracles,
@@ -21,7 +21,7 @@ green.
 <iframe
   src="wasm-demo/index.html?embed=1&seed=0"
   title="paros: a value is chosen"
-  style="width:100%;height:560px;border:1px solid #30363d;border-radius:12px"
+  style="width:100%;height:720px;border:1px solid #30363d;border-radius:12px"
   loading="lazy">
 </iframe>
 
@@ -35,7 +35,7 @@ duel resolves; safety never bends.
 <iframe
   src="wasm-demo/index.html?embed=1&seed=19"
   title="paros: contention resolves to one value"
-  style="width:100%;height:560px;border:1px solid #30363d;border-radius:12px"
+  style="width:100%;height:720px;border:1px solid #30363d;border-radius:12px"
   loading="lazy">
 </iframe>
 
@@ -46,6 +46,10 @@ duel resolves; safety never bends.
 - Each acceptor shows its **promised ballot** and a swatch for the value it
   accepted.
 - The top-left readout tracks the current ballot and the promise / accept quorums.
+- The **scenario** chips below the canvas describe the run you just computed (the
+  ballot, the promise/accept quorums reached, who chose the value, whether the
+  proposers dueled, how many messages the network dropped), and the status line
+  narrates each step as it plays. Every seed describes itself, so try a few.
 
 ## Reproducibility
 
@@ -57,7 +61,6 @@ a single frozen frame (useful for screenshots).
 > **What the demo shows.** Three acceptors run the single-decree kernel under
 > network chaos: dropped, delayed, and reordered messages, plus dueling proposers,
 > are all in play. The safety oracle asserts on every seed that no two acceptors
-> ever choose different values. The Multi-Paxos protocol, the
-> [replicated log](replicated-log.md) and the [stable leader](stable-leader.md), is
-> explained with diagrams in the chapters; extending this live demo to Multi-Paxos
-> is future work.
+> ever choose different values. The full Multi-Paxos protocol, the
+> [replicated log](replicated-log.md) and the [stable leader](stable-leader.md),
+> runs live on the next page: [Multi-Paxos: leader and log](multi-paxos.md).

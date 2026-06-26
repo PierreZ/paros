@@ -120,6 +120,30 @@ pub struct ChosenShot {
     pub vhash: u64,
 }
 
+/// A "this node became leader" marker, from `leader_elected` events. Drives the
+/// leader badge and the multi-decree election animation.
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderShot {
+    /// Simulated time the node took leadership, in milliseconds.
+    pub time_ms: u64,
+    /// The node that became leader.
+    pub node: u64,
+    /// The ballot round it leads at.
+    pub round: u64,
+}
+
+/// A "this node advanced its applied (contiguous chosen) prefix" marker, from
+/// `log_applied` events. Drives the per-node committed-prefix boundary.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedShot {
+    /// Simulated time the slot was applied, in milliseconds.
+    pub time_ms: u64,
+    /// The node that applied the slot.
+    pub node: u64,
+    /// The slot just applied (the applied prefix grows one slot at a time).
+    pub slot: u64,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +160,10 @@ pub struct RunResult {
     pub node_states: Vec<NodeStateShot>,
     /// Chosen-value markers, in observation order.
     pub chosen: Vec<ChosenShot>,
+    /// Leadership-takeover markers, in observation order (multi-decree).
+    pub leaders: Vec<LeaderShot>,
+    /// Applied-prefix advancement markers, in observation order (multi-decree).
+    pub applied: Vec<AppliedShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -158,6 +186,8 @@ impl RunResult {
             protocol: Vec::new(),
             node_states: Vec::new(),
             chosen: Vec::new(),
+            leaders: Vec::new(),
+            applied: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -238,6 +268,8 @@ pub(crate) struct ProtocolData {
     recvs: Vec<RawLeg>,
     node_states: Vec<NodeStateShot>,
     chosen: Vec<ChosenShot>,
+    leaders: Vec<LeaderShot>,
+    applied: Vec<AppliedShot>,
 }
 
 /// Pull the ballot-carrying message legs named `name`. `self_field` names the
@@ -305,6 +337,34 @@ fn collect_chosen(q: &dyn TraceQuery) -> Vec<ChosenShot> {
         .collect()
 }
 
+/// Pull the leadership-takeover markers from the `leader_elected` stream.
+fn collect_leaders(q: &dyn TraceQuery) -> Vec<LeaderShot> {
+    q.snapshot(EV_LEADER)
+        .into_iter()
+        .filter_map(|e| {
+            Some(LeaderShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                round: e.u64("round")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the applied-prefix advancement markers from the `log_applied` stream.
+fn collect_applied(q: &dyn TraceQuery) -> Vec<AppliedShot> {
+    q.snapshot(EV_APPLIED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(AppliedShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                slot: e.u64("slot")?,
+            })
+        })
+        .collect()
+}
+
 /// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
 /// inter-node Paxos messages and the node-state / chosen streams the single-decree
 /// visualization needs (the client recorder above stays focused on client events).
@@ -329,6 +389,8 @@ impl Invariant for ProtocolRecorder {
         d.recvs = collect_legs(q, EV_MSG_RECV, false);
         d.node_states = collect_node_states(q);
         d.chosen = collect_chosen(q);
+        d.leaders = collect_leaders(q);
+        d.applied = collect_applied(q);
     }
 }
 
@@ -336,7 +398,16 @@ impl Invariant for ProtocolRecorder {
 /// order. A paired send is `Delivered` (its receive's time is the arrival); an
 /// unpaired send is one the network `Dropped`. Deterministic: the trace is
 /// captured in deterministic order and the pairing is a stable FIFO over it.
-fn build_protocol(data: &ProtocolData) -> (Vec<ProtocolShot>, Vec<NodeStateShot>, Vec<ChosenShot>) {
+#[allow(clippy::type_complexity)]
+fn build_protocol(
+    data: &ProtocolData,
+) -> (
+    Vec<ProtocolShot>,
+    Vec<NodeStateShot>,
+    Vec<ChosenShot>,
+    Vec<LeaderShot>,
+    Vec<AppliedShot>,
+) {
     let mut sends: Vec<&RawLeg> = data.sends.iter().collect();
     sends.sort_by_key(|s| s.time_ms); // stable: ties keep capture order
 
@@ -377,7 +448,13 @@ fn build_protocol(data: &ProtocolData) -> (Vec<ProtocolShot>, Vec<NodeStateShot>
         });
     }
 
-    (protocol, data.node_states.clone(), data.chosen.clone())
+    (
+        protocol,
+        data.node_states.clone(),
+        data.chosen.clone(),
+        data.leaders.clone(),
+        data.applied.clone(),
+    )
 }
 
 /// Liveness oracle: wires the `assert_*` contract macros off the standard client
@@ -584,13 +661,15 @@ impl Invariant for ProgressOracle {
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.
 pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData) -> RunResult {
-    let (protocol, node_states, chosen) = build_protocol(proto);
+    let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
 
     if data.issued.is_empty() {
         return RunResult {
             protocol,
             node_states,
             chosen,
+            leaders,
+            applied,
             ..RunResult::empty(seed)
         };
     }
@@ -653,6 +732,8 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         .chain(protocol.iter().map(|s| s.arrive_ms))
         .chain(node_states.iter().map(|s| s.time_ms))
         .chain(chosen.iter().map(|s| s.time_ms))
+        .chain(leaders.iter().map(|s| s.time_ms))
+        .chain(applied.iter().map(|s| s.time_ms))
         .max()
         .unwrap_or(0);
 
@@ -663,6 +744,8 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         protocol,
         node_states,
         chosen,
+        leaders,
+        applied,
         delivered,
         dropped,
         ticks: data.ticks,

@@ -15,4 +15,7 @@
 
 ---
 
-[Watch it live](wasm.md)
+# Watch it live
+
+- [Single-decree Paxos](single-decree.md)
+- [Multi-Paxos: leader and log](multi-paxos.md)

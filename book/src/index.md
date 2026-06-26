@@ -22,7 +22,7 @@ side effects in the order the `Ready` documents, honoring the persist-before-sen
 durability rule at the heart of Paxos safety.
 
 Because the core is portable to WebAssembly, the *same* simulation that runs in
-CI runs in your browser tab. The [Watch it live](wasm.md) page runs it there.
+CI runs in your browser tab. The [Watch it live](single-decree.md) page runs it there.
 
 > **How to read this book.** It is a guided tour of the algorithm, grounded in the
 > papers and mapped onto the real `paros-core` code. Part one,
@@ -31,4 +31,4 @@ CI runs in your browser tab. The [Watch it live](wasm.md) page runs it there.
 > [replicated log](replicated-log.md), elects a [stable leader](stable-leader.md),
 > and works through a [crash and restart safety](restart-safety.md) bug the
 > simulation caught. Every chapter explains with diagrams; to watch the
-> single-decree kernel actually run, open [Watch it live](wasm.md).
+> single-decree kernel actually run, open [Watch it live](single-decree.md).

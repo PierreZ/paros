@@ -55,3 +55,30 @@ config with `--no-sandbox`).
   table, or numbered steps as boxes. If it only restates the surrounding text, cut it.
 - Keep every symbol named in a diagram real: it should exist in `paros-core` / `paros-sim`
   so the figure stays mapped to the code, like the rest of the book.
+
+## Live demos (Watch it live)
+
+The **"Watch it live"** section embeds the wasm demo. Today it holds two pages:
+`single-decree.md` (single-decree) and `multi-paxos.md` (Multi-Paxos). One file,
+`paros-wasm-demo/web/index.html`, serves both via a `?mode=` switch (`single` is the
+default, `?mode=multi` selects the leader-and-log column scene). The two modes share the
+scenario digest, the narration, and the time-warp playback machinery; only the canvas
+painter (`renderScene` vs `renderMultiScene`) and the message endpoints differ.
+
+- **Demos are self-describing.** The browser computes the whole `RunResult`
+  (`paros_sim::run_seed_json`), and the UI derives, **purely from that data**, a *scenario
+  digest* (the chips: leader failovers, Phase-2 piggybacked slots, dueling vs stable, log
+  length, value chosen by N/3, network drops) and a *live narration* (the status line:
+  what is happening at the current sim time). Adding a demo metric means deriving it from
+  `RunResult`, not threading a new narrative through the prose.
+- **Never pin a "curated" seed to a claimed narrative in prose.** Seeds drift as the
+  protocol changes, so a hand-picked "this seed shows X" story silently rots. Embed
+  arbitrary fixed seeds; **teach the *concepts* in prose and let the demo narrate the
+  *specifics*.** Because the UI reads the data, the same embed stays correct across code
+  changes. (The single-decree page still names a couple of historical seeds; new pages
+  should not.)
+- Embed with an iframe `src="wasm-demo/index.html?embed=1&..."` (`embed=1` hides the page
+  chrome). URL params: `?seed=<n>`, `?mode=multi`, `?dump` (raw JSON), `?still=<k>` (frozen
+  frame for screenshots). Build the demo with `book/build-wasm-demo.sh` (the `wasm-bindgen`
+  crate pin in `paros-wasm-demo/Cargo.toml` must match the flake's `wasm-bindgen-cli`); the
+  GitHub Pages workflow (`pages.yml`) runs the same build before `mdbook build`.

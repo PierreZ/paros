@@ -5,7 +5,7 @@ a single value, and never disagree, even when the network drops, delays, and
 reorders messages, and even when several proposers compete at once?
 
 This chapter walks through how, step by step, with diagrams. To watch the very same
-protocol run for real in your browser, open [Watch it live](wasm.md).
+protocol run for real in your browser, open [Watch it live](single-decree.md).
 
 ## Ballots
 
@@ -103,7 +103,7 @@ That duel really happens. Node 0 starts proposing at ballot `(1,0)`, node 1 inte
 with a higher ballot `(2,1)`, node 0's late Accept is **nacked** (rejected), node
 1's ballot wins, and a value is still chosen by all three acceptors. The duel
 resolves; safety never bends. You can watch this exact run, it is seed 19, on the
-[Watch it live](wasm.md) page.
+[Watch it live](single-decree.md) page.
 
 ## What each acceptor remembers
 
@@ -133,7 +133,7 @@ exists only to feed these two acceptors' rules a safe value.
 
 The simulation will never show two acceptors choosing different values. That is
 the single safety property the `SafetyOracle` asserts on every step of every seed,
-in CI and in your browser alike (the [Watch it live](wasm.md) page runs the very
+in CI and in your browser alike (the [Watch it live](single-decree.md) page runs the very
 same code). Seeds like **42** show proposers dueling without
 ever converging, a livelock: every node has promised a different high ballot, so
 no single ballot wins a promise quorum and nothing is chosen. Annoying, but never

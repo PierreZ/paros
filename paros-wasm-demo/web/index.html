@@ -35,6 +35,12 @@
   .stat .dropped { color: #f85149; }
   .stat span { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .status { margin-top: 8px; color: #8b949e; min-height: 1.4em; font-size: 13px; }
+  .scenario { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .scenario:empty { display: none; }
+  .chip { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 6px 10px;
+    font-variant-numeric: tabular-nums; }
+  .chip b { display: block; font-size: 14px; color: #c9d1d9; font-weight: 650; }
+  .chip span { color: #8b949e; text-transform: uppercase; letter-spacing: .03em; font-size: 10px; }
   .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #8b949e; margin-top: 8px; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
   a { color: #2f81f7; }
@@ -77,6 +83,8 @@
       <span><i class="dot" style="background:#3fb950"></i>Commit · chosen</span>
     </div>
 
+    <div class="scenario" id="scenario"></div>
+
     <div class="stats">
       <div class="stat"><b id="s-req">–</b><span>proposals</span></div>
       <div class="stat"><b id="s-del" class="delivered">–</b><span>delivered</span></div>
@@ -94,7 +102,10 @@ import init, { runSeed } from './pkg/paros_wasm_demo.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('court'), ctx = canvas.getContext('2d');
-const W = canvas.width, H = canvas.height;
+// The single-decree court is wide and short; the multi-decree view draws vertical
+// per-node log columns, so it gets a taller drawing area (set once below for multi).
+const W = canvas.width;
+let H = canvas.height;
 
 // The proposing client (left) and the 3 acceptors (a triangle on the right), so
 // every inter-node arc is clearly separated.
@@ -104,6 +115,15 @@ const NODES = [
   { x: 388, y: 296, label: 'N1' },
   { x: 702, y: 296, label: 'N2' },
 ];
+// Multi-decree layout: the 3 nodes as columns, each with a vertical log beneath
+// its header. Protocol balls fly between the headers; the logs fill below.
+const NODES_M = [
+  { x: 164, y: 58, label: 'N0' },
+  { x: 404, y: 58, label: 'N1' },
+  { x: 644, y: 58, label: 'N2' },
+];
+const HEADER_Y = 58, LOG_TOP = 96;
+const LEADER_C = '#e3b341';
 const ACCEPTOR = '#8b949e', PROPOSER = '#d2a8ff', CLIENT_C = '#58a6ff';
 
 // Message kind → colour + label. The six Paxos kinds plus the two synthetic
@@ -115,6 +135,7 @@ const KIND = {
   accepted: { c: '#e3b341', t: 'Accepted' },
   nack:     { c: '#f85149', t: 'Nack'     },
   commit:   { c: '#3fb950', t: 'Commit'   },
+  heartbeat:{ c: '#6e7681', t: 'Heartbeat'},
   propose:  { c: '#c9d1d9', t: 'Propose'  },
   ack:      { c: '#2ea043', t: 'Ack'      },
 };
@@ -137,6 +158,8 @@ let legs = [];           // unified message legs (protocol + the 2 client legs)
 let warpA = [], warpD = [];   // monotone map: animation time <-> display time
 let displayDuration = 0; // total display span (warped, + tail)
 let steps = [], stepIdx = 0;  // step-through positions (display time) + cursor
+let LOG_MAX = 0;         // highest slot any node touched (multi-decree log height)
+let narration = [];      // time-sorted {t, text} events for the live status line
 let dispT = 0;           // display clock, integrated from frame deltas
 let lastTs = null;       // previous frame timestamp (for delta-time integration)
 let playing = false;
@@ -147,10 +170,33 @@ const params = new URLSearchParams(location.search);
 if (params.has('seed')) $('seed').value = params.get('seed');
 const STILL = params.has('still') ? parseInt(params.get('still'), 10) : null;
 const DUMP = params.has('dump');
+// ?mode=multi swaps the single-decree court for the Multi-Paxos column scene
+// (leader badge + per-node replicated log). Single-decree is the default and
+// stays the same; both modes share the scenario digest + narration below.
+const MODE = params.get('mode') === 'multi' ? 'multi' : 'single';
+const MULTI = MODE === 'multi';
 if (params.has('embed')) {
   document.querySelector('h1').style.display = 'none';
   document.querySelector('.sub').style.display = 'none';
   document.body.style.padding = '10px';
+}
+if (MULTI) {
+  // taller drawing area so the vertical per-node logs are not cramped
+  H = 470; canvas.height = H; canvas.style.height = H + 'px';
+  document.title = 'paros · Multi-Paxos in the browser';
+  document.querySelector('h1').innerHTML =
+    'paros <small>· Multi-Paxos: leader election + replicated log</small>';
+  document.querySelector('.sub').innerHTML =
+    'A stable <b>leader</b> runs <b>Phase&nbsp;1</b> once per ballot, then streams ' +
+    '<b>Phase&nbsp;2</b> (Accept) per log slot. Each node shows its replicated log; ' +
+    'same colour across nodes = agreement. Same seed ⇒ same run.';
+  document.querySelector('.legend').innerHTML =
+    '<span><i class="dot" style="background:#e3b341"></i>Leader</span>' +
+    '<span><i class="dot" style="background:#3fb950"></i>Chosen (same colour = agreement)</span>' +
+    '<span><i class="dot" style="background:#58a6ff"></i>Phase&nbsp;1 (Prepare/Promise)</span>' +
+    '<span><i class="dot" style="background:#d29922"></i>Phase&nbsp;2 (Accept stream)</span>' +
+    '<span><i class="dot" style="background:#6e7681"></i>Heartbeat</span>' +
+    '<span><i class="dot" style="background:#f85149"></i>Nack / dropped</span>';
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -195,6 +241,190 @@ function chosenAt(T) {
     if (c.time_ms >= vt) { vt = c.time_ms; vh = c.vhash; }
   }
   return { set, vh };
+}
+
+// ---- multi-decree (Multi-Paxos) derived views ------------------------------
+// The cluster leader as of T: the most recent leadership takeover at or before T.
+function leaderAt(T) {
+  let best = null;
+  for (const l of run.leaders)
+    if (l.time_ms <= T && (!best || l.time_ms >= best.time_ms)) best = l;
+  return best; // {time_ms, node, round} | null
+}
+// Per-node highest applied (committed) slot at or before T; -1 = nothing applied.
+function committedAt(T) {
+  const c = NODES_M.map(() => -1);
+  for (const a of run.applied)
+    if (a.time_ms <= T && a.node < c.length) c[a.node] = Math.max(c[a.node], a.slot);
+  return c;
+}
+// Per-node map slot -> chosen value hash, as learned by time T.
+function logAt(T) {
+  const m = NODES_M.map(() => new Map());
+  for (const ch of run.chosen)
+    if (ch.time_ms <= T && ch.node < m.length) m[ch.node].set(ch.slot, ch.vhash);
+  return m;
+}
+
+// Paint the Multi-Paxos scene at simulated time T: node columns with a leader
+// badge and a per-node replicated log, plus in-flight protocol balls. Pure in T.
+function renderMultiScene(T, balls) {
+  ctx.clearRect(0, 0, W, H);
+  const has = !!run;
+  const st = has ? stateAt(T) : NODES_M.map(() => ({ pr: 0, pn: 0 }));
+  const lead = has ? leaderAt(T) : null;
+  const log = has ? logAt(T) : NODES_M.map(() => new Map());
+  const committed = has ? committedAt(T) : NODES_M.map(() => -1);
+  const cellH = clamp((H - LOG_TOP - 14) / (LOG_MAX + 1), 13, 26);
+  const cellW = 150;
+
+  // slot-number gutter on the far left
+  ctx.fillStyle = '#484f58'; ctx.font = '10px system-ui'; ctx.textAlign = 'right';
+  for (let s = 0; s <= LOG_MAX; s++) ctx.fillText('slot ' + s, 64, LOG_TOP + s * cellH + cellH * 0.7);
+
+  NODES_M.forEach((n, i) => {
+    const isLeader = lead && lead.node === i;
+    // the log column
+    for (let s = 0; s <= LOG_MAX; s++) {
+      const y = LOG_TOP + s * cellH, x = n.x - cellW / 2;
+      const vh = log[i].get(s);
+      ctx.beginPath(); ctx.rect(x, y + 1, cellW, cellH - 3);
+      if (vh !== undefined) { ctx.globalAlpha = 0.92; ctx.fillStyle = vhColor(vh); ctx.fill(); ctx.globalAlpha = 1; }
+      ctx.lineWidth = 1; ctx.strokeStyle = vh !== undefined ? '#0d1117' : '#262c36'; ctx.stroke();
+      if (s <= committed[i]) { ctx.fillStyle = '#3fb950'; ctx.fillRect(x - 3, y + 1, 3, cellH - 3); }
+    }
+    // the node header
+    if (isLeader) { ctx.shadowColor = LEADER_C; ctx.shadowBlur = 22; }
+    ctx.beginPath(); ctx.arc(n.x, HEADER_Y, 22, 0, 7);
+    ctx.fillStyle = (isLeader ? LEADER_C : ACCEPTOR) + '22'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = isLeader ? LEADER_C : ACCEPTOR; ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = isLeader ? LEADER_C : '#c9d1d9'; ctx.font = '600 15px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(n.label, n.x, HEADER_Y + 5);
+    if (isLeader) { ctx.fillStyle = LEADER_C; ctx.font = '600 11px system-ui'; ctx.fillText(`LEADER · r${lead.round}`, n.x, HEADER_Y - 30); }
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui';
+    ctx.fillText(`promised (${st[i].pr},${st[i].pn})`, n.x, HEADER_Y + 40);
+  });
+
+  // heartbeat pulse ring from the current leader
+  if (lead) {
+    const ph = (T % 600) / 600, r = 22 + ph * 24;
+    ctx.beginPath(); ctx.arc(NODES_M[lead.node].x, HEADER_Y, r, 0, 7);
+    ctx.strokeStyle = `rgba(227,179,65,${(1 - ph) * 0.45})`; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  // in-flight protocol balls (between headers)
+  for (const b of balls) drawBall(b.p, b.color, b.dropping);
+
+  // top-left HUD
+  ctx.textAlign = 'left'; ctx.font = '600 12px system-ui';
+  const cm = Math.max(-1, ...committed);
+  ctx.fillStyle = lead ? '#c9d1d9' : '#8b949e';
+  ctx.fillText(lead ? `leader N${lead.node} · ballot r${lead.round} · committed ${cm + 1} slots` : 'electing a leader…', 12, 18);
+  ctx.textAlign = 'center';
+}
+
+// Build the time-sorted narration ("what is happening") purely from the run.
+// Single-decree narrates only the slot-0 decree (matching its one-value court);
+// multi narrates the whole log, including leadership and Phase-2 streaming.
+function buildNarration() {
+  const ev = [];
+  const seenPrep = new Set(), seenAccSlot = new Set(), minSlot = new Map();
+  for (const p of run.protocol) if (p.kind === 'accept') {
+    const k = p.bround + ':' + p.bnode;
+    minSlot.set(k, Math.min(minSlot.has(k) ? minSlot.get(k) : Infinity, p.slot));
+  }
+  for (const p of run.protocol) {
+    const k = p.bround + ':' + p.bnode;
+    if (p.kind === 'prepare' && !seenPrep.has(k)) {
+      seenPrep.add(k);
+      ev.push({ t: p.depart_ms, text: MULTI
+        ? `N${p.bnode} election timeout → ballot r${p.bround} → Prepare broadcast (Phase 1)`
+        : `N${p.bnode} claims ballot r${p.bround} → Prepare (Phase 1)` });
+    } else if (p.kind === 'accept') {
+      if (!MULTI && p.slot !== 0) continue; // single-decree is the slot-0 story only
+      const sk = k + '#' + p.slot;
+      if (!seenAccSlot.has(sk)) {
+        seenAccSlot.add(sk);
+        ev.push(!MULTI ? { t: p.depart_ms, text: `N${p.bnode} Accept (Phase 2)` }
+          : p.slot === minSlot.get(k)
+            ? { t: p.depart_ms, text: `N${p.bnode} starts Phase 2 (Accept slot ${p.slot})` }
+            : { t: p.depart_ms, text: `N${p.bnode} streams slot ${p.slot} (Phase 2 only, piggybacked on its ballot)` });
+      }
+    } else if (p.kind === 'nack') {
+      ev.push({ t: p.depart_ms, text: `Nack on ballot r${p.bround}: stale, the proposer steps down` });
+    }
+  }
+  if (MULTI) for (const l of run.leaders) ev.push({ t: l.time_ms, text: `N${l.node} becomes leader at r${l.round}` });
+  const seenCh = new Set();
+  for (const c of [...run.chosen].sort((a, b) => a.time_ms - b.time_ms)) {
+    if (!MULTI && c.slot !== 0) continue;
+    if (!seenCh.has(c.slot)) {
+      seenCh.add(c.slot);
+      ev.push({ t: c.time_ms, text: MULTI ? `slot ${c.slot} chosen by a majority` : `value chosen by a majority` });
+    }
+  }
+  ev.sort((a, b) => a.t - b.t);
+  narration = ev;
+}
+function narrationAt(simT) {
+  let best = null;
+  for (const e of narration) { if (e.t <= simT) best = e; else break; }
+  return best;
+}
+
+// Derive the scenario digest ("what this run shows") from the computed run.
+// Pure function of `run`; the chips shown depend on the mode.
+function deriveScenario() {
+  const drops = run.protocol.filter((p) => p.outcome === 'dropped').length;
+  const leaders = [...run.leaders].sort((a, b) => a.time_ms - b.time_ms);
+  const failovers = Math.max(0, leaders.length - 1);
+  const trail = leaders.map((l) => `N${l.node}@r${l.round}`).join(' → ');
+  const finalL = leaders.length ? leaders[leaders.length - 1] : null;
+  const nacks = run.protocol.filter((p) => p.kind === 'nack').length;
+  const firstChosenT = run.chosen.length ? Math.min(...run.chosen.map((c) => c.time_ms)) : Infinity;
+  const ballotsBefore = new Set(run.protocol.filter((p) => p.kind === 'prepare' && p.depart_ms < firstChosenT)
+    .map((p) => p.bround + ':' + p.bnode)).size;
+  const dueling = nacks > 0 || ballotsBefore >= 2;
+  const chips = [];
+
+  if (MULTI) {
+    const slots = new Set(run.chosen.map((c) => c.slot));
+    const high = run.chosen.length ? Math.max(...run.chosen.map((c) => c.slot)) : -1;
+    const ph1 = new Set(run.protocol.filter((p) => p.kind === 'prepare').map((p) => p.bround + ':' + p.bnode)).size;
+    const byBallot = new Map();
+    for (const p of run.protocol) if (p.kind === 'accept') {
+      const k = p.bround + ':' + p.bnode;
+      if (!byBallot.has(k)) byBallot.set(k, new Set());
+      byBallot.get(k).add(p.slot);
+    }
+    let piggyback = 0; for (const s of byBallot.values()) piggyback += Math.max(0, s.size - 1);
+    chips.push(['log committed', `${slots.size} slots (high ${high})`]);
+    chips.push(['leader failovers', String(failovers)]);
+    if (trail) chips.push(['ballot trail', trail]);
+    chips.push(['Phase 1 elections', String(ph1)]);
+    chips.push(['Phase 2 piggybacked', `${piggyback} slots`]);
+    chips.push(['dueling', dueling ? (finalL ? `yes → resolved by N${finalL.node}@r${finalL.round}` : 'yes') : 'no, stable leader']);
+    chips.push(['network drops', String(drops)]);
+  } else {
+    const st = stateAt(run.sim_duration_ms);
+    let mr = 0, mn = 0; for (const s of st) if (cmpB(s.pr, s.pn, mr, mn) > 0) { mr = s.pr; mn = s.pn; }
+    const promisedK = st.filter((s) => s.pr === mr && s.pn === mn).length;
+    const acceptedK = st.filter((s) => s.acc).length;
+    const choosers = new Set(run.chosen.filter((c) => c.slot === 0).map((c) => c.node)).size;
+    chips.push(['ballot', mr > 0 ? `(${mr},${mn})` : '—']);
+    chips.push(['promised quorum', `${promisedK}/3`]);
+    chips.push(['accepted quorum', `${acceptedK}/3`]);
+    chips.push(['chosen by', `${choosers}/3`]);
+    chips.push(['dueling proposers', dueling ? 'yes (resolved)' : 'no']);
+    chips.push(['network drops', String(drops)]);
+  }
+  return chips;
+}
+function renderScenario() {
+  const el = $('scenario'); if (!el) return;
+  el.innerHTML = deriveScenario()
+    .map(([k, v]) => `<span class="chip"><b>${v}</b><span>${k}</span></span>`).join('');
 }
 
 function drawNode(n, st, opts) {
@@ -327,14 +557,18 @@ function setStats(r) {
 // causality stays exact; visibility is handled by the time-warp below.
 function buildLegs() {
   // +1 so a 0-latency (same-tick) delivery still spans a segment in the warp and
-  // gets a visible flight; legs with real latency are untouched.
+  // gets a visible flight; legs with real latency are untouched. In multi mode the
+  // legs fly between the column headers (NODES_M); in single mode the triangle court.
+  const POS = MULTI ? NODES_M : NODES;
   legs = run.protocol.map((s) => {
     const depart = s.depart_ms + LEAD_MS;
-    return { from: NODES[s.from], to: NODES[s.to], depart_ms: depart,
+    return { from: POS[s.from], to: POS[s.to], depart_ms: depart,
              arrive_ms: Math.max(s.arrive_ms + LEAD_MS, depart + 1), kind: s.kind, outcome: s.outcome };
   });
+  // The single-decree court frames consensus as a client round trip; the
+  // multi-decree column scene is internal to the cluster, so it has no client legs.
   const first = run.protocol[0];
-  if (first) {
+  if (!MULTI && first) {
     const prop = NODES[first.bnode] || NODES[0];
     legs.unshift({ from: CLIENT, to: prop, depart_ms: 0, arrive_ms: LEAD_MS, kind: 'propose', outcome: 'delivered' });
     // ack the client from the contacted node, the moment *it* learns the chosen
@@ -380,23 +614,23 @@ function renderAt(D) {
   const A = unwarp(D);
   const simT = Math.max(0, A - LEAD_MS);
   const balls = ballsAt(A);
-  renderScene(simT, balls.filter((b) => !b.cross));
+  const paint = MULTI ? renderMultiScene : renderScene;
+  paint(simT, balls.filter((b) => !b.cross));
   for (const b of balls) if (b.cross) drawCross(b.p);
   return simT;
 }
 
+// The live status line narrates what is happening: the most recent protocol
+// event (election, Phase 2 stream, chosen) at or before the current sim time.
 function liveStatus(simT) {
-  const ch = chosenAt(simT);
-  const phase = ch.set.size ? ` · chosen by ${ch.set.size}/3`
-    : (simT === 0 ? ' · client proposes…' : ' · agreeing…');
-  $('status').textContent = `seed ${run.seed} · t=${Math.round(simT)}ms${phase}`;
+  const n = narrationAt(simT);
+  const base = `seed ${run.seed} · t=${Math.round(simT)}ms`;
+  $('status').textContent = n ? `${base} · ${n.text}` : `${base} · …`;
 }
 
 function finalStatus() {
-  const fin = chosenAt(run.sim_duration_ms);
-  $('status').textContent = fin.set.size
-    ? `done · seed ${run.seed} · one value chosen by ${fin.set.size}/3 acceptors`
-    : `done · seed ${run.seed} · no value chosen yet (dueling proposers; randomized timeouts fix this in Stage 3)`;
+  const last = narration.length ? narration[narration.length - 1].text : 'no events recorded';
+  $('status').textContent = `done · seed ${run.seed} · ${last}`;
 }
 
 function frame(ts) {
@@ -415,7 +649,7 @@ function frame(ts) {
 
   if (dispT >= displayDuration) {
     playing = false;
-    renderScene(run.sim_duration_ms, []);
+    (MULTI ? renderMultiScene : renderScene)(run.sim_duration_ms, []);
     finalStatus();
     updateTransport();
     return;
@@ -451,13 +685,15 @@ function step(dir) {
 // Deterministic frozen frame at protocol leg K (its ball at midpoint), with state
 // replayed to that leg's departure. Used for screenshots and ?still= links.
 function drawStill(k) {
-  if (run.protocol.length === 0) { renderScene(0, []); return; }
+  const paint = MULTI ? renderMultiScene : renderScene;
+  if (run.protocol.length === 0) { paint(0, []); return; }
   k = clamp(k, 0, run.protocol.length - 1);
   const s = run.protocol[k];
-  const ball = { p: arcPoint(NODES[s.from], NODES[s.to], 0.5), color: (KIND[s.kind] || {}).c || '#d29922' };
-  renderScene(s.depart_ms, [ball]);
+  const POS = MULTI ? NODES_M : NODES;
+  const ball = { p: arcPoint(POS[s.from], POS[s.to], 0.5), color: (KIND[s.kind] || {}).c || '#d29922' };
+  paint(s.depart_ms, [ball]);
   setStats(run);
-  $('status').textContent = `seed ${run.seed} · frame at ${s.kind} (${s.bround},${s.bnode}) ${s.from}→${s.to}`;
+  $('status').textContent = `seed ${run.seed} · frame at ${s.kind} (${s.bround},${s.bnode}) slot ${s.slot} ${s.from}→${s.to}`;
 }
 
 function start() {
@@ -477,7 +713,12 @@ function start() {
   }
 
   run = JSON.parse(json);
+  LOG_MAX = 0;
+  for (const c of run.chosen) LOG_MAX = Math.max(LOG_MAX, c.slot);
+  for (const p of run.protocol) LOG_MAX = Math.max(LOG_MAX, p.slot);
   buildLegs();
+  buildNarration();
+  renderScenario();
   setStats(run);
   dispT = 0; lastTs = null; stepIdx = 0;
 
@@ -508,7 +749,20 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
 
-renderScene(0, []);
+// When embedded in the book (?embed=1), report our content height to the parent
+// page so it can auto-size the iframe to fit — no hand-tuned heights, no clipping.
+// A ResizeObserver catches every height change: a new run, the scenario chips
+// wrapping, the taller multi-decree canvas, a narrow viewport rewrapping the
+// legend. body is content-sized, so reading its height back never feeds back.
+if (params.has('embed') && window.parent !== window) {
+  const postHeight = () => window.parent.postMessage(
+    { type: 'paros-resize', height: document.body.offsetHeight }, '*');
+  if ('ResizeObserver' in window) new ResizeObserver(postHeight).observe(document.body);
+  window.addEventListener('load', postHeight);
+  postHeight();
+}
+
+(MULTI ? renderMultiScene : renderScene)(0, []);
 init().then(() => {
   $('status').textContent = 'ready · press Run (or pick a seed above)';
   start();
