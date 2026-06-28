@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # The demo reuses paros-sim's workloads + oracles unchanged, in the wasm-able
 # configuration (no native moonpool features). The real RPC stack runs over the
 # simulated network.
-paros-sim = { path = "../paros-sim", version = "0.1.0", default-features = false }
+paros-sim = { path = "../paros-sim", version = "0.2.0", default-features = false }
 serde_json = "1"
 
 # wasm-only glue. The crate version MUST exactly match the flake's
