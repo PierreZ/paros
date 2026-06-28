@@ -23,7 +23,7 @@ native = [
 [dependencies]
 # The node driver + RPC contract + MemStorage live in `paros` (the library); this
 # crate is just the DST harness on top: the `Process` adapter, workloads, oracles.
-paros = { path = "../paros", version = "0.1.0" }
+paros = { path = "../paros", version = "0.2.0" }
 
 # moonpool is pinned to a commit on `main` (not the crates.io release): it evolves
 # fast and we track it deliberately, bumping `rev` by hand. Both crates come in
