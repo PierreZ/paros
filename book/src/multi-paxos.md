@@ -30,23 +30,24 @@ random, and read what actually happened.
 ```mermaid
 sequenceDiagram
   autonumber
-  participant L as Leader, owns ballot r
-  participant F1 as Follower
-  participant F2 as Follower
+  participant L as Leader N2, ballot (4,2)
+  participant F1 as Follower N0
+  participant F2 as Follower N1
+  note over L,F2: v5 = Entry("C7",1,"SET x=1"), v6 = Entry("C7",2,"SET y=2")
   rect rgba(70, 170, 110, 0.25)
     note over L,F2: Phase 1 — once per ballot
-    L->>F1: Prepare (r, from_slot)
-    L->>F2: Prepare (r, from_slot)
-    F1-->>L: Promise (+ accepted suffix)
-    F2-->>L: Promise (+ accepted suffix)
+    L->>F1: Prepare(ballot=(4,2), from_slot=5)
+    L->>F2: Prepare(ballot=(4,2), from_slot=5)
+    F1-->>L: Promise(ballot=(4,2), accepted_suffix={5: ((2,1), v5)})
+    F2-->>L: Promise(ballot=(4,2), accepted_suffix={})
   end
-  note over L: adopt any recovered values, fill gaps, then stream
-  L->>F1: Accept (r, slot 5, v5)
-  L->>F2: Accept (r, slot 5, v5)
-  L->>F1: Accept (r, slot 6, v6)
-  L->>F2: Accept (r, slot 6, v6)
-  F1-->>L: Accepted (slot 5)
-  F2-->>L: Accepted (slot 5)
+  note over L: adopt recovered v5, fill gaps, then stream
+  L->>F1: Accept(ballot=(4,2), slot=5, entry=v5)
+  L->>F2: Accept(ballot=(4,2), slot=5, entry=v5)
+  L->>F1: Accept(ballot=(4,2), slot=6, entry=v6)
+  L->>F2: Accept(ballot=(4,2), slot=6, entry=v6)
+  F1-->>L: Accepted(ballot=(4,2), slot=5)
+  F2-->>L: Accepted(ballot=(4,2), slot=5)
   note over L,F2: Phase 2 — streamed per slot, no new Prepare
 ```
 

@@ -32,24 +32,26 @@ Two round trips, two of three acceptors each time:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant P as Proposer at ballot b
+    participant P as Proposer N2 at ballot (4,2)
     participant A0 as Acceptor 0
     participant A1 as Acceptor 1
     participant A2 as Acceptor 2
     Note over P,A2: Phase 1, claim the ballot
-    P->>A0: Prepare(b)
-    P->>A1: Prepare(b)
-    P->>A2: Prepare(b)
-    A0-->>P: Promise(b)
-    A1-->>P: Promise(b)
-    Note over P: a majority promised, so P owns ballot b.<br/>It adopts the highest already-accepted value it saw,<br/>or picks its own if no acceptor reported one.
+    P->>A0: Prepare(ballot=(4,2))
+    P->>A1: Prepare(ballot=(4,2))
+    P->>A2: Prepare(ballot=(4,2))
+    A0-->>P: Promise(ballot=(4,2), accepted=none)
+    A1-->>P: Promise(ballot=(4,2), accepted=none)
+    Note over A0,A1: promised ballot raised to (4,2),<br/>now refuse anything below it
+    Note over P: a majority promised, so N2 owns ballot (4,2).<br/>No acceptor reported a value, so N2 may use its own: "SET x=1".
     Note over P,A2: Phase 2, get a value chosen
-    P->>A0: Accept(b, v)
-    P->>A1: Accept(b, v)
-    P->>A2: Accept(b, v)
-    A0-->>P: Accepted(b)
-    A1-->>P: Accepted(b)
-    Note over P: a majority accepted, so v is chosen.<br/>P broadcasts Commit and every node learns it.
+    P->>A0: Accept(ballot=(4,2), value="SET x=1")
+    P->>A1: Accept(ballot=(4,2), value="SET x=1")
+    P->>A2: Accept(ballot=(4,2), value="SET x=1")
+    A0-->>P: Accepted(ballot=(4,2))
+    A1-->>P: Accepted(ballot=(4,2))
+    Note over A0,A1: accepted "SET x=1" at (4,2)
+    Note over P: a majority accepted, so "SET x=1" is chosen.<br/>N2 broadcasts Commit and every node learns it.
 ```
 
 (Acceptor 2 never replies above: a majority is two of three, so the proposer
@@ -79,17 +81,17 @@ its own value and re-propose the one with the highest ballot:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant P2 as Proposer 2 at ballot (2,1)
+    participant P2 as Proposer N2 at ballot (4,2)
     participant A0 as Acceptor 0
     participant A1 as Acceptor 1
-    Note over A0,A1: both already accepted "cat" at ballot (1,0)
-    P2->>A0: Prepare (2,1)
-    P2->>A1: Prepare (2,1)
-    A0-->>P2: Promise (2,1), piggybacks (1,0) = "cat"
-    A1-->>P2: Promise (2,1), piggybacks (1,0) = "cat"
-    Note over P2: a value came back on the Promises,<br/>so P2 may not propose its own.<br/>It must re-propose the highest-ballot one: "cat".
-    P2->>A0: Accept (2,1), "cat"
-    P2->>A1: Accept (2,1), "cat"
+    Note over A0,A1: both already accepted "SET x=1" at ballot (2,1)
+    P2->>A0: Prepare(ballot=(4,2))
+    P2->>A1: Prepare(ballot=(4,2))
+    A0-->>P2: Promise(ballot=(4,2), accepted=(2,1) "SET x=1")
+    A1-->>P2: Promise(ballot=(4,2), accepted=(2,1) "SET x=1")
+    Note over P2: a value came back on the Promises,<br/>so N2 may not propose its own.<br/>It must re-propose the highest-ballot one: "SET x=1".
+    P2->>A0: Accept(ballot=(4,2), value="SET x=1")
+    P2->>A1: Accept(ballot=(4,2), value="SET x=1")
 ```
 
 In paros the piggybacked values are the `accepted` map inside `Message::Promise`
@@ -115,12 +117,12 @@ rules govern every reply, and together they are the whole of Paxos safety:
 stateDiagram-v2
     direction TB
     [*] --> Listening
-    Listening --> Promised: Prepare with a higher ballot,<br/>persist it, reply Promise
-    Promised --> Promised: Prepare with an even higher ballot
-    Promised --> Voted: Accept at a ballot at least the promise,<br/>persist the value, reply Accepted
-    Voted --> Voted: Accept at a ballot at least the promise
-    Promised --> Promised: anything below the promise, reply Nack
-    Voted --> Voted: anything below the promise, reply Nack
+    Listening --> Promised: Prepare(4,2) > promise,<br/>persist (4,2), reply Promise
+    Promised --> Promised: Prepare(5,0), even higher,<br/>persist (5,0)
+    Promised --> Voted: Accept((4,2), "SET x=1") >= promise,<br/>persist value, reply Accepted
+    Voted --> Voted: Accept((4,2), "SET x=1") >= promise, resend
+    Promised --> Promised: Prepare(1,0) below promise, reply Nack
+    Voted --> Voted: Accept((1,0), ...) below promise, reply Nack
 ```
 
 In paros the promise lives in `max_promised_ballot` and the accepted value in the

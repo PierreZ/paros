@@ -29,13 +29,13 @@ argument, because:
 
 > any two majorities intersect.
 
-Take three acceptors. The majority that chose `v` is some set of two. Any later
+Take three acceptors. The majority that chose `SET x=1` is some set of two. Any later
 majority is also a set of two. Two sets of two, drawn from three, must share at
 least one acceptor:
 
 ```mermaid
 flowchart TD
-    M1["Majority that chose v:<br/>A0 and A1"]
+    M1["Majority that chose<br/>SET x=1: A0 and A1"]
     M2["Any later majority:<br/>A1 and A2"]
     A0((A0))
     A1((A1)):::shared
@@ -47,7 +47,7 @@ flowchart TD
     classDef shared fill:#c97a2b,stroke:#7a4718,color:#fff
 ```
 
-That shared acceptor (A1) is the pivot. It saw the value `v` get chosen, and it
+That shared acceptor (A1) is the pivot. It saw `SET x=1` get chosen, and it
 will be consulted by anyone who tries to choose later. If we can force every
 later proposal to respect what that pivot remembers, two different values can
 never both be chosen. The rest of the protocol exists to do exactly that.
@@ -66,7 +66,7 @@ flowchart TD
     P2["P2: if v is chosen, every higher-numbered<br/>chosen proposal also has value v"]
     P2A["P2a: ... every higher-numbered proposal<br/>ACCEPTED by any acceptor has value v"]
     P2B["P2b: ... every higher-numbered proposal<br/>ISSUED by any proposer has value v"]
-    P2C["P2c: before issuing (n, v), some majority S has either<br/>(a) accepted nothing numbered below n, or<br/>(b) v is the highest-numbered value accepted below n in S"]
+    P2C["P2c: before issuing (n, v), some majority S has either<br/>(a) accepted nothing numbered below n, or<br/>(b) v is the highest-numbered value accepted below n in S<br/>(e.g. n=(4,2), v=SET x=1)"]
     PROTO["The two-phase protocol:<br/>Phase 1 reads the constraint, Phase 2 proposes the safe value"]
     SAFE --> P2 --> P2A --> P2B --> P2C --> PROTO
 ```
@@ -110,16 +110,17 @@ how a value, once chosen, stays chosen forever.
 ## Recovery, not catch-up
 
 It is tempting to read this rule as a way to help slow acceptors catch up: the
-proposer sees "cat", so it spreads "cat" to the others. That intuition is half
-right, and the wrong half is the important one.
+proposer sees "SET x=1", so it spreads "SET x=1" to the others. That intuition is
+half right, and the wrong half is the important one.
 
 The literature calls this step **recovery**: a new leader, before it may lead,
 recovers any value that might already be committed and re-commits it under its own
-ballot. When "cat" really was chosen, re-proposing it does heal acceptors that
+ballot. When "SET x=1" really was chosen, re-proposing it does heal acceptors that
 missed it, so it looks like catch-up. But the rule **also fires when nothing was
-chosen and no acceptor is behind**. If one acceptor accepted "cat" at a low ballot
-and it never reached a majority, the proposer must *still* re-propose "cat",
-because it cannot tell that world apart from the one where "cat" is already chosen.
+chosen and no acceptor is behind**. If one acceptor accepted "SET x=1" at a low
+ballot and it never reached a majority, the proposer must *still* re-propose
+"SET x=1", because it cannot tell that world apart from the one where "SET x=1" is
+already chosen.
 
 | | Recovery (adopt the highest) | Catch-up (`Commit`, heartbeat resend) |
 |---|---|---|
