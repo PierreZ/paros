@@ -43,10 +43,10 @@ a **compile** error until the first is acknowledged:
 ```mermaid
 flowchart TD
     step["step(msg) or tick():<br/>run protocol logic, fill the pending buckets"]
-    r1["1. Persist HardState to stable storage"]
-    r2["2. Send messages to peers"]
-    r3["3. Apply committed entries to the state machine"]
-    r4["4. advance(): release the gate for the next batch"]
+    r1["Step 1 — persist HardState<br/>(mpb, accepted, chosen_index)"]
+    r2["Step 2 — send messages to peers"]
+    r3["Step 3 — apply committed entries"]
+    r4["Step 4 — advance(): release the gate"]
     step --> r1 --> r2 --> r3 --> r4
     r1 -. "a Promise or Accepted sent before its HardState<br/>is durable is a safety violation" .-> r2
 ```
@@ -61,28 +61,29 @@ requirement: the durable state must not just be *written in order*, it must stay
 ```mermaid
 sequenceDiagram
     autonumber
-    participant N as Node A
+    participant N as Node N0
     participant D as Durable storage
-    Note over N,D: 1. accept a value at a low ballot that never gets chosen
-    N->>D: accepted[0] = (ballot 1, value X)
-    Note over N,D: 2. learn the cluster chose a DIFFERENT value
-    N->>N: Commit: slot 0 is (ballot 2, value Y)
-    Note over N: chosen[0] = Y, in memory
+    Note over N,D: X = Entry("C7",7,"SET q=0"), Y = v5 = Entry("C7",1,"SET x=1")
+    Note over N,D: Step 1 — accept a value at a low ballot that never gets chosen
+    N->>D: accepted[5] = ((1,0), X)
+    Note over N,D: Step 2 — learn the cluster chose a DIFFERENT value
+    N->>N: Commit: slot 5 is ((4,2), Y)
+    Note over N: chosen[5] = Y, in memory
     rect rgba(200, 70, 70, 0.25)
-    Note over N,D: BUG: durable accepted[0] still holds the stale (ballot 1, X)
+    Note over N,D: BUG: durable accepted[5] still holds the stale ((1,0), X)
     end
-    Note over N,D: 3. crash, then rebuild chosen from accepted on restart
-    D->>N: accepted[0] = (ballot 1, X)
+    Note over N,D: Step 3 — crash, then rebuild chosen from accepted on restart
+    D->>N: accepted[5] = ((1,0), X)
     rect rgba(200, 70, 70, 0.25)
-    Note over N: chosen[0] rebuilds to X, contradicting the cluster's choice of Y
+    Note over N: chosen[5] rebuilds to X, contradicting the cluster's choice of Y
     end
 ```
 
-The node learned that slot 0 was chosen as `Y`, but it still had an old, never
+The node learned that slot 5 was chosen as `Y`, but it still had an old, never
 chosen `X` sitting in its durable `accepted` map from a failed earlier ballot. In
 memory that did not matter, because the volatile `chosen` map held `Y`. But on
 restart, `RawNode::new` rebuilds the volatile state from the durable `accepted`
-map (`node.rs`), and there it found `X`. The node came back believing slot 0 was
+map (`node.rs`), and there it found `X`. The node came back believing slot 5 was
 `X`. Two nodes, two different values for one slot: the exact thing
 [Why one value is safe](safety.md) promised could never happen.
 
@@ -108,17 +109,18 @@ so the restart rebuilds the right answer:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant N as Node A
+    participant N as Node N0
     participant D as Durable storage
-    N->>D: accepted[0] = (ballot 1, value X)
-    N->>N: Commit: slot 0 is (ballot 2, value Y)
+    Note over N,D: X = Entry("C7",7,"SET q=0"), Y = v5 = Entry("C7",1,"SET x=1")
+    N->>D: accepted[5] = ((1,0), X)
+    N->>N: Commit: slot 5 is ((4,2), Y)
     rect rgba(70, 170, 110, 0.25)
-    N->>D: mark_chosen OVERWRITES accepted[0] = (ballot 2, value Y)
+    N->>D: mark_chosen OVERWRITES accepted[5] := ((4,2), Y)
     end
     Note over N,D: crash, then rebuild on restart
-    D->>N: accepted[0] = (ballot 2, Y)
+    D->>N: accepted[5] = ((4,2), Y)
     rect rgba(70, 170, 110, 0.25)
-    Note over N: chosen[0] rebuilds to Y, the value the cluster chose
+    Note over N: chosen[5] rebuilds to Y, the value the cluster chose
     end
 ```
 

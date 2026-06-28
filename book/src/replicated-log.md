@@ -74,19 +74,22 @@ slots out of order. A leader can get slot 3 chosen before slot 2, leaving a
 
 ```mermaid
 flowchart TD
-    s0["slot 0<br/>set x=1<br/>chosen"]:::done
-    s1["slot 1<br/>set y=2<br/>chosen"]:::done
-    s2["slot 2<br/>hole<br/>not yet chosen"]:::gap
-    s3["slot 3<br/>set z=9<br/>chosen"]:::open
-    s0 --> s1 --> s2 --> s3
+    s5["slot 5<br/>SET x=1<br/>chosen"]:::done
+    s6["slot 6<br/>SET y=2<br/>chosen"]:::done
+    s7["slot 7<br/>SET z=3<br/>not yet chosen"]:::gap
+    s8["slot 8<br/>SET w=4<br/>chosen"]:::open
+    s5 --> s6 --> s7 --> s8
+    ci["chosen_index = Some(Slot(6))<br/>apply up to here, then stop at the hole"]:::ci
+    ci -.-> s6
     classDef done fill:#3b6e47,stroke:#244730,color:#fff
     classDef gap fill:#7a2f2f,stroke:#4d1f1f,color:#fff
     classDef open fill:#5a5a5a,stroke:#333,color:#fff
+    classDef ci fill:#2f4f6e,stroke:#1f3147,color:#fff
 ```
 
-Here slots 0 and 1 are chosen, slot 2 is still a hole, and slot 3 is already
-chosen. The commit index is `Some(Slot(1))`: the application may apply slots 0 and
-1, but it **must not** apply slot 3 yet, because applying slot 3 before slot 2
+Here slots 5 and 6 are chosen, slot 7 is still a hole, and slot 8 is already
+chosen. The commit index is `Some(Slot(6))`: the application may apply slots 5 and
+6, but it **must not** apply slot 8 yet, because applying slot 8 before slot 7
 would execute commands out of order on this node but maybe in a different order on
 another. The log advances only as a contiguous prefix. In paros,
 `advance_chosen_index` walks that prefix forward one slot at a time and surfaces

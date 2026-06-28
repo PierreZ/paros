@@ -55,21 +55,24 @@ collects them in the `Election.recovered` map and re-proposes each one through
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Candidate, new ballot
-    participant A1 as Acceptor 1
-    participant A2 as Acceptor 2
-    Note over C,A2: Phase 1, once, for the whole log suffix
-    C->>A1: Prepare(ballot, from_slot)
-    C->>A2: Prepare(ballot, from_slot)
-    A1-->>C: Promise(ballot, accepted entries at slots >= from_slot)
-    A2-->>C: Promise(ballot, accepted entries at slots >= from_slot)
-    Note over C: a majority promised, so C is now Leader.<br/>It re-proposes every recovered in-flight slot first,<br/>then is free to stream new ones.
-    Note over C,A2: Phase 2, streamed per slot, no more Prepare
-    C->>A1: Accept(ballot, recovered slot)
-    C->>A2: Accept(ballot, recovered slot)
-    A1-->>C: Accepted(ballot, slot)
-    A2-->>C: Accepted(ballot, slot)
-    Note over C: quorum reached, slot chosen, Commit broadcast
+    participant C as Candidate N2, ballot (4,2)
+    participant A0 as Acceptor N0
+    participant A1 as Acceptor N1
+    Note over C,A1: v5 = Entry("C7",1,"SET x=1")
+    Note over C,A1: Phase 1, once, for the whole log suffix
+    C->>A0: Prepare(ballot=(4,2), from_slot=5)
+    C->>A1: Prepare(ballot=(4,2), from_slot=5)
+    A0-->>C: Promise(ballot=(4,2), accepted_suffix={5: ((2,1), v5)})
+    A1-->>C: Promise(ballot=(4,2), accepted_suffix={})
+    Note over A0,A1: mpb (2,1)->(4,2)
+    Note over C: a majority promised, so N2 is now Leader.<br/>Slot 5 came back accepted at (2,1): recover it first<br/>(re-propose v5 at (4,2)) before streaming new slots.
+    Note over C,A1: Phase 2, streamed per slot, no more Prepare
+    C->>A0: Accept(ballot=(4,2), slot=5, entry=v5)
+    C->>A1: Accept(ballot=(4,2), slot=5, entry=v5)
+    A0-->>C: Accepted(ballot=(4,2), slot=5)
+    A1-->>C: Accepted(ballot=(4,2), slot=5)
+    Note over A0,A1: accepted[5] := ((4,2), v5)
+    Note over C: quorum on slot 5, chosen.<br/>chosen_index 4->5, Commit broadcast
 ```
 
 This is Paxos Made Moderately Complex's scout-then-commander pattern, with the scout
@@ -84,15 +87,16 @@ the leader assigns the next free slot and goes straight to Accept.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Cl as Client
-    participant L as Leader, owns the ballot
-    participant A as Acceptors, a majority
-    Cl->>L: Propose(command)
-    Note over L: assign the next free slot, no Phase 1 needed
-    L->>A: Accept(ballot, slot, entry)
-    A-->>L: Accepted(ballot, slot)
-    Note over L: a quorum accepted, so the slot is chosen
-    L-->>Cl: ProposeAck(committed)
+    participant Cl as Client C7
+    participant L as Leader N2, ballot (4,2)
+    participant A as Acceptors N0, N1 (a majority)
+    Note over Cl,A: v6 = Entry("C7",2,"SET y=2")
+    Cl->>L: Propose(v6)
+    Note over L: assign the next free slot, 6, no Phase 1 needed
+    L->>A: Accept(ballot=(4,2), slot=6, entry=v6)
+    A-->>L: Accepted(ballot=(4,2), slot=6)
+    Note over L: a quorum accepted, so slot 6 is chosen.<br/>accepted[6] := ((4,2), v6)<br/>chosen_index 5->6
+    L-->>Cl: ProposeAck(slot 6 committed)
 ```
 
 One round trip to a majority per command. Lamport notes this is not just fast but
@@ -129,10 +133,10 @@ roles:
 stateDiagram-v2
     direction TB
     [*] --> Follower
-    Follower --> Candidate: election timeout fires,<br/>bump ballot, send Prepare
-    Candidate --> Leader: won a promise quorum
-    Candidate --> Follower: saw a higher ballot, Nack
-    Leader --> Follower: saw a higher ballot
+    Follower --> Candidate: election timeout fires,<br/>bump ballot to (4,2), Prepare(from_slot=5)
+    Candidate --> Leader: won a promise quorum at (4,2)
+    Candidate --> Follower: saw a higher ballot (5,0), Nack
+    Leader --> Follower: saw a higher ballot (5,0)
     Leader --> Leader: heartbeat tick,<br/>resend un-acked Accepts
     Follower --> Follower: heartbeat or Accept from leader,<br/>reset election clock
 ```
@@ -187,56 +191,72 @@ log into a system you can run for months without the disk filling up.
 
 ## The whole flow, end to end
 
-Putting the pieces together, here is the whole protocol in one picture: one node
-wins an election (Phase 1, run **once** for the whole log), then streams a sequence
-of client values into the log, one Accept round per slot, never paying for Phase 1
-again. Notice the **pipelining**: the leader fires the Accept for slot 1 before
-slot 0 has come back, so several values are in flight at once, and the commit index
-walks forward as quorums land.
+Putting the pieces together, here is the whole protocol in two pictures. First the
+**election**: Node 2 times out, claims ballot `(4,2)` for the whole log suffix
+(`from_slot=5`), and on a promise quorum becomes Leader. Slot 5 came back accepted
+at the old ballot `(2,1)`, so before opening fresh slots the new leader
+**recovers** it, re-proposing `v5` at `(4,2)` and watching `chosen_index` step
+from `4` to `5`:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Cl as Client
+    participant Cl as Client C7
     participant N0 as Node 0
     participant N1 as Node 1
     participant N2 as Node 2
 
-    Note over N0,N2: Election, Phase 1, run once for the whole log
-    Note over N0: no leader heard from, election timeout fires:<br/>become Candidate, bump ballot to (1,0)
-    N0->>N1: Prepare(ballot (1,0), from_slot 0)
-    N0->>N2: Prepare(ballot (1,0), from_slot 0)
-    N1-->>N0: Promise(ballot (1,0), nothing accepted yet)
-    N2-->>N0: Promise(ballot (1,0), nothing accepted yet)
-    Note over N0: a majority promised, Node 0 is Leader.<br/>(any accepted entries reported here would be re-proposed first)
+    Note over N0,N2: v5 = Entry("C7",1,"SET x=1")
+    Note over N0,N2: Election, Phase 1, run once for the whole log suffix
+    Note over N2: no leader heard from, election timeout fires:<br/>become Candidate, bump ballot to (4,2)
+    N2->>N0: Prepare(ballot=(4,2), from_slot=5)
+    N2->>N1: Prepare(ballot=(4,2), from_slot=5)
+    N0-->>N2: Promise(ballot=(4,2), accepted_suffix={5: ((2,1), v5)})
+    N1-->>N2: Promise(ballot=(4,2), accepted_suffix={})
+    Note over N2: a majority promised, Node 2 is Leader.<br/>slot 5 was accepted at (2,1): recover it first.
+    N2->>N0: Accept(ballot=(4,2), slot=5, entry=v5)
+    N2->>N1: Accept(ballot=(4,2), slot=5, entry=v5)
+    N0-->>N2: Accepted(ballot=(4,2), slot=5)
+    N1-->>N2: Accepted(ballot=(4,2), slot=5)
+    Note over N2: slot 5 chosen. chosen_index 4->5
+    N2-->>Cl: ProposeAck(slot 5 committed)
+```
 
+Then the **steady state**: the leader streams new client values into the log, one
+Accept round per slot, never paying for Phase 1 again. Notice the **pipelining**:
+the leader fires the Accept for slot 7 before slot 6 has come back, so several
+values are in flight at once, and the commit index walks forward (`5 -> 6 -> 7`) as
+quorums land:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as Client C7
+    participant N0 as Node 0
+    participant N1 as Node 1
+    participant N2 as Node 2
+
+    Note over N0,N2: v6 = Entry("C7",2,"SET y=2"), v7 = Entry("C7",3,"SET z=3")
     Note over Cl,N2: Storing values, Phase 2, streamed per slot, no Prepare again
-    Cl->>N0: Propose(x = 1)
-    N0->>N1: Accept(ballot (1,0), slot 0, x = 1)
-    N0->>N2: Accept(ballot (1,0), slot 0, x = 1)
-    Cl->>N0: Propose(y = 2)
-    N0->>N1: Accept(ballot (1,0), slot 1, y = 2)
-    N0->>N2: Accept(ballot (1,0), slot 1, y = 2)
-    N1-->>N0: Accepted(slot 0)
-    N2-->>N0: Accepted(slot 0)
-    Note over N0: slot 0 has a quorum, chosen. commit index = 0
-    N0-->>Cl: ProposeAck(x = 1 committed)
-    Cl->>N0: Propose(z = 3)
-    N0->>N1: Accept(ballot (1,0), slot 2, z = 3)
-    N0->>N2: Accept(ballot (1,0), slot 2, z = 3)
-    N1-->>N0: Accepted(slot 1)
-    N2-->>N0: Accepted(slot 1)
-    Note over N0: slot 1 chosen. commit index = 1
-    N0-->>Cl: ProposeAck(y = 2 committed)
-    N1-->>N0: Accepted(slot 2)
-    N2-->>N0: Accepted(slot 2)
-    Note over N0: slot 2 chosen. commit index = 2
-    N0-->>Cl: ProposeAck(z = 3 committed)
+    Cl->>N2: Propose(v6)
+    N2->>N0: Accept(ballot=(4,2), slot=6, entry=v6)
+    N2->>N1: Accept(ballot=(4,2), slot=6, entry=v6)
+    Cl->>N2: Propose(v7)
+    N2->>N0: Accept(ballot=(4,2), slot=7, entry=v7)
+    N2->>N1: Accept(ballot=(4,2), slot=7, entry=v7)
+    N0-->>N2: Accepted(ballot=(4,2), slot=6)
+    N1-->>N2: Accepted(ballot=(4,2), slot=6)
+    Note over N2: slot 6 chosen. chosen_index 5->6
+    N2-->>Cl: ProposeAck(slot 6 committed)
+    N0-->>N2: Accepted(ballot=(4,2), slot=7)
+    N1-->>N2: Accepted(ballot=(4,2), slot=7)
+    Note over N2: slot 7 chosen. chosen_index 6->7
+    N2-->>Cl: ProposeAck(slot 7 committed)
 
     Note over N0,N2: Heartbeat, carry the commit index so followers advance
-    N0->>N1: Heartbeat(ballot (1,0), commit 2)
-    N0->>N2: Heartbeat(ballot (1,0), commit 2)
-    Note over N1,N2: followers apply the log prefix [x=1, y=2, z=3]
+    N2->>N0: Heartbeat(ballot=(4,2), commit=7)
+    N2->>N1: Heartbeat(ballot=(4,2), commit=7)
+    Note over N0,N1: followers apply the prefix [..., SET x=1, SET y=2, SET z=3]
 ```
 
 With a stable leader streaming a log, one question remains: what happens when a
