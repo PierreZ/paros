@@ -12,9 +12,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle, buggify_with_prob};
+use moonpool_sim::{
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_with_prob,
+};
 use paros::{
     Ballot, Config, CrashSeam, Entry, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
     Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
@@ -72,7 +75,10 @@ impl Process for NodeProcess {
         // but stable across a process's reboots). Each node reaches it through a
         // `Weak` handle upgraded per op.
         let world = storage_world(ctx.state());
-        let crash = SeamCrasher;
+        let crash = SeamCrasher {
+            time: ctx.time().clone(),
+            cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
+        };
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
@@ -285,10 +291,21 @@ impl Storage for DurableStorage {
 /// and deterministically so (a failing seed replays bit-identically). This is the
 /// repo's first real `buggify!()` use: attrition crashes a node only *between*
 /// Ready batches; this reaches the persist/send seam *within* one.
-struct SeamCrasher;
+///
+/// Seam crashes are gated to the chaos window (like attrition, which the harness
+/// already bounds by `chaos_duration`): they fire only while `time.now()` is
+/// within [`crate::CHAOS_DURATION_MS`]. The client's post-chaos settle tail must be
+/// genuinely quiet so a lagging node can run commit-replay catch-up to completion
+/// and *durably* converge — a seam crash that keeps discarding the relaxed
+/// chosen-index write in that tail would make convergence unreachable (the
+/// [`crate::oracle::ConvergenceOracle`] asserts over exactly that tail).
+struct SeamCrasher<T> {
+    time: T,
+    cutoff: Duration,
+}
 
-impl CrashSeam for SeamCrasher {
+impl<T: TimeProvider> CrashSeam for SeamCrasher<T> {
     fn crash_at(&self, _seam: Seam) -> bool {
-        buggify_with_prob!(0.03)
+        self.time.now() < self.cutoff && buggify_with_prob!(0.03)
     }
 }

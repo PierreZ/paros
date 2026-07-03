@@ -15,6 +15,11 @@ use crate::write::WriteOp;
 /// always beats before any follower's election clock fires.
 const HEARTBEAT_TICKS: u64 = 1;
 
+/// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
+/// lagging peer that needs more re-requests on the next heartbeat, so a large
+/// backlog is drained over several rounds rather than one unbounded message.
+const CATCHUP_BATCH: usize = 64;
+
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -244,8 +249,14 @@ impl RawNode {
                 entry,
                 ..
             } => self.on_commit(ballot, slot, &entry),
+            Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
+            Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
             Message::CheckLeader { .. } => self.on_check_leader(),
-            Message::Heartbeat { from, ballot, .. } => self.on_heartbeat(from, ballot),
+            Message::Heartbeat {
+                from,
+                ballot,
+                commit,
+            } => self.on_heartbeat(from, ballot, commit),
         }
     }
 
@@ -349,6 +360,19 @@ impl RawNode {
         self.broadcast(&Message::Prepare {
             from: me,
             ballot: self.ballot,
+            from_slot,
+        });
+        // Proactive catch-up probe. The election clock fires precisely when we have
+        // *not* heard a satisfactory leader — the same condition under which we may
+        // be silently behind: a stale or absent leader beat never reveals a decided
+        // slot past our prefix, so heartbeat-triggered catch-up never fires. Ask
+        // every peer to replay our decided-prefix gap directly; any peer that has
+        // those slots chosen serves them, healing us even if this election does not
+        // win (a won election gap-fills only *accepted* slots it can re-proposes;
+        // this learns *chosen* ones outright). Harmless when we are not behind — a
+        // peer with nothing past `from_slot` simply sends nothing.
+        self.broadcast(&Message::CatchUpRequest {
+            from: me,
             from_slot,
         });
         self.try_become_leader();
@@ -531,7 +555,7 @@ impl RawNode {
     }
 
     /// Leader self-beat or a follower receiving a peer beat.
-    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot) {
+    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot) {
         let me = self.config.id;
         if from == me {
             // Leader self-trigger: broadcast the beat and re-send un-acked
@@ -557,7 +581,8 @@ impl RawNode {
             }
             return;
         }
-        // Follower receiving the leader's beat.
+        // Follower receiving the leader's beat: adopt its ballot / leadership only
+        // if it is at or above our promise.
         if ballot >= self.hard_state.max_promised_ballot {
             if self.role == NodeRole::Follower {
                 self.leader = Some(from);
@@ -569,8 +594,94 @@ impl RawNode {
                 self.ballot = ballot;
             }
         }
-        // We do not fabricate chosen-ness from the heartbeat's `commit`; the
-        // prefix only advances over slots we have actually chosen.
+        // Commit-replay catch-up reconciles the sender's advertised contiguous
+        // chosen prefix (`commit`) against ours, in **both** directions. It is
+        // deliberately **not** gated on `ballot >= promise`: catch-up learns
+        // *immutable chosen history*, not leadership, and a value either side has
+        // decided is quorum-committed and safe to learn. The per-beat cadence
+        // rate-limits (and self-heals a lost message); it stops once the prefixes
+        // agree.
+        match self.hard_state.chosen_index {
+            // We are behind: a `Commit` (and its `Accept`) for a decided slot never
+            // reached us — the leader only re-sends `Accept`s for still-*pending*
+            // slots, so that hole would be permanent. Pull the decided range from
+            // our first unchosen slot.
+            _ if self.lags_behind(commit) => {
+                let from_slot = self.first_unchosen();
+                self.pending_messages.push((
+                    from,
+                    Message::CatchUpRequest {
+                        from: me,
+                        from_slot,
+                    },
+                ));
+            }
+            // We are ahead of the sender: push what it is missing. This is what
+            // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a
+            // crash — it beats a stale low `commit`, so no follower would ever pull;
+            // a follower that *does* know the slot is decided replays it to the
+            // leader, which then advertises the true prefix and the genuinely-behind
+            // nodes pull.
+            Some(ci) if commit < ci => self.serve_catchup(from, commit),
+            _ => {}
+        }
+    }
+
+    /// Whether the leader's advertised contiguous chosen prefix (`commit`) names a
+    /// slot we have not yet chosen contiguously. `commit` defaults to `Slot(0)` on
+    /// a leader that has chosen nothing, so a bare `Slot(0)` from a follower that
+    /// also has nothing is (correctly) not treated as lagging.
+    fn lags_behind(&self, commit: Slot) -> bool {
+        match self.hard_state.chosen_index {
+            Some(ci) => commit > ci,
+            None => commit > Slot(0),
+        }
+    }
+
+    /// Serve a lagging peer's catch-up request by replaying the decided range.
+    fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {
+        self.serve_catchup(from, from_slot);
+    }
+
+    /// Send `to` the decided `(ballot, entry)` per slot for a bounded range at or
+    /// after `from_slot`, up to our own contiguous chosen prefix. A node with
+    /// nothing chosen at or above `from_slot` sends nothing. Every entry is chosen —
+    /// durable and quorum-decided — so the recipient may learn it directly (the
+    /// same safety a `Commit` relies on). Used both to answer a pull
+    /// ([`Message::CatchUpRequest`]) and to push a decided prefix to a peer whose
+    /// heartbeat `commit` shows it is behind us.
+    fn serve_catchup(&mut self, to: NodeId, from_slot: Slot) {
+        let me = self.config.id;
+        let Some(ci) = self.hard_state.chosen_index else {
+            return;
+        };
+        if from_slot > ci {
+            return;
+        }
+        let mut entries: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
+        for (slot, entry) in self.chosen.range(from_slot..=ci) {
+            if entries.len() >= CATCHUP_BATCH {
+                break;
+            }
+            // The choosing ballot is the ballot recorded for this slot in the
+            // accepted log (a chosen value is recorded authoritatively there).
+            let ballot = self.accepted.get(slot).map_or(self.ballot, |(b, _)| *b);
+            entries.insert(*slot, (ballot, entry.clone()));
+        }
+        if entries.is_empty() {
+            return;
+        }
+        self.pending_messages
+            .push((to, Message::CatchUpResponse { from: me, entries }));
+    }
+
+    /// Learn every decided entry a peer replayed to us. Each is chosen (durable,
+    /// quorum-decided), so `mark_chosen` records it authoritatively and advances
+    /// the contiguous prefix — filling the hole a missed `Accept`+`Commit` left.
+    fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Entry)>) {
+        for (slot, (ballot, entry)) in entries {
+            self.mark_chosen(slot, &entry, ballot);
+        }
     }
 
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.

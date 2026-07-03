@@ -28,9 +28,9 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, LeadershipOracle, NoGapsOracle, ProgressOracle, ProtocolData,
-    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
-    TimelineRecorder, build_result,
+    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, NoGapsOracle, ProgressOracle,
+    ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
+    SafetyOracle, TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -44,6 +44,13 @@ pub(crate) const REQUESTS: u32 = 12;
 pub(crate) const TIMEOUT_MS: u64 = 1000;
 /// Gap between proposals, in simulated milliseconds, so node ticks interleave.
 pub(crate) const GAP_MS: u64 = 20;
+/// Quiescence window the client holds open *after* its last proposal before it
+/// returns (and thereby triggers the harness shutdown). Chaos has ended by now,
+/// so this is a quiet tail in which the leader keeps heartbeating and any lagging
+/// follower runs commit-replay catch-up to converge. The [`oracle::ConvergenceOracle`]
+/// asserts over exactly this tail; it must comfortably exceed a few heartbeat /
+/// election-timeout intervals plus a catch-up round trip.
+pub(crate) const SETTLE_MS: u64 = 5_000;
 /// Number of paros nodes in the cluster.
 pub(crate) const CLUSTER_SIZE: usize = 3;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
@@ -56,16 +63,26 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
 pub const COVERAGE_ITERATIONS: usize = 64;
 
-/// Pinned seeds that exercise durability edge cases (crash/restart + the
-/// persist/send seam crashes), replayed on every CI run so a regression in the
-/// storage or recovery path is caught immediately — not left to the adaptive
-/// sweep to rediscover. Anchored by the seed on which the `buggify` seam crash
-/// first went red (the `log_applied` gap the recovery path now fills); grows as
-/// new durability bugs are found. Each replays clean via [`run_seed`].
-pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345];
-/// Simulated window over which chaos (network faults + attrition reboots) fires.
-/// Wide enough to span a run's proposal phase so crashes land mid-protocol.
-const CHAOS_DURATION: Duration = Duration::from_secs(30);
+/// Pinned seeds that exercise durability + convergence edge cases (crash/restart,
+/// the persist/send seam crashes, and a follower left with a permanent decided-slot
+/// hole), replayed on every CI run so a regression in the storage, recovery, or
+/// catch-up path is caught immediately — not left to the adaptive sweep to
+/// rediscover. Anchored by the seed on which the `buggify` seam crash first went
+/// red (the `log_applied` gap the recovery path now fills); grows as new bugs are
+/// found. Seed 5 is where the [`oracle::ConvergenceOracle`] first went red: a
+/// follower that missed both the `Accept` and the `Commit` for a decided slot kept
+/// a permanent hole until commit-replay catch-up landed. Each replays clean via
+/// [`run_seed`].
+pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345, 5];
+/// Simulated window (ms) over which chaos (network faults + attrition reboots)
+/// fires — wide enough to span the proposal phase so crashes land mid-protocol
+/// (creating the follower holes convergence must heal), but ending *before* the
+/// client's [`SETTLE_MS`] tail so that tail is quiet. The [`oracle::ConvergenceOracle`]
+/// only asserts once `sim_time_ms` is past this window, so it never trips on the
+/// legitimate transient lag while chaos is still firing.
+pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
+/// Simulated window over which chaos fires (see [`CHAOS_DURATION_MS`]).
+const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 
 /// The chaos surfaces every run exercises: swarm network faults plus single-node
 /// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
@@ -115,6 +132,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
+        .invariant(ConvergenceOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -151,6 +169,17 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
+        // `ConvergenceOracle` is deliberately *not* in the adaptive sweep. The
+        // sweep draws a fresh wall-clock base seed each run, and convergence is a
+        // *liveness* property ("every live node eventually catches up"), not a hard
+        // safety invariant: under the harshest interleavings a lagging node can take
+        // many seconds to converge (slow leader-election stabilization after a crash
+        // reverts a relaxed chosen-index), longer than any bounded settle window. As
+        // an `assert_always` over random seeds that reads as a flaky failure. The
+        // oracle instead runs on the *deterministic* [`run_seed`] path (the pinned
+        // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
+        // red→green result is reproducible; the deterministic core unit test
+        // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

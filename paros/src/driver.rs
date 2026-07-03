@@ -200,6 +200,8 @@ fn message_kind(m: &Message) -> &'static str {
         Message::Accepted { .. } => "accepted",
         Message::Nack { .. } => "nack",
         Message::Commit { .. } => "commit",
+        Message::CatchUpRequest { .. } => "catchup_request",
+        Message::CatchUpResponse { .. } => "catchup_response",
         Message::CheckLeader { .. } => "check_leader",
         Message::Heartbeat { .. } => "heartbeat",
         _ => "unknown",

@@ -87,6 +87,31 @@ pub enum Message {
         entry: Entry,
     },
 
+    // ---- Catch-up (commit replay) ----
+    /// Lagging node → an up-to-date peer: "I am behind; send me every decided slot
+    /// at or after `from_slot`." A follower emits this when a `Heartbeat.commit`
+    /// (or a `Commit` it received out of order) reveals decided slots beyond its
+    /// own contiguous chosen prefix — the hole a missed `Accept`+`Commit` pair
+    /// leaves that no re-send would otherwise fill.
+    CatchUpRequest {
+        /// Sender (where the response is addressed).
+        from: NodeId,
+        /// First slot the requester still needs (its `chosen_index + 1`).
+        from_slot: Slot,
+    },
+    /// An up-to-date peer → the lagging requester: the decided `(ballot, entry)`
+    /// per slot for a bounded range at or after the request's `from_slot`. Every
+    /// entry is already **chosen** on the server (quorum-decided, durable), so the
+    /// requester may learn it directly — the same safety `Commit` relies on. The
+    /// choosing `ballot` is carried so the learner records it authoritatively
+    /// (mirroring [`Message::Promise`]'s `accepted`).
+    CatchUpResponse {
+        /// Sender (the serving peer).
+        from: NodeId,
+        /// Decided entries by slot, contiguous from the request's `from_slot`.
+        entries: BTreeMap<Slot, (Ballot, Entry)>,
+    },
+
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
     /// "Have I heard from a leader recently?" — drives leader election / a
     /// ballot bump when it fires.
