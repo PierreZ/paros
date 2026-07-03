@@ -84,3 +84,35 @@ Publishing/changelogs mirror moonpool: library crates share a `version_group` wi
 `CHANGELOG.md` (release-plz); binaries/demos/xtask are `publish = false`. Note: `paros` and
 `paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
 moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
+
+## Environment detection & setup
+
+At the start of a session, run:
+
+    echo "entrypoint=$CLAUDE_CODE_ENTRYPOINT sandboxed=$CLAUDE_CODE_SANDBOXED"
+
+If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`),
+this project is open in **Claude Code on the web** (an isolated, Anthropic-managed
+cloud VM). In that case, install the Nix binaries before doing anything else:
+
+    if ! command -v nix-store >/dev/null 2>&1; then
+      sudo apt-get update && sudo apt-get install -y nix-bin
+    fi
+
+Any other value (e.g. `cli`, `vscode`) means it's running locally — do NOT run
+the install; assume Nix is already set up on the host.
+
+## Always use Nix-provided software
+
+Once Nix is available, use Nix-provided software for ALL tooling — never rely on
+system or ad-hoc installed binaries:
+
+- Prefer a project shell if one exists: run commands inside `nix develop`
+  (flakes) or `nix-shell` (if there's a `shell.nix`/`default.nix`).
+- To run a one-off tool, use `nix run nixpkgs#<tool> -- <args>` or
+  `nix shell nixpkgs#<tool> -c <command>` instead of `apt-get install`.
+- Do NOT use `apt-get`, `pip install`, `npm -g`, `brew`, or similar to obtain
+  tools; get them from Nix so versions are reproducible across sessions.
+- If a required tool isn't in the environment, add it to the project's
+  flake/`shell.nix` (or fetch it via `nixpkgs#<tool>`) rather than installing
+  it globally.
