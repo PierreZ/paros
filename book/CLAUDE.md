@@ -72,6 +72,14 @@ painter (`renderScene` vs `renderMultiScene`) and the message endpoints differ.
   length, value chosen by N/3, network drops) and a *live narration* (the status line:
   what is happening at the current sim time). Adding a demo metric means deriving it from
   `RunResult`, not threading a new narrative through the prose.
+- **Prefer a still timeline over a moving animation.** A demo should render, for one
+  seed, a *scannable timeline of what happened* — a static picture the reader studies at
+  their own pace — and let them type a different seed to see another run. Do **not**
+  auto-play a constantly-moving animation on load: motion makes the page restless and
+  hard to read, and a reader loses their place. Keep the seed input front and centre;
+  optional play/step controls are fine, but the default view is the still timeline, not a
+  running clock. (The single-decree/multi court scenes predate this rule; new demos —
+  starting with `?mode=crash` — follow it.)
 - **Never pin a "curated" seed to a claimed narrative in prose.** Seeds drift as the
   protocol changes, so a hand-picked "this seed shows X" story silently rots. Embed
   arbitrary fixed seeds; **teach the *concepts* in prose and let the demo narrate the

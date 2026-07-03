@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_CHOSEN, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
-    EV_PERSIST, EV_RECOVERED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CRASHED, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT,
+    EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_RECOVERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -145,6 +145,61 @@ pub struct AppliedShot {
     pub slot: u64,
 }
 
+/// A "this node crashed at a durability seam" marker, from `crashed` events (a
+/// `buggify`-injected seam crash). Drives the crash icon and pins the animation's
+/// persist/send-seam marker to the node that died on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrashShot {
+    /// Simulated time the node crashed, in milliseconds.
+    pub time_ms: u64,
+    /// The node that crashed.
+    pub node: u64,
+    /// Which seam it died on: `"before_sync"` (whole un-synced batch lost) or
+    /// `"after_sync_before_send"` (durable, but the batch's messages never left).
+    pub seam: String,
+}
+
+/// A "this node came back up" marker: a boot that follows an earlier boot of the
+/// same node (its first boot is the initial start, not a restart). Derived from
+/// `booted` events. Drives the node re-lighting and rejoining after a crash gap.
+#[derive(Debug, Clone, Serialize)]
+pub struct RestartShot {
+    /// Simulated time the node restarted, in milliseconds.
+    pub time_ms: u64,
+    /// The node that restarted.
+    pub node: u64,
+}
+
+/// A "this node flushed a `Ready` batch" marker, from `synced` events. Drives the
+/// persist/send-seam tick: filled when the batch was fsync'd (`sync`), hollow for
+/// a relaxed (chosen-index-only) write.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncShot {
+    /// Simulated time the batch was flushed, in milliseconds.
+    pub time_ms: u64,
+    /// The node that flushed.
+    pub node: u64,
+    /// Whether the batch required an fsync-before-send (`MustSync::Sync`).
+    pub sync: bool,
+    /// Number of write ops in the batch.
+    pub writes: u64,
+}
+
+/// A "this node read a durable accepted record back on (re)boot" marker, from
+/// `recovered` events. Drives the durable-state badge that survives the crash gap:
+/// the accepted value the node still holds after coming back.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveredShot {
+    /// Simulated time the record was recovered (the boot instant), in ms.
+    pub time_ms: u64,
+    /// The node that recovered the record.
+    pub node: u64,
+    /// The slot the record belongs to.
+    pub slot: u64,
+    /// Hash of the recovered accepted value.
+    pub vhash: u64,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +220,15 @@ pub struct RunResult {
     pub leaders: Vec<LeaderShot>,
     /// Applied-prefix advancement markers, in observation order (multi-decree).
     pub applied: Vec<AppliedShot>,
+    /// Seam-crash markers (a node died at the persist/send seam), in time order.
+    pub crashes: Vec<CrashShot>,
+    /// Restart markers (a node came back after a crash), in time order.
+    pub restarts: Vec<RestartShot>,
+    /// Batch-flush (`MustSync`) markers, in time order — the persist/send seam.
+    pub syncs: Vec<SyncShot>,
+    /// Durable accepted records read back on (re)boot, in time order — the durable
+    /// state that survives a crash.
+    pub recovered: Vec<RecoveredShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -189,6 +253,10 @@ impl RunResult {
             chosen: Vec::new(),
             leaders: Vec::new(),
             applied: Vec::new(),
+            crashes: Vec::new(),
+            restarts: Vec::new(),
+            syncs: Vec::new(),
+            recovered: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -364,6 +432,110 @@ fn collect_applied(q: &dyn TraceQuery) -> Vec<AppliedShot> {
             })
         })
         .collect()
+}
+
+/// Pull the seam-crash markers from the `crashed` stream.
+fn collect_crashes(q: &dyn TraceQuery) -> Vec<CrashShot> {
+    q.snapshot(EV_CRASHED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(CrashShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                seam: e.str("seam").unwrap_or("unknown").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Derive the restart markers from the `booted` stream: a node's *first* boot is
+/// its initial start, so only the second and later boots are restarts. Both
+/// streams arrive in capture (time) order, so a per-node "seen once" set suffices.
+fn collect_restarts(q: &dyn TraceQuery) -> Vec<RestartShot> {
+    let mut seen: HashSet<u64> = HashSet::new();
+    q.snapshot(EV_BOOTED)
+        .into_iter()
+        .filter_map(|e| {
+            let node = e.u64("node")?;
+            if seen.insert(node) {
+                return None; // first boot for this node — not a restart
+            }
+            Some(RestartShot {
+                time_ms: e.time_ms,
+                node,
+            })
+        })
+        .collect()
+}
+
+/// Pull the batch-flush (`MustSync`) markers from the `synced` stream.
+fn collect_syncs(q: &dyn TraceQuery) -> Vec<SyncShot> {
+    q.snapshot(EV_SYNCED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(SyncShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                sync: e.bool("sync").unwrap_or(false),
+                writes: e.u64("writes").unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// Pull the durable accepted records read back on (re)boot from the `recovered`
+/// stream.
+fn collect_recovered(q: &dyn TraceQuery) -> Vec<RecoveredShot> {
+    q.snapshot(EV_RECOVERED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(RecoveredShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                slot: e.u64("slot")?,
+                vhash: e.u64("vhash")?,
+            })
+        })
+        .collect()
+}
+
+/// Raw recovery timeline the [`RecoveryRecorder`] accumulates: the crash/restart
+/// events, the per-batch flush (`MustSync`) markers, and the durable records read
+/// back on (re)boot. All four are used as-is by `build_result`.
+#[derive(Default)]
+pub(crate) struct RecoveryData {
+    crashes: Vec<CrashShot>,
+    restarts: Vec<RestartShot>,
+    syncs: Vec<SyncShot>,
+    recovered: Vec<RecoveredShot>,
+}
+
+/// The recovery-timeline recorder: mirrors [`ProtocolRecorder`], but captures the
+/// durability streams the crash/recovery visualization needs — seam crashes,
+/// restarts, batch flushes, and durable read-backs. Kept separate from the
+/// protocol recorder so each recorder owns one concern.
+pub(crate) struct RecoveryRecorder {
+    data: Arc<Mutex<RecoveryData>>,
+}
+
+impl RecoveryRecorder {
+    pub(crate) fn new(data: Arc<Mutex<RecoveryData>>) -> Self {
+        Self { data }
+    }
+}
+
+impl Invariant for RecoveryRecorder {
+    fn name(&self) -> &'static str {
+        "recovery_recorder"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        d.crashes = collect_crashes(q);
+        d.restarts = collect_restarts(q);
+        d.syncs = collect_syncs(q);
+        d.recovered = collect_recovered(q);
+    }
 }
 
 /// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
@@ -730,8 +902,17 @@ impl Invariant for ProgressOracle {
 /// Turn the recorded timeline into the animation [`RunResult`]: match each issued
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.
-pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData) -> RunResult {
+pub(crate) fn build_result(
+    seed: u64,
+    data: &RecorderData,
+    proto: &ProtocolData,
+    rec: &RecoveryData,
+) -> RunResult {
     let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
+    let crashes = rec.crashes.clone();
+    let restarts = rec.restarts.clone();
+    let syncs = rec.syncs.clone();
+    let recovered = rec.recovered.clone();
 
     if data.issued.is_empty() {
         return RunResult {
@@ -740,6 +921,10 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
             chosen,
             leaders,
             applied,
+            crashes,
+            restarts,
+            syncs,
+            recovered,
             ..RunResult::empty(seed)
         };
     }
@@ -795,7 +980,8 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
     }
 
     // The animation spans the latest of any observable event: a client leg, a
-    // protocol leg, a node-state change, or a chosen marker.
+    // protocol leg, a node-state change, a chosen marker, or a crash/restart —
+    // the crash/recovery tail must not be truncated.
     let sim_duration_ms = shots
         .iter()
         .map(|s| s.arrive_ms)
@@ -804,6 +990,9 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         .chain(chosen.iter().map(|s| s.time_ms))
         .chain(leaders.iter().map(|s| s.time_ms))
         .chain(applied.iter().map(|s| s.time_ms))
+        .chain(crashes.iter().map(|s| s.time_ms))
+        .chain(restarts.iter().map(|s| s.time_ms))
+        .chain(recovered.iter().map(|s| s.time_ms))
         .max()
         .unwrap_or(0);
 
@@ -816,6 +1005,10 @@ pub(crate) fn build_result(seed: u64, data: &RecorderData, proto: &ProtocolData)
         chosen,
         leaders,
         applied,
+        crashes,
+        restarts,
+        syncs,
+        recovered,
         delivered,
         dropped,
         ticks: data.ticks,

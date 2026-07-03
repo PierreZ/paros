@@ -167,14 +167,18 @@ let playing = false;
 // Optional URL params: ?seed=N picks the seed; ?still=K freezes one frame at
 // protocol leg K; ?dump exposes raw JSON; ?embed hides the page chrome.
 const params = new URLSearchParams(location.search);
-if (params.has('seed')) $('seed').value = params.get('seed');
 const STILL = params.has('still') ? parseInt(params.get('still'), 10) : null;
 const DUMP = params.has('dump');
 // ?mode=multi swaps the single-decree court for the Multi-Paxos column scene
-// (leader badge + per-node replicated log). Single-decree is the default and
-// stays the same; both modes share the scenario digest + narration below.
-const MODE = params.get('mode') === 'multi' ? 'multi' : 'single';
-const MULTI = MODE === 'multi';
+// (leader badge + per-node replicated log). ?mode=crash reuses that column scene
+// but overlays crash/recovery: a node dies at the persist/send seam, its volatile
+// state clears while its durable state survives, and it restarts. Single-decree is
+// the default; every mode shares the scenario digest + narration below.
+const CRASH = params.get('mode') === 'crash';
+const MODE = CRASH ? 'crash' : (params.get('mode') === 'multi' ? 'multi' : 'single');
+const MULTI = MODE === 'multi' || CRASH; // crash builds on the multi column scene
+if (params.has('seed')) $('seed').value = params.get('seed');
+else if (CRASH) $('seed').value = 99; // a seed that crashes a node at the seam
 if (params.has('embed')) {
   document.querySelector('h1').style.display = 'none';
   document.querySelector('.sub').style.display = 'none';
@@ -197,6 +201,30 @@ if (MULTI) {
     '<span><i class="dot" style="background:#d29922"></i>Phase&nbsp;2 (Accept stream)</span>' +
     '<span><i class="dot" style="background:#6e7681"></i>Heartbeat</span>' +
     '<span><i class="dot" style="background:#f85149"></i>Nack / dropped</span>';
+}
+if (CRASH) {
+  // Reuses the multi column scene (H, layout) but retells it as crash & recovery.
+  document.title = 'paros · crash and recovery in the browser';
+  document.querySelector('h1').innerHTML =
+    'paros <small>· crash &amp; recovery: what survives a restart</small>';
+  document.querySelector('.sub').innerHTML =
+    'A node <b>crashes at the persist/send seam</b> (⚡). Its <b>volatile</b> state — its ' +
+    'leadership, its in-flight messages — clears; its <b>durable</b> state — the promised ' +
+    'ballot and the accepted log it fsync’d before replying — <b>survives</b>. It ' +
+    'reboots, rebuilds from that durable state, and rejoins <b>without breaking a promise</b>. ' +
+    'Same seed ⇒ same run.';
+  document.querySelector('.legend').innerHTML =
+    '<span><i class="dot" style="background:#f85149"></i>⚡ crashed at seam</span>' +
+    '<span><i class="dot" style="background:#3fb950"></i>durable state (survives the crash)</span>' +
+    '<span><i class="dot" style="background:#58a6ff"></i>↻ restarted &amp; rejoined</span>' +
+    '<span><i class="dot" style="background:#e3b341"></i>Leader</span>' +
+    '<span><i class="dot" style="background:#3fb950"></i>Chosen (same colour = agreement)</span>' +
+    '<span><i class="dot" style="background:#6e7681"></i>fsync ✓ (persist before send)</span>';
+  // A still timeline has no running clock: hide the step-through + speed controls.
+  document.querySelectorAll('.controls')[1].style.display = 'none';
+  $('speed').style.display = 'none'; $('speedval').style.display = 'none';
+  const sl = document.querySelector('label[for=speed]'); if (sl) sl.style.display = 'none';
+  $('replay').textContent = '↻ Redraw';
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -324,6 +352,160 @@ function renderMultiScene(T, balls) {
   ctx.textAlign = 'center';
 }
 
+// ---- crash / recovery timeline (?mode=crash) -------------------------------
+// A *still* picture of one seed: three node lanes on a shared time axis, showing
+// every crash at the persist/send seam, the down window that follows, the durable
+// state that survives it, and the restart that rejoins. Nothing animates — the
+// reader studies it at their own pace and types another seed for another run.
+
+// The recovery oracle, re-checked in JS for a live badge: a node's promised ballot
+// never decreases, including across every restart. The sim would have panicked on a
+// violation (`run_seed` asserts it), so this is green by construction — surfaced to
+// make the guarantee legible. Returns true when every promise is monotonic.
+function promisesIntact() {
+  const last = new Map();
+  for (const s of [...run.node_states].sort((a, b) => a.time_ms - b.time_ms)) {
+    const p = last.get(s.node);
+    if (p && cmpB(s.pround, s.pbnode, p.r, p.n) < 0) return false;
+    last.set(s.node, { r: s.pround, n: s.pbnode });
+  }
+  return true;
+}
+
+// The crash→restart "down" windows for node i: a crash opens one, its next restart
+// closes it (an unclosed one runs to the end). Attrition reboots without a seam
+// crash leave no window (nothing to shade); the seam crashes are the story here.
+function downWindows(i) {
+  const evs = [];
+  for (const c of run.crashes) if (c.node === i) evs.push({ t: c.time_ms, k: 'c', seam: c.seam });
+  for (const r of run.restarts) if (r.node === i) evs.push({ t: r.time_ms, k: 'r' });
+  evs.sort((a, b) => a.t - b.t);
+  const wins = []; let open = null;
+  for (const e of evs) {
+    if (e.k === 'c' && open === null) open = { start: e.t, seam: e.seam };
+    else if (e.k === 'r' && open !== null) { wins.push({ start: open.start, end: e.t, seam: open.seam }); open = null; }
+  }
+  if (open !== null) wins.push({ start: open.start, end: run.sim_duration_ms, seam: open.seam });
+  return wins;
+}
+
+const SEAM_TAG = { before_sync: 'pre-fsync', after_sync_before_send: 'fsync✓ · send✗' };
+
+// A one-line summary for the status bar (no live clock in crash mode).
+function crashSummary() {
+  const bs = run.crashes.filter((c) => c.seam === 'before_sync').length;
+  const as = run.crashes.length - bs;
+  return `seed ${run.seed} · ${run.crashes.length} seam crashes (${as} after-fsync, ${bs} pre-fsync)`
+    + ` · ${run.restarts.length} restarts · promises ${promisesIntact() ? 'intact ✓' : 'BROKEN ✗'}`;
+}
+
+// Paint the whole crash/recovery timeline once. Pure function of `run`; no rAF.
+function renderCrashTimeline() {
+  ctx.clearRect(0, 0, W, H);
+  if (!run) return;
+  const padL = 96, padR = 26, padT = 74, padB = 40;
+  const plotW = W - padL - padR, dur = Math.max(run.sim_duration_ms, 1);
+  const xOf = (t) => padL + plotW * clamp(t / dur, 0, 1);
+  const laneH = (H - padT - padB) / NODES_M.length;
+  const laneY = (i) => padT + laneH * (i + 0.5);
+
+  // header: title + recovery-oracle badge
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#c9d1d9'; ctx.font = '600 13px system-ui';
+  ctx.fillText(`seed ${run.seed} — crash & recovery timeline`, padL, 26);
+  const ok = promisesIntact();
+  ctx.fillStyle = ok ? '#3fb950' : '#f85149'; ctx.font = '600 12px system-ui';
+  ctx.fillText(ok ? '✓ recovery oracle: no promise lowered across any restart'
+                  : '✗ recovery oracle VIOLATED', padL, 46);
+  // seam key
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px system-ui';
+  ctx.fillText('⚡ crash at seam   ↻ restart   ▬ down (volatile lost)   ━ durable (survives)   ◆ chosen', padL, 64);
+
+  // time axis + faint vertical gridlines
+  const axisY = H - padB;
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, axisY); ctx.lineTo(W - padR, axisY); ctx.stroke();
+  ctx.fillStyle = '#484f58'; ctx.font = '10px system-ui'; ctx.textAlign = 'center';
+  for (let k = 0; k <= 4; k++) {
+    const t = dur * k / 4, x = xOf(t);
+    ctx.strokeStyle = '#161b22'; ctx.beginPath(); ctx.moveTo(x, padT - 6); ctx.lineTo(x, axisY); ctx.stroke();
+    ctx.fillStyle = '#484f58'; ctx.fillText(`${Math.round(t)}ms`, x, axisY + 16);
+  }
+
+  // per-node lanes
+  NODES_M.forEach((n, i) => {
+    const y = laneY(i), wins = downWindows(i);
+    // durable band: one continuous green line the full width — it never breaks,
+    // the crash gap notwithstanding. This is "durable state survives".
+    ctx.strokeStyle = '#238636'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(padL, y + 16); ctx.lineTo(W - padR, y + 16); ctx.stroke();
+    // durable growth: a green up-tick per chosen slot this node learned
+    for (const c of run.chosen) if (c.node === i) {
+      const x = xOf(c.time_ms);
+      ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, y + 16); ctx.lineTo(x, y + 10); ctx.stroke();
+    }
+
+    // volatile "process alive" baseline: solid where up, a red hatched gap where down
+    ctx.strokeStyle = '#3d444d'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    for (const w of wins) {
+      const x0 = xOf(w.start), x1 = Math.max(xOf(w.end), x0 + 6);
+      ctx.fillStyle = 'rgba(248,81,73,0.16)'; ctx.fillRect(x0, y - 13, x1 - x0, 26);
+      ctx.strokeStyle = 'rgba(248,81,73,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.strokeRect(x0, y - 13, x1 - x0, 26); ctx.setLineDash([]);
+      ctx.fillStyle = '#f85149'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
+      if (x1 - x0 > 26) ctx.fillText('down', (x0 + x1) / 2, y - 16);
+    }
+
+    // leader spans (yellow) — clipped to exclude down windows, so a leader that
+    // crashes visibly loses leadership (volatile) the instant it goes down.
+    const leaders = [...run.leaders].sort((a, b) => a.time_ms - b.time_ms);
+    for (let li = 0; li < leaders.length; li++) {
+      if (leaders[li].node !== i) continue;
+      const start = leaders[li].time_ms;
+      const end = li + 1 < leaders.length ? leaders[li + 1].time_ms : run.sim_duration_ms;
+      let segStart = start;
+      for (const w of [...wins, { start: end, end }]) {
+        if (w.start > segStart) {
+          const xs = xOf(segStart), xe = xOf(Math.min(w.start, end));
+          if (xe > xs) { ctx.strokeStyle = LEADER_C; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(xs, y - 20); ctx.lineTo(xe, y - 20); ctx.stroke(); }
+        }
+        segStart = Math.max(segStart, w.end);
+        if (segStart >= end) break;
+      }
+    }
+
+    // event markers: crash ⚡ (with a seam line + tag) and restart ↻. The dashed
+    // vertical line marks the exact persist/send seam the node died on, tying the
+    // volatile baseline to the durable line it did (or didn't) reach.
+    for (const c of run.crashes) if (c.node === i) {
+      const x = xOf(c.time_ms);
+      ctx.strokeStyle = 'rgba(248,81,73,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(x, y - 20); ctx.lineTo(x, y + 16); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = '#f85149'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText('⚡', x, y + 4);
+      ctx.fillStyle = '#f0b6b3'; ctx.font = '9px system-ui';
+      ctx.fillText(SEAM_TAG[c.seam] || c.seam, x, y - 22);
+    }
+    for (const r of run.restarts) if (r.node === i) {
+      const x = xOf(r.time_ms);
+      ctx.fillStyle = '#58a6ff'; ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText('↻', x, y + 5);
+    }
+
+    // lane label + durable summary
+    const promised = [...run.node_states].filter((s) => s.node === i).sort((a, b) => a.time_ms - b.time_ms).pop();
+    const slots = new Set(run.chosen.filter((c) => c.node === i).map((c) => c.slot)).size;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#c9d1d9'; ctx.font = '600 14px system-ui'; ctx.fillText(n.label, 12, y - 2);
+    ctx.fillStyle = '#3fb950'; ctx.font = '9px system-ui';
+    ctx.fillText(promised ? `durable (${promised.pround},${promised.pbnode})` : 'durable —', 12, y + 12);
+    ctx.fillStyle = '#8b949e'; ctx.fillText(`${slots} slots`, 12, y + 24);
+  });
+  ctx.textAlign = 'center';
+}
+
 // Build the time-sorted narration ("what is happening") purely from the run.
 // Single-decree narrates only the slot-0 decree (matching its one-value court);
 // multi narrates the whole log, including leadership and Phase-2 streaming.
@@ -376,6 +558,23 @@ function narrationAt(simT) {
 // Derive the scenario digest ("what this run shows") from the computed run.
 // Pure function of `run`; the chips shown depend on the mode.
 function deriveScenario() {
+  if (CRASH) {
+    const bs = run.crashes.filter((c) => c.seam === 'before_sync').length;
+    const as = run.crashes.length - bs;
+    const slots = new Set(run.chosen.map((c) => c.slot));
+    const syncd = run.syncs.filter((s) => s.sync).length;
+    const relaxed = run.syncs.length - syncd;
+    return [
+      ['seam crashes', String(run.crashes.length)],
+      ['after fsync', `${as} (durable, send lost)`],
+      ['before fsync', `${bs} (batch lost)`],
+      ['restarts', String(run.restarts.length)],
+      ['durable read-backs', String(run.recovered.length)],
+      ['batches fsync’d', relaxed ? `${syncd} (+${relaxed} relaxed)` : String(syncd)],
+      ['log committed', `${slots.size} slots`],
+      ['promises', promisesIntact() ? 'intact ✓' : 'BROKEN ✗'],
+    ];
+  }
   const drops = run.protocol.filter((p) => p.outcome === 'dropped').length;
   const leaders = [...run.leaders].sort((a, b) => a.time_ms - b.time_ms);
   const failovers = Math.max(0, leaders.length - 1);
@@ -724,6 +923,18 @@ function start() {
   LOG_MAX = 0;
   for (const c of run.chosen) LOG_MAX = Math.max(LOG_MAX, c.slot);
   for (const p of run.protocol) LOG_MAX = Math.max(LOG_MAX, p.slot);
+
+  // Crash mode is a *still* timeline, not a running clock: render once and stop,
+  // so the reader studies one seed at their own pace (change the seed to re-run).
+  if (CRASH) {
+    playing = false;
+    renderScenario();
+    setStats(run);
+    renderCrashTimeline();
+    $('status').textContent = crashSummary();
+    return;
+  }
+
   buildLegs();
   buildNarration();
   renderScenario();
@@ -738,6 +949,7 @@ function start() {
 // Replay the run already loaded, from the top, without re-running the sim.
 function replay() {
   if (!run) { start(); return; }
+  if (CRASH) { renderCrashTimeline(); return; } // still timeline — just redraw
   dispT = 0; lastTs = null; stepIdx = 0; playing = true; updateTransport();
   requestAnimationFrame(frame);
 }
@@ -770,7 +982,7 @@ if (params.has('embed') && window.parent !== window) {
   postHeight();
 }
 
-(MULTI ? renderMultiScene : renderScene)(0, []);
+if (CRASH) renderCrashTimeline(); else (MULTI ? renderMultiScene : renderScene)(0, []);
 init().then(() => {
   $('status').textContent = 'ready · press Run (or pick a seed above)';
   start();

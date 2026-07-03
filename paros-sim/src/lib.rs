@@ -29,7 +29,8 @@ use moonpool_sim::{
 
 use crate::oracle::{
     ClientLivenessOracle, LeadershipOracle, NoGapsOracle, ProgressOracle, ProtocolData,
-    ProtocolRecorder, RecorderData, RecoveryOracle, SafetyOracle, TimelineRecorder, build_result,
+    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
+    TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -101,11 +102,13 @@ fn chaos_surfaces() -> [Chaos; 2] {
 pub fn run_seed(seed: u64) -> RunResult {
     let data = Arc::new(Mutex::new(RecorderData::default()));
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
+    let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
+        .invariant(RecoveryRecorder::new(recovery.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(RecoveryOracle)
@@ -126,7 +129,8 @@ pub fn run_seed(seed: u64) -> RunResult {
 
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
-    build_result(seed, &data, &proto)
+    let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+    build_result(seed, &data, &proto, &recovery)
 }
 
 /// Run the DST bug-finding sweep: swarm network chaos + the safety oracle under

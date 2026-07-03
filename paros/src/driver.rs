@@ -71,6 +71,30 @@ pub const EV_PERSIST: &str = "persist";
 /// a restart never changes a pre-crash accepted `(slot -> value)`.
 pub const EV_RECOVERED: &str = "recovered";
 
+/// Tracing event: this node started an incarnation, having rebuilt its volatile
+/// state from durable storage. Carries `node`. Fires on the initial boot and on
+/// every restart (a seam-crash recovery re-run or an attrition process kill), so
+/// it is the reliable "this node came (back) up" marker. Purely observational: no
+/// oracle asserts on it; the recovery recorder derives per-node *restarts* from it
+/// (every `booted` after the first). The crash/restart animation reads it.
+pub const EV_BOOTED: &str = "booted";
+
+/// Tracing event: this node crashed at a durability seam inside a `Ready` batch
+/// (a `buggify`-injected [`Seam`] crash). Carries `node` and `seam`
+/// (`"before_sync"` — the whole un-synced batch is lost — or
+/// `"after_sync_before_send"` — the writes are durable but the batch's messages
+/// never left). Provider-generic but inert in production, where
+/// [`NoCrash`](crate::NoCrash) never fires. Purely observational; the crash
+/// animation reads it to mark the persist/send seam a node died on.
+pub const EV_CRASHED: &str = "crashed";
+
+/// Tracing event: this node flushed a `Ready` batch's durable writes. Carries
+/// `node`, `sync` (whether the batch required an fsync-before-send —
+/// [`MustSync::Sync`] — or a relaxed write), and `writes` (op count). Emitted once
+/// per non-empty batch, right after the flush. Purely observational; it is the
+/// "was this batch fsync'd?" marker the persist/send-seam animation renders.
+pub const EV_SYNCED: &str = "synced";
+
 /// Tracing event: this node applied a chosen value. Carries `node`, `slot`, and
 /// the value hash (`vhash`). The safety oracle reads it for the
 /// at-most-one-value-chosen invariant.
@@ -255,6 +279,7 @@ where
     // recovered node must re-derive them. Only meaningful when there is durable
     // work or a message to lose.
     if (!writes.is_empty() || !messages.is_empty()) && crash.crash_at(Seam::AfterSyncBeforeSend) {
+        tracing::info!(node = self_id, seam = "after_sync_before_send", "crashed");
         return Err(seam_crash());
     }
 
@@ -356,14 +381,26 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
     }
 
     // Crash seam: the batch is staged but not yet flushed. A crash here loses the
-    // whole un-synced batch (and no message has been sent), so surface nothing.
-    // Only meaningful when the batch actually staged something.
+    // whole un-synced batch (and no message has been sent), so surface nothing but
+    // the crash marker itself. Only meaningful when the batch actually staged
+    // something.
     if !writes.is_empty() && crash.crash_at(Seam::BeforeSync) {
+        tracing::info!(node = self_id, seam = "before_sync", "crashed");
         return Err(seam_crash());
     }
 
     if !writes.is_empty() {
         storage.sync(must_sync).map_err(|e| storage_err(&e))?;
+        // Durability marker: whether this batch was fsync'd (a promise-raise or
+        // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only
+        // advance). The persist/send-seam animation renders it as a filled vs
+        // hollow tick.
+        tracing::info!(
+            node = self_id,
+            sync = (must_sync == paros_core::MustSync::Sync),
+            writes = u64::try_from(writes.len()).unwrap_or(u64::MAX),
+            "synced"
+        );
     }
 
     // Durable now — emit the truthful persisted state for the oracles.
@@ -514,6 +551,10 @@ where
     // chosen value resurrected on restart" bug observable). A clean first boot has
     // empty scalars/log, so this is a near no-op.
     {
+        // Mark this incarnation coming up. The recovery recorder turns every
+        // `booted` after a node's first into a *restart* event for the animation.
+        tracing::info!(node = self_id, "booted");
+
         let promised = node.hard_state().max_promised_ballot;
         tracing::info!(
             node = self_id,
