@@ -1,19 +1,28 @@
 //! The sim-side adapter: a moonpool [`Process`] that runs the provider-generic
 //! [`paros::run_node`] driver under `SimProviders`.
 //!
-//! All the driver logic lives in `paros`; this just bridges the sim boundary —
-//! it derives a cluster-consistent membership from the topology, then pulls the
-//! providers, local address, and shutdown token out of [`SimContext`] and hands
-//! them to the same `run_node` a production `tokio::main` would call.
+//! All the driver logic lives in `paros`; this bridges the sim boundary. It
+//! derives a cluster-consistent membership from the topology, wires the node to a
+//! per-node handle on the shared [`StorageWorld`] (the sim's stand-in for durable
+//! disk), and runs the same `run_node` a production `tokio::main` would — inside a
+//! recovery loop that turns a `buggify`-injected seam crash into a real
+//! crash+restart: `run_node` unwinds, the volatile `RawNode` is dropped, and the
+//! next iteration rebuilds it from the durable [`StorageWorld`].
 
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle};
+use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle, buggify_with_prob};
 use paros::{
-    Ballot, Config, Entry, HardState, MemStorage, NodeId, NodeStorage, Slot, Storage, parse_addr,
-    run_node,
+    Ballot, Config, CrashSeam, Entry, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
+    Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
+
+/// Well-known [`StateHandle`] key under which the single per-iteration
+/// [`StorageWorld`] is published (shared by every node, survives restarts).
+const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
@@ -55,76 +64,231 @@ impl Process for NodeProcess {
         let config = Config {
             id: self_rank,
             peers: members.iter().map(|(id, _)| *id).collect(),
+            ..Config::default()
         };
 
-        // Durable storage that survives a chaos `Crash`/restart: it mirrors the
-        // node's `HardState` into the per-iteration `StateHandle` (shared across a
-        // process's reboots, fresh per seed), keyed by this node's IP. This is the
-        // sim's stand-in for real durable disk; the storage stage swaps in a faulty
-        // fake without touching the driver.
-        let storage = DurableStorage::restore(
-            config,
-            ctx.state().clone(),
-            format!("paros-hardstate:{my_ip}"),
-        );
+        // The per-iteration durable-storage world, shared by every node and
+        // surviving crash/restart (it lives in the `StateHandle`, fresh per seed
+        // but stable across a process's reboots). Each node reaches it through a
+        // `Weak` handle upgraded per op.
+        let world = storage_world(ctx.state());
+        let crash = SeamCrasher;
 
-        run_node(
-            ctx.providers().clone(),
-            storage,
-            parse_addr(&my_ip)?,
-            members,
-            ctx.shutdown().clone(),
-        )
-        .await
+        // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
+        // drop the volatile node, rebuild storage from the (surviving) world, and
+        // re-run — a faithful clean crash + recovery. Attrition (process kill) is
+        // handled by the harness; this covers the seams *inside* a Ready batch
+        // that attrition cannot reach.
+        loop {
+            let storage =
+                DurableStorage::restore(config.clone(), Arc::downgrade(&world), my_ip.clone());
+            match run_node(
+                ctx.providers().clone(),
+                storage,
+                parse_addr(&my_ip)?,
+                members.clone(),
+                ctx.shutdown().clone(),
+                &crash,
+            )
+            .await
+            {
+                // Simulated crash at a durability seam: fall through to recover
+                // and re-run (rebuilding volatile state from the durable world).
+                Err(e) if is_seam_crash(&e) => {}
+                other => return other,
+            }
+        }
     }
 }
 
-/// A [`NodeStorage`] whose durable [`HardState`] is mirrored into the moonpool
-/// per-iteration [`StateHandle`], keyed by the node's IP. The `StateHandle` is
-/// shared across a process's reboots within an iteration (and fresh per seed), so
-/// state written before a chaos `Crash` is read back on restart, exactly like a
-/// real disk, while staying deterministic across the seed sweep.
+/// Get-or-create the singleton [`StorageWorld`] for this iteration. Get-then-
+/// publish is race-free: the sim executor is single-threaded and this runs
+/// synchronously (no `.await` between the get and the publish).
+fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
+    if let Some(world) = state.get::<Arc<Mutex<StorageWorld>>>(STORAGE_WORLD_KEY) {
+        return world;
+    }
+    let world = Arc::new(Mutex::new(StorageWorld::default()));
+    state.publish(STORAGE_WORLD_KEY, world.clone());
+    world
+}
+
+/// One node's durable records: the scalars, the per-slot accepted log, and an
+/// optional snapshot blob. The [`StorageWorld`] owns one of these per node IP.
+#[derive(Default)]
+struct NodeDisk {
+    hard_state: HardState,
+    accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    snapshot: Option<Vec<u8>>,
+}
+
+/// The per-iteration durable-storage world: every node's durable records, keyed
+/// by IP. It is **protocol-blind** — it stores records, never knowing what is
+/// committed. It outlives process crashes (owned by the `StateHandle`), so a
+/// write that reached it before a crash is read back on restart, exactly like a
+/// real disk. This is where a later storage-fault stage rolls seeded faults under
+/// a cluster-wide budget.
+#[derive(Default)]
+struct StorageWorld {
+    disks: HashMap<String, NodeDisk>,
+}
+
+/// A [`NodeStorage`] handle onto one node's slice of the shared [`StorageWorld`].
+///
+/// It holds a `Weak` to the world, upgraded per op (moonpool's "world held via
+/// Weak, upgraded per op" convention). Reads are served from `boot` — a snapshot
+/// of this node's durable records taken at construction — because the core only
+/// reads storage once, at boot.
+///
+/// Writes stage locally and reach the durable world only on a
+/// [`sync`](NodeStorage::sync): a [`MustSync::Sync`] batch flushes the stage
+/// through (fsync); a [`MustSync::Relaxed`] batch leaves it staged, so it is lost
+/// if the incarnation is dropped before a later sync. Because the stage lives in
+/// this handle (dropped when `run_node` unwinds on a seam crash), a crash *before*
+/// the fsync loses the whole un-synced batch — a faithful clean crash.
 struct DurableStorage {
-    inner: MemStorage,
-    state: StateHandle,
+    /// Read view: this node's durable records as of boot.
+    boot: MemStorage,
+    /// The snapshot blob recovered from durable storage at boot (Stage 5).
+    boot_snapshot: Option<Vec<u8>>,
+    /// The shared world, upgraded per op.
+    world: Weak<Mutex<StorageWorld>>,
+    /// This node's IP — its key into the world.
     key: String,
+    /// Writes staged since the last flush (lost if the incarnation is dropped).
+    staged_ballot: Option<Ballot>,
+    staged_accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    staged_chosen: Option<Slot>,
 }
 
 impl DurableStorage {
-    /// Build storage for `config`, seeding it from any [`HardState`] a prior boot
-    /// of this node (same IP, same iteration) persisted into `state`.
-    fn restore(config: Config, state: StateHandle, key: String) -> Self {
-        let mut inner = MemStorage::new(config);
-        if let Some(hard_state) = state.get::<HardState>(&key) {
-            inner.set_hard_state(hard_state);
+    /// Build storage for `config`, seeding the read view from any durable records
+    /// a prior boot of this node (same IP, same iteration) left in the world.
+    fn restore(config: Config, world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
+        let mut boot = MemStorage::new(config);
+        let mut boot_snapshot = None;
+        if let Some(strong) = world.upgrade() {
+            let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(disk) = guard.disks.get(&key) {
+                // Seed the read view through the semantic ops (records, not a blob).
+                let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
+                for (slot, (ballot, entry)) in &disk.accepted {
+                    let _ = boot.append_accepted(*slot, *ballot, entry.clone());
+                }
+                if let Some(ci) = disk.hard_state.chosen_index {
+                    let _ = boot.set_chosen_index(ci);
+                }
+                let _ = boot.sync(MustSync::Sync);
+                boot_snapshot.clone_from(&disk.snapshot);
+            }
         }
-        Self { inner, state, key }
+        Self {
+            boot,
+            boot_snapshot,
+            world,
+            key,
+            staged_ballot: None,
+            staged_accepted: BTreeMap::new(),
+            staged_chosen: None,
+        }
+    }
+
+    /// Run `f` against this node's durable disk in the shared world.
+    fn with_disk<R>(&self, f: impl FnOnce(&mut NodeDisk) -> R) -> Result<R, StorageError> {
+        let strong = self
+            .world
+            .upgrade()
+            .ok_or_else(|| StorageError::Io("storage world dropped".into()))?;
+        let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(f(guard.disks.entry(self.key.clone()).or_default()))
+    }
+}
+
+impl NodeStorage for DurableStorage {
+    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        self.staged_ballot = Some(ballot);
+        Ok(())
+    }
+
+    fn append_accepted(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        entry: Entry,
+    ) -> Result<(), StorageError> {
+        self.staged_accepted.insert(slot, (ballot, entry));
+        Ok(())
+    }
+
+    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
+        self.staged_chosen = Some(slot);
+        Ok(())
+    }
+
+    fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
+        // A relaxed (chosen-index-only) batch keeps its stage un-flushed: it is
+        // durable only once a later Sync flushes it, and lost on a crash before
+        // then. A Sync batch flushes the whole stage through to the world.
+        if must_sync != MustSync::Sync {
+            return Ok(());
+        }
+        let ballot = self.staged_ballot.take();
+        let accepted = std::mem::take(&mut self.staged_accepted);
+        let chosen = self.staged_chosen.take();
+        self.with_disk(|d| {
+            if let Some(b) = ballot {
+                d.hard_state.max_promised_ballot = b;
+            }
+            for (slot, record) in accepted {
+                d.accepted.insert(slot, record);
+            }
+            if let Some(c) = chosen {
+                d.hard_state.chosen_index = Some(c);
+            }
+        })
+    }
+
+    fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
+        let bytes = bytes.to_vec();
+        self.with_disk(|d| {
+            d.snapshot = Some(bytes);
+            d.accepted.retain(|s, _| *s > up_to);
+        })
+    }
+
+    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+        self.with_disk(|d| d.accepted.retain(|s, _| *s >= first))
     }
 }
 
 impl Storage for DurableStorage {
     fn initial_state(&self) -> (HardState, Config) {
-        self.inner.initial_state()
+        self.boot.initial_state()
     }
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
-        self.inner.accepted(slot)
+        self.boot.accepted(slot)
     }
     fn first_slot(&self) -> Slot {
-        self.inner.first_slot()
+        self.boot.first_slot()
     }
     fn last_slot(&self) -> Slot {
-        self.inner.last_slot()
+        self.boot.last_slot()
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        self.inner.snapshot()
+        self.boot_snapshot.clone()
     }
 }
 
-impl NodeStorage for DurableStorage {
-    fn set_hard_state(&mut self, hard_state: HardState) {
-        // Persist to the per-iteration StateHandle FIRST (survives restart), then
-        // update the in-memory mirror the driver reads back.
-        self.state.publish(&self.key, hard_state.clone());
-        self.inner.set_hard_state(hard_state);
+/// The simulation's [`CrashSeam`]: crash the node at a durability seam with a
+/// small `buggify` probability. Buggify is two-phase — activated per seed, then
+/// firing probabilistically — so only some seeds exercise seam crashes at all,
+/// and deterministically so (a failing seed replays bit-identically). This is the
+/// repo's first real `buggify!()` use: attrition crashes a node only *between*
+/// Ready batches; this reaches the persist/send seam *within* one.
+struct SeamCrasher;
+
+impl CrashSeam for SeamCrasher {
+    fn crash_at(&self, _seam: Seam) -> bool {
+        buggify_with_prob!(0.03)
     }
 }

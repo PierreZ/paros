@@ -5,7 +5,19 @@
 
 use std::collections::HashMap;
 
-use paros_sim::{SWEEP_ITERATIONS, explore, run_seed, run_seed_json};
+use paros_sim::{REGRESSION_SEEDS, SWEEP_ITERATIONS, explore, run_seed, run_seed_json};
+
+/// The pinned-seed regression corpus: replay every recorded durability seed and
+/// assert it stays clean. `run_seed` panics on any `always`-assertion violation,
+/// so a regression in the storage/recovery/seam-crash path fails this test
+/// directly, without waiting for the adaptive sweep to rediscover it.
+#[test]
+fn pinned_regression_seeds_replay_clean() {
+    for &seed in REGRESSION_SEEDS {
+        let r = run_seed(seed);
+        assert_eq!(r.seed, seed, "replayed the pinned seed");
+    }
+}
 
 /// The determinism proof: the same seed produces a bit-identical timeline across
 /// two independent runs. Network chaos is on, but it is seeded, so replay still

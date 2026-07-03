@@ -22,12 +22,14 @@ use moonpool_core::{
 };
 use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot, Value,
+    Ballot, ClientId, ClientSeq, Entry, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot,
+    Value, WriteOp,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::storage::NodeStorage;
+use crate::crash::{CrashSeam, Seam};
+use crate::storage::{NodeStorage, StorageError};
 
 /// Well-known RPC token the paros node service is registered at. Every node
 /// serves [`Paros`] here, and clients address it by `(node address, this token)`
@@ -48,11 +50,26 @@ const ELECTION_TIMEOUT_BASE: u64 = 5;
 /// literal (tracing requires one); readers (oracles) match on this constant.
 pub const EV_NODE_TICK: &str = "node_tick";
 
-/// Tracing event: this node's durable state changed. Carries `node` (id), the
-/// promised ballot (`pround`/`pbnode`), and — when `has_accepted` — the slot-0
-/// accepted ballot (`around`/`abnode`) + value hash (`vhash`). The safety oracle
-/// reads it for the monotonic-promise and never-accept-below-promise invariants.
+/// Tracing event: this node raised its durable promised ballot. Carries `node`
+/// (id) and the promised ballot (`pround`/`pbnode`). The safety oracle reads it
+/// for the monotonic-promise invariant. (Per-slot accepted state is surfaced
+/// separately by [`EV_PERSIST`], so never-accept-below-promise is checked across
+/// the whole log, not just slot 0.)
 pub const EV_NODE_STATE: &str = "node_state";
+
+/// Tracing event: this node durably persisted an accepted `(ballot, entry)` for a
+/// slot (a `WriteOp::AppendAccepted`). Carries `node`, `slot`, the node's current
+/// promised ballot (`pround`/`pbnode`), the accepted ballot (`around`/`abnode`),
+/// and the value hash (`vhash`). The safety oracle reads it for the
+/// never-accept-below-promise invariant per slot; the recovery oracle reads it to
+/// check a pre-crash accepted `(slot -> value)` is stable across a restart.
+pub const EV_PERSIST: &str = "persist";
+
+/// Tracing event: on (re)boot, this node recovered an accepted record from
+/// durable storage. Carries `node`, `slot`, the accepted ballot (`around`/
+/// `abnode`), and the value hash (`vhash`). The recovery oracle reads it to check
+/// a restart never changes a pre-crash accepted `(slot -> value)`.
+pub const EV_RECOVERED: &str = "recovered";
 
 /// Tracing event: this node applied a chosen value. Carries `node`, `slot`, and
 /// the value hash (`vhash`). The safety oracle reads it for the
@@ -202,48 +219,48 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<P, S>(
+fn drain_ready<P, S, C>(
     node: &mut RawNode,
     storage: &mut S,
     transport: &Arc<NetTransport<P>>,
     addrs: &BTreeMap<NodeId, NetworkAddress>,
     self_id: u64,
     pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
-) where
+    crash: &C,
+) -> SimulationResult<()>
+where
     P: Providers,
     S: NodeStorage,
+    C: CrashSeam,
 {
+    // Copy the batch out of the borrow guard, advance to release the gate, then
+    // perform I/O — persist → send → apply. Advancing before the I/O is the
+    // documented async pattern; persist-before-send still holds because the
+    // persist loop below precedes the send loop.
     let ready = node.ready();
+    let writes: Vec<WriteOp> = ready.writes().to_vec();
+    let must_sync = ready.must_sync();
+    let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
+    let committed: Vec<(Slot, Entry)> = ready.committed().to_vec();
+    ready.advance();
 
-    // 1. Persist durable state FIRST, and surface it for the safety oracles.
-    if let Some(hard_state) = ready.hard_state() {
-        storage.set_hard_state(hard_state.clone());
-        let pb = hard_state.max_promised_ballot;
-        if let Some((ab, e)) = hard_state.accepted.get(&Slot(0)) {
-            tracing::info!(
-                node = self_id,
-                pround = pb.round,
-                pbnode = pb.node.0,
-                has_accepted = true,
-                around = ab.round,
-                abnode = ab.node.0,
-                vhash = value_hash(&e.value.0),
-                "node_state"
-            );
-        } else {
-            tracing::info!(
-                node = self_id,
-                pround = pb.round,
-                pbnode = pb.node.0,
-                has_accepted = false,
-                "node_state"
-            );
-        }
+    // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
+    //    surface the persisted state for the safety + recovery oracles. The
+    //    `BeforeSync` crash seam lives inside `persist_writes`.
+    let promised = node.hard_state().max_promised_ballot;
+    persist_writes(storage, &writes, must_sync, promised, self_id, crash)?;
+
+    // Crash seam: after the batch is durable but before its messages leave. The
+    // durable writes survive; the batch's messages are dropped (never sent), so a
+    // recovered node must re-derive them. Only meaningful when there is durable
+    // work or a message to lose.
+    if (!writes.is_empty() || !messages.is_empty()) && crash.crash_at(Seam::AfterSyncBeforeSend) {
+        return Err(seam_crash());
     }
 
     // 2. Send messages — only after (1) is durable. The core addresses each one;
     //    the driver just maps NodeId → address and fires (fire-and-forget).
-    for (to, msg) in ready.messages() {
+    for (to, msg) in &messages {
         let kind = message_kind(msg);
         if let Some((_, ballot, slot)) = message_route(msg) {
             tracing::info!(
@@ -267,7 +284,7 @@ fn drain_ready<P, S>(
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
-    for (slot, entry) in ready.committed() {
+    for (slot, entry) in &committed {
         tracing::info!(
             node = self_id,
             slot = slot.0,
@@ -291,8 +308,117 @@ fn drain_ready<P, S>(
         }
     }
 
-    // 4. Release the gate.
-    ready.advance();
+    Ok(())
+}
+
+/// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
+/// [`MustSync`], and surface the persisted state for the safety + recovery
+/// oracles: a `node_state` event when the promised ballot rose, and a per-slot
+/// `persist` event for each accepted append. `promised` is the node's post-batch
+/// promise (`>=` any accept ballot in the batch).
+///
+/// The observability events are emitted only **after** the fsync, so they never
+/// claim a write the `BeforeSync` crash seam then discards: a crash before the
+/// fsync loses the whole un-synced batch and emits nothing, exactly as a real
+/// crash-before-flush would.
+fn persist_writes<S: NodeStorage, C: CrashSeam>(
+    storage: &mut S,
+    writes: &[WriteOp],
+    must_sync: paros_core::MustSync,
+    promised: Ballot,
+    self_id: u64,
+    crash: &C,
+) -> SimulationResult<()> {
+    let mut promise_changed = false;
+    for op in writes {
+        match op {
+            WriteOp::SetPromise(ballot) => {
+                storage
+                    .persist_ballot(*ballot)
+                    .map_err(|e| storage_err(&e))?;
+                promise_changed = true;
+            }
+            WriteOp::AppendAccepted {
+                slot,
+                ballot,
+                entry,
+            } => {
+                storage
+                    .append_accepted(*slot, *ballot, entry.clone())
+                    .map_err(|e| storage_err(&e))?;
+            }
+            WriteOp::SetChosenIndex(slot) => {
+                storage
+                    .set_chosen_index(*slot)
+                    .map_err(|e| storage_err(&e))?;
+            }
+        }
+    }
+
+    // Crash seam: the batch is staged but not yet flushed. A crash here loses the
+    // whole un-synced batch (and no message has been sent), so surface nothing.
+    // Only meaningful when the batch actually staged something.
+    if !writes.is_empty() && crash.crash_at(Seam::BeforeSync) {
+        return Err(seam_crash());
+    }
+
+    if !writes.is_empty() {
+        storage.sync(must_sync).map_err(|e| storage_err(&e))?;
+    }
+
+    // Durable now — emit the truthful persisted state for the oracles.
+    if promise_changed {
+        tracing::info!(
+            node = self_id,
+            pround = promised.round,
+            pbnode = promised.node.0,
+            "node_state"
+        );
+    }
+    for op in writes {
+        if let WriteOp::AppendAccepted {
+            slot,
+            ballot,
+            entry,
+        } = op
+        {
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                pround = promised.round,
+                pbnode = promised.node.0,
+                around = ballot.round,
+                abnode = ballot.node.0,
+                vhash = value_hash(&entry.value.0),
+                "persist"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Map a [`StorageError`] into a driver [`SimulationError`] so a durable-write
+/// fault propagates out of the node loop.
+fn storage_err(e: &StorageError) -> SimulationError {
+    SimulationError::InvalidState(format!("storage: {e}"))
+}
+
+/// Marker payload of the error [`run_node`] returns when a [`Seam`] crash fires.
+/// Distinguishes a *simulated crash* (the caller should recover and re-run) from
+/// a genuine failure (which should propagate).
+const SEAM_CRASH_MARKER: &str = "paros:seam-crash";
+
+/// The error a crash seam raises to unwind the current node incarnation.
+fn seam_crash() -> SimulationError {
+    SimulationError::InvalidState(SEAM_CRASH_MARKER.to_string())
+}
+
+/// Whether `e` is the marker [`run_node`] returns on a simulated seam crash (as
+/// opposed to a real failure). The node loop's owner re-runs `run_node` — which
+/// rebuilds volatile state from durable storage — to recover.
+#[must_use]
+pub fn is_seam_crash(e: &SimulationError) -> bool {
+    matches!(e, SimulationError::InvalidState(s) if s == SEAM_CRASH_MARKER)
 }
 
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
@@ -346,18 +472,23 @@ fn maintain<P: Providers>(
 ///
 /// # Errors
 ///
-/// Returns an error if the transport fails to bind or listen on `local_addr`.
+/// Returns an error if the transport fails to bind or listen on `local_addr`. May
+/// also return a simulated crash marker ([`is_seam_crash`]) if `crash` fires at a
+/// durability seam — the caller recovers by re-running `run_node` with fresh
+/// storage. Production passes [`NoCrash`](crate::NoCrash), which never fires.
 #[tracing::instrument(skip_all)]
-pub async fn run_node<P, S>(
+pub async fn run_node<P, S, C>(
     providers: P,
     mut storage: S,
     local_addr: NetworkAddress,
     members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
+    crash: &C,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
+    C: CrashSeam,
 {
     let transport = NetTransportBuilder::new(providers.clone())
         .local_address(local_addr)
@@ -373,21 +504,51 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    // On restart the core rebuilt its chosen log from durable `HardState`. Re-emit
-    // each rebuilt chosen entry as `value_chosen` so the safety oracle sees this
-    // node's post-restart belief and catches any divergence from the value the
-    // cluster actually chose for that slot. A clean first boot has an empty log, so
-    // this is a no-op. (This is what makes a "stale chosen value resurrected on
-    // restart" bug observable in the simulation.)
+    // On (re)boot the core rebuilt its volatile state from durable storage.
+    // Re-emit that recovered state so the oracles see this node's post-restart
+    // belief: the recovered promised ballot (`node_state`, feeding the
+    // monotonic-promise check across the restart seam), each recovered accepted
+    // record (`recovered`, feeding the recovery oracle's "a restart never changes
+    // a pre-crash accepted value" check), and each rebuilt chosen entry
+    // (`value_chosen`, feeding at-most-one-value-chosen — what makes a "stale
+    // chosen value resurrected on restart" bug observable). A clean first boot has
+    // empty scalars/log, so this is a near no-op.
     {
-        let hs = node.hard_state();
-        if let Some(ci) = hs.chosen_index {
-            for (slot, (_b, entry)) in hs.accepted.range(..=ci) {
+        let promised = node.hard_state().max_promised_ballot;
+        tracing::info!(
+            node = self_id,
+            pround = promised.round,
+            pbnode = promised.node.0,
+            "node_state"
+        );
+        for (slot, (ballot, entry)) in node.accepted() {
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                around = ballot.round,
+                abnode = ballot.node.0,
+                vhash = value_hash(&entry.value.0),
+                "recovered"
+            );
+        }
+        if let Some(ci) = node.hard_state().chosen_index {
+            for (slot, (_b, entry)) in node.accepted().range(..=ci) {
                 tracing::info!(
                     node = self_id,
                     slot = slot.0,
                     vhash = value_hash(&entry.value.0),
                     "value_chosen"
+                );
+                // Re-drive apply of the durable committed prefix: a crash between
+                // "chosen_index durable" and "apply side-effects done" (e.g. the
+                // seam after fsync, before send) drops the live `log_applied`, so
+                // replay it here. The apply is idempotent (chosen_index is the
+                // applied index), so replaying a prefix is safe.
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    applied_index = slot.0,
+                    "log_applied"
                 );
             }
         }
@@ -422,7 +583,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -445,14 +606,14 @@ where
                     tracing::info!(node = self_id, kind, "msg_received");
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 reply.send(());
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }

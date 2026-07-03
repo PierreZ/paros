@@ -8,6 +8,7 @@ use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
+use crate::write::WriteOp;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
 /// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
@@ -85,12 +86,19 @@ struct Election {
 pub struct RawNode {
     /// This node's static identity and membership.
     config: Config,
-    /// The must-be-durable state, surfaced for persistence via [`Ready`].
+    /// The must-be-durable scalars (promised ballot + chosen index), surfaced for
+    /// persistence via [`Ready`].
     hard_state: HardState,
+    /// The per-slot accepted log: the working copy the protocol reads (range
+    /// scans for Phase-1 recovery / Phase-2 gap-fill). Volatile — rebuilt on boot
+    /// from the durable log (see [`RawNode::new`]); durably persisted one record
+    /// at a time via [`WriteOp::AppendAccepted`], never as a blob.
+    accepted: BTreeMap<Slot, (Ballot, Entry)>,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
     // ---- `ready`, cleared by `advance`.
-    pending_hard_state: Option<HardState>,
+    /// Semantic durable write deltas produced this batch, in apply order.
+    pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(NodeId, Message)>,
     pending_committed: Vec<(Slot, Entry)>,
 
@@ -149,10 +157,20 @@ impl RawNode {
         let (hard_state, config) = storage.initial_state();
         let ballot = hard_state.max_promised_ballot;
 
+        // Rebuild the working accepted log by scanning the durable per-slot log
+        // (first_slot..=last_slot); gaps read back as `None` and are skipped.
+        let mut accepted: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
+        let (first, last) = (storage.first_slot().0, storage.last_slot().0);
+        for s in first..=last {
+            if let Some(record) = storage.accepted(Slot(s)) {
+                accepted.insert(Slot(s), record);
+            }
+        }
+
         let mut chosen = BTreeMap::new();
         let mut applied_seq: BTreeMap<ClientId, ClientSeq> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
-        for (slot, (_b, entry)) in &hard_state.accepted {
+        for (slot, (_b, entry)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
             if is_chosen {
                 chosen.insert(*slot, entry.clone());
@@ -166,8 +184,7 @@ impl RawNode {
                 inflight.insert((entry.client, entry.seq), *slot);
             }
         }
-        let next_slot = hard_state
-            .accepted
+        let next_slot = accepted
             .keys()
             .next_back()
             .map_or(Slot(0), |s| Slot(s.0 + 1));
@@ -175,7 +192,8 @@ impl RawNode {
         Self {
             config,
             hard_state,
-            pending_hard_state: None,
+            accepted,
+            pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
             tick_count: 0,
@@ -311,12 +329,10 @@ impl RawNode {
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };
-        self.hard_state.max_promised_ballot = self.ballot;
-        self.mark_dirty();
+        self.set_promise(self.ballot);
 
         let from_slot = self.first_unchosen();
         let recovered: BTreeMap<Slot, (Ballot, Entry)> = self
-            .hard_state
             .accepted
             .range(from_slot..)
             .map(|(s, v)| (*s, v.clone()))
@@ -394,7 +410,6 @@ impl RawNode {
             self.start_accept_round(slot, entry);
         }
         self.next_slot = self
-            .hard_state
             .accepted
             .keys()
             .next_back()
@@ -413,13 +428,11 @@ impl RawNode {
                 self.become_follower(None);
             }
             self.election_elapsed = 0;
-            self.hard_state.max_promised_ballot = ballot;
+            self.set_promise(ballot);
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
-            self.mark_dirty();
             let accepted: BTreeMap<Slot, (Ballot, Entry)> = self
-                .hard_state
                 .accepted
                 .range(from_slot..)
                 .map(|(s, v)| (*s, v.clone()))
@@ -459,9 +472,8 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
-            self.hard_state.max_promised_ballot = ballot;
-            self.hard_state.accepted.insert(slot, (ballot, entry));
-            self.mark_dirty();
+            self.set_promise(ballot);
+            self.record_accepted(slot, ballot, entry);
             self.pending_messages.push((
                 from,
                 Message::Accepted {
@@ -570,11 +582,8 @@ impl RawNode {
         // since we became leader, skip the self-accept (the round relies on
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
         if ballot >= self.hard_state.max_promised_ballot {
-            self.hard_state.max_promised_ballot = ballot;
-            self.hard_state
-                .accepted
-                .insert(slot, (ballot, entry.clone()));
-            self.mark_dirty();
+            self.set_promise(ballot);
+            self.record_accepted(slot, ballot, entry.clone());
             accepted_by.insert(me);
         }
         self.proposer.insert(
@@ -618,14 +627,34 @@ impl RawNode {
 
     // ---- helpers ----------------------------------------------------------
 
-    /// Majority quorum size of the cluster (membership includes self).
+    /// Quorum size of the cluster, per the configured [`crate::QuorumSystem`]
+    /// (membership includes self).
     fn quorum(&self) -> usize {
-        self.config.peers.len() / 2 + 1
+        self.config
+            .quorum_system
+            .quorum_size(self.config.peers.len())
     }
 
-    /// Snapshot `hard_state` into the pending bucket for the next `ready()`.
-    fn mark_dirty(&mut self) {
-        self.pending_hard_state = Some(self.hard_state.clone());
+    /// Raise (or re-affirm) the promised ballot to `ballot`, recording a
+    /// [`WriteOp::SetPromise`] delta only when it actually changes. Callers that
+    /// must never lower the promise guard with `ballot >` first.
+    fn set_promise(&mut self, ballot: Ballot) {
+        if self.hard_state.max_promised_ballot != ballot {
+            self.hard_state.max_promised_ballot = ballot;
+            self.pending_writes.push(WriteOp::SetPromise(ballot));
+        }
+    }
+
+    /// Record `(ballot, entry)` as accepted for `slot` in the working log and
+    /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
+    /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
+    fn record_accepted(&mut self, slot: Slot, ballot: Ballot, entry: Entry) {
+        self.accepted.insert(slot, (ballot, entry.clone()));
+        self.pending_writes.push(WriteOp::AppendAccepted {
+            slot,
+            ballot,
+            entry,
+        });
     }
 
     /// Queue `msg` to every member except this node.
@@ -674,11 +703,9 @@ impl RawNode {
         // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
         // would resurrect a value the cluster never chose for this slot. A chosen
         // value is durable and safe to record at its choosing ballot.
-        self.hard_state
-            .accepted
-            .insert(slot, (ballot, entry.clone()));
+        self.record_accepted(slot, ballot, entry.clone());
         if ballot > self.hard_state.max_promised_ballot {
-            self.hard_state.max_promised_ballot = ballot;
+            self.set_promise(ballot);
         }
         self.chosen.insert(slot, entry.clone());
         self.inflight.remove(&(entry.client, entry.seq));
@@ -689,7 +716,6 @@ impl RawNode {
         if bump {
             self.applied_seq.insert(entry.client, entry.seq);
         }
-        self.mark_dirty();
         self.advance_chosen_index();
     }
 
@@ -699,8 +725,8 @@ impl RawNode {
         let mut next = self.first_unchosen();
         while let Some(entry) = self.chosen.get(&next).cloned() {
             self.hard_state.chosen_index = Some(next);
+            self.pending_writes.push(WriteOp::SetChosenIndex(next));
             self.pending_committed.push((next, entry));
-            self.mark_dirty();
             next = Slot(next.0 + 1);
         }
     }
@@ -713,10 +739,17 @@ impl RawNode {
         &self.config
     }
 
-    /// The current durable state.
+    /// The current durable scalars (promised ballot + chosen index).
     #[must_use]
     pub fn hard_state(&self) -> &HardState {
         &self.hard_state
+    }
+
+    /// The working per-slot accepted log (rebuilt from durable storage on boot).
+    /// A read view for drivers/oracles; writes go through [`Ready`] deltas.
+    #[must_use]
+    pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Entry)> {
+        &self.accepted
     }
 
     /// The number of ticks observed so far.
@@ -758,8 +791,8 @@ impl RawNode {
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----
 
-    pub(crate) fn pending_hard_state(&self) -> Option<&HardState> {
-        self.pending_hard_state.as_ref()
+    pub(crate) fn pending_writes(&self) -> &[WriteOp] {
+        &self.pending_writes
     }
 
     pub(crate) fn pending_messages(&self) -> &[(NodeId, Message)] {
@@ -771,7 +804,7 @@ impl RawNode {
     }
 
     pub(crate) fn clear_pending(&mut self) {
-        self.pending_hard_state = None;
+        self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_committed.clear();
     }

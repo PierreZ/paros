@@ -29,7 +29,7 @@ use moonpool_sim::{
 
 use crate::oracle::{
     ClientLivenessOracle, LeadershipOracle, NoGapsOracle, ProgressOracle, ProtocolData,
-    ProtocolRecorder, RecorderData, SafetyOracle, TimelineRecorder, build_result,
+    ProtocolRecorder, RecorderData, RecoveryOracle, SafetyOracle, TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -54,15 +54,23 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
 /// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
 pub const COVERAGE_ITERATIONS: usize = 64;
+
+/// Pinned seeds that exercise durability edge cases (crash/restart + the
+/// persist/send seam crashes), replayed on every CI run so a regression in the
+/// storage or recovery path is caught immediately — not left to the adaptive
+/// sweep to rediscover. Anchored by the seed on which the `buggify` seam crash
+/// first went red (the `log_applied` gap the recovery path now fills); grows as
+/// new durability bugs are found. Each replays clean via [`run_seed`].
+pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345];
 /// Simulated window over which chaos (network faults + attrition reboots) fires.
 /// Wide enough to span a run's proposal phase so crashes land mid-protocol.
 const CHAOS_DURATION: Duration = Duration::from_secs(30);
 
 /// The chaos surfaces every run exercises: swarm network faults plus single-node
 /// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
-/// `HardState` mirrored into the per-iteration `StateHandle`) survives a restart,
-/// modelling a clean process crash with intact disk. Shared by [`run_seed`] and
-/// [`explore`] so a failing seed replays identically.
+/// records in the per-iteration `StorageWorld`) survives a restart, modelling a
+/// clean process crash with intact disk. Shared by [`run_seed`] and [`explore`]
+/// so a failing seed replays identically.
 fn chaos_surfaces() -> [Chaos; 2] {
     [
         Chaos::Network(ChaosMode::Swarm),
@@ -100,6 +108,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
@@ -134,6 +143,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)

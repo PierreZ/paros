@@ -151,7 +151,7 @@ The single-decree safety rules map directly onto the acceptor code:
 | Paxos Made Simple | paros |
 |---|---|
 | highest promised prepare number | `HardState.max_promised_ballot` (`state.rs`) |
-| highest accepted proposal | `HardState.accepted: BTreeMap<Slot, (Ballot, Entry)>` |
+| highest accepted proposal | the per-slot accepted log `Slot -> (Ballot, Entry)`, persisted via `WriteOp::AppendAccepted` (`write.rs`) |
 | promise rule (P1a) | `ballot > max_promised_ballot` in `on_prepare` (`node.rs`) |
 | vote rule | `ballot >= max_promised_ballot` in `on_accept` |
 | value-selection rule (P2c) | adopt the highest `(ballot, entry)` from the `Promise` replies |
