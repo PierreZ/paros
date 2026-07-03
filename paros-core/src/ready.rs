@@ -3,8 +3,8 @@
 
 use crate::message::Message;
 use crate::node::RawNode;
-use crate::state::HardState;
 use crate::types::{Entry, NodeId, Slot};
+use crate::write::{self, MustSync, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -17,9 +17,11 @@ use crate::types::{Entry, NodeId, Slot};
 ///
 /// # Durability ordering — process the buckets in this order
 ///
-/// 1. **Persist** [`Ready::hard_state`] to stable storage.
+/// 1. **Persist** [`Ready::writes`] to stable storage, applying each
+///    [`WriteOp`] in order; fsync the batch first if [`Ready::must_sync`] is
+///    [`MustSync::Sync`].
 /// 2. **Send** [`Ready::messages`] to peers — *only after* step 1 is durable. A
-///    `Promise`/`Accepted` published before its `HardState` is on disk is a
+///    `Promise`/`Accepted` published before its durable write is on disk is a
 ///    safety violation (a crash could un-promise / un-accept).
 /// 3. **Apply** [`Ready::committed`] to the application state machine — these are
 ///    already chosen *and* durable.
@@ -29,9 +31,8 @@ use crate::types::{Entry, NodeId, Slot};
 ///
 /// The accessors borrow node-owned buffers, so a guard must not be held across
 /// an `.await`. An async driver should copy the buckets out
-/// (`hard_state().cloned()`, `messages().to_vec()`, `committed().to_vec()`),
-/// `advance()`, and *then* await its I/O. Stage 0 is synchronous, so this does
-/// not bite yet.
+/// (`writes().to_vec()`, `must_sync()`, `messages().to_vec()`,
+/// `committed().to_vec()`), `advance()`, and *then* await its I/O.
 #[must_use = "a Ready must be processed and then advanced; dropping it silently skips a batch"]
 pub struct Ready<'a> {
     node: &'a mut RawNode,
@@ -44,11 +45,19 @@ impl<'a> Ready<'a> {
         Self { node }
     }
 
-    /// Durable state to persist **first** (step 1). `None` when nothing changed
-    /// this batch.
+    /// The semantic durable write deltas to persist **first** (step 1), in apply
+    /// order. Empty when nothing durable changed this batch.
     #[must_use]
-    pub fn hard_state(&self) -> Option<&HardState> {
-        self.node.pending_hard_state()
+    pub fn writes(&self) -> &[WriteOp] {
+        self.node.pending_writes()
+    }
+
+    /// Whether this batch must be fsync'd before its [`Ready::messages`] are sent.
+    /// [`MustSync::Sync`] when any write raises a promise or appends an accept;
+    /// [`MustSync::Relaxed`] when the batch only advances the chosen index.
+    #[must_use]
+    pub fn must_sync(&self) -> MustSync {
+        write::classify(self.node.pending_writes())
     }
 
     /// Outbound messages to send **after** [`Ready::hard_state`] is durable

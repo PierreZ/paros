@@ -9,9 +9,11 @@ use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
 
-/// In-memory [`Storage`] seeded with an explicit initial state (for restart tests).
+/// In-memory [`Storage`] seeded with an explicit initial state (for restart
+/// tests): the durable scalars plus a per-slot accepted log.
 struct TestStorage {
     hard_state: HardState,
+    accepted: BTreeMap<Slot, (Ballot, Entry)>,
     config: Config,
 }
 
@@ -19,10 +21,23 @@ impl TestStorage {
     fn new(id: u64, members: &[u64]) -> Self {
         Self {
             hard_state: HardState::default(),
+            accepted: BTreeMap::new(),
             config: Config {
                 id: NodeId(id),
                 peers: members.iter().copied().map(NodeId).collect(),
+                quorum_system: crate::state::QuorumSystem::Majority,
             },
+        }
+    }
+
+    /// Snapshot a live node's durable state (scalars + accepted log) into a fresh
+    /// storage, the way a real driver's persisted disk would look — for building
+    /// the "restart from durable storage" path in tests.
+    fn from_node(n: &RawNode) -> Self {
+        Self {
+            hard_state: n.hard_state().clone(),
+            accepted: n.accepted().clone(),
+            config: n.config().clone(),
         }
     }
 }
@@ -32,18 +47,13 @@ impl Storage for TestStorage {
         (self.hard_state.clone(), self.config.clone())
     }
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
-        self.hard_state.accepted.get(&slot).cloned()
+        self.accepted.get(&slot).cloned()
     }
     fn first_slot(&self) -> Slot {
         Slot(0)
     }
     fn last_slot(&self) -> Slot {
-        self.hard_state
-            .accepted
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(Slot(0))
+        self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
         None
@@ -293,7 +303,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
         entry: recovered.clone(),
     });
     let _ = drain(&mut nodes[1]); // Accepted reply, dropped (node 0 is gone)
-    assert!(nodes[1].hard_state().accepted.contains_key(&Slot(0)));
+    assert!(nodes[1].accepted().contains_key(&Slot(0)));
 
     // Node 2 campaigns. Deliver only to node 1 (node 0 is partitioned).
     nodes[2].set_election_timeout(1);
@@ -304,8 +314,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     assert!(nodes[2].is_leader(), "node 2 won with node 1's promise");
     // Node 2 re-proposed the recovered entry for slot 0 under its own ballot.
     let (b, e) = nodes[2]
-        .hard_state()
-        .accepted
+        .accepted()
         .get(&Slot(0))
         .expect("slot 0 re-accepted");
     assert_eq!(
@@ -351,11 +360,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
         accepted: acc_high,
     });
     assert!(n.is_leader(), "quorum reached");
-    let (_, e) = n
-        .hard_state()
-        .accepted
-        .get(&Slot(0))
-        .expect("slot 0 re-accepted");
+    let (_, e) = n.accepted().get(&Slot(0)).expect("slot 0 re-accepted");
     assert_eq!(
         e, &high.1,
         "the highest-ballot accepted value is re-proposed"
@@ -459,14 +464,15 @@ fn restart_rebuilds_state_from_hard_state() {
     accepted.insert(Slot(2), (ballot(2, 0), entry(1, 3, 30)));
     let hard_state = HardState {
         max_promised_ballot: ballot(2, 0),
-        accepted,
         chosen_index: Some(Slot(1)),
     };
     let storage = TestStorage {
         hard_state,
+        accepted,
         config: Config {
             id: NodeId(1),
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            quorum_system: crate::state::QuorumSystem::Majority,
         },
     };
     let n = RawNode::new(&storage);
@@ -513,7 +519,7 @@ fn acceptor_rejects_below_promised_ballot() {
         entry: entry(1, 1, 9),
     });
     assert!(
-        !n.hard_state().accepted.contains_key(&Slot(0)),
+        !n.accepted().contains_key(&Slot(0)),
         "must not accept below the promised ballot"
     );
     let out = drain(&mut n);
@@ -554,11 +560,8 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
         "learns the chosen value live"
     );
 
-    // Restart: rebuild from the durable HardState.
-    let storage = TestStorage {
-        hard_state: n.hard_state().clone(),
-        config: n.config().clone(),
-    };
+    // Restart: rebuild from the durable state (scalars + accepted log).
+    let storage = TestStorage::from_node(&n);
     let restarted = RawNode::new(&storage);
 
     assert_eq!(

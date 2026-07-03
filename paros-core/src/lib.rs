@@ -31,10 +31,12 @@ mod ready;
 mod state;
 mod storage;
 mod types;
+mod write;
 
 pub use message::Message;
 pub use node::{NodeRole, ProposeResult, RawNode};
 pub use ready::Ready;
-pub use state::{Config, HardState};
+pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;
 pub use types::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, Slot, Value};
+pub use write::{MustSync, WriteOp};

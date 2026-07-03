@@ -2,32 +2,111 @@
 //! plus the [`NodeStorage`] write extension the driver persists through, and the
 //! default in-memory [`MemStorage`] implementing both.
 
-use paros_core::{Ballot, Config, Entry, HardState, Slot, Storage};
+use std::collections::BTreeMap;
+use std::fmt;
 
-/// The write side of node storage.
-///
-/// [`paros_core::Storage`] is the read-only recovery port — the core only ever
-/// *reads back* durable state. The driver, which owns all writes, persists
-/// through this extension **before** sending the matching batch's messages (the
-/// persist-before-send rule [`paros_core::Ready`] documents). Implementors also
-/// implement [`Storage`]. Stage 1 only needs `set_hard_state`; later stages add
-/// log-append and snapshot writes here.
-pub trait NodeStorage: Storage {
-    /// Persist the durable [`HardState`].
-    fn set_hard_state(&mut self, hard_state: HardState);
+use paros_core::{Ballot, Config, Entry, HardState, MustSync, Slot, Storage};
+
+/// A durable-write failure. The read-side [`paros_core::Storage`] recovery port
+/// stays infallible, but every *write* is fallible **from day one** so a later
+/// storage-fault stage can inject `EIO` / torn-write / fsync failures through
+/// these signatures without a second trait redesign.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageError {
+    /// An I/O error (a lost/failed write, a failed fsync).
+    Io(String),
+    /// A durable record failed its integrity check (Stage 7 checksums).
+    Corruption(String),
 }
 
-/// The smallest thing that satisfies [`paros_core::Storage`]: enough to
-/// *construct* a [`paros_core::RawNode`] and to receive the durable-before-send
-/// writes the driver makes while draining a [`paros_core::Ready`].
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Io(m) => write!(f, "storage io error: {m}"),
+            StorageError::Corruption(m) => write!(f, "storage corruption: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+/// The write side of node storage: **semantic per-record ops**, not a whole-blob
+/// rewrite.
 ///
-/// This is the library's default in-memory storage. A crash-testable faulty fake
-/// (fail-stop, corruption, protocol-aware recovery) arrives with the
-/// storage-fault milestone (Stage 4+); the driver is generic over
-/// [`paros_core::Storage`], so it swaps in without touching the loop.
+/// [`paros_core::Storage`] is the read-only recovery port — the core only ever
+/// *reads back* durable state (at construction). The driver, which owns all
+/// writes, applies each [`paros_core::WriteOp`] a [`paros_core::Ready`] surfaces
+/// through the matching method here, then [`sync`](NodeStorage::sync)s the batch
+/// **before** sending its messages (the persist-before-send rule). Every write
+/// returns [`Result`] so faults are injectable from the start.
+pub trait NodeStorage: Storage {
+    /// Persist a raised promised ballot (Phase 1).
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError>;
+
+    /// Persist the `(ballot, entry)` accepted for `slot` (Phase 2). An
+    /// upsert-by-slot (a chosen value overwrites a stale accept).
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn append_accepted(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        entry: Entry,
+    ) -> Result<(), StorageError>;
+
+    /// Advance the durable chosen index (commit index) to `slot`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError>;
+
+    /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch
+    /// (promise-raise / accepted-append) must be fsync-durable on return; a
+    /// [`MustSync::Relaxed`] batch (chosen-index-only) may skip the fsync — its
+    /// effect is safely re-derivable after a crash.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the flush fails.
+    fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError>;
+
+    /// Install a snapshot covering every slot `<= up_to`, discarding the
+    /// compacted prefix. **Declared for Stage 5 (catch-up / log compaction);**
+    /// the default is a no-op so today's callers need not implement it.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
+        let _ = (up_to, bytes);
+        Ok(())
+    }
+
+    /// Truncate the log below `first`, discarding compacted records. **Declared
+    /// for Stage 5;** the default is a no-op.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+        let _ = first;
+        Ok(())
+    }
+}
+
+/// The library's default in-memory storage: enough to *construct* a
+/// [`paros_core::RawNode`] and to receive the semantic writes the driver makes
+/// while draining a [`paros_core::Ready`]. The durable scalars and the per-slot
+/// accepted log are stored separately (never a single blob).
+///
+/// A crash-testable faulty fake (fail-stop, corruption, protocol-aware recovery)
+/// arrives with the storage-fault milestone (Stage 6); the driver is generic over
+/// [`NodeStorage`], so it swaps in without touching the loop.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     hard_state: HardState,
+    accepted: BTreeMap<Slot, (Ballot, Entry)>,
     config: Config,
 }
 
@@ -37,14 +116,36 @@ impl MemStorage {
     pub fn new(config: Config) -> Self {
         Self {
             hard_state: HardState::default(),
+            accepted: BTreeMap::new(),
             config,
         }
     }
 }
 
 impl NodeStorage for MemStorage {
-    fn set_hard_state(&mut self, hard_state: HardState) {
-        self.hard_state = hard_state;
+    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        self.hard_state.max_promised_ballot = ballot;
+        Ok(())
+    }
+
+    fn append_accepted(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        entry: Entry,
+    ) -> Result<(), StorageError> {
+        self.accepted.insert(slot, (ballot, entry));
+        Ok(())
+    }
+
+    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
+        self.hard_state.chosen_index = Some(slot);
+        Ok(())
+    }
+
+    fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
+        // In-memory: writes are already visible; nothing to flush.
+        Ok(())
     }
 }
 
@@ -54,7 +155,7 @@ impl Storage for MemStorage {
     }
 
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
-        self.hard_state.accepted.get(&slot).cloned()
+        self.accepted.get(&slot).cloned()
     }
 
     fn first_slot(&self) -> Slot {
@@ -62,12 +163,7 @@ impl Storage for MemStorage {
     }
 
     fn last_slot(&self) -> Slot {
-        self.hard_state
-            .accepted
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(Slot(0))
+        self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
     }
 
     fn snapshot(&self) -> Option<Vec<u8>> {

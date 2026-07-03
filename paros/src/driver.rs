@@ -22,12 +22,13 @@ use moonpool_core::{
 };
 use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot, Value,
+    Ballot, ClientId, ClientSeq, Entry, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot,
+    Value, WriteOp,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::storage::NodeStorage;
+use crate::storage::{NodeStorage, StorageError};
 
 /// Well-known RPC token the paros node service is registered at. Every node
 /// serves [`Paros`] here, and clients address it by `(node address, this token)`
@@ -48,11 +49,20 @@ const ELECTION_TIMEOUT_BASE: u64 = 5;
 /// literal (tracing requires one); readers (oracles) match on this constant.
 pub const EV_NODE_TICK: &str = "node_tick";
 
-/// Tracing event: this node's durable state changed. Carries `node` (id), the
-/// promised ballot (`pround`/`pbnode`), and — when `has_accepted` — the slot-0
-/// accepted ballot (`around`/`abnode`) + value hash (`vhash`). The safety oracle
-/// reads it for the monotonic-promise and never-accept-below-promise invariants.
+/// Tracing event: this node raised its durable promised ballot. Carries `node`
+/// (id) and the promised ballot (`pround`/`pbnode`). The safety oracle reads it
+/// for the monotonic-promise invariant. (Per-slot accepted state is surfaced
+/// separately by [`EV_PERSIST`], so never-accept-below-promise is checked across
+/// the whole log, not just slot 0.)
 pub const EV_NODE_STATE: &str = "node_state";
+
+/// Tracing event: this node durably persisted an accepted `(ballot, entry)` for a
+/// slot (a `WriteOp::AppendAccepted`). Carries `node`, `slot`, the node's current
+/// promised ballot (`pround`/`pbnode`), the accepted ballot (`around`/`abnode`),
+/// and the value hash (`vhash`). The safety oracle reads it for the
+/// never-accept-below-promise invariant per slot; the recovery oracle reads it to
+/// check a pre-crash accepted `(slot -> value)` is stable across a restart.
+pub const EV_PERSIST: &str = "persist";
 
 /// Tracing event: this node applied a chosen value. Carries `node`, `slot`, and
 /// the value hash (`vhash`). The safety oracle reads it for the
@@ -209,41 +219,30 @@ fn drain_ready<P, S>(
     addrs: &BTreeMap<NodeId, NetworkAddress>,
     self_id: u64,
     pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
-) where
+) -> SimulationResult<()>
+where
     P: Providers,
     S: NodeStorage,
 {
+    // Copy the batch out of the borrow guard, advance to release the gate, then
+    // perform I/O — persist → send → apply. Advancing before the I/O is the
+    // documented async pattern; persist-before-send still holds because the
+    // persist loop below precedes the send loop.
     let ready = node.ready();
+    let writes: Vec<WriteOp> = ready.writes().to_vec();
+    let must_sync = ready.must_sync();
+    let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
+    let committed: Vec<(Slot, Entry)> = ready.committed().to_vec();
+    ready.advance();
 
-    // 1. Persist durable state FIRST, and surface it for the safety oracles.
-    if let Some(hard_state) = ready.hard_state() {
-        storage.set_hard_state(hard_state.clone());
-        let pb = hard_state.max_promised_ballot;
-        if let Some((ab, e)) = hard_state.accepted.get(&Slot(0)) {
-            tracing::info!(
-                node = self_id,
-                pround = pb.round,
-                pbnode = pb.node.0,
-                has_accepted = true,
-                around = ab.round,
-                abnode = ab.node.0,
-                vhash = value_hash(&e.value.0),
-                "node_state"
-            );
-        } else {
-            tracing::info!(
-                node = self_id,
-                pround = pb.round,
-                pbnode = pb.node.0,
-                has_accepted = false,
-                "node_state"
-            );
-        }
-    }
+    // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
+    //    surface the persisted state for the safety + recovery oracles.
+    let promised = node.hard_state().max_promised_ballot;
+    persist_writes(storage, &writes, must_sync, promised, self_id)?;
 
     // 2. Send messages — only after (1) is durable. The core addresses each one;
     //    the driver just maps NodeId → address and fires (fire-and-forget).
-    for (to, msg) in ready.messages() {
+    for (to, msg) in &messages {
         let kind = message_kind(msg);
         if let Some((_, ballot, slot)) = message_route(msg) {
             tracing::info!(
@@ -267,7 +266,7 @@ fn drain_ready<P, S>(
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
-    for (slot, entry) in ready.committed() {
+    for (slot, entry) in &committed {
         tracing::info!(
             node = self_id,
             slot = slot.0,
@@ -291,8 +290,72 @@ fn drain_ready<P, S>(
         }
     }
 
-    // 4. Release the gate.
-    ready.advance();
+    Ok(())
+}
+
+/// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
+/// [`MustSync`], and surface the persisted state for the safety + recovery
+/// oracles: a `node_state` event when the promised ballot rose, and a per-slot
+/// `persist` event for each accepted append. `promised` is the node's post-batch
+/// promise (`>=` any accept ballot in the batch).
+fn persist_writes<S: NodeStorage>(
+    storage: &mut S,
+    writes: &[WriteOp],
+    must_sync: paros_core::MustSync,
+    promised: Ballot,
+    self_id: u64,
+) -> SimulationResult<()> {
+    let mut promise_changed = false;
+    for op in writes {
+        match op {
+            WriteOp::SetPromise(ballot) => {
+                storage.persist_ballot(*ballot).map_err(|e| storage_err(&e))?;
+                promise_changed = true;
+            }
+            WriteOp::AppendAccepted {
+                slot,
+                ballot,
+                entry,
+            } => {
+                storage
+                    .append_accepted(*slot, *ballot, entry.clone())
+                    .map_err(|e| storage_err(&e))?;
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    pround = promised.round,
+                    pbnode = promised.node.0,
+                    around = ballot.round,
+                    abnode = ballot.node.0,
+                    vhash = value_hash(&entry.value.0),
+                    "persist"
+                );
+            }
+            WriteOp::SetChosenIndex(slot) => {
+                storage
+                    .set_chosen_index(*slot)
+                    .map_err(|e| storage_err(&e))?;
+            }
+        }
+    }
+    if !writes.is_empty() {
+        storage.sync(must_sync).map_err(|e| storage_err(&e))?;
+    }
+    if promise_changed {
+        tracing::info!(
+            node = self_id,
+            pround = promised.round,
+            pbnode = promised.node.0,
+            "node_state"
+        );
+    }
+    Ok(())
+}
+
+/// Map a [`StorageError`] into a driver [`SimulationError`] so a durable-write
+/// fault propagates out of the node loop.
+fn storage_err(e: &StorageError) -> SimulationError {
+    SimulationError::InvalidState(format!("storage: {e}"))
 }
 
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
@@ -380,9 +443,9 @@ where
     // this is a no-op. (This is what makes a "stale chosen value resurrected on
     // restart" bug observable in the simulation.)
     {
-        let hs = node.hard_state();
-        if let Some(ci) = hs.chosen_index {
-            for (slot, (_b, entry)) in hs.accepted.range(..=ci) {
+        let chosen_index = node.hard_state().chosen_index;
+        if let Some(ci) = chosen_index {
+            for (slot, (_b, entry)) in node.accepted().range(..=ci) {
                 tracing::info!(
                     node = self_id,
                     slot = slot.0,
@@ -422,7 +485,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -445,14 +508,14 @@ where
                     tracing::info!(node = self_id, kind, "msg_received");
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 reply.send(());
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }
