@@ -205,6 +205,46 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
 }
 
 #[test]
+fn promise_and_accept_batches_require_fsync() {
+    use crate::write::MustSync;
+
+    // An acceptor promoting its promise on a higher Prepare must fsync before it
+    // replies Promise.
+    let mut n = node(0, &[0, 1, 2]);
+    n.step(Message::Prepare {
+        from: NodeId(1),
+        ballot: ballot(3, 1),
+        from_slot: Slot(0),
+    });
+    {
+        let r = n.ready();
+        assert_eq!(
+            r.must_sync(),
+            MustSync::Sync,
+            "a promise-raise must fsync before Promise is sent"
+        );
+        r.advance();
+    }
+
+    // An acceptor accepting a value must fsync before it replies Accepted.
+    n.step(Message::Accept {
+        from: NodeId(1),
+        ballot: ballot(3, 1),
+        slot: Slot(0),
+        entry: entry(1, 1, 9),
+    });
+    {
+        let r = n.ready();
+        assert_eq!(
+            r.must_sync(),
+            MustSync::Sync,
+            "an accepted-append must fsync before Accepted is sent"
+        );
+        r.advance();
+    }
+}
+
+#[test]
 fn non_leader_propose_redirects() {
     let mut nodes = [
         node(0, &[0, 1, 2]),

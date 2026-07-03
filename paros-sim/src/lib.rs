@@ -54,6 +54,14 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
 /// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
 pub const COVERAGE_ITERATIONS: usize = 64;
+
+/// Pinned seeds that exercise durability edge cases (crash/restart + the
+/// persist/send seam crashes), replayed on every CI run so a regression in the
+/// storage or recovery path is caught immediately — not left to the adaptive
+/// sweep to rediscover. Anchored by the seed on which the `buggify` seam crash
+/// first went red (the `log_applied` gap the recovery path now fills); grows as
+/// new durability bugs are found. Each replays clean via [`run_seed`].
+pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345];
 /// Simulated window over which chaos (network faults + attrition reboots) fires.
 /// Wide enough to span a run's proposal phase so crashes land mid-protocol.
 const CHAOS_DURATION: Duration = Duration::from_secs(30);

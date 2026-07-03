@@ -55,15 +55,17 @@ change or a restart. (More on that in [Crash and restart safety](restart-safety.
 
 ## The log is a gapless prefix plus the future
 
-A node's durable state holds, per slot, the value it has accepted, and a single
-**commit index**:
+A node's durable state is two small scalars — the promised ballot and a single
+**commit index** — persisted whole, plus a per-slot accepted log persisted one
+record at a time (mirroring etcd-raft's `HardState`-vs-`entries` split):
 
 ```rust
 pub struct HardState {
     pub max_promised_ballot: Ballot,
-    pub accepted: BTreeMap<Slot, (Ballot, Entry)>,
     pub chosen_index: Option<Slot>,   // highest contiguous chosen slot
 }
+// The accepted log — `Slot -> (Ballot, Entry)` — is persisted separately, one
+// record per `WriteOp::AppendAccepted`, never as a blob.
 ```
 
 `chosen_index` is the highest slot such that **every** slot up to it is chosen. It

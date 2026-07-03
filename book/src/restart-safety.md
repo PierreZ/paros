@@ -12,19 +12,31 @@ edge, and the simulation caught it.
 ## What must be durable, and when
 
 Three things must reach stable storage, and the *order* in which they do is part
-of the protocol. paros calls them the `HardState`:
+of the protocol: the promised ballot, the per-slot accepted value, and the commit
+index. paros splits them the way etcd-raft splits `HardState` from `entries` —
+two small scalars persisted whole, and the log persisted one record at a time:
 
 ```rust
-pub struct HardState {
+pub struct HardState {          // the two scalars, persisted whole
     pub max_promised_ballot: Ballot,
-    pub accepted: BTreeMap<Slot, (Ballot, Entry)>,
     pub chosen_index: Option<Slot>,
+}
+// The accepted log — Slot -> (Ballot, Entry) — is persisted per record, not as a
+// blob. Each `Ready` batch surfaces the minimal deltas instead of a whole-state
+// clone:
+enum WriteOp {
+    SetPromise(Ballot),                                   // raise the promise
+    AppendAccepted { slot: Slot, ballot: Ballot, entry: Entry }, // one accept
+    SetChosenIndex(Slot),                                 // advance the commit index
 }
 ```
 
 The rule is **persist before send**. An acceptor must write a raised promise to
 disk before it replies `Promise`, and write a new accepted value to disk before it
-replies `Accepted`. The state lives in the code with the reason attached:
+replies `Accepted`. A promise-raise or accepted-append is `MustSync::Sync` (fsync
+before the reply leaves); a commit-index-only advance may use a relaxed write,
+because a chosen value is already durable from the accept that preceded it. The
+state lives in the code with the reason attached:
 
 > Sending either reply before the corresponding field is durable violates Paxos
 > safety: a crash could "un-promise" or "un-accept", letting two different values
@@ -43,7 +55,7 @@ a **compile** error until the first is acknowledged:
 ```mermaid
 flowchart TD
     step["step(msg) or tick():<br/>run protocol logic, fill the pending buckets"]
-    r1["Step 1 — persist HardState<br/>(mpb, accepted, chosen_index)"]
+    r1["Step 1 — persist the batch's writes<br/>(set-promise / append-accepted / set-chosen-index), then fsync"]
     r2["Step 2 — send messages to peers"]
     r3["Step 3 — apply committed entries"]
     r4["Step 4 — advance(): release the gate"]
@@ -99,12 +111,14 @@ the **authoritative** accepted entry, overwriting any stale one:
 // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
 // would resurrect a value the cluster never chose for this slot. A chosen
 // value is durable and safe to record at its choosing ballot.
-self.hard_state.accepted.insert(slot, (ballot, entry.clone()));
+self.record_accepted(slot, ballot, entry.clone()); // insert (overwrite), then
+                                                    // queue an AppendAccepted
 ```
 
-`insert` overwrites; `or_insert_with` would have left the stale `X` in place. With
-the overwrite, the durable `accepted` map and the chosen value can never disagree,
-so the restart rebuilds the right answer:
+`record_accepted` overwrites the slot's entry and queues a
+`WriteOp::AppendAccepted` at the choosing ballot; `or_insert_with` would have left
+the stale `X` in place. With the overwrite, the durable accepted log and the
+chosen value can never disagree, so the restart rebuilds the right answer:
 
 ```mermaid
 sequenceDiagram
@@ -142,3 +156,47 @@ This is the loop the project lives by: make the violation reproducible, watch it
 fail, fix the core, watch it pass. A safety bug the simulation cannot reproduce is
 treated as unproven. This one was very real, and the simulation is why we know the
 fix works.
+
+## Crashing *inside* a batch: the persist/send seam
+
+`Chaos::Attrition` crashes a node at *process* granularity. But the driver drains
+each `Ready` batch synchronously — persist every write, fsync, *then* send the
+messages — with no `.await` in between, so attrition can only ever crash a node
+**between** batches, never at the seam *within* one. Yet the seam is exactly where
+durability is subtle: what happens if a node dies after it fsyncs an accept but
+before the `Accepted` reply leaves the wire? Or before the fsync, with the batch
+half-written?
+
+To reach those points the harness uses `buggify!()` — deterministic fault
+injection that is activated per seed and then fires probabilistically, so only
+some seeds exercise a seam crash, and always reproducibly. Two seams matter:
+
+```mermaid
+flowchart TD
+    stage["stage the batch's writes<br/>(promise / accepts / commit index)"]
+    s1{{"seam: crash before fsync"}}
+    sync["fsync"]
+    s2{{"seam: crash after fsync,<br/>before send"}}
+    send["send messages"]
+    stage --> s1 --> sync --> s2 --> send
+    s1 -. "whole un-synced batch lost;<br/>no message was sent → clean 'never happened'" .-> lost1["recover: batch gone"]:::gap
+    s2 -. "writes durable;<br/>batch's messages dropped" .-> lost2["recover: peers re-driven"]:::done
+    classDef gap fill:#7a2f2f,stroke:#4d1f1f,color:#fff
+    classDef done fill:#3b6e47,stroke:#244730,color:#fff
+```
+
+The simulation makes this a *real* crash: a seam crash unwinds the node loop, the
+volatile state is dropped, and the node re-runs — rebuilding from the durable
+storage world, exactly as a fresh process would. A recovery oracle checks that a
+restart never lowers a promised ballot and never changes a pre-crash accepted
+`(slot -> value)`.
+
+The seam injection immediately went red — not on safety, which held, but on the
+**no-gaps** oracle. A crash *after* the commit index was durable but *before* the
+node emitted its "applied slot N" events lost those events, and the boot did not
+replay them, so the applied prefix looked like it skipped. The durable prefix was
+gap-free the whole time; the *apply* had simply not been re-driven. The fix mirrors
+what a real state machine must do: on boot, re-drive the apply of the durable
+committed prefix (it is idempotent — the commit index *is* the applied index). With
+that, the sweep runs clean and saturates with seam crashes on, and the seed that
+first surfaced the gap is pinned in the regression corpus.

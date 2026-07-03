@@ -579,13 +579,15 @@ impl Invariant for RecoveryOracle {
         let mut persisted: HashMap<(u64, u64), u64> = HashMap::new();
         let mut pi = 0;
         for r in &recovers {
-            let (Some(node), Some(slot), Some(vhash)) = (r.u64("node"), r.u64("slot"), r.u64("vhash"))
+            let (Some(node), Some(slot), Some(vhash)) =
+                (r.u64("node"), r.u64("slot"), r.u64("vhash"))
             else {
                 continue;
             };
             while pi < persists.len() && persists[pi].time_ms <= r.time_ms {
                 let p = &persists[pi];
-                if let (Some(pn), Some(ps), Some(pv)) = (p.u64("node"), p.u64("slot"), p.u64("vhash"))
+                if let (Some(pn), Some(ps), Some(pv)) =
+                    (p.u64("node"), p.u64("slot"), p.u64("vhash"))
                 {
                     persisted.insert((pn, ps), pv);
                 }

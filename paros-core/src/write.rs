@@ -78,3 +78,54 @@ pub fn classify(writes: &[WriteOp]) -> MustSync {
         MustSync::Relaxed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MustSync, WriteOp, classify};
+    use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
+
+    fn ballot() -> Ballot {
+        Ballot {
+            round: 1,
+            node: NodeId(0),
+        }
+    }
+
+    fn append(slot: u64) -> WriteOp {
+        WriteOp::AppendAccepted {
+            slot: Slot(slot),
+            ballot: ballot(),
+            entry: Entry {
+                client: ClientId(1),
+                seq: ClientSeq(1),
+                value: Value(vec![7]),
+            },
+        }
+    }
+
+    #[test]
+    fn promise_and_accept_need_fsync_chosen_index_does_not() {
+        assert!(WriteOp::SetPromise(ballot()).needs_sync());
+        assert!(append(0).needs_sync());
+        assert!(!WriteOp::SetChosenIndex(Slot(0)).needs_sync());
+    }
+
+    #[test]
+    fn a_batch_is_sync_iff_it_raises_a_promise_or_appends_an_accept() {
+        // Promise-raise or accepted-append ⇒ fsync required.
+        assert_eq!(classify(&[WriteOp::SetPromise(ballot())]), MustSync::Sync);
+        assert_eq!(classify(&[append(0)]), MustSync::Sync);
+        // Even mixed with a chosen-index advance, the batch is Sync.
+        assert_eq!(
+            classify(&[append(0), WriteOp::SetChosenIndex(Slot(0))]),
+            MustSync::Sync
+        );
+        // A chosen-index-only advance may use a relaxed write.
+        assert_eq!(
+            classify(&[WriteOp::SetChosenIndex(Slot(0))]),
+            MustSync::Relaxed
+        );
+        // An empty batch persists nothing; relaxed is the safe default.
+        assert_eq!(classify(&[]), MustSync::Relaxed);
+    }
+}

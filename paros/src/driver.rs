@@ -333,7 +333,9 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
     for op in writes {
         match op {
             WriteOp::SetPromise(ballot) => {
-                storage.persist_ballot(*ballot).map_err(|e| storage_err(&e))?;
+                storage
+                    .persist_ballot(*ballot)
+                    .map_err(|e| storage_err(&e))?;
                 promise_changed = true;
             }
             WriteOp::AppendAccepted {
