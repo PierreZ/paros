@@ -13,7 +13,7 @@ use moonpool_transport::NetTransportBuilder;
 
 use paros::{Paros, Propose, WLTOKEN_PAROS, parse_addr};
 
-use crate::{GAP_MS, REQUESTS, TIMEOUT_MS};
+use crate::{GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
 /// A client that sends a fixed number of proposals and records each outcome.
 /// Each proposal is deduplicated by `(client_id, seq)`; on a redirect (a
@@ -112,6 +112,19 @@ impl Workload for ProposeClient {
             acknowledged > 0,
             "a client run acknowledges at least one committed proposal"
         );
+
+        // Settle / quiescence window. The single workload returning is what
+        // triggers the harness shutdown (every node then leaves its loop), so
+        // without this pause the cluster stops ticking the instant the last
+        // proposal is acked — a lagging follower would never get a chance to run
+        // commit-replay catch-up. Chaos has ended by now (see `CHAOS_DURATION`),
+        // so this is a quiet tail in which the leader keeps heartbeating and any
+        // node still short of the chosen prefix converges. The `ConvergenceOracle`
+        // asserts over exactly this tail.
+        tokio::select! {
+            _ = time.sleep(Duration::from_millis(SETTLE_MS)) => {}
+            () = shutdown.cancelled() => {}
+        }
         Ok(())
     }
 }

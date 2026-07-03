@@ -46,6 +46,8 @@ mod tests {
         };
         let mut accepted = BTreeMap::new();
         accepted.insert(Slot(5), (ballot, entry.clone()));
+        let mut catchup = BTreeMap::new();
+        catchup.insert(Slot(4), (ballot, entry.clone()));
         vec![
             Message::Prepare {
                 from: NodeId(1),
@@ -79,6 +81,14 @@ mod tests {
                 ballot,
                 slot: Slot(6),
                 entry,
+            },
+            Message::CatchUpRequest {
+                from: NodeId(1),
+                from_slot: Slot(4),
+            },
+            Message::CatchUpResponse {
+                from: NodeId(0),
+                entries: catchup,
             },
             Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {

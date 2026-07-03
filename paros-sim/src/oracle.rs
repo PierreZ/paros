@@ -899,6 +899,142 @@ impl Invariant for ProgressOracle {
     }
 }
 
+/// Grace (ms) after chaos ends — and after the cluster's chosen prefix last grew,
+/// and after a node's most recent (re)boot — before that node is required to have
+/// converged. It must cover a lagging follower's catch-up round trip; below it,
+/// follower lag (or a just-rebooted node re-establishing its prefix) is a
+/// legitimate transient, not a violation.
+const CONVERGENCE_GRACE_MS: u64 = 3_000;
+
+/// Convergence oracle (the #18 liveness deliverable): once chaos has quiesced,
+/// every *live* node's chosen prefix catches up to the cluster maximum — the log
+/// converges. This is the invariant no prior oracle sees: safety oracles check
+/// that nodes never *disagree* on a slot, but a follower that missed both the
+/// `Accept` and the `Commit` for a decided slot keeps a permanent **hole** (the
+/// leader only re-sends `Accept`s for still-pending slots, and the follower path
+/// used to ignore the heartbeat's `commit`). Commit-replay catch-up
+/// (`paros_core`) closes that hole; this oracle is what makes the closure
+/// observable — red on the unfixed code, green once catch-up lands.
+///
+/// Convergence is a *liveness* property ("eventually all caught up"), but there is
+/// no end-of-run hook and no `assert_eventually`. So it is expressed as a
+/// **quiescence-gated** `assert_always`: only require convergence once the run has
+/// settled — past the chaos window, and with the cluster prefix stable for
+/// [`CONVERGENCE_GRACE_MS`] (no new slots being chosen). Before that gate,
+/// follower lag is legitimate and unasserted. The client's `SETTLE_MS` tail is
+/// what keeps the cluster ticking long enough for this gate to be reached.
+pub(crate) struct ConvergenceOracle;
+
+impl Invariant for ConvergenceOracle {
+    fn name(&self) -> &'static str {
+        "convergence"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, sim_time_ms: u64) {
+        // Per-node chosen-prefix high-water mark, plus the cluster maximum and the
+        // time it was last raised (the applied index equals the slot; the driver
+        // only emits it walking the *contiguous* chosen prefix, so a node's max is
+        // its prefix length − 1).
+        let mut per_node_max: HashMap<u64, u64> = HashMap::new();
+        let mut cluster_max = 0_u64;
+        let mut cluster_max_time = 0_u64;
+        let mut lagged: HashSet<u64> = HashSet::new();
+        let applied = q.snapshot(EV_APPLIED);
+        if applied.is_empty() {
+            return;
+        }
+        // Single time-ordered pass: track each node's running max and the cluster
+        // max, marking any node that is ever strictly behind the cluster max (it
+        // fell into a hole). `snapshot` yields events in capture (time) order.
+        for e in &applied {
+            let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
+                continue;
+            };
+            if idx > cluster_max {
+                cluster_max = idx;
+                cluster_max_time = e.time_ms;
+            }
+            let m = per_node_max.entry(node).or_insert(0);
+            *m = (*m).max(idx);
+            for (&n, &nm) in &per_node_max {
+                if nm < cluster_max {
+                    lagged.insert(n);
+                }
+            }
+        }
+
+        // Coverage: a node that fell behind and then reached the cluster max —
+        // proof the catch-up path actually healed a hole (not merely that nothing
+        // ever broke). Fires on the fixed code; drives sweep saturation.
+        let recovered = cluster_max > 0
+            && lagged
+                .iter()
+                .any(|n| per_node_max.get(n).copied().unwrap_or(0) == cluster_max);
+        assert_sometimes!(
+            recovered,
+            "a lagging node catches up to the cluster's chosen prefix"
+        );
+        if recovered {
+            assert_reachable!("a lagging node converges via catch-up");
+        }
+
+        // Each node's most recent lifecycle event: `booted` (up) vs `crashed` (a
+        // seam crash — down until a later boot). Used to require convergence only
+        // of nodes that are up and have been stable for the grace window, so a
+        // node crashed or just-rebooted in the settle tail is not falsely flagged
+        // (its prefix is re-established from durable storage on boot).
+        let mut last_life: HashMap<u64, (u64, bool)> = HashMap::new();
+        for (name, is_boot) in [(EV_BOOTED, true), (EV_CRASHED, false)] {
+            for e in q.snapshot(name) {
+                if let Some(node) = e.u64("node") {
+                    let slot = last_life.entry(node).or_insert((0, is_boot));
+                    if e.time_ms >= slot.0 {
+                        *slot = (e.time_ms, is_boot);
+                    }
+                }
+            }
+        }
+        let stable_up = |node: u64| -> bool {
+            match last_life.get(&node) {
+                Some(&(t, true)) => sim_time_ms.saturating_sub(t) > CONVERGENCE_GRACE_MS,
+                Some(&(_, false)) => false, // most recent event is a crash → down
+                None => true,               // applied but no lifecycle event recorded
+            }
+        };
+
+        // Time of the most recent leadership change — the cluster is not quiesced
+        // while elections are still turning over (a lagging node cannot pull from,
+        // nor push to, a leader that keeps changing under it).
+        let last_leader_time = q
+            .snapshot(EV_LEADER)
+            .iter()
+            .map(|e| e.time_ms)
+            .max()
+            .unwrap_or(0);
+
+        // Quiescence gate: the cluster has genuinely settled — chaos is over, the
+        // chosen prefix has been stable for the grace window (nothing new is being
+        // chosen), *and* leadership has been stable for the grace window (no
+        // election in flight). Only then is a lagging live node a real convergence
+        // failure rather than a node still catching up under a settling cluster.
+        let quiesced = sim_time_ms > crate::CHAOS_DURATION_MS + CONVERGENCE_GRACE_MS
+            && sim_time_ms.saturating_sub(cluster_max_time) > CONVERGENCE_GRACE_MS
+            && sim_time_ms.saturating_sub(last_leader_time) > CONVERGENCE_GRACE_MS;
+        if !quiesced {
+            return;
+        }
+
+        for (&node, &m) in &per_node_max {
+            if stable_up(node) {
+                assert_always!(
+                    m == cluster_max,
+                    "every live node converges to the cluster's chosen prefix"
+                );
+            }
+        }
+    }
+}
+
 /// Turn the recorded timeline into the animation [`RunResult`]: match each issued
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.

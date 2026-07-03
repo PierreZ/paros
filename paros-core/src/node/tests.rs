@@ -153,12 +153,20 @@ fn election_fires_after_timeout_and_becomes_candidate() {
     );
     assert!(n.needs_election_timeout(), "driver must reseed the timeout");
     let out = drain(&mut n);
-    assert_eq!(out.len(), 2, "Prepare broadcast to the two peers");
-    assert!(
-        out.iter()
-            .all(|(_, m)| matches!(m, Message::Prepare { from_slot, .. } if *from_slot == Slot(0))),
-        "Prepare covers the whole log from slot 0"
-    );
+    // On the election timeout the candidate broadcasts a Prepare *and* a proactive
+    // catch-up probe to each of the two peers (the probe heals a silently-behind
+    // node that is not hearing a fresh leader commit): 4 messages total.
+    let prepares: Vec<_> = out
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Prepare { from_slot, .. } if *from_slot == Slot(0)))
+        .collect();
+    let probes: Vec<_> = out
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::CatchUpRequest { from_slot, .. } if *from_slot == Slot(0)))
+        .collect();
+    assert_eq!(prepares.len(), 2, "Prepare broadcast to the two peers");
+    assert_eq!(probes.len(), 2, "catch-up probe broadcast to the two peers");
+    assert_eq!(out.len(), 4, "only Prepare + catch-up probe are broadcast");
 }
 
 #[test]
@@ -202,6 +210,71 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
             "the contiguous prefix reached slot 2"
         );
     }
+}
+
+#[test]
+fn follower_fills_a_hole_via_commit_replay_catch_up() {
+    // Pins the #18 bug: a follower that missed both the `Accept` and the `Commit`
+    // for a decided slot keeps a permanent hole (the leader re-sends `Accept`s only
+    // for still-pending slots, never a `Commit`), until commit-replay catch-up
+    // heals it. The `ConvergenceOracle` catches this in simulation; this is the
+    // deterministic unit pin.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0: healthy — every node learns it.
+    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // Slot 1: drop *every* message addressed to node 2. Node 0 still decides with
+    // the {0,1} quorum, so slot 1 is chosen — but node 2 misses both the `Accept`
+    // and the `Commit`, opening a permanent hole.
+    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+    assert_eq!(
+        chosen_at(&nodes[0], 1),
+        Some(val(20)),
+        "leader chose slot 1"
+    );
+    assert_eq!(
+        chosen_at(&nodes[2], 1),
+        None,
+        "follower 2 has a hole at slot 1"
+    );
+
+    // Slot 2: healthy again — node 2 receives it, but its *contiguous* prefix is
+    // stuck behind the slot-1 hole.
+    nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(0)),
+        "follower 2's prefix stalls at the hole (slot 2 chosen out of order)"
+    );
+
+    // A heartbeat now advertises the leader's commit = slot 2. Node 2 sees it is
+    // behind, requests the decided range, the leader replays slots 1..=2, and node
+    // 2 fills the hole and converges to the cluster prefix.
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(
+        chosen_at(&nodes[2], 1),
+        Some(val(20)),
+        "the hole is filled via commit-replay catch-up"
+    );
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(2)),
+        "follower 2 converged to the cluster's chosen prefix"
+    );
 }
 
 #[test]
