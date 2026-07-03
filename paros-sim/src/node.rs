@@ -2,20 +2,22 @@
 //! [`paros::run_node`] driver under `SimProviders`.
 //!
 //! All the driver logic lives in `paros`; this bridges the sim boundary. It
-//! derives a cluster-consistent membership from the topology, then wires the
-//! node to a per-node handle on the shared [`StorageWorld`] — the sim's stand-in
-//! for durable disk — before handing the providers, address, and shutdown token
-//! to the same `run_node` a production `tokio::main` would call.
+//! derives a cluster-consistent membership from the topology, wires the node to a
+//! per-node handle on the shared [`StorageWorld`] (the sim's stand-in for durable
+//! disk), and runs the same `run_node` a production `tokio::main` would — inside a
+//! recovery loop that turns a `buggify`-injected seam crash into a real
+//! crash+restart: `run_node` unwinds, the volatile `RawNode` is dropped, and the
+//! next iteration rebuilds it from the durable [`StorageWorld`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle};
+use moonpool_sim::{Process, SimContext, SimulationResult, StateHandle, buggify_with_prob};
 use paros::{
-    Ballot, Config, Entry, HardState, MemStorage, MustSync, NodeId, NodeStorage, Slot, Storage,
-    StorageError, parse_addr, run_node,
+    Ballot, Config, CrashSeam, Entry, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
+    Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -66,20 +68,36 @@ impl Process for NodeProcess {
         };
 
         // The per-iteration durable-storage world, shared by every node and
-        // surviving chaos crash/restart (it lives in the `StateHandle`, which is
-        // fresh per seed but stable across a process's reboots). Each node reaches
-        // it through a `Weak` handle upgraded per op.
+        // surviving crash/restart (it lives in the `StateHandle`, fresh per seed
+        // but stable across a process's reboots). Each node reaches it through a
+        // `Weak` handle upgraded per op.
         let world = storage_world(ctx.state());
-        let storage = DurableStorage::restore(config, Arc::downgrade(&world), my_ip.clone());
+        let crash = SeamCrasher;
 
-        run_node(
-            ctx.providers().clone(),
-            storage,
-            parse_addr(&my_ip)?,
-            members,
-            ctx.shutdown().clone(),
-        )
-        .await
+        // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
+        // drop the volatile node, rebuild storage from the (surviving) world, and
+        // re-run — a faithful clean crash + recovery. Attrition (process kill) is
+        // handled by the harness; this covers the seams *inside* a Ready batch
+        // that attrition cannot reach.
+        loop {
+            let storage =
+                DurableStorage::restore(config.clone(), Arc::downgrade(&world), my_ip.clone());
+            match run_node(
+                ctx.providers().clone(),
+                storage,
+                parse_addr(&my_ip)?,
+                members.clone(),
+                ctx.shutdown().clone(),
+                &crash,
+            )
+            .await
+            {
+                // Simulated crash at a durability seam: fall through to recover
+                // and re-run (rebuilding volatile state from the durable world).
+                Err(e) if is_seam_crash(&e) => {}
+                other => return other,
+            }
+        }
     }
 }
 
@@ -120,21 +138,27 @@ struct StorageWorld {
 /// It holds a `Weak` to the world, upgraded per op (moonpool's "world held via
 /// Weak, upgraded per op" convention). Reads are served from `boot` — a snapshot
 /// of this node's durable records taken at construction — because the core only
-/// reads storage once, at boot. Writes go to the world: promise-raises and
-/// accepted-appends are written straight through (they are always in a
-/// [`MustSync::Sync`] batch and must survive a crash); a chosen-index advance is
-/// staged locally and only reaches the world on a `sync(Sync)`, so a relaxed
-/// chosen-index-only advance is lost on crash — the [`MustSync`] payoff.
+/// reads storage once, at boot.
+///
+/// Writes stage locally and reach the durable world only on a
+/// [`sync`](NodeStorage::sync): a [`MustSync::Sync`] batch flushes the stage
+/// through (fsync); a [`MustSync::Relaxed`] batch leaves it staged, so it is lost
+/// if the incarnation is dropped before a later sync. Because the stage lives in
+/// this handle (dropped when `run_node` unwinds on a seam crash), a crash *before*
+/// the fsync loses the whole un-synced batch — a faithful clean crash.
 struct DurableStorage {
     /// Read view: this node's durable records as of boot.
     boot: MemStorage,
+    /// The snapshot blob recovered from durable storage at boot (Stage 5).
+    boot_snapshot: Option<Vec<u8>>,
     /// The shared world, upgraded per op.
     world: Weak<Mutex<StorageWorld>>,
     /// This node's IP — its key into the world.
     key: String,
-    /// A chosen-index advance staged by a relaxed batch, not yet fsync'd (lost on
-    /// crash unless a later `sync(Sync)` flushes it).
-    unsynced_chosen_index: Option<Slot>,
+    /// Writes staged since the last flush (lost if the incarnation is dropped).
+    staged_ballot: Option<Ballot>,
+    staged_accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    staged_chosen: Option<Slot>,
 }
 
 impl DurableStorage {
@@ -142,6 +166,7 @@ impl DurableStorage {
     /// a prior boot of this node (same IP, same iteration) left in the world.
     fn restore(config: Config, world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
         let mut boot = MemStorage::new(config);
+        let mut boot_snapshot = None;
         if let Some(strong) = world.upgrade() {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(disk) = guard.disks.get(&key) {
@@ -153,13 +178,18 @@ impl DurableStorage {
                 if let Some(ci) = disk.hard_state.chosen_index {
                     let _ = boot.set_chosen_index(ci);
                 }
+                let _ = boot.sync(MustSync::Sync);
+                boot_snapshot.clone_from(&disk.snapshot);
             }
         }
         Self {
             boot,
+            boot_snapshot,
             world,
             key,
-            unsynced_chosen_index: None,
+            staged_ballot: None,
+            staged_accepted: BTreeMap::new(),
+            staged_chosen: None,
         }
     }
 
@@ -176,7 +206,8 @@ impl DurableStorage {
 
 impl NodeStorage for DurableStorage {
     fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
-        self.with_disk(|d| d.hard_state.max_promised_ballot = ballot)
+        self.staged_ballot = Some(ballot);
+        Ok(())
     }
 
     fn append_accepted(
@@ -185,25 +216,36 @@ impl NodeStorage for DurableStorage {
         ballot: Ballot,
         entry: Entry,
     ) -> Result<(), StorageError> {
-        self.with_disk(|d| {
-            d.accepted.insert(slot, (ballot, entry));
-        })
+        self.staged_accepted.insert(slot, (ballot, entry));
+        Ok(())
     }
 
     fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
-        // Stage locally; a relaxed batch leaves it unsynced (lost on crash), a
-        // `sync(Sync)` flushes it to the world.
-        self.unsynced_chosen_index = Some(slot);
+        self.staged_chosen = Some(slot);
         Ok(())
     }
 
     fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
-        if must_sync == MustSync::Sync
-            && let Some(slot) = self.unsynced_chosen_index.take()
-        {
-            self.with_disk(|d| d.hard_state.chosen_index = Some(slot))?;
+        // A relaxed (chosen-index-only) batch keeps its stage un-flushed: it is
+        // durable only once a later Sync flushes it, and lost on a crash before
+        // then. A Sync batch flushes the whole stage through to the world.
+        if must_sync != MustSync::Sync {
+            return Ok(());
         }
-        Ok(())
+        let ballot = self.staged_ballot.take();
+        let accepted = std::mem::take(&mut self.staged_accepted);
+        let chosen = self.staged_chosen.take();
+        self.with_disk(|d| {
+            if let Some(b) = ballot {
+                d.hard_state.max_promised_ballot = b;
+            }
+            for (slot, record) in accepted {
+                d.accepted.insert(slot, record);
+            }
+            if let Some(c) = chosen {
+                d.hard_state.chosen_index = Some(c);
+            }
+        })
     }
 
     fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
@@ -233,6 +275,20 @@ impl Storage for DurableStorage {
         self.boot.last_slot()
     }
     fn snapshot(&self) -> Option<Vec<u8>> {
-        self.boot.snapshot()
+        self.boot_snapshot.clone()
+    }
+}
+
+/// The simulation's [`CrashSeam`]: crash the node at a durability seam with a
+/// small `buggify` probability. Buggify is two-phase — activated per seed, then
+/// firing probabilistically — so only some seeds exercise seam crashes at all,
+/// and deterministically so (a failing seed replays bit-identically). This is the
+/// repo's first real `buggify!()` use: attrition crashes a node only *between*
+/// Ready batches; this reaches the persist/send seam *within* one.
+struct SeamCrasher;
+
+impl CrashSeam for SeamCrasher {
+    fn crash_at(&self, _seam: Seam) -> bool {
+        buggify_with_prob!(0.03)
     }
 }

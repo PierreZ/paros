@@ -28,6 +28,7 @@ use paros_core::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::crash::{CrashSeam, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 /// Well-known RPC token the paros node service is registered at. Every node
@@ -218,17 +219,19 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<P, S>(
+fn drain_ready<P, S, C>(
     node: &mut RawNode,
     storage: &mut S,
     transport: &Arc<NetTransport<P>>,
     addrs: &BTreeMap<NodeId, NetworkAddress>,
     self_id: u64,
     pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
+    crash: &C,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
+    C: CrashSeam,
 {
     // Copy the batch out of the borrow guard, advance to release the gate, then
     // perform I/O — persist → send → apply. Advancing before the I/O is the
@@ -242,9 +245,18 @@ where
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
-    //    surface the persisted state for the safety + recovery oracles.
+    //    surface the persisted state for the safety + recovery oracles. The
+    //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id)?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, crash)?;
+
+    // Crash seam: after the batch is durable but before its messages leave. The
+    // durable writes survive; the batch's messages are dropped (never sent), so a
+    // recovered node must re-derive them. Only meaningful when there is durable
+    // work or a message to lose.
+    if (!writes.is_empty() || !messages.is_empty()) && crash.crash_at(Seam::AfterSyncBeforeSend) {
+        return Err(seam_crash());
+    }
 
     // 2. Send messages — only after (1) is durable. The core addresses each one;
     //    the driver just maps NodeId → address and fires (fire-and-forget).
@@ -304,12 +316,18 @@ where
 /// oracles: a `node_state` event when the promised ballot rose, and a per-slot
 /// `persist` event for each accepted append. `promised` is the node's post-batch
 /// promise (`>=` any accept ballot in the batch).
-fn persist_writes<S: NodeStorage>(
+///
+/// The observability events are emitted only **after** the fsync, so they never
+/// claim a write the `BeforeSync` crash seam then discards: a crash before the
+/// fsync loses the whole un-synced batch and emits nothing, exactly as a real
+/// crash-before-flush would.
+fn persist_writes<S: NodeStorage, C: CrashSeam>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
     promised: Ballot,
     self_id: u64,
+    crash: &C,
 ) -> SimulationResult<()> {
     let mut promise_changed = false;
     for op in writes {
@@ -326,16 +344,6 @@ fn persist_writes<S: NodeStorage>(
                 storage
                     .append_accepted(*slot, *ballot, entry.clone())
                     .map_err(|e| storage_err(&e))?;
-                tracing::info!(
-                    node = self_id,
-                    slot = slot.0,
-                    pround = promised.round,
-                    pbnode = promised.node.0,
-                    around = ballot.round,
-                    abnode = ballot.node.0,
-                    vhash = value_hash(&entry.value.0),
-                    "persist"
-                );
             }
             WriteOp::SetChosenIndex(slot) => {
                 storage
@@ -344,9 +352,19 @@ fn persist_writes<S: NodeStorage>(
             }
         }
     }
+
+    // Crash seam: the batch is staged but not yet flushed. A crash here loses the
+    // whole un-synced batch (and no message has been sent), so surface nothing.
+    // Only meaningful when the batch actually staged something.
+    if !writes.is_empty() && crash.crash_at(Seam::BeforeSync) {
+        return Err(seam_crash());
+    }
+
     if !writes.is_empty() {
         storage.sync(must_sync).map_err(|e| storage_err(&e))?;
     }
+
+    // Durable now — emit the truthful persisted state for the oracles.
     if promise_changed {
         tracing::info!(
             node = self_id,
@@ -355,6 +373,25 @@ fn persist_writes<S: NodeStorage>(
             "node_state"
         );
     }
+    for op in writes {
+        if let WriteOp::AppendAccepted {
+            slot,
+            ballot,
+            entry,
+        } = op
+        {
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                pround = promised.round,
+                pbnode = promised.node.0,
+                around = ballot.round,
+                abnode = ballot.node.0,
+                vhash = value_hash(&entry.value.0),
+                "persist"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -362,6 +399,24 @@ fn persist_writes<S: NodeStorage>(
 /// fault propagates out of the node loop.
 fn storage_err(e: &StorageError) -> SimulationError {
     SimulationError::InvalidState(format!("storage: {e}"))
+}
+
+/// Marker payload of the error [`run_node`] returns when a [`Seam`] crash fires.
+/// Distinguishes a *simulated crash* (the caller should recover and re-run) from
+/// a genuine failure (which should propagate).
+const SEAM_CRASH_MARKER: &str = "paros:seam-crash";
+
+/// The error a crash seam raises to unwind the current node incarnation.
+fn seam_crash() -> SimulationError {
+    SimulationError::InvalidState(SEAM_CRASH_MARKER.to_string())
+}
+
+/// Whether `e` is the marker [`run_node`] returns on a simulated seam crash (as
+/// opposed to a real failure). The node loop's owner re-runs `run_node` — which
+/// rebuilds volatile state from durable storage — to recover.
+#[must_use]
+pub fn is_seam_crash(e: &SimulationError) -> bool {
+    matches!(e, SimulationError::InvalidState(s) if s == SEAM_CRASH_MARKER)
 }
 
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
@@ -415,18 +470,23 @@ fn maintain<P: Providers>(
 ///
 /// # Errors
 ///
-/// Returns an error if the transport fails to bind or listen on `local_addr`.
+/// Returns an error if the transport fails to bind or listen on `local_addr`. May
+/// also return a simulated crash marker ([`is_seam_crash`]) if `crash` fires at a
+/// durability seam — the caller recovers by re-running `run_node` with fresh
+/// storage. Production passes [`NoCrash`](crate::NoCrash), which never fires.
 #[tracing::instrument(skip_all)]
-pub async fn run_node<P, S>(
+pub async fn run_node<P, S, C>(
     providers: P,
     mut storage: S,
     local_addr: NetworkAddress,
     members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
+    crash: &C,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
+    C: CrashSeam,
 {
     let transport = NetTransportBuilder::new(providers.clone())
         .local_address(local_addr)
@@ -477,6 +537,17 @@ where
                     vhash = value_hash(&entry.value.0),
                     "value_chosen"
                 );
+                // Re-drive apply of the durable committed prefix: a crash between
+                // "chosen_index durable" and "apply side-effects done" (e.g. the
+                // seam after fsync, before send) drops the live `log_applied`, so
+                // replay it here. The apply is idempotent (chosen_index is the
+                // applied index), so replaying a prefix is safe.
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    applied_index = slot.0,
+                    "log_applied"
+                );
             }
         }
     }
@@ -510,7 +581,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -533,14 +604,14 @@ where
                     tracing::info!(node = self_id, kind, "msg_received");
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 reply.send(());
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending)?;
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }

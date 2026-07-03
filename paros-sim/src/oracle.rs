@@ -604,6 +604,12 @@ impl Invariant for RecoveryOracle {
 /// No-gaps oracle: each node's applied (contiguous chosen) prefix advances one
 /// slot at a time, starting at slot 0 — it never skips a slot. Reads the
 /// `log_applied` stream the driver emits as the commit index moves.
+///
+/// Restart-tolerant: after a crash a node re-drives the apply of its durable
+/// committed prefix (the boot re-emits `log_applied` for `0..=chosen_index`), so
+/// a node may *replay* already-applied slots (`idx` at or below the frontier).
+/// A replay is idempotent and allowed; only a *forward skip* past the frontier is
+/// a real gap. The first-ever apply must still be slot 0.
 pub(crate) struct NoGapsOracle;
 
 impl Invariant for NoGapsOracle {
@@ -612,20 +618,25 @@ impl Invariant for NoGapsOracle {
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
-        let mut last: HashMap<u64, u64> = HashMap::new();
+        // Per node, the frontier is the next slot expected to be newly applied.
+        let mut frontier: HashMap<u64, u64> = HashMap::new();
         let mut max_applied = 0_u64;
         for e in q.snapshot(EV_APPLIED) {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
                 continue;
             };
             max_applied = max_applied.max(idx);
-            if let Some(prev) = last.insert(node, idx) {
+            let next = frontier.entry(node).or_insert(0);
+            if idx == *next {
+                // Advancing the frontier by exactly one (no gap).
+                *next += 1;
+            } else {
+                // Below the frontier is an idempotent restart replay (allowed);
+                // above it is a real skipped slot.
                 assert_always!(
-                    idx == prev + 1,
+                    idx < *next,
                     "a node's applied prefix advances one slot at a time (no gaps)"
                 );
-            } else {
-                assert_always!(idx == 0, "a node's applied prefix starts at slot 0");
             }
         }
         // The log is multi-slot (a stable leader streamed past slot 0).
