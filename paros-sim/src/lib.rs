@@ -29,7 +29,7 @@ use moonpool_sim::{
 
 use crate::oracle::{
     ClientLivenessOracle, LeadershipOracle, NoGapsOracle, ProgressOracle, ProtocolData,
-    ProtocolRecorder, RecorderData, SafetyOracle, TimelineRecorder, build_result,
+    ProtocolRecorder, RecorderData, RecoveryOracle, SafetyOracle, TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -60,9 +60,9 @@ const CHAOS_DURATION: Duration = Duration::from_secs(30);
 
 /// The chaos surfaces every run exercises: swarm network faults plus single-node
 /// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
-/// `HardState` mirrored into the per-iteration `StateHandle`) survives a restart,
-/// modelling a clean process crash with intact disk. Shared by [`run_seed`] and
-/// [`explore`] so a failing seed replays identically.
+/// records in the per-iteration `StorageWorld`) survives a restart, modelling a
+/// clean process crash with intact disk. Shared by [`run_seed`] and [`explore`]
+/// so a failing seed replays identically.
 fn chaos_surfaces() -> [Chaos; 2] {
     [
         Chaos::Network(ChaosMode::Swarm),
@@ -100,6 +100,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
@@ -134,6 +135,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)

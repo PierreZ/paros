@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     EV_APPLIED, EV_CHOSEN, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+    EV_PERSIST, EV_RECOVERED,
 };
 use serde::Serialize;
 
@@ -515,8 +516,9 @@ impl Invariant for SafetyOracle {
             assert_reachable!("a value is chosen");
         }
 
-        // Invariants 2 & 3 are per-node, reconstructed from the node-state stream
-        // in capture (time) order.
+        // Invariant 2 (per-node, in capture/time order): a node's promised ballot
+        // is monotonic — it never decreases, including across a restart (the boot
+        // re-emits the recovered promise as a `node_state`).
         let mut last_promised: HashMap<u64, (u64, u64)> = HashMap::new();
         for e in q.snapshot(EV_NODE_STATE) {
             let Some(node) = e.u64("node") else { continue };
@@ -524,20 +526,75 @@ impl Invariant for SafetyOracle {
                 continue;
             };
             let promised = (pr, pn);
-
-            // Invariant 2: a node's promised ballot is monotonic (never decreases).
             if let Some(prev) = last_promised.insert(node, promised) {
                 assert_always!(promised >= prev, "a node's promised ballot never decreases");
             }
+        }
 
-            // Invariant 3: a node never accepts above its promised ballot (i.e.
-            // it only accepts ballots it has promised — never below the promise).
-            if e.bool("has_accepted") == Some(true)
-                && let (Some(ar), Some(an)) = (e.u64("around"), e.u64("abnode"))
-            {
+        // Invariant 3 (per-slot, across the whole log — not just slot 0): a node
+        // never persists an accept above the ballot it has promised. Each `persist`
+        // event carries the accepted ballot and the node's promised ballot at the
+        // time of the write.
+        for e in q.snapshot(EV_PERSIST) {
+            let (Some(ar), Some(an)) = (e.u64("around"), e.u64("abnode")) else {
+                continue;
+            };
+            let (Some(pr), Some(pn)) = (e.u64("pround"), e.u64("pbnode")) else {
+                continue;
+            };
+            assert_always!(
+                (ar, an) <= (pr, pn),
+                "a node's accepted ballot never exceeds its promised ballot"
+            );
+        }
+    }
+}
+
+/// Recovery oracle (safety only): a node's durable state survives a crash intact.
+/// After a restart, the state the core rebuilds from storage must not contradict
+/// what the node persisted before the crash — a durable accepted `(slot -> value)`
+/// never changes across the restart seam. (The promised-ballot-never-lowers half
+/// is covered by [`SafetyOracle`] invariant 2, since the boot re-emits the
+/// recovered promise as a `node_state`.) Convergence of a *lagging* restarted node
+/// is a Stage-5 concern, not this oracle's.
+pub(crate) struct RecoveryOracle;
+
+impl Invariant for RecoveryOracle {
+    fn name(&self) -> &'static str {
+        "recovery_safety"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // `persist` records the latest durably-accepted value hash per (node,
+        // slot); `recovered` is what a node read back from storage on a (re)boot.
+        // A recovered value must match what the node last persisted for that slot
+        // before the boot (a synced accept is never lost or altered by a crash).
+        //
+        // Both streams arrive in capture (time) order, so merge them with a two-
+        // pointer walk: before checking a recovery at time `t`, fold in every
+        // persist at time `<= t` (same-instant persists come from the pre-crash
+        // life; the rebooted life's first persist is strictly later).
+        let persists = q.snapshot(EV_PERSIST);
+        let recovers = q.snapshot(EV_RECOVERED);
+        let mut persisted: HashMap<(u64, u64), u64> = HashMap::new();
+        let mut pi = 0;
+        for r in &recovers {
+            let (Some(node), Some(slot), Some(vhash)) = (r.u64("node"), r.u64("slot"), r.u64("vhash"))
+            else {
+                continue;
+            };
+            while pi < persists.len() && persists[pi].time_ms <= r.time_ms {
+                let p = &persists[pi];
+                if let (Some(pn), Some(ps), Some(pv)) = (p.u64("node"), p.u64("slot"), p.u64("vhash"))
+                {
+                    persisted.insert((pn, ps), pv);
+                }
+                pi += 1;
+            }
+            if let Some(&prev) = persisted.get(&(node, slot)) {
                 assert_always!(
-                    (ar, an) <= promised,
-                    "a node's accepted ballot never exceeds its promised ballot"
+                    prev == vhash,
+                    "a restart never changes a pre-crash accepted value for a slot"
                 );
             }
         }

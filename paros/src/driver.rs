@@ -64,6 +64,12 @@ pub const EV_NODE_STATE: &str = "node_state";
 /// check a pre-crash accepted `(slot -> value)` is stable across a restart.
 pub const EV_PERSIST: &str = "persist";
 
+/// Tracing event: on (re)boot, this node recovered an accepted record from
+/// durable storage. Carries `node`, `slot`, the accepted ballot (`around`/
+/// `abnode`), and the value hash (`vhash`). The recovery oracle reads it to check
+/// a restart never changes a pre-crash accepted `(slot -> value)`.
+pub const EV_RECOVERED: &str = "recovered";
+
 /// Tracing event: this node applied a chosen value. Carries `node`, `slot`, and
 /// the value hash (`vhash`). The safety oracle reads it for the
 /// at-most-one-value-chosen invariant.
@@ -436,15 +442,34 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    // On restart the core rebuilt its chosen log from durable `HardState`. Re-emit
-    // each rebuilt chosen entry as `value_chosen` so the safety oracle sees this
-    // node's post-restart belief and catches any divergence from the value the
-    // cluster actually chose for that slot. A clean first boot has an empty log, so
-    // this is a no-op. (This is what makes a "stale chosen value resurrected on
-    // restart" bug observable in the simulation.)
+    // On (re)boot the core rebuilt its volatile state from durable storage.
+    // Re-emit that recovered state so the oracles see this node's post-restart
+    // belief: the recovered promised ballot (`node_state`, feeding the
+    // monotonic-promise check across the restart seam), each recovered accepted
+    // record (`recovered`, feeding the recovery oracle's "a restart never changes
+    // a pre-crash accepted value" check), and each rebuilt chosen entry
+    // (`value_chosen`, feeding at-most-one-value-chosen — what makes a "stale
+    // chosen value resurrected on restart" bug observable). A clean first boot has
+    // empty scalars/log, so this is a near no-op.
     {
-        let chosen_index = node.hard_state().chosen_index;
-        if let Some(ci) = chosen_index {
+        let promised = node.hard_state().max_promised_ballot;
+        tracing::info!(
+            node = self_id,
+            pround = promised.round,
+            pbnode = promised.node.0,
+            "node_state"
+        );
+        for (slot, (ballot, entry)) in node.accepted() {
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                around = ballot.round,
+                abnode = ballot.node.0,
+                vhash = value_hash(&entry.value.0),
+                "recovered"
+            );
+        }
+        if let Some(ci) = node.hard_state().chosen_index {
             for (slot, (_b, entry)) in node.accepted().range(..=ci) {
                 tracing::info!(
                     node = self_id,
