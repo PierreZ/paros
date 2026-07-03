@@ -5,6 +5,8 @@ Learning project: implementing the Paxos consensus algorithm in Rust. WIP, not f
 ## Build & test
 
 Dev shell is a Nix flake — enter `nix develop` (or rely on direnv) before running commands.
+(On Claude Code on the web the flake can't be built — its inputs are egress-blocked; use
+`nix shell nixpkgs#rustup -c cargo …` instead. See *Always use Nix-provided software* below.)
 
 - `cargo build`
 - `cargo nextest run` (fall back to `cargo test`)
@@ -93,26 +95,55 @@ At the start of a session, run:
 
 If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`),
 this project is open in **Claude Code on the web** (an isolated, Anthropic-managed
-cloud VM). In that case, install the Nix binaries before doing anything else:
+cloud VM). Set up Nix before doing anything else:
 
+    # The sandbox ships broken third-party APT sources (deadsnakes, ondrej), so a
+    # plain `apt-get update` fails with 403s — and `update && install` then
+    # short-circuits before nix-bin is installed. Install straight from the
+    # already-cached package lists; only fall back to `update` if that fails.
     if ! command -v nix-store >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y nix-bin
+      sudo apt-get install -y nix-bin \
+        || { sudo apt-get update; sudo apt-get install -y nix-bin; }
     fi
+
+    # Enable flakes and point Nix at the agent proxy's CA so it can fetch through
+    # the proxy. Export these in every shell that runs a `nix` command (or add
+    # them to ~/.bashrc):
+    export NIX_CONFIG="experimental-features = nix-command flakes"
+    export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt
 
 Any other value (e.g. `cli`, `vscode`) means it's running locally — do NOT run
 the install; assume Nix is already set up on the host.
 
 ## Always use Nix-provided software
 
-Once Nix is available, use Nix-provided software for ALL tooling — never rely on
-system or ad-hoc installed binaries:
+Use Nix-provided software for ALL tooling. **Never** run the sandbox's
+pre-installed binaries — in particular the `rustup`/`cargo`/`rustc` under
+`/root/.cargo`. Whatever the sandbox image ships is off-limits; every tool comes
+from Nix so versions are reproducible across sessions.
 
-- Prefer a project shell if one exists: run commands inside `nix develop`
-  (flakes) or `nix-shell` (if there's a `shell.nix`/`default.nix`).
-- To run a one-off tool, use `nix run nixpkgs#<tool> -- <args>` or
-  `nix shell nixpkgs#<tool> -c <command>` instead of `apt-get install`.
-- Do NOT use `apt-get`, `pip install`, `npm -g`, `brew`, or similar to obtain
-  tools; get them from Nix so versions are reproducible across sessions.
-- If a required tool isn't in the environment, add it to the project's
-  flake/`shell.nix` (or fetch it via `nixpkgs#<tool>`) rather than installing
-  it globally.
+- **Locally** (`cli`/`vscode` sessions) just use the project dev shell:
+  `nix develop` (or rely on direnv), then run `cargo …` inside it.
+- **On Claude Code on the web** the project's `nix develop` shell can't be built:
+  its flake inputs (`flake-utils`, `rust-overlay`, `nix-systems`, `nixpkgs`) are
+  fetched as GitHub tarballs the sandbox egress policy blocks with a 403
+  (`…not enabled for this session`). Do not fight it — that is an org-policy
+  denial, not a bug to retry. Instead get a **Nix-provided `rustup`**, which reads
+  `rust-toolchain.toml` and runs the pinned channel (1.95.0 +
+  `wasm32-unknown-unknown` + clippy/rustfmt):
+
+      nix shell nixpkgs#rustup -c cargo build
+      nix shell nixpkgs#rustup -c cargo test           # nextest: add nixpkgs#cargo-nextest
+      nix shell nixpkgs#rustup -c cargo clippy -- -D warnings
+      nix shell nixpkgs#rustup -c cargo fmt
+      nix shell nixpkgs#rustup -c cargo check --target wasm32-unknown-unknown -p paros-core
+
+  `nix shell nixpkgs#…` resolves against `cache.nixos.org` (which the egress
+  policy allows), so it works even where `nix develop` does not. The `rustc`/
+  `cargo` it runs are the official upstream pinned toolchain — never the sandbox's.
+- **Other one-off tools:** `nix shell nixpkgs#<tool> -c <command>` or
+  `nix run nixpkgs#<tool> -- <args>`. Do NOT use `apt-get`, `pip install`,
+  `npm -g`, `brew`, or similar (`nix-bin` in setup is the sole exception, and only
+  to bootstrap Nix itself).
+- If a required tool isn't available, add it to the project's flake (or fetch it
+  via `nixpkgs#<tool>`) rather than installing it globally.
