@@ -3,7 +3,7 @@
 
 use crate::message::Message;
 use crate::node::RawNode;
-use crate::types::{Entry, NodeId, Slot};
+use crate::types::{Command, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
@@ -70,10 +70,13 @@ impl<'a> Ready<'a> {
         self.node.pending_messages()
     }
 
-    /// Newly chosen `(slot, entry)` pairs to apply **after** they are durable
-    /// (step 3), surfaced in contiguous slot order (no gaps).
+    /// Newly chosen `(slot, command)` pairs to apply **after** they are durable
+    /// (step 3), surfaced in contiguous slot order (no gaps). Each is a
+    /// [`Command::User`] client entry to hand the application, or a
+    /// [`Command::Control`] the driver acts on (a `Truncate` records the durable
+    /// floor).
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Entry)] {
+    pub fn committed(&self) -> &[(Slot, Command)] {
         self.node.pending_committed()
     }
 

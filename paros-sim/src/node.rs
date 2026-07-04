@@ -19,7 +19,7 @@ use moonpool_sim::{
     Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_with_prob,
 };
 use paros::{
-    Ballot, Config, CrashSeam, Entry, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
+    Ballot, Command, Config, CrashSeam, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
     Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
@@ -124,7 +124,7 @@ fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
 #[derive(Default)]
 struct NodeDisk {
     hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// The first slot still retained. Everything below it has been truncated.
     first_slot: Slot,
 }
@@ -162,7 +162,7 @@ struct DurableStorage {
     key: String,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
     staged_ballot: Option<Ballot>,
-    staged_accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
     staged_chosen: Option<Slot>,
     staged_floor: Option<Slot>,
 }
@@ -179,8 +179,8 @@ impl DurableStorage {
                 // Set the floor first so first_slot() reads it back on boot.
                 let _ = boot.truncate(disk.first_slot);
                 let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
-                for (slot, (ballot, entry)) in &disk.accepted {
-                    let _ = boot.append_accepted(*slot, *ballot, entry.clone());
+                for (slot, (ballot, command)) in &disk.accepted {
+                    let _ = boot.append_accepted(*slot, *ballot, command.clone());
                 }
                 if let Some(ci) = disk.hard_state.chosen_index {
                     let _ = boot.set_chosen_index(ci);
@@ -220,9 +220,9 @@ impl NodeStorage for DurableStorage {
         &mut self,
         slot: Slot,
         ballot: Ballot,
-        entry: Entry,
+        command: Command,
     ) -> Result<(), StorageError> {
-        self.staged_accepted.insert(slot, (ballot, entry));
+        self.staged_accepted.insert(slot, (ballot, command));
         Ok(())
     }
 
@@ -273,7 +273,7 @@ impl Storage for DurableStorage {
     fn initial_state(&self) -> (HardState, Config) {
         self.boot.initial_state()
     }
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
         self.boot.accepted(slot)
     }
     fn first_slot(&self) -> Slot {

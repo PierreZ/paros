@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Entry, NodeId, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -44,21 +44,21 @@ pub enum Message {
         ballot: Ballot,
         /// First slot this promise covers (echoes the prepare's `from_slot`).
         from_slot: Slot,
-        /// All accepted entries for slots `>= from_slot`. Empty if none.
-        accepted: BTreeMap<Slot, (Ballot, Entry)>,
+        /// All accepted commands for slots `>= from_slot`. Empty if none.
+        accepted: BTreeMap<Slot, (Ballot, Command)>,
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----
-    /// Proposer → acceptors: "accept `entry` for `slot` at `ballot`."
+    /// Proposer → acceptors: "accept `command` for `slot` at `ballot`."
     Accept {
         /// Sender.
         from: NodeId,
-        /// The ballot under which the entry is proposed.
+        /// The ballot under which the command is proposed.
         ballot: Ballot,
         /// The target slot.
         slot: Slot,
-        /// The proposed entry (value plus its client tag).
-        entry: Entry,
+        /// The proposed command (an opaque client entry or a control command).
+        command: Command,
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
@@ -81,16 +81,16 @@ pub enum Message {
     },
 
     // ---- Learning ----
-    /// Any → any: `entry` is chosen for `slot` (decided at `ballot`).
+    /// Any → any: `command` is chosen for `slot` (decided at `ballot`).
     Commit {
         /// Sender.
         from: NodeId,
-        /// The ballot at which the entry was chosen.
+        /// The ballot at which the command was chosen.
         ballot: Ballot,
         /// The chosen slot.
         slot: Slot,
-        /// The chosen entry.
-        entry: Entry,
+        /// The chosen command (an opaque client entry or a control command).
+        command: Command,
     },
 
     // ---- Catch-up (commit replay) ----
@@ -114,8 +114,8 @@ pub enum Message {
     CatchUpResponse {
         /// Sender (the serving peer).
         from: NodeId,
-        /// Decided entries by slot, contiguous from the request's `from_slot`.
-        entries: BTreeMap<Slot, (Ballot, Entry)>,
+        /// Decided commands by slot, contiguous from the request's `from_slot`.
+        entries: BTreeMap<Slot, (Ballot, Command)>,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----

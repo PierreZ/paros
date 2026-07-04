@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use paros_core::{Ballot, Config, Entry, HardState, MustSync, Slot, Storage};
+use paros_core::{Ballot, Command, Config, HardState, MustSync, Slot, Storage};
 
 /// A durable-write failure. The read-side [`paros_core::Storage`] recovery port
 /// stays infallible, but every *write* is fallible **from day one** so a later
@@ -46,7 +46,7 @@ pub trait NodeStorage: Storage {
     /// Returns [`StorageError`] if the durable write fails.
     fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError>;
 
-    /// Persist the `(ballot, entry)` accepted for `slot` (Phase 2). An
+    /// Persist the `(ballot, command)` accepted for `slot` (Phase 2). An
     /// upsert-by-slot (a chosen value overwrites a stale accept).
     ///
     /// # Errors
@@ -55,7 +55,7 @@ pub trait NodeStorage: Storage {
         &mut self,
         slot: Slot,
         ballot: Ballot,
-        entry: Entry,
+        command: Command,
     ) -> Result<(), StorageError>;
 
     /// Advance the durable chosen index (commit index) to `slot`.
@@ -95,7 +95,7 @@ pub trait NodeStorage: Storage {
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
     config: Config,
     /// The compaction floor: the first slot still retained. Everything below it
     /// has been truncated away.
@@ -125,9 +125,9 @@ impl NodeStorage for MemStorage {
         &mut self,
         slot: Slot,
         ballot: Ballot,
-        entry: Entry,
+        command: Command,
     ) -> Result<(), StorageError> {
-        self.accepted.insert(slot, (ballot, entry));
+        self.accepted.insert(slot, (ballot, command));
         Ok(())
     }
 
@@ -153,7 +153,7 @@ impl Storage for MemStorage {
         (self.hard_state.clone(), self.config.clone())
     }
 
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
         self.accepted.get(&slot).cloned()
     }
 
