@@ -8,9 +8,9 @@ use crate::types::{Ballot, Entry, Slot};
 /// already persisted (per the [`crate::Ready`] handshake's durability ordering).
 ///
 /// This mirrors etcd-raft's `Storage`: every method is a read. Writers
-/// (`append`, `set_hard_state`, `apply_snapshot`, …) live on the *concrete* type
-/// the application drives while processing a [`crate::Ready`] — never on this
-/// trait — which keeps the core trivially testable against an in-memory fake.
+/// (`append`, `set_hard_state`, `truncate`, ...) live on the *concrete* type
+/// the application drives while processing a [`crate::Ready`], never on this
+/// trait, which keeps the core trivially testable against an in-memory fake.
 ///
 /// Bootstrap and restart are the same path: the core reads durable state back in
 /// on construction and resumes. A fresh node is just an empty/sentinel
@@ -31,8 +31,4 @@ pub trait Storage {
 
     /// The last slot present in storage.
     fn last_slot(&self) -> Slot;
-
-    /// The most recent snapshot, if any. The `Vec<u8>` is opaque to the core
-    /// (the application owns snapshot encoding); `None` means no snapshot yet.
-    fn snapshot(&self) -> Option<Vec<u8>>;
 }

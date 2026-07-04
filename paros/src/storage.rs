@@ -73,26 +73,15 @@ pub trait NodeStorage: Storage {
     /// Returns [`StorageError`] if the flush fails.
     fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError>;
 
-    /// Install a snapshot covering every slot `<= up_to`, discarding the
-    /// compacted prefix. **Declared for Stage 5 (catch-up / log compaction);**
-    /// the default is a no-op so today's callers need not implement it.
+    /// Truncate the log below `first`, discarding the compacted prefix, and
+    /// record `first` as the durable compaction floor (returned by
+    /// [`Storage::first_slot`] after a restart). The application drives this via
+    /// [`paros_core::RawNode::compact`], which only ever names slots within the
+    /// chosen prefix, so nothing undecided is dropped.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
-        let _ = (up_to, bytes);
-        Ok(())
-    }
-
-    /// Truncate the log below `first`, discarding compacted records. **Declared
-    /// for Stage 5;** the default is a no-op.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the durable write fails.
-    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
-        let _ = first;
-        Ok(())
-    }
+    fn truncate(&mut self, first: Slot) -> Result<(), StorageError>;
 }
 
 /// The library's default in-memory storage: enough to *construct* a
@@ -108,6 +97,9 @@ pub struct MemStorage {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
     config: Config,
+    /// The compaction floor: the first slot still retained. Everything below it
+    /// has been truncated away.
+    first: Slot,
 }
 
 impl MemStorage {
@@ -118,6 +110,7 @@ impl MemStorage {
             hard_state: HardState::default(),
             accepted: BTreeMap::new(),
             config,
+            first: Slot(0),
         }
     }
 }
@@ -147,6 +140,12 @@ impl NodeStorage for MemStorage {
         // In-memory: writes are already visible; nothing to flush.
         Ok(())
     }
+
+    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+        self.first = self.first.max(first);
+        self.accepted.retain(|slot, _| *slot >= self.first);
+        Ok(())
+    }
 }
 
 impl Storage for MemStorage {
@@ -159,14 +158,10 @@ impl Storage for MemStorage {
     }
 
     fn first_slot(&self) -> Slot {
-        Slot(0)
+        self.first
     }
 
     fn last_slot(&self) -> Slot {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
-    }
-
-    fn snapshot(&self) -> Option<Vec<u8>> {
-        None
     }
 }

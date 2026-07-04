@@ -119,13 +119,12 @@ fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
     world
 }
 
-/// One node's durable records: the scalars, the per-slot accepted log, and an
-/// optional snapshot blob. The [`StorageWorld`] owns one of these per node IP.
+/// One node's durable records: the scalars and the per-slot accepted log. The
+/// [`StorageWorld`] owns one of these per node IP.
 #[derive(Default)]
 struct NodeDisk {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
-    snapshot: Option<Vec<u8>>,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -155,8 +154,6 @@ struct StorageWorld {
 struct DurableStorage {
     /// Read view: this node's durable records as of boot.
     boot: MemStorage,
-    /// The snapshot blob recovered from durable storage at boot (Stage 5).
-    boot_snapshot: Option<Vec<u8>>,
     /// The shared world, upgraded per op.
     world: Weak<Mutex<StorageWorld>>,
     /// This node's IP — its key into the world.
@@ -172,7 +169,6 @@ impl DurableStorage {
     /// a prior boot of this node (same IP, same iteration) left in the world.
     fn restore(config: Config, world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
         let mut boot = MemStorage::new(config);
-        let mut boot_snapshot = None;
         if let Some(strong) = world.upgrade() {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(disk) = guard.disks.get(&key) {
@@ -185,12 +181,10 @@ impl DurableStorage {
                     let _ = boot.set_chosen_index(ci);
                 }
                 let _ = boot.sync(MustSync::Sync);
-                boot_snapshot.clone_from(&disk.snapshot);
             }
         }
         Self {
             boot,
-            boot_snapshot,
             world,
             key,
             staged_ballot: None,
@@ -254,14 +248,6 @@ impl NodeStorage for DurableStorage {
         })
     }
 
-    fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
-        let bytes = bytes.to_vec();
-        self.with_disk(|d| {
-            d.snapshot = Some(bytes);
-            d.accepted.retain(|s, _| *s > up_to);
-        })
-    }
-
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
         self.with_disk(|d| d.accepted.retain(|s, _| *s >= first))
     }
@@ -279,9 +265,6 @@ impl Storage for DurableStorage {
     }
     fn last_slot(&self) -> Slot {
         self.boot.last_slot()
-    }
-    fn snapshot(&self) -> Option<Vec<u8>> {
-        self.boot_snapshot.clone()
     }
 }
 

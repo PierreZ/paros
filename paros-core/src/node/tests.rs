@@ -55,9 +55,6 @@ impl Storage for TestStorage {
     fn last_slot(&self) -> Slot {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
     }
-    fn snapshot(&self) -> Option<Vec<u8>> {
-        None
-    }
 }
 
 fn node(id: u64, members: &[u64]) -> RawNode {

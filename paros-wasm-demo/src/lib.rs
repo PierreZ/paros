@@ -9,7 +9,7 @@
 //!
 //! Stage 1 renders an empty cluster acknowledging client proposals and advancing
 //! logical time; later milestones extend the same demo (election → log →
-//! snapshot → reconfig → compartments).
+//! truncation → reconfig → compartments).
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
