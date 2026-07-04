@@ -138,8 +138,9 @@ fn safety_and_progress_hold_under_chaos() {
 
     assert!(
         report.assertion_violations.is_empty(),
-        "safety violated under chaos: {:?}",
-        report.assertion_violations
+        "safety violated under chaos: {:?}; failing seeds (replay with run_seed): {:?}",
+        report.assertion_violations,
+        report.seeds_failing.iter().take(10).collect::<Vec<_>>(),
     );
     assert_eq!(report.failed_runs, 0, "no run failed");
     assert!(

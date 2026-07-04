@@ -10,10 +10,16 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(42);
+    // Optional second arg: exploration iteration budget (defaults to the sancov
+    // coverage cap). Lets a hunt drive the code-coverage-guided sweep harder.
+    let iterations = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(COVERAGE_ITERATIONS);
 
     // 1. The DST bug-finding sweep: many seeds of swarm chaos, asserting safety.
     println!("--- safety sweep (UntilCoverageStable, swarm network chaos) ---");
-    let report = explore(COVERAGE_ITERATIONS);
+    let report = explore(iterations);
     let stop = if report.convergence_timeout {
         "hit the iteration cap (did NOT saturate)"
     } else {
@@ -38,6 +44,10 @@ fn main() {
         println!("  no safety violations — single-decree Paxos chose at most one value");
     } else {
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
+        println!(
+            "  FAILING SEEDS (replay with run_seed): {:?}",
+            report.seeds_failing
+        );
     }
 
     // 2. A single seed, with its full message timeline for eyeballing.
