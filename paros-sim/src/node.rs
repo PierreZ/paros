@@ -119,12 +119,14 @@ fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
     world
 }
 
-/// One node's durable records: the scalars and the per-slot accepted log. The
-/// [`StorageWorld`] owns one of these per node IP.
+/// One node's durable records: the scalars, the per-slot accepted log, and the
+/// compaction floor. The [`StorageWorld`] owns one of these per node IP.
 #[derive(Default)]
 struct NodeDisk {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    /// The first slot still retained. Everything below it has been truncated.
+    first_slot: Slot,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -162,6 +164,7 @@ struct DurableStorage {
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Entry)>,
     staged_chosen: Option<Slot>,
+    staged_floor: Option<Slot>,
 }
 
 impl DurableStorage {
@@ -173,6 +176,8 @@ impl DurableStorage {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(disk) = guard.disks.get(&key) {
                 // Seed the read view through the semantic ops (records, not a blob).
+                // Set the floor first so first_slot() reads it back on boot.
+                let _ = boot.truncate(disk.first_slot);
                 let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
                 for (slot, (ballot, entry)) in &disk.accepted {
                     let _ = boot.append_accepted(*slot, *ballot, entry.clone());
@@ -190,6 +195,7 @@ impl DurableStorage {
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
+            staged_floor: None,
         }
     }
 
@@ -235,6 +241,7 @@ impl NodeStorage for DurableStorage {
         let ballot = self.staged_ballot.take();
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
+        let floor = self.staged_floor.take();
         self.with_disk(|d| {
             if let Some(b) = ballot {
                 d.hard_state.max_promised_ballot = b;
@@ -245,11 +252,20 @@ impl NodeStorage for DurableStorage {
             if let Some(c) = chosen {
                 d.hard_state.chosen_index = Some(c);
             }
+            // Apply the truncation last, after the chosen index it sits behind, so
+            // a flushed floor never outruns the flushed chosen index.
+            if let Some(f) = floor {
+                d.first_slot = d.first_slot.max(f);
+                d.accepted.retain(|s, _| *s >= d.first_slot);
+            }
         })
     }
 
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
-        self.with_disk(|d| d.accepted.retain(|s, _| *s >= first))
+        // Stage the floor like every other write: it reaches the durable world
+        // only on the next Sync flush (Truncate classifies as MustSync::Sync).
+        self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        Ok(())
     }
 }
 

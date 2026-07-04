@@ -123,6 +123,21 @@ pub const EV_LEADER: &str = "leader_elected";
 /// skipping.
 pub const EV_APPLIED: &str = "log_applied";
 
+/// Tracing event: this node durably truncated its log prefix (a
+/// `WriteOp::Truncate`). Carries `node` and `first` (the new compaction floor:
+/// the first slot still retained). Emitted only after the fsync, like
+/// [`EV_PERSIST`], so it never claims a truncation a `BeforeSync` crash discards.
+/// The truncation oracle reads it to check the log stays bounded and nothing
+/// below the floor is ever persisted or recovered again.
+pub const EV_COMPACTED: &str = "compacted";
+
+/// Tracing event: this node received a `Prepare` whose `from_slot` is below its
+/// own compaction floor. Carries `node`, `from_slot`, and `floor`. Purely
+/// observational: it marks that the dangerous "campaign against a truncated
+/// acceptor" interleaving was reached, so the sweep can assert it stays reachable
+/// once the acceptor floor guard is in place.
+pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
+
 /// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Propose {
@@ -148,6 +163,28 @@ pub struct ProposeAck {
     /// Whether the command is durably chosen. `false` is a redirect: retry
     /// `leader`.
     pub committed: bool,
+    /// The slot the command committed at, when `committed` is `true`. `None` for a
+    /// redirect. Lets the application track the chosen prefix so it can drive
+    /// compaction (see [`Compact`]).
+    pub slot: Option<u64>,
+}
+
+/// An application request to compact the log: drop every slot at or below
+/// `up_to`. The application owns compaction of its own state and tells the node
+/// how far its log may be truncated (see [`paros_core::RawNode::compact`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Compact {
+    /// The last slot the application permits dropping (inclusive). Clamped to the
+    /// node's chosen prefix, so nothing undecided is ever dropped.
+    pub up_to: u64,
+}
+
+/// The node's acknowledgement of a [`Compact`]: the new durable compaction floor
+/// (the first slot still retained) once the truncation is fsync'd.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactAck {
+    /// The first slot still retained after truncation.
+    pub first_slot: u64,
 }
 
 /// The paros node RPC interface. The `#[service]` macro renames this trait to
@@ -161,6 +198,9 @@ pub trait Paros {
     /// A peer delivers a Paxos protocol message into this node's `step()` inbox.
     /// One-way: the reply is empty (peers use fire-and-forget `send`).
     async fn deliver(&self, msg: Message) -> Result<(), RpcError>;
+    /// The application asks the node to truncate its log prefix; the node replies
+    /// with the new durable compaction floor.
+    async fn compact(&self, req: Compact) -> Result<CompactAck, RpcError>;
 }
 
 /// Parse an IP (which may lack a port) into a [`NetworkAddress`], defaulting to
@@ -330,6 +370,7 @@ where
                     seq,
                     leader: Some(self_id),
                     committed: true,
+                    slot: Some(slot.0),
                 });
             }
         }
@@ -418,22 +459,27 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
         );
     }
     for op in writes {
-        if let WriteOp::AppendAccepted {
-            slot,
-            ballot,
-            entry,
-        } = op
-        {
-            tracing::info!(
-                node = self_id,
-                slot = slot.0,
-                pround = promised.round,
-                pbnode = promised.node.0,
-                around = ballot.round,
-                abnode = ballot.node.0,
-                vhash = value_hash(&entry.value.0),
-                "persist"
-            );
+        match op {
+            WriteOp::AppendAccepted {
+                slot,
+                ballot,
+                entry,
+            } => {
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    pround = promised.round,
+                    pbnode = promised.node.0,
+                    around = ballot.round,
+                    abnode = ballot.node.0,
+                    vhash = value_hash(&entry.value.0),
+                    "persist"
+                );
+            }
+            WriteOp::Truncate { first } => {
+                tracing::info!(node = self_id, first = first.0, "compacted");
+            }
+            WriteOp::SetPromise(_) | WriteOp::SetChosenIndex(_) => {}
         }
     }
     Ok(())
@@ -499,6 +545,58 @@ fn maintain<P: Providers>(
     *last_role = role;
 }
 
+/// On (re)boot the core rebuilt its volatile state from durable storage. Re-emit
+/// that recovered state so the oracles see this node's post-restart belief: the
+/// recovered promised ballot (`node_state`, feeding the monotonic-promise check
+/// across the restart seam), each recovered accepted record (`recovered`, feeding
+/// the recovery oracle's "a restart never changes a pre-crash accepted value"
+/// check), and each rebuilt chosen entry (`value_chosen`, feeding
+/// at-most-one-value-chosen). The apply replay (`log_applied`) covers a crash
+/// between "`chosen_index` durable" and "apply side-effects done"; it is
+/// idempotent (the chosen index is the applied index). A compacted node's
+/// accepted log starts at its floor, so the replay naturally covers only the
+/// retained prefix. A clean first boot has empty scalars/log, so this is a near
+/// no-op.
+fn replay_boot_state(node: &RawNode, self_id: u64) {
+    // Mark this incarnation coming up. The recovery recorder turns every `booted`
+    // after a node's first into a *restart* event for the animation.
+    tracing::info!(node = self_id, "booted");
+
+    let promised = node.hard_state().max_promised_ballot;
+    tracing::info!(
+        node = self_id,
+        pround = promised.round,
+        pbnode = promised.node.0,
+        "node_state"
+    );
+    for (slot, (ballot, entry)) in node.accepted() {
+        tracing::info!(
+            node = self_id,
+            slot = slot.0,
+            around = ballot.round,
+            abnode = ballot.node.0,
+            vhash = value_hash(&entry.value.0),
+            "recovered"
+        );
+    }
+    if let Some(ci) = node.hard_state().chosen_index {
+        for (slot, (_b, entry)) in node.accepted().range(..=ci) {
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                vhash = value_hash(&entry.value.0),
+                "value_chosen"
+            );
+            tracing::info!(
+                node = self_id,
+                slot = slot.0,
+                applied_index = slot.0,
+                "log_applied"
+            );
+        }
+    }
+}
+
 /// Drive a paros node to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
@@ -546,59 +644,7 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    // On (re)boot the core rebuilt its volatile state from durable storage.
-    // Re-emit that recovered state so the oracles see this node's post-restart
-    // belief: the recovered promised ballot (`node_state`, feeding the
-    // monotonic-promise check across the restart seam), each recovered accepted
-    // record (`recovered`, feeding the recovery oracle's "a restart never changes
-    // a pre-crash accepted value" check), and each rebuilt chosen entry
-    // (`value_chosen`, feeding at-most-one-value-chosen — what makes a "stale
-    // chosen value resurrected on restart" bug observable). A clean first boot has
-    // empty scalars/log, so this is a near no-op.
-    {
-        // Mark this incarnation coming up. The recovery recorder turns every
-        // `booted` after a node's first into a *restart* event for the animation.
-        tracing::info!(node = self_id, "booted");
-
-        let promised = node.hard_state().max_promised_ballot;
-        tracing::info!(
-            node = self_id,
-            pround = promised.round,
-            pbnode = promised.node.0,
-            "node_state"
-        );
-        for (slot, (ballot, entry)) in node.accepted() {
-            tracing::info!(
-                node = self_id,
-                slot = slot.0,
-                around = ballot.round,
-                abnode = ballot.node.0,
-                vhash = value_hash(&entry.value.0),
-                "recovered"
-            );
-        }
-        if let Some(ci) = node.hard_state().chosen_index {
-            for (slot, (_b, entry)) in node.accepted().range(..=ci) {
-                tracing::info!(
-                    node = self_id,
-                    slot = slot.0,
-                    vhash = value_hash(&entry.value.0),
-                    "value_chosen"
-                );
-                // Re-drive apply of the durable committed prefix: a crash between
-                // "chosen_index durable" and "apply side-effects done" (e.g. the
-                // seam after fsync, before send) drops the live `log_applied`, so
-                // replay it here. The apply is idempotent (chosen_index is the
-                // applied index), so replaying a prefix is safe.
-                tracing::info!(
-                    node = self_id,
-                    slot = slot.0,
-                    applied_index = slot.0,
-                    "log_applied"
-                );
-            }
-        }
-    }
+    replay_boot_state(&node, self_id);
 
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
@@ -620,13 +666,14 @@ where
                 let seq = req.seq;
                 match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
                     ProposeResult::NotLeader(hint) => {
-                        reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false });
+                        reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
                         pending.entry(slot).or_default().push((seq, reply));
                     }
                     ProposeResult::Chosen => {
-                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true });
+                        // Already applied before this call; the slot is not tracked here.
+                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: None });
                     }
                 }
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
@@ -651,10 +698,34 @@ where
                 } else {
                     tracing::info!(node = self_id, kind, "msg_received");
                 }
+                // Canary: a Prepare whose from_slot is below our floor is the
+                // dangerous "campaign against a truncated acceptor" case. Record it
+                // so the sweep can assert the interleaving stays reachable once the
+                // acceptor floor guard is in place.
+                if let Message::Prepare { from_slot, .. } = &msg
+                    && *from_slot < node.first_slot()
+                {
+                    tracing::info!(
+                        node = self_id,
+                        from_slot = from_slot.0,
+                        floor = node.first_slot().0,
+                        "prepare_below_floor"
+                    );
+                }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
                 reply.send(());
+            }
+            Some((req, reply)) = svc.compact.recv() => {
+                // The application permits dropping the log prefix up to `up_to`.
+                // compact() clamps to the chosen prefix and returns the new floor;
+                // drain_ready persists the truncation (fsync'd) before we ack, so a
+                // CompactAck means "durably truncated".
+                let first = node.compact(Slot(req.up_to));
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+                reply.send(CompactAck { first_slot: first.0 });
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
