@@ -836,3 +836,145 @@ fn serve_catchup_sends_nothing_below_the_floor() {
         "a request at the floor still gets the retained decided entry"
     );
 }
+
+#[test]
+fn prepare_below_floor_is_nacked_not_promised() {
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[0];
+    n.compact(Slot(1)); // floor -> 2
+    let _ = drain(n);
+    let promise_before = n.hard_state().max_promised_ballot;
+
+    // A higher ballot that would normally win a promise, but its from_slot is
+    // below our floor: those slots are chosen and we truncated them.
+    n.step(Message::Prepare {
+        from: NodeId(1),
+        ballot: ballot(9, 1),
+        from_slot: Slot(0),
+    });
+    let out = drain(n);
+    assert!(
+        matches!(out.as_slice(), [(_, Message::Nack { slot, .. })] if *slot == Slot(0)),
+        "a below-floor prepare is nacked, not promised"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        promise_before,
+        "a below-floor prepare must not raise the promise (else a blind laggard deposes the leader)"
+    );
+}
+
+#[test]
+fn accept_below_floor_is_ignored() {
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[0];
+    n.compact(Slot(2)); // floor -> 3, whole prefix truncated
+    let _ = drain(n);
+
+    n.step(Message::Accept {
+        from: NodeId(1),
+        ballot: ballot(9, 1),
+        slot: Slot(1),
+        entry: entry(1, 1, 99),
+    });
+    let out = drain(n);
+    assert!(
+        out.is_empty(),
+        "a below-floor accept is ignored: no Accepted and no Nack"
+    );
+    assert!(
+        !n.accepted().contains_key(&Slot(1)),
+        "a below-floor accept records nothing"
+    );
+}
+
+#[test]
+fn commit_below_floor_is_not_relearned() {
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[0];
+    n.compact(Slot(2)); // floor -> 3
+    let _ = drain(n);
+
+    n.step(Message::Commit {
+        from: NodeId(1),
+        ballot: ballot(1, 0),
+        slot: Slot(1),
+        entry: entry(7, 7, 88),
+    });
+    assert!(
+        chosen_at(n, 1).is_none(),
+        "a below-floor commit is not relearned"
+    );
+    assert!(
+        !n.accepted().contains_key(&Slot(1)),
+        "a below-floor commit records nothing below the floor"
+    );
+}
+
+/// The safety crux of Stage 5, as a directed core reproduction: a quorum that
+/// truncated a chosen slot refuses a candidate blind to that slot. Without the
+/// floor guard this candidate would win with an empty-looking Promise and
+/// re-propose a different value into the already-chosen slot (two values chosen
+/// for one slot, the DST-found `18153519926117387038` violation).
+#[test]
+fn truncated_quorum_refuses_a_blind_candidate() {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slots 0 and 1 chosen everywhere.
+    for (seq, b) in [(1u64, 10u8), (2, 20)] {
+        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+    // Slot 2 chosen on the quorum {0, 1} only: drop everything addressed to node 2.
+    let _ = nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(2)));
+    assert_eq!(nodes[1].hard_state().chosen_index, Some(Slot(2)));
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(1)),
+        "node 2 missed slot 2"
+    );
+
+    // The caught-up quorum {0, 1} compacts past slot 2, dropping the record.
+    nodes[0].compact(Slot(2));
+    nodes[1].compact(Slot(2));
+    let _ = drain(&mut nodes[0]);
+    let _ = drain(&mut nodes[1]);
+    assert_eq!(nodes[0].first_slot(), Slot(3));
+    assert_eq!(nodes[1].first_slot(), Slot(3));
+
+    // Node 2, blind to slot 2, campaigns: its Prepare's from_slot is 2, below the
+    // quorum's floor (3).
+    nodes[2].set_election_timeout(1);
+    nodes[2].tick();
+    assert_eq!(nodes[2].role(), NodeRole::Candidate);
+    let q = drain(&mut nodes[2]);
+    assert!(
+        q.iter().any(|(_, m)| matches!(
+            m,
+            Message::Prepare { from_slot, .. } if *from_slot == Slot(2)
+        )),
+        "node 2 prepares from its hole at slot 2"
+    );
+    deliver_all(&mut nodes, q);
+
+    // The quorum Nacked (below floor), so the blind candidate is deposed, never
+    // becomes leader, and never learns a (possibly different) value for slot 2.
+    assert_eq!(
+        nodes[2].role(),
+        NodeRole::Follower,
+        "a blind candidate is deposed by the below-floor Nacks, never leads"
+    );
+    assert!(
+        chosen_at(&nodes[2], 2).is_none(),
+        "slot 2 is not re-chosen with a new value on the blind node"
+    );
+}

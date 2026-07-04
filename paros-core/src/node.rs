@@ -495,6 +495,25 @@ impl RawNode {
     /// higher than our promise; otherwise `Nack`.
     fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
+        // Floor guard: a Prepare whose `from_slot` is below our compaction floor
+        // cannot be promised. We truncated the accepted entries for
+        // `[from_slot, first_slot)`, so our Promise could not report them, and the
+        // candidate would treat those already-chosen slots as free and re-propose
+        // a different value: two values chosen for one slot. Nack *without* raising
+        // our promise (so a blind laggard cannot ratchet our promise up and depose
+        // a healthy leader); those slots are chosen, and the candidate must recover
+        // them out of band.
+        if from_slot < self.first_slot {
+            self.pending_messages.push((
+                from,
+                Message::Nack {
+                    from: me,
+                    ballot,
+                    slot: from_slot,
+                },
+            ));
+            return;
+        }
         if ballot > self.hard_state.max_promised_ballot {
             if ballot.node != me && self.role != NodeRole::Follower {
                 self.become_follower(None);
@@ -533,6 +552,14 @@ impl RawNode {
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
     fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, entry: Entry) {
+        // Floor guard: a slot below our floor is already chosen (only chosen slots
+        // are ever truncated). Ignore the Accept rather than Nack: the slot is
+        // decided, so re-accepting a different value there would break agreement,
+        // and a Nack would needlessly depose a leader that can still assemble a
+        // quorum on live slots. Heartbeat commit reconciliation heals any real gap.
+        if slot < self.first_slot {
+            return;
+        }
         let me = self.config.id;
         if ballot >= self.hard_state.max_promised_ballot {
             if ballot.node != me && self.role != NodeRole::Follower {
@@ -811,6 +838,10 @@ impl RawNode {
     /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
     /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
     fn record_accepted(&mut self, slot: Slot, ballot: Ballot, entry: Entry) {
+        debug_assert!(
+            slot >= self.first_slot,
+            "never record an accept below the compaction floor"
+        );
         self.accepted.insert(slot, (ballot, entry.clone()));
         self.pending_writes.push(WriteOp::AppendAccepted {
             slot,
@@ -856,6 +887,11 @@ impl RawNode {
     /// Record `(slot, entry)` as chosen: persist, update dedup tables, and
     /// advance the contiguous chosen prefix. Idempotent.
     fn mark_chosen(&mut self, slot: Slot, entry: &Entry, ballot: Ballot) {
+        // A slot below our floor was chosen and then truncated; do not relearn it
+        // (that would re-insert a record below the floor via `record_accepted`).
+        if slot < self.first_slot {
+            return;
+        }
         if self.chosen.contains_key(&slot) {
             return;
         }
