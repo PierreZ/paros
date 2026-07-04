@@ -14,12 +14,13 @@ use crate::types::{Ballot, Entry, Slot};
 /// A single semantic durable write the driver must apply to stable storage,
 /// **in order**, before sending the batch's messages.
 ///
-/// The three variants map one-to-one onto the durable state:
+/// The variants map one-to-one onto the durable state:
 /// [`SetPromise`](WriteOp::SetPromise) raises the promised ballot (Phase 1),
 /// [`AppendAccepted`](WriteOp::AppendAccepted) records the `(ballot, entry)` a
 /// slot has accepted (Phase 2, an upsert-by-slot — a chosen value overwrites any
-/// stale lower-ballot accept), and [`SetChosenIndex`](WriteOp::SetChosenIndex)
-/// advances the contiguous commit index.
+/// stale lower-ballot accept), [`SetChosenIndex`](WriteOp::SetChosenIndex)
+/// advances the contiguous commit index, and [`Truncate`](WriteOp::Truncate)
+/// drops the compacted log prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WriteOp {
@@ -38,6 +39,14 @@ pub enum WriteOp {
     },
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
+    /// Truncate the log below `first`, discarding the compacted prefix, and
+    /// record `first` as the durable compaction floor. Application-driven (see
+    /// [`crate::RawNode::compact`]); `first` always sits within the chosen
+    /// prefix, so nothing undecided is dropped.
+    Truncate {
+        /// The first slot still retained. Everything below it is dropped.
+        first: Slot,
+    },
 }
 
 /// Whether a [`crate::Ready`] batch must be flushed to stable storage (fsync'd)
@@ -48,6 +57,10 @@ pub enum WriteOp {
 /// fsync. A batch that only advances the chosen index carries no new promise or
 /// vote — the chosen value is already durable from the accept that preceded it —
 /// so it may use a relaxed (non-fsync) write and be safely re-derived on restart.
+///
+/// A truncate is also fsync'd: it must land in the same flush as (and after) any
+/// chosen-index advance in the batch, else a crash could leave a durable floor
+/// above the durable chosen index (an unfillable hole below the node's own floor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MustSync {
@@ -58,12 +71,13 @@ pub enum MustSync {
 }
 
 impl WriteOp {
-    /// Whether this op requires an fsync (a promise-raise or accepted-append).
+    /// Whether this op requires an fsync (a promise-raise, accepted-append, or
+    /// truncate).
     #[must_use]
     pub fn needs_sync(&self) -> bool {
         matches!(
             self,
-            WriteOp::SetPromise(_) | WriteOp::AppendAccepted { .. }
+            WriteOp::SetPromise(_) | WriteOp::AppendAccepted { .. } | WriteOp::Truncate { .. }
         )
     }
 }
@@ -108,6 +122,7 @@ mod tests {
         assert!(WriteOp::SetPromise(ballot()).needs_sync());
         assert!(append(0).needs_sync());
         assert!(!WriteOp::SetChosenIndex(Slot(0)).needs_sync());
+        assert!(WriteOp::Truncate { first: Slot(1) }.needs_sync());
     }
 
     #[test]
@@ -124,6 +139,18 @@ mod tests {
         assert_eq!(
             classify(&[WriteOp::SetChosenIndex(Slot(0))]),
             MustSync::Relaxed
+        );
+        // A truncate is fsync'd, on its own or mixed with a chosen-index advance.
+        assert_eq!(
+            classify(&[WriteOp::Truncate { first: Slot(1) }]),
+            MustSync::Sync
+        );
+        assert_eq!(
+            classify(&[
+                WriteOp::SetChosenIndex(Slot(3)),
+                WriteOp::Truncate { first: Slot(1) }
+            ]),
+            MustSync::Sync
         );
         // An empty batch persists nothing; relaxed is the safe default.
         assert_eq!(classify(&[]), MustSync::Relaxed);

@@ -15,6 +15,7 @@ struct TestStorage {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
     config: Config,
+    first_slot: Slot,
 }
 
 impl TestStorage {
@@ -27,17 +28,19 @@ impl TestStorage {
                 peers: members.iter().copied().map(NodeId).collect(),
                 quorum_system: crate::state::QuorumSystem::Majority,
             },
+            first_slot: Slot(0),
         }
     }
 
-    /// Snapshot a live node's durable state (scalars + accepted log) into a fresh
-    /// storage, the way a real driver's persisted disk would look — for building
-    /// the "restart from durable storage" path in tests.
+    /// Snapshot a live node's durable state (scalars + accepted log + compaction
+    /// floor) into a fresh storage, the way a real driver's persisted disk would
+    /// look, for building the "restart from durable storage" path in tests.
     fn from_node(n: &RawNode) -> Self {
         Self {
             hard_state: n.hard_state().clone(),
             accepted: n.accepted().clone(),
             config: n.config().clone(),
+            first_slot: n.first_slot(),
         }
     }
 }
@@ -50,7 +53,7 @@ impl Storage for TestStorage {
         self.accepted.get(&slot).cloned()
     }
     fn first_slot(&self) -> Slot {
-        Slot(0)
+        self.first_slot
     }
     fn last_slot(&self) -> Slot {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
@@ -584,6 +587,7 @@ fn restart_rebuilds_state_from_hard_state() {
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
             quorum_system: crate::state::QuorumSystem::Majority,
         },
+        first_slot: Slot(0),
     };
     let n = RawNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
@@ -678,5 +682,157 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
         chosen_at(&restarted, 0),
         Some(val(2)),
         "restart must rebuild the chosen value, not the stale never-chosen accept"
+    );
+}
+
+/// Drive a fresh 3-node cluster with node 0 as leader and get slots 0..=2 chosen
+/// everywhere, then return the cluster (`chosen_index` is `Some(Slot(2))`).
+fn cluster_with_three_chosen() -> [RawNode; 3] {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+    for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
+        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+    nodes
+}
+
+#[test]
+fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
+    let mut nodes = cluster_with_three_chosen();
+    let leader = &mut nodes[0];
+    assert_eq!(leader.hard_state().chosen_index, Some(Slot(2)));
+
+    // A partial compaction drops slots 0..=1 and keeps slot 2.
+    let floor = leader.compact(Slot(1));
+    assert_eq!(floor, Slot(2), "floor is one past the last dropped slot");
+    assert_eq!(leader.first_slot(), Slot(2));
+    assert_eq!(
+        leader.accepted().keys().copied().collect::<Vec<_>>(),
+        vec![Slot(2)],
+        "only slot 2 is retained in the accepted log"
+    );
+    assert_eq!(
+        leader.chosen.keys().copied().collect::<Vec<_>>(),
+        vec![Slot(2)],
+        "only slot 2 is retained in the chosen map"
+    );
+
+    // Over-requesting past the chosen index clamps to it: everything drops.
+    let floor = leader.compact(Slot(100));
+    assert_eq!(floor, Slot(3), "clamped to chosen_index + 1");
+    assert_eq!(leader.first_slot(), Slot(3));
+    assert!(leader.accepted().is_empty());
+    assert!(leader.chosen.is_empty());
+}
+
+#[test]
+fn compact_below_the_current_floor_is_a_no_op() {
+    use crate::write::WriteOp;
+
+    let mut nodes = cluster_with_three_chosen();
+    let leader = &mut nodes[0];
+    leader.compact(Slot(1)); // floor -> 2
+    let _ = drain(leader); // clear the pending Truncate write
+
+    let floor = leader.compact(Slot(0)); // below the current floor
+    assert_eq!(floor, Slot(2), "the floor does not move backward");
+    let r = leader.ready();
+    assert!(
+        !r.writes()
+            .iter()
+            .any(|w| matches!(w, WriteOp::Truncate { .. })),
+        "a below-floor compaction emits no Truncate write"
+    );
+    r.advance();
+}
+
+#[test]
+fn a_compact_batch_requires_fsync() {
+    use crate::write::{MustSync, WriteOp};
+
+    let mut nodes = cluster_with_three_chosen();
+    let leader = &mut nodes[0];
+    let _ = drain(leader); // clear any pending writes from the proposal round
+
+    let floor = leader.compact(Slot(2));
+    assert_eq!(floor, Slot(3));
+    let r = leader.ready();
+    assert!(
+        r.writes()
+            .iter()
+            .any(|w| matches!(w, WriteOp::Truncate { first } if *first == Slot(3))),
+        "the batch carries the Truncate delta"
+    );
+    assert_eq!(
+        r.must_sync(),
+        MustSync::Sync,
+        "a truncate must fsync before the batch's messages are sent"
+    );
+    r.advance();
+}
+
+#[test]
+fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
+    let mut nodes = cluster_with_three_chosen();
+    let leader = &mut nodes[0];
+    leader.compact(Slot(2)); // full compaction: floor -> 3, accepted empty
+    assert!(leader.accepted().is_empty());
+
+    let storage = TestStorage::from_node(leader);
+    let restarted = RawNode::new(&storage);
+    assert_eq!(restarted.first_slot(), Slot(3), "floor survives a restart");
+    assert!(
+        restarted.accepted().is_empty(),
+        "the truncated log rebuilds empty"
+    );
+    assert_eq!(
+        restarted.hard_state().chosen_index,
+        Some(Slot(2)),
+        "the chosen index is unchanged by truncation"
+    );
+    assert_eq!(
+        restarted.next_slot,
+        Slot(3),
+        "next_slot falls back to first-unchosen when the log is empty"
+    );
+}
+
+#[test]
+fn serve_catchup_sends_nothing_below_the_floor() {
+    let mut nodes = cluster_with_three_chosen();
+    let leader = &mut nodes[0];
+    leader.compact(Slot(1)); // floor -> 2 (slot 2 retained)
+    let _ = drain(leader);
+
+    // A request below the floor cannot be served: the decided entries are gone.
+    leader.step(Message::CatchUpRequest {
+        from: NodeId(1),
+        from_slot: Slot(0),
+    });
+    let out = drain(leader);
+    assert!(
+        !out.iter()
+            .any(|(_, m)| matches!(m, Message::CatchUpResponse { .. })),
+        "a below-floor catch-up request is answered with nothing"
+    );
+
+    // A request at the floor is served normally (positive control).
+    leader.step(Message::CatchUpRequest {
+        from: NodeId(1),
+        from_slot: Slot(2),
+    });
+    let out = drain(leader);
+    assert!(
+        out.iter().any(|(_, m)| matches!(
+            m,
+            Message::CatchUpResponse { entries, .. } if entries.contains_key(&Slot(2))
+        )),
+        "a request at the floor still gets the retained decided entry"
     );
 }

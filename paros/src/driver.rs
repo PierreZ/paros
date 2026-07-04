@@ -379,6 +379,9 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
                     .set_chosen_index(*slot)
                     .map_err(|e| storage_err(&e))?;
             }
+            WriteOp::Truncate { first } => {
+                storage.truncate(*first).map_err(|e| storage_err(&e))?;
+            }
         }
     }
 
