@@ -18,8 +18,8 @@ pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER,
     EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_RECOVERED, EV_SYNCED, Paros, Propose, ProposeAck, WLTOKEN_PAROS, is_seam_crash, parse_addr,
-    run_node,
+    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, WLTOKEN_PAROS,
+    is_seam_crash, parse_addr, run_node,
 };
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
@@ -97,6 +97,12 @@ mod tests {
             Message::CatchUpResponse {
                 from: NodeId(0),
                 entries: catchup,
+            },
+            Message::InstallSnapshot {
+                from: NodeId(0),
+                ballot,
+                chosen_index: Slot(5),
+                snapshot: Value(vec![9, 9, 9]),
             },
             Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {

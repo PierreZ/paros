@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -116,6 +116,32 @@ pub enum Message {
         from: NodeId,
         /// Decided commands by slot, contiguous from the request's `from_slot`.
         entries: BTreeMap<Slot, (Ballot, Command)>,
+    },
+
+    // ---- Snapshot transfer (below-floor recovery) ----
+    /// An up-to-date peer → a requester whose needed prefix sits **below the
+    /// server's compaction floor** (it was truncated, so no [`CatchUpResponse`]
+    /// could replay it). Carries an **opaque application snapshot** at
+    /// `chosen_index` (the core never interprets `snapshot`; the application
+    /// produced it). The requester jumps its chosen prefix to `chosen_index`,
+    /// adopts `max(promise, ballot)` (so its durable promise never regresses —
+    /// the safety hinge), and truncates to a fully-compacted log above it.
+    ///
+    /// This is a recovery accelerator, not log bounding: it exists precisely for a
+    /// node that was down while the cluster advanced and truncated past it, so
+    /// commit-replay catch-up can no longer heal it.
+    InstallSnapshot {
+        /// Sender (the serving peer).
+        from: NodeId,
+        /// The ballot the requester adopts (`>=` every ballot the snapshot's
+        /// prefix was chosen under); it takes `max(promise, ballot)`.
+        ballot: Ballot,
+        /// The chosen index the snapshot brings the requester up to. Everything at
+        /// or below it is decided and folded into `snapshot`.
+        chosen_index: Slot,
+        /// Opaque application snapshot bytes at `chosen_index`. Paros never
+        /// interprets them; the application owns their meaning.
+        snapshot: Value,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----

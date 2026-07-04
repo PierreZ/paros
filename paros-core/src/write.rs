@@ -9,7 +9,7 @@
 //! whole, the log persists per record — and is what lets later stages truncate,
 //! checksum, and recover per entry without a blob rewrite.
 
-use crate::types::{Ballot, Command, Slot};
+use crate::types::{Ballot, Command, Slot, Value};
 
 /// A single semantic durable write the driver must apply to stable storage,
 /// **in order**, before sending the batch's messages.
@@ -47,6 +47,20 @@ pub enum WriteOp {
         /// The first slot still retained. Everything below it is dropped.
         first: Slot,
     },
+    /// Install an opaque application snapshot: record `chosen_index` as the
+    /// durable commit index, `chosen_index + 1` as the durable compaction floor,
+    /// `ballot` as (at least) the durable promise, and persist the opaque
+    /// `snapshot` bytes (so a restart boots from them and the node can serve them
+    /// onward). Produced only by [`crate::Message::InstallSnapshot`]; the bytes are
+    /// never interpreted by the core.
+    InstallSnapshot {
+        /// The commit index the snapshot brings the node up to.
+        chosen_index: Slot,
+        /// The ballot adopted with the snapshot (the promise takes its max).
+        ballot: Ballot,
+        /// Opaque application snapshot bytes at `chosen_index`.
+        snapshot: Value,
+    },
 }
 
 /// Whether a [`crate::Ready`] batch must be flushed to stable storage (fsync'd)
@@ -77,7 +91,10 @@ impl WriteOp {
     pub fn needs_sync(&self) -> bool {
         matches!(
             self,
-            WriteOp::SetPromise(_) | WriteOp::AppendAccepted { .. } | WriteOp::Truncate { .. }
+            WriteOp::SetPromise(_)
+                | WriteOp::AppendAccepted { .. }
+                | WriteOp::Truncate { .. }
+                | WriteOp::InstallSnapshot { .. }
         )
     }
 }

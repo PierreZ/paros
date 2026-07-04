@@ -111,6 +111,11 @@ pub struct RawNode {
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(NodeId, Message)>,
     pending_committed: Vec<(Slot, Command)>,
+    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`. The core
+    /// decides *who* needs a snapshot and *up to where* (a below-floor catch-up
+    /// request), but holds no application state, so the driver attaches the opaque
+    /// snapshot bytes (from storage) and sends the [`Message::InstallSnapshot`].
+    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
 
     /// Logical clock, advanced by [`RawNode::tick`].
     tick_count: u64,
@@ -215,6 +220,7 @@ impl RawNode {
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
+            pending_snapshot_offers: Vec::new(),
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,
@@ -265,6 +271,12 @@ impl RawNode {
             } => self.on_commit(ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
             Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
+            Message::InstallSnapshot {
+                ballot,
+                chosen_index,
+                snapshot,
+                ..
+            } => self.on_install_snapshot(ballot, chosen_index, snapshot),
             Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
@@ -756,10 +768,16 @@ impl RawNode {
         let Some(ci) = self.hard_state.chosen_index else {
             return;
         };
-        // Below our floor the decided entries have been truncated away: we cannot
-        // serve a contiguous range, so we serve nothing (the peer must recover its
-        // pre-floor state out of band).
-        if from_slot < self.first_slot || from_slot > ci {
+        // Below our floor the decided entries have been truncated away, so no
+        // contiguous `CatchUpResponse` can replay them. Offer a snapshot instead:
+        // record the offer (the driver attaches the opaque application bytes and
+        // sends the `InstallSnapshot`), bringing the peer up to our chosen prefix.
+        if from_slot < self.first_slot {
+            self.pending_snapshot_offers
+                .push((to, ci, self.hard_state.max_promised_ballot));
+            return;
+        }
+        if from_slot > ci {
             return;
         }
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
@@ -786,6 +804,48 @@ impl RawNode {
         for (slot, (ballot, command)) in entries {
             self.mark_chosen(slot, &command, ballot);
         }
+    }
+
+    /// Install an opaque application snapshot from a peer (below-floor recovery):
+    /// jump the chosen prefix to `chosen_index`, adopt `max(promise, ballot)` (the
+    /// durable promise never regresses — the safety hinge that keeps a recovered
+    /// node from re-voting under a stale ballot), and fully compact the log up to
+    /// the snapshot (its state is folded into the opaque bytes). A stale snapshot
+    /// that would not advance us is ignored.
+    fn on_install_snapshot(&mut self, ballot: Ballot, chosen_index: Slot, snapshot: Value) {
+        // Never go backward: a snapshot at or below our chosen prefix teaches us
+        // nothing and must not lower the floor or re-truncate live slots.
+        if self
+            .hard_state
+            .chosen_index
+            .is_some_and(|ci| chosen_index <= ci)
+        {
+            return;
+        }
+        // Adopt the choosing ballot. `set_promise` only ever raises the promise
+        // (it is a max), so even a far-behind node cannot regress its durable
+        // promise here — installing the log does not un-promise a higher ballot.
+        if ballot > self.hard_state.max_promised_ballot {
+            self.set_promise(ballot);
+        }
+        let first = Slot(chosen_index.0 + 1);
+        self.hard_state.chosen_index = Some(chosen_index);
+        // Fully compact up to the snapshot: everything at or below `chosen_index`
+        // is folded into the opaque bytes, so drop the in-memory prefix and raise
+        // the floor to `first`.
+        self.first_slot = first;
+        self.accepted = self.accepted.split_off(&first);
+        self.chosen = self.chosen.split_off(&first);
+        self.proposer.retain(|slot, _| *slot >= first);
+        self.next_slot = self.next_slot.max(first);
+        // Persist the install (opaque bytes + boundary). Snapshot-xor-entries: this
+        // batch surfaces no committed user entries for the folded prefix; the
+        // application installs the opaque state via the driver's storage write.
+        self.pending_writes.push(WriteOp::InstallSnapshot {
+            chosen_index,
+            ballot,
+            snapshot,
+        });
     }
 
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
@@ -1055,10 +1115,15 @@ impl RawNode {
         &self.pending_committed
     }
 
+    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
+        &self.pending_snapshot_offers
+    }
+
     pub(crate) fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_committed.clear();
+        self.pending_snapshot_offers.clear();
     }
 }
 

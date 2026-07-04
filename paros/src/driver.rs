@@ -131,6 +131,14 @@ pub const EV_APPLIED: &str = "log_applied";
 /// below the floor is ever persisted or recovered again.
 pub const EV_COMPACTED: &str = "compacted";
 
+/// Tracing event: this node installed an opaque application snapshot from a peer
+/// (a `WriteOp::InstallSnapshot`), jumping its chosen prefix. Carries `node`,
+/// `chosen_index` (the commit index the snapshot brought it up to), and `first`
+/// (the new compaction floor). Emitted only after the install is fsync'd. The
+/// snapshot oracle reads it to confirm a below-floor node recovered, and the
+/// no-gaps oracle reads it to admit the applied-index jump the install performs.
+pub const EV_SNAPSHOT_INSTALLED: &str = "snapshot_installed";
+
 /// Tracing event: this node received a `Prepare` whose `from_slot` is below its
 /// own compaction floor. Carries `node`, `from_slot`, and `floor`. Purely
 /// observational: it marks that the dangerous "campaign against a truncated
@@ -269,6 +277,7 @@ fn message_kind(m: &Message) -> &'static str {
         Message::Commit { .. } => "commit",
         Message::CatchUpRequest { .. } => "catchup_request",
         Message::CatchUpResponse { .. } => "catchup_response",
+        Message::InstallSnapshot { .. } => "install_snapshot",
         Message::CheckLeader { .. } => "check_leader",
         Message::Heartbeat { .. } => "heartbeat",
         _ => "unknown",
@@ -305,6 +314,12 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             ballot,
             commit,
         } => Some((*from, *ballot, *commit)),
+        Message::InstallSnapshot {
+            from,
+            ballot,
+            chosen_index,
+            ..
+        } => Some((*from, *ballot, *chosen_index)),
         _ => None,
     }
 }
@@ -335,6 +350,7 @@ where
     let must_sync = ready.must_sync();
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
@@ -372,6 +388,30 @@ where
         if let Some(addr) = addrs.get(to) {
             let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
             let _ = client.deliver.send(msg.clone());
+        }
+    }
+
+    // 2b. Serve snapshot offers: the core decided a peer needs a snapshot (it
+    //     asked for a prefix below our floor). Attach the opaque application bytes
+    //     from storage and send the InstallSnapshot — the driver holds the state
+    //     the core does not.
+    for (to, chosen_index, ballot) in &snapshot_offers {
+        let msg = Message::InstallSnapshot {
+            from: NodeId(self_id),
+            ballot: *ballot,
+            chosen_index: *chosen_index,
+            snapshot: Value(storage.snapshot()),
+        };
+        tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind = "install_snapshot",
+            slot = chosen_index.0,
+            "msg_sent"
+        );
+        if let Some(addr) = addrs.get(to) {
+            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
+            let _ = client.deliver.send(msg);
         }
     }
 
@@ -456,6 +496,15 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
             WriteOp::Truncate { first } => {
                 storage.truncate(*first).map_err(|e| storage_err(&e))?;
             }
+            WriteOp::InstallSnapshot {
+                chosen_index,
+                ballot,
+                snapshot,
+            } => {
+                storage
+                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone())
+                    .map_err(|e| storage_err(&e))?;
+            }
         }
     }
 
@@ -511,6 +560,25 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
             }
             WriteOp::Truncate { first } => {
                 tracing::info!(node = self_id, first = first.0, "compacted");
+            }
+            WriteOp::InstallSnapshot { chosen_index, .. } => {
+                let first = chosen_index.0 + 1;
+                tracing::info!(
+                    node = self_id,
+                    chosen_index = chosen_index.0,
+                    first,
+                    "snapshot_installed"
+                );
+                // The install jumps the applied prefix to `chosen_index` without
+                // replaying entries (snapshot-xor-entries); surface the jump so the
+                // no-gaps oracle (which admits it as a snapshot jump) and the
+                // convergence oracle see the node reach the cluster prefix.
+                tracing::info!(
+                    node = self_id,
+                    slot = chosen_index.0,
+                    applied_index = chosen_index.0,
+                    "log_applied"
+                );
             }
             WriteOp::SetPromise(_) | WriteOp::SetChosenIndex(_) => {}
         }

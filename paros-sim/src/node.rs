@@ -244,7 +244,11 @@ impl NodeStorage for DurableStorage {
         let floor = self.staged_floor.take();
         self.with_disk(|d| {
             if let Some(b) = ballot {
-                d.hard_state.max_promised_ballot = b;
+                // The promise is monotonic: never let a flush lower it. A
+                // SetPromise write only ever raises it, but an InstallSnapshot
+                // carries the *server's* ballot, which can be below this node's own
+                // promise, so take the max (matching `MemStorage::install_snapshot`).
+                d.hard_state.max_promised_ballot = d.hard_state.max_promised_ballot.max(b);
             }
             for (slot, record) in accepted {
                 d.accepted.insert(slot, record);
@@ -264,6 +268,29 @@ impl NodeStorage for DurableStorage {
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
         // Stage the floor like every other write: it reaches the durable world
         // only on the next Sync flush (Truncate classifies as MustSync::Sync).
+        self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        // Opaque marker of the chosen prefix (the sim has no application state
+        // machine); the boot read view carries this node's durable chosen index.
+        self.boot.snapshot()
+    }
+
+    fn install_snapshot(
+        &mut self,
+        chosen_index: Slot,
+        ballot: Ballot,
+        _snapshot: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        // Stage the install like every other write (InstallSnapshot is
+        // MustSync::Sync): the chosen index, the adopted ballot, and the floor
+        // (`chosen_index + 1`) reach the durable world on the next Sync flush,
+        // where the floor is applied last so it never outruns the chosen index.
+        self.staged_chosen = Some(chosen_index);
+        self.staged_ballot = Some(ballot);
+        let first = Slot(chosen_index.0 + 1);
         self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
         Ok(())
     }

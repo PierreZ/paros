@@ -82,6 +82,28 @@ pub trait NodeStorage: Storage {
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError>;
+
+    /// The opaque application snapshot at this node's chosen prefix, for serving a
+    /// below-floor peer. The **application** owns its meaning; paros only transfers
+    /// the bytes. The core never calls this — only the driver, when it fills a
+    /// [`paros_core::Ready::snapshot_offers`] offer with bytes before sending an
+    /// [`paros_core::Message::InstallSnapshot`].
+    fn snapshot(&self) -> Vec<u8>;
+
+    /// Install an opaque application snapshot at `chosen_index`: set the durable
+    /// commit index, raise the promise to at least `ballot`, record
+    /// `chosen_index + 1` as the compaction floor, and persist `snapshot` (so a
+    /// restart boots from it and the node can serve it onward). Mirrors
+    /// [`paros_core::WriteOp::InstallSnapshot`].
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn install_snapshot(
+        &mut self,
+        chosen_index: Slot,
+        ballot: Ballot,
+        snapshot: Vec<u8>,
+    ) -> Result<(), StorageError>;
 }
 
 /// The library's default in-memory storage: enough to *construct* a
@@ -142,6 +164,29 @@ impl NodeStorage for MemStorage {
     }
 
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+        self.first = self.first.max(first);
+        self.accepted.retain(|slot, _| *slot >= self.first);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        // The default in-memory storage has no application state machine, so its
+        // opaque "snapshot" is a deterministic marker of the chosen prefix. A real
+        // application supplies a NodeStorage whose snapshot() folds its own state.
+        self.hard_state
+            .chosen_index
+            .map_or_else(Vec::new, |ci| ci.0.to_le_bytes().to_vec())
+    }
+
+    fn install_snapshot(
+        &mut self,
+        chosen_index: Slot,
+        ballot: Ballot,
+        _snapshot: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.hard_state.chosen_index = Some(chosen_index);
+        self.hard_state.max_promised_ballot = self.hard_state.max_promised_ballot.max(ballot);
+        let first = Slot(chosen_index.0 + 1);
         self.first = self.first.max(first);
         self.accepted.retain(|slot, _| *slot >= self.first);
         Ok(())

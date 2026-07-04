@@ -30,7 +30,7 @@ use moonpool_sim::{
 use crate::oracle::{
     ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, NoGapsOracle, ProgressOracle,
     ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
-    SafetyOracle, TimelineRecorder, TruncationOracle, build_result,
+    SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -82,9 +82,22 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// went red: a quorum that truncated a chosen slot answered a lagging candidate's
 /// below-floor `Prepare` with an empty-looking `Promise`, so the blind candidate
 /// won and re-proposed a different value into the already-chosen slot (two values
-/// chosen for one slot), until the acceptor floor guards landed. Each replays clean
-/// via [`run_seed`].
-pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345, 5, 18_153_519_926_117_387_038];
+/// chosen for one slot), until the acceptor floor guards landed. Seed
+/// `11316277997507784505` exercises **snapshot restore**: a node that fell behind
+/// while the cluster kept committing and truncating (leader-driven) comes back
+/// below a peer's compaction floor, and instead of stalling it recovers through
+/// paros via an `InstallSnapshot` (the [`oracle::SnapshotOracle`] coverage gate
+/// fires and the [`oracle::ConvergenceOracle`] — now with no below-floor exemption
+/// — confirms it converges). Each replays clean via [`run_seed`].
+pub const REGRESSION_SEEDS: &[u64] = &[
+    99,
+    42,
+    7,
+    12_345,
+    5,
+    18_153_519_926_117_387_038,
+    11_316_277_997_507_784_505,
+];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
@@ -98,8 +111,15 @@ const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 /// The chaos surfaces every run exercises: swarm network faults plus single-node
 /// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
 /// records in the per-iteration `StorageWorld`) survives a restart, modelling a
-/// clean process crash with intact disk. Shared by [`run_seed`] and [`explore`]
-/// so a failing seed replays identically.
+/// clean process crash with intact disk (a **wiped** disk, which loses the
+/// promise, is the amnesia case deferred to a later stage). The recovery window
+/// is deliberately *wide* (`200..900` ms): a node kept down that long while the
+/// cluster keeps committing and truncating (leader-driven, per
+/// [`crate::workload`]) comes back **below every peer's compaction floor**, so
+/// commit-replay catch-up can no longer heal it and only snapshot transfer can.
+/// That is the scenario the [`oracle::ConvergenceOracle`] now demands convergence
+/// for. Shared by [`run_seed`] and [`explore`] so a failing seed replays
+/// identically.
 fn chaos_surfaces() -> [Chaos; 2] {
     [
         Chaos::Network(ChaosMode::Swarm),
@@ -109,7 +129,7 @@ fn chaos_surfaces() -> [Chaos; 2] {
                 prob_graceful: 0.0,
                 prob_crash: 1.0,
                 prob_wipe: 0.0,
-                recovery_delay_ms: Some(50..200),
+                recovery_delay_ms: Some(200..900),
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
             },
@@ -145,6 +165,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ProgressOracle)
         .invariant(ConvergenceOracle)
         .invariant(TruncationOracle)
+        .invariant(SnapshotOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -193,6 +214,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // red→green result is reproducible; the deterministic core unit test
         // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
         .invariant(TruncationOracle)
+        .invariant(SnapshotOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

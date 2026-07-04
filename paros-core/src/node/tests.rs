@@ -982,6 +982,108 @@ fn commit_below_floor_is_not_relearned() {
     );
 }
 
+#[test]
+fn below_floor_catchup_request_offers_a_snapshot() {
+    // A node truncated its chosen prefix; a peer that missed it asks for a slot
+    // below the floor. We cannot replay the truncated entries, so we offer a
+    // snapshot at our chosen prefix instead of serving nothing.
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[0];
+    n.compact(Slot(2)); // floor -> 3, chosen_index 2
+    let _ = drain(n);
+
+    n.step(Message::CatchUpRequest {
+        from: NodeId(1),
+        from_slot: Slot(0), // below our floor
+    });
+    assert_eq!(n.pending_snapshot_offers.len(), 1, "a snapshot was offered");
+    let (to, chosen_index, _ballot) = n.pending_snapshot_offers[0];
+    assert_eq!(to, NodeId(1), "offered to the requester");
+    assert_eq!(
+        chosen_index,
+        Slot(2),
+        "snapshot brings it up to our chosen prefix"
+    );
+    // The offer carries no bytes (the driver attaches them); no CatchUpResponse.
+    let out = drain(n);
+    assert!(
+        !out.iter()
+            .any(|(_, m)| matches!(m, Message::CatchUpResponse { .. })),
+        "a below-floor request is answered by a snapshot offer, not a replay"
+    );
+}
+
+#[test]
+fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
+    use crate::write::{MustSync, WriteOp};
+
+    // A node that missed a truncated prefix installs a snapshot at chosen_index 5
+    // under ballot {3,0}: it jumps its chosen prefix, fully compacts to floor 6,
+    // and adopts the ballot as its promise.
+    let mut n = node(1, &[0, 1, 2]);
+    assert_eq!(n.hard_state().chosen_index, None);
+
+    n.step(Message::InstallSnapshot {
+        from: NodeId(0),
+        ballot: ballot(3, 0),
+        chosen_index: Slot(5),
+        snapshot: Value(vec![1, 2, 3]),
+    });
+    assert_eq!(
+        n.hard_state().chosen_index,
+        Some(Slot(5)),
+        "jumped to the snapshot's chosen prefix"
+    );
+    assert_eq!(
+        n.first_slot(),
+        Slot(6),
+        "fully compacted up to the snapshot"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        ballot(3, 0),
+        "adopted the choosing ballot as the promise"
+    );
+
+    let r = n.ready();
+    assert_eq!(
+        r.must_sync(),
+        MustSync::Sync,
+        "an install is fsync'd before send"
+    );
+    assert!(
+        r.writes().iter().any(|w| matches!(
+            w,
+            WriteOp::InstallSnapshot { chosen_index, .. } if *chosen_index == Slot(5)
+        )),
+        "the install surfaced a durable WriteOp::InstallSnapshot"
+    );
+    assert!(
+        r.committed().is_empty(),
+        "snapshot-xor-entries: no committed user entries for the folded prefix"
+    );
+    r.advance();
+
+    // A stale snapshot at or below our prefix is ignored (no going backward), even
+    // though it carries a higher ballot.
+    n.step(Message::InstallSnapshot {
+        from: NodeId(0),
+        ballot: ballot(9, 0),
+        chosen_index: Slot(4),
+        snapshot: Value(vec![]),
+    });
+    assert_eq!(
+        n.hard_state().chosen_index,
+        Some(Slot(5)),
+        "a stale snapshot does not move the chosen prefix backward"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        ballot(3, 0),
+        "an ignored stale snapshot changes nothing"
+    );
+}
+
 /// The safety crux of Stage 5, as a directed core reproduction: a quorum that
 /// truncated a chosen slot refuses a candidate blind to that slot. Without the
 /// floor guard this candidate would win with an empty-looking Promise and
