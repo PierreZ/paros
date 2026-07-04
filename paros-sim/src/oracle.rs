@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_RECV,
-    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_RECOVERED, EV_SYNCED,
+    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
+    EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -1082,6 +1083,92 @@ impl Invariant for ConvergenceOracle {
                 m == cluster_max,
                 "every servable live node converges to the cluster's chosen prefix"
             );
+        }
+    }
+}
+
+/// Truncation oracle: the log stays bounded, and nothing below a node's durable
+/// compaction floor is ever persisted or recovered again (safety of truncation),
+/// while the compaction path and the dangerous below-floor Prepare interleaving
+/// are actually exercised (coverage).
+///
+/// The floor for each `(node, slot)` event is folded from the [`EV_COMPACTED`]
+/// stream with a two-pointer merge (both streams in capture order), matching the
+/// pattern [`RecoveryOracle`] uses for `persist`/`recovered`.
+pub(crate) struct TruncationOracle;
+
+impl TruncationOracle {
+    /// For each event in `events` (each carrying `node`/`slot`), assert its slot
+    /// is at or above the node's durable compaction floor established *strictly
+    /// before* that event's time.
+    ///
+    /// The floor is folded from compactions with time `<` the event's time, not
+    /// `<=`: a node may legitimately persist a late re-accept of a slot in the same
+    /// simulated millisecond it then compacts that slot away (the accept happened
+    /// first, in-core, guarded by `record_accepted`'s floor check). Counting a
+    /// same-instant compaction against such a persist would be a false positive. A
+    /// real resurrection (a persist below a floor made durable at an earlier
+    /// instant) is still caught, since the in-core floor only ever rises.
+    fn assert_above_floor(
+        q: &dyn TraceQuery,
+        compactions: &[(u64, u64, u64)],
+        event: &'static str,
+        msg: &'static str,
+    ) {
+        let mut ci = 0;
+        let mut floor: HashMap<u64, u64> = HashMap::new();
+        for e in q.snapshot(event) {
+            let (Some(node), Some(slot)) = (e.u64("node"), e.u64("slot")) else {
+                continue;
+            };
+            while ci < compactions.len() && compactions[ci].0 < e.time_ms {
+                let (_, cn, cf) = compactions[ci];
+                let f = floor.entry(cn).or_insert(0);
+                *f = (*f).max(cf);
+                ci += 1;
+            }
+            assert_always!(slot >= floor.get(&node).copied().unwrap_or(0), msg);
+        }
+    }
+}
+
+impl Invariant for TruncationOracle {
+    fn name(&self) -> &'static str {
+        "log_truncation"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let compactions = collect_compactions(q);
+
+        // Safety: a node never persists an accept, nor recovers a record on boot,
+        // below its own durable floor. The truncated prefix is genuinely gone, so
+        // the log stays bounded by the floor across restarts.
+        Self::assert_above_floor(
+            q,
+            &compactions,
+            EV_PERSIST,
+            "a node never persists an accept below its compaction floor",
+        );
+        Self::assert_above_floor(
+            q,
+            &compactions,
+            EV_RECOVERED,
+            "a truncated record is never recovered on boot (the log stays bounded)",
+        );
+
+        // Coverage: compaction actually happens (the workload drives it every run).
+        let compacted = compactions.iter().any(|&(_, _, first)| first > 0);
+        assert_sometimes!(compacted, "the log is compacted (truncation happens)");
+        if compacted {
+            assert_reachable!("a node truncates its log prefix behind the chosen index");
+        }
+
+        // Coverage: the dangerous below-floor Prepare interleaving is exercised, so
+        // the guard that refuses it stays under test. Rare (only a lagging node
+        // below a compacted peer's floor triggers it), so reachable-only: it must
+        // be hit at least once across exploration, not on every seed.
+        if !q.snapshot(EV_PREPARE_BELOW_FLOOR).is_empty() {
+            assert_reachable!("a candidate prepares below a peer's compaction floor");
         }
     }
 }
