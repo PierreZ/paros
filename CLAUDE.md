@@ -46,13 +46,32 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
-**Log compaction doctrine.** Entry bytes are opaque: paros never interprets, snapshots, or compacts
-application state. The application owns snapshots and compaction of its own state; it notifies paros
-to drop the log prefix (`RawNode::compact`, the `Compact` RPC), and paros only truncates entries
-within its chosen prefix. There is no snapshot interface, snapshot storage, or snapshot transfer in
-paros. Acceptors refuse `Prepare`/`Accept` below their truncation floor (safety), so a node that lags
-below every peer's floor cannot converge through paros: recovering it is the application's job
-(out-of-band state transfer). Paros guarantees safety, not liveness, in that case.
+**Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
+application state. The application owns compaction of its own state. What paros does own is its
+*log*, and it drops the log prefix two ways, both keeping the bytes opaque:
+
+- **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
+  a `User(Entry)` (opaque client bytes) or a `Control(Truncate{up_to})` metadata command. A client
+  asks the **leader** to truncate (the `Compact` RPC → `RawNode::propose_control`); the leader
+  decides `Truncate` into a slot by ordinary consensus, and every node truncates *lazily* when it
+  applies that slot (`RawNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
+  forwarded by normal replication + catch-up. The consensus/acceptor paths treat `Command` fully
+  opaquely (exactly as Compartmentalized Paxos treats a `Noop`); only the replica/apply path
+  interprets a control command, which keeps the eventual M5 compartment split clean.
+- **Snapshot transfer recovers a below-floor node.** Acceptors refuse `Prepare`/`Accept` below their
+  truncation floor (safety). A node that was down while the cluster truncated past it comes back
+  below the floor, where commit-replay catch-up cannot heal it (the entries are gone). paros **does**
+  transfer a snapshot to recover it: a peer offers `Message::InstallSnapshot` carrying the
+  **opaque, application-produced** snapshot (from `NodeStorage::snapshot()`, the same hook a backup
+  would use) plus the boundary `chosen_index`/ballot; the node jumps its chosen prefix, adopts
+  `max(promise, ballot)` (its durable promise never regresses), and installs via
+  `NodeStorage::install_snapshot()`. paros transfers and tracks the boundary slot; it never
+  interprets the bytes. "No compaction" was never "no snapshot transfer": the *application* produces
+  the snapshot, paros ships it.
+
+A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) is still
+out of scope: a snapshot restores the log, not the promise, so a naive rejoin can regress the
+promise (a real safety violation). That belongs to the disk-fault stage (`prob_wipe` stays 0).
 
 ## Simulation-driven development
 

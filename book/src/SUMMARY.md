@@ -15,3 +15,4 @@
 - [Crash and restart safety](restart-safety.md)
 - [Watch it live](multi-paxos.md)
 - [Crash and recovery: what survives](crash-and-recovery.md)
+- [Truncation and snapshot restore](truncation-and-snapshots.md)
