@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CRASHED, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT,
-    EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_RECOVERED, EV_SYNCED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_RECV,
+    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
+    EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -722,6 +723,16 @@ impl Invariant for SafetyOracle {
     }
 }
 
+/// The truncation events (`compacted`), time-ordered, as `(time_ms, node, first)`
+/// where `first` is the new compaction floor (the first slot still retained).
+/// `snapshot` yields events in capture (time) order.
+fn collect_compactions(q: &dyn TraceQuery) -> Vec<(u64, u64, u64)> {
+    q.snapshot(EV_COMPACTED)
+        .iter()
+        .filter_map(|e| Some((e.time_ms, e.u64("node")?, e.u64("first")?)))
+        .collect()
+}
+
 /// Recovery oracle (safety only): a node's durable state survives a crash intact.
 /// After a restart, the state the core rebuilds from storage must not contradict
 /// what the node persisted before the crash — a durable accepted `(slot -> value)`
@@ -780,10 +791,12 @@ impl Invariant for RecoveryOracle {
 /// `log_applied` stream the driver emits as the commit index moves.
 ///
 /// Restart-tolerant: after a crash a node re-drives the apply of its durable
-/// committed prefix (the boot re-emits `log_applied` for `0..=chosen_index`), so
-/// a node may *replay* already-applied slots (`idx` at or below the frontier).
+/// committed prefix (the boot re-emits `log_applied` for `first_slot..=chosen_index`),
+/// so a node may *replay* already-applied slots (`idx` at or below the frontier).
 /// A replay is idempotent and allowed; only a *forward skip* past the frontier is
-/// a real gap. The first-ever apply must still be slot 0.
+/// a real gap. The first-ever apply must be slot 0, unless the node has truncated
+/// its prefix: a compacted node's boot replay resumes at its compaction floor, so
+/// a forward jump is admitted only when it lands exactly on that floor.
 pub(crate) struct NoGapsOracle;
 
 impl Invariant for NoGapsOracle {
@@ -793,25 +806,40 @@ impl Invariant for NoGapsOracle {
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         // Per node, the frontier is the next slot expected to be newly applied.
+        // Track each node's durable compaction floor over time, folding in every
+        // truncation at or before the current applied event (two-pointer merge,
+        // both streams in capture order), so a legitimate boot-replay jump to the
+        // floor is distinguished from a real gap.
+        let compactions = collect_compactions(q);
+        let mut ci = 0;
+        let mut floor: HashMap<u64, u64> = HashMap::new();
         let mut frontier: HashMap<u64, u64> = HashMap::new();
         let mut max_applied = 0_u64;
         for e in q.snapshot(EV_APPLIED) {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
                 continue;
             };
+            while ci < compactions.len() && compactions[ci].0 <= e.time_ms {
+                let (_, cn, cf) = compactions[ci];
+                let f = floor.entry(cn).or_insert(0);
+                *f = (*f).max(cf);
+                ci += 1;
+            }
             max_applied = max_applied.max(idx);
             let next = frontier.entry(node).or_insert(0);
             if idx == *next {
                 // Advancing the frontier by exactly one (no gap).
                 *next += 1;
-            } else {
-                // Below the frontier is an idempotent restart replay (allowed);
-                // above it is a real skipped slot.
+            } else if idx > *next {
+                // A forward jump is only legal at the node's compaction floor: a
+                // boot replay of a truncated log resumes there, not at slot 0.
                 assert_always!(
-                    idx < *next,
-                    "a node's applied prefix advances one slot at a time (no gaps)"
+                    idx == floor.get(&node).copied().unwrap_or(0),
+                    "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor)"
                 );
+                *next = idx + 1;
             }
+            // else idx < *next: an idempotent restart replay, allowed.
         }
         // The log is multi-slot (a stable leader streamed past slot 0).
         assert_sometimes!(max_applied >= 2, "a multi-slot prefix is applied");
@@ -1024,13 +1052,123 @@ impl Invariant for ConvergenceOracle {
             return;
         }
 
+        // Each node's final durable compaction floor (the max over its truncation
+        // events). A lagging node whose next needed slot has been truncated on
+        // *every* peer cannot catch up through paros: no live peer can serve it.
+        // Per the compaction doctrine, recovering it is the application's job
+        // (out-of-band state transfer), so paros guarantees safety, not liveness,
+        // there: that node is exempt from convergence.
+        let mut final_floor: HashMap<u64, u64> = HashMap::new();
+        for (_t, node, first) in collect_compactions(q) {
+            let f = final_floor.entry(node).or_insert(0);
+            *f = (*f).max(first);
+        }
+
         for (&node, &m) in &per_node_max {
-            if stable_up(node) {
-                assert_always!(
-                    m == cluster_max,
-                    "every live node converges to the cluster's chosen prefix"
-                );
+            if !stable_up(node) || m == cluster_max {
+                continue;
             }
+            let next_needed = m + 1;
+            let unservable = per_node_max
+                .keys()
+                .filter(|&&p| p != node)
+                .all(|&p| next_needed < final_floor.get(&p).copied().unwrap_or(0));
+            if unservable {
+                assert_reachable!(
+                    "a node lags below every peer's compaction floor (app-owned recovery)"
+                );
+                continue;
+            }
+            assert_always!(
+                m == cluster_max,
+                "every servable live node converges to the cluster's chosen prefix"
+            );
+        }
+    }
+}
+
+/// Truncation oracle: the log stays bounded, and nothing below a node's durable
+/// compaction floor is ever persisted or recovered again (safety of truncation),
+/// while the compaction path and the dangerous below-floor Prepare interleaving
+/// are actually exercised (coverage).
+///
+/// The floor for each `(node, slot)` event is folded from the [`EV_COMPACTED`]
+/// stream with a two-pointer merge (both streams in capture order), matching the
+/// pattern [`RecoveryOracle`] uses for `persist`/`recovered`.
+pub(crate) struct TruncationOracle;
+
+impl TruncationOracle {
+    /// For each event in `events` (each carrying `node`/`slot`), assert its slot
+    /// is at or above the node's durable compaction floor established *strictly
+    /// before* that event's time.
+    ///
+    /// The floor is folded from compactions with time `<` the event's time, not
+    /// `<=`: a node may legitimately persist a late re-accept of a slot in the same
+    /// simulated millisecond it then compacts that slot away (the accept happened
+    /// first, in-core, guarded by `record_accepted`'s floor check). Counting a
+    /// same-instant compaction against such a persist would be a false positive. A
+    /// real resurrection (a persist below a floor made durable at an earlier
+    /// instant) is still caught, since the in-core floor only ever rises.
+    fn assert_above_floor(
+        q: &dyn TraceQuery,
+        compactions: &[(u64, u64, u64)],
+        event: &'static str,
+        msg: &'static str,
+    ) {
+        let mut ci = 0;
+        let mut floor: HashMap<u64, u64> = HashMap::new();
+        for e in q.snapshot(event) {
+            let (Some(node), Some(slot)) = (e.u64("node"), e.u64("slot")) else {
+                continue;
+            };
+            while ci < compactions.len() && compactions[ci].0 < e.time_ms {
+                let (_, cn, cf) = compactions[ci];
+                let f = floor.entry(cn).or_insert(0);
+                *f = (*f).max(cf);
+                ci += 1;
+            }
+            assert_always!(slot >= floor.get(&node).copied().unwrap_or(0), msg);
+        }
+    }
+}
+
+impl Invariant for TruncationOracle {
+    fn name(&self) -> &'static str {
+        "log_truncation"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let compactions = collect_compactions(q);
+
+        // Safety: a node never persists an accept, nor recovers a record on boot,
+        // below its own durable floor. The truncated prefix is genuinely gone, so
+        // the log stays bounded by the floor across restarts.
+        Self::assert_above_floor(
+            q,
+            &compactions,
+            EV_PERSIST,
+            "a node never persists an accept below its compaction floor",
+        );
+        Self::assert_above_floor(
+            q,
+            &compactions,
+            EV_RECOVERED,
+            "a truncated record is never recovered on boot (the log stays bounded)",
+        );
+
+        // Coverage: compaction actually happens (the workload drives it every run).
+        let compacted = compactions.iter().any(|&(_, _, first)| first > 0);
+        assert_sometimes!(compacted, "the log is compacted (truncation happens)");
+        if compacted {
+            assert_reachable!("a node truncates its log prefix behind the chosen index");
+        }
+
+        // Coverage: the dangerous below-floor Prepare interleaving is exercised, so
+        // the guard that refuses it stays under test. Rare (only a lagging node
+        // below a compacted peer's floor triggers it), so reachable-only: it must
+        // be hit at least once across exploration, not on every seed.
+        if !q.snapshot(EV_PREPARE_BELOW_FLOOR).is_empty() {
+            assert_reachable!("a candidate prepares below a peer's compaction floor");
         }
     }
 }

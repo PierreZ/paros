@@ -11,7 +11,7 @@ use moonpool_sim::{
 };
 use moonpool_transport::NetTransportBuilder;
 
-use paros::{Paros, Propose, WLTOKEN_PAROS, parse_addr};
+use paros::{Compact, Paros, Propose, WLTOKEN_PAROS, parse_addr};
 
 use crate::{GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
@@ -59,6 +59,9 @@ impl Workload for ProposeClient {
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         let n = clients.len();
         let mut acknowledged: u32 = 0;
+        // Highest slot this client has seen committed, the compaction watermark it
+        // hands to every node (playing the application that owns compaction).
+        let mut max_slot: Option<u64> = None;
 
         for seq in 0..u64::from(REQUESTS) {
             if shutdown.is_cancelled() {
@@ -70,7 +73,8 @@ impl Workload for ProposeClient {
             // Send to a node; on a redirect (a non-leader replies `committed =
             // false`) cycle to the next node until the leader holds the request and
             // commits it (ack-on-commit), all bounded by the per-proposal deadline.
-            // Dedup by `(client_id, seq)` makes the cycling safe (at-most-once).
+            // Dedup by `(client_id, seq)` makes the cycling safe (at-most-once). The
+            // committed ack carries the slot, so we can track the chosen prefix.
             let attempt = async {
                 let mut target = usize::try_from(seq).unwrap_or(0) % n;
                 loop {
@@ -82,22 +86,35 @@ impl Workload for ProposeClient {
                     if let Ok(ack) = clients[target].propose.get_reply(proposal).await {
                         assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
                         if ack.committed {
-                            break true;
+                            break ack.slot;
                         }
                     }
                     target = (target + 1) % n;
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
                 }
             };
-            let acked = tokio::select! {
-                v = attempt => v,
-                () = shutdown.cancelled() => false,
-                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => false,
+            let outcome: Option<Option<u64>> = tokio::select! {
+                v = attempt => Some(v),
+                () = shutdown.cancelled() => None,
+                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
             };
 
-            if acked {
+            if let Some(slot) = outcome {
                 acknowledged += 1;
                 tracing::info!(seq_id = seq, "client_acknowledged");
+                if let Some(s) = slot {
+                    max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
+                }
+                // Notify every node it may compact its log up to the highest slot
+                // this client has seen chosen. Each node clamps to its own chosen
+                // index, so floors diverge per node (the aggressive policy): a node
+                // that lagged keeps a lower floor, which is what makes a below-floor
+                // Prepare reachable. Fire-and-forget; the ack is not awaited.
+                if let Some(up_to) = max_slot {
+                    for client in &clients {
+                        let _ = client.compact.send(Compact { up_to });
+                    }
+                }
             } else {
                 tracing::info!(seq_id = seq, "client_failed");
             }

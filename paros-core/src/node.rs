@@ -99,6 +99,11 @@ pub struct RawNode {
     /// from the durable log (see [`RawNode::new`]); durably persisted one record
     /// at a time via [`WriteOp::AppendAccepted`], never as a blob.
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    /// The compaction floor: the first slot still retained. Everything below it
+    /// has been truncated away (see [`RawNode::compact`]). Rebuilt on boot from
+    /// [`Storage::first_slot`]. Always `<= first_unchosen()`: only chosen slots
+    /// are ever dropped.
+    first_slot: Slot,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
     // ---- `ready`, cleared by `advance`.
@@ -165,7 +170,8 @@ impl RawNode {
         // Rebuild the working accepted log by scanning the durable per-slot log
         // (first_slot..=last_slot); gaps read back as `None` and are skipped.
         let mut accepted: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
-        let (first, last) = (storage.first_slot().0, storage.last_slot().0);
+        let first_slot = storage.first_slot();
+        let (first, last) = (first_slot.0, storage.last_slot().0);
         for s in first..=last {
             if let Some(record) = storage.accepted(Slot(s)) {
                 accepted.insert(Slot(s), record);
@@ -189,15 +195,19 @@ impl RawNode {
                 inflight.insert((entry.client, entry.seq), *slot);
             }
         }
+        // Next free slot: one past the highest accepted entry, or (when the log
+        // is empty, e.g. fully truncated) one past the durable chosen index.
+        let first_unchosen = hard_state.chosen_index.map_or(Slot(0), |ci| Slot(ci.0 + 1));
         let next_slot = accepted
             .keys()
             .next_back()
-            .map_or(Slot(0), |s| Slot(s.0 + 1));
+            .map_or(first_unchosen, |s| Slot(s.0 + 1));
 
         Self {
             config,
             hard_state,
             accepted,
+            first_slot,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
@@ -279,6 +289,42 @@ impl RawNode {
         self.inflight.insert((client, seq), slot);
         self.start_accept_round(slot, entry);
         ProposeResult::Accepted(slot)
+    }
+
+    /// Application-driven log compaction: drop every retained slot at or below
+    /// `up_to`, raising the truncation floor. Returns the new floor (the first
+    /// slot still retained).
+    ///
+    /// `up_to` is the last slot the application permits dropping (inclusive); the
+    /// floor stored in the log is the first slot *retained*. The request is
+    /// clamped to the contiguous chosen prefix (`up_to.min(chosen_index)`): a slot
+    /// that is not yet chosen is never dropped, so nothing undecided is lost.
+    /// Clamping makes the call safe to over-request ("drop as much as you may, up
+    /// to N") and idempotent (a floor never moves backward). With nothing chosen,
+    /// or when the floor would not rise, it is a no-op that emits no
+    /// [`WriteOp::Truncate`].
+    ///
+    /// The application owns the risk that truncation shrinks the at-most-once
+    /// dedup window: `applied_seq`/`inflight` are rebuilt from the remaining log
+    /// on restart (see [`RawNode::new`]), so a client `(id, seq)` whose slot was
+    /// truncated is no longer recognized as a duplicate after a reboot. This is
+    /// consistent with the doctrine that the application owns compaction of its
+    /// own state.
+    pub fn compact(&mut self, up_to: Slot) -> Slot {
+        let Some(ci) = self.hard_state.chosen_index else {
+            return self.first_slot;
+        };
+        let highest_drop = up_to.min(ci);
+        let first = Slot(highest_drop.0 + 1).max(self.first_slot);
+        if first <= self.first_slot {
+            return self.first_slot;
+        }
+        self.accepted = self.accepted.split_off(&first);
+        self.chosen = self.chosen.split_off(&first);
+        self.proposer.retain(|slot, _| *slot >= first);
+        self.first_slot = first;
+        self.pending_writes.push(WriteOp::Truncate { first });
+        self.first_slot
     }
 
     /// Advance logical time by one tick, synthesizing `CheckLeader`/`Heartbeat`
@@ -427,7 +473,9 @@ impl RawNode {
         self.proposer.clear();
 
         for (slot, (_old, entry)) in e.recovered {
-            if self.chosen.contains_key(&slot) {
+            // A slot below our floor is chosen (only chosen slots are truncated),
+            // so it needs no re-proposal.
+            if slot < self.first_slot || self.chosen.contains_key(&slot) {
                 continue;
             }
             self.inflight.insert((entry.client, entry.seq), slot);
@@ -447,6 +495,25 @@ impl RawNode {
     /// higher than our promise; otherwise `Nack`.
     fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
+        // Floor guard: a Prepare whose `from_slot` is below our compaction floor
+        // cannot be promised. We truncated the accepted entries for
+        // `[from_slot, first_slot)`, so our Promise could not report them, and the
+        // candidate would treat those already-chosen slots as free and re-propose
+        // a different value: two values chosen for one slot. Nack *without* raising
+        // our promise (so a blind laggard cannot ratchet our promise up and depose
+        // a healthy leader); those slots are chosen, and the candidate must recover
+        // them out of band.
+        if from_slot < self.first_slot {
+            self.pending_messages.push((
+                from,
+                Message::Nack {
+                    from: me,
+                    ballot,
+                    slot: from_slot,
+                },
+            ));
+            return;
+        }
         if ballot > self.hard_state.max_promised_ballot {
             if ballot.node != me && self.role != NodeRole::Follower {
                 self.become_follower(None);
@@ -485,6 +552,14 @@ impl RawNode {
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
     fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, entry: Entry) {
+        // Floor guard: a slot below our floor is already chosen (only chosen slots
+        // are ever truncated). Ignore the Accept rather than Nack: the slot is
+        // decided, so re-accepting a different value there would break agreement,
+        // and a Nack would needlessly depose a leader that can still assemble a
+        // quorum on live slots. Heartbeat commit reconciliation heals any real gap.
+        if slot < self.first_slot {
+            return;
+        }
         let me = self.config.id;
         if ballot >= self.hard_state.max_promised_ballot {
             if ballot.node != me && self.role != NodeRole::Follower {
@@ -655,7 +730,10 @@ impl RawNode {
         let Some(ci) = self.hard_state.chosen_index else {
             return;
         };
-        if from_slot > ci {
+        // Below our floor the decided entries have been truncated away: we cannot
+        // serve a contiguous range, so we serve nothing (the peer must recover its
+        // pre-floor state out of band).
+        if from_slot < self.first_slot || from_slot > ci {
             return;
         }
         let mut entries: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
@@ -760,6 +838,10 @@ impl RawNode {
     /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
     /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
     fn record_accepted(&mut self, slot: Slot, ballot: Ballot, entry: Entry) {
+        debug_assert!(
+            slot >= self.first_slot,
+            "never record an accept below the compaction floor"
+        );
         self.accepted.insert(slot, (ballot, entry.clone()));
         self.pending_writes.push(WriteOp::AppendAccepted {
             slot,
@@ -805,6 +887,11 @@ impl RawNode {
     /// Record `(slot, entry)` as chosen: persist, update dedup tables, and
     /// advance the contiguous chosen prefix. Idempotent.
     fn mark_chosen(&mut self, slot: Slot, entry: &Entry, ballot: Ballot) {
+        // A slot below our floor was chosen and then truncated; do not relearn it
+        // (that would re-insert a record below the floor via `record_accepted`).
+        if slot < self.first_slot {
+            return;
+        }
         if self.chosen.contains_key(&slot) {
             return;
         }
@@ -861,6 +948,13 @@ impl RawNode {
     #[must_use]
     pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Entry)> {
         &self.accepted
+    }
+
+    /// The compaction floor: the first slot still retained. Slots below it have
+    /// been truncated away (see [`RawNode::compact`]).
+    #[must_use]
+    pub fn first_slot(&self) -> Slot {
+        self.first_slot
     }
 
     /// The number of ticks observed so far.

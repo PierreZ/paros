@@ -37,6 +37,14 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
+**Log compaction doctrine.** Entry bytes are opaque: paros never interprets, snapshots, or compacts
+application state. The application owns snapshots and compaction of its own state; it notifies paros
+to drop the log prefix (`RawNode::compact`, the `Compact` RPC), and paros only truncates entries
+within its chosen prefix. There is no snapshot interface, snapshot storage, or snapshot transfer in
+paros. Acceptors refuse `Prepare`/`Accept` below their truncation floor (safety), so a node that lags
+below every peer's floor cannot converge through paros: recovering it is the application's job
+(out-of-band state transfer). Paros guarantees safety, not liveness, in that case.
+
 ## Simulation-driven development
 
 This project is simulation-first: the deterministic simulation (moonpool DST + the `paros-sim`

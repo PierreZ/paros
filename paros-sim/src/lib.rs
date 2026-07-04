@@ -30,7 +30,7 @@ use moonpool_sim::{
 use crate::oracle::{
     ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, NoGapsOracle, ProgressOracle,
     ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
-    SafetyOracle, TimelineRecorder, build_result,
+    SafetyOracle, TimelineRecorder, TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -71,9 +71,14 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// red (the `log_applied` gap the recovery path now fills); grows as new bugs are
 /// found. Seed 5 is where the [`oracle::ConvergenceOracle`] first went red: a
 /// follower that missed both the `Accept` and the `Commit` for a decided slot kept
-/// a permanent hole until commit-replay catch-up landed. Each replays clean via
-/// [`run_seed`].
-pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345, 5];
+/// a permanent hole until commit-replay catch-up landed. Seed
+/// `18153519926117387038` is where the [`oracle::TruncationOracle`] scenario first
+/// went red: a quorum that truncated a chosen slot answered a lagging candidate's
+/// below-floor `Prepare` with an empty-looking `Promise`, so the blind candidate
+/// won and re-proposed a different value into the already-chosen slot (two values
+/// chosen for one slot), until the acceptor floor guards landed. Each replays clean
+/// via [`run_seed`].
+pub const REGRESSION_SEEDS: &[u64] = &[99, 42, 7, 12_345, 5, 18_153_519_926_117_387_038];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
@@ -133,6 +138,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         .invariant(ConvergenceOracle)
+        .invariant(TruncationOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -180,6 +186,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
         // red→green result is reproducible; the deterministic core unit test
         // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
+        .invariant(TruncationOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

@@ -119,13 +119,14 @@ fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
     world
 }
 
-/// One node's durable records: the scalars, the per-slot accepted log, and an
-/// optional snapshot blob. The [`StorageWorld`] owns one of these per node IP.
+/// One node's durable records: the scalars, the per-slot accepted log, and the
+/// compaction floor. The [`StorageWorld`] owns one of these per node IP.
 #[derive(Default)]
 struct NodeDisk {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Entry)>,
-    snapshot: Option<Vec<u8>>,
+    /// The first slot still retained. Everything below it has been truncated.
+    first_slot: Slot,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -155,8 +156,6 @@ struct StorageWorld {
 struct DurableStorage {
     /// Read view: this node's durable records as of boot.
     boot: MemStorage,
-    /// The snapshot blob recovered from durable storage at boot (Stage 5).
-    boot_snapshot: Option<Vec<u8>>,
     /// The shared world, upgraded per op.
     world: Weak<Mutex<StorageWorld>>,
     /// This node's IP — its key into the world.
@@ -165,6 +164,7 @@ struct DurableStorage {
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Entry)>,
     staged_chosen: Option<Slot>,
+    staged_floor: Option<Slot>,
 }
 
 impl DurableStorage {
@@ -172,11 +172,12 @@ impl DurableStorage {
     /// a prior boot of this node (same IP, same iteration) left in the world.
     fn restore(config: Config, world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
         let mut boot = MemStorage::new(config);
-        let mut boot_snapshot = None;
         if let Some(strong) = world.upgrade() {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(disk) = guard.disks.get(&key) {
                 // Seed the read view through the semantic ops (records, not a blob).
+                // Set the floor first so first_slot() reads it back on boot.
+                let _ = boot.truncate(disk.first_slot);
                 let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
                 for (slot, (ballot, entry)) in &disk.accepted {
                     let _ = boot.append_accepted(*slot, *ballot, entry.clone());
@@ -185,17 +186,16 @@ impl DurableStorage {
                     let _ = boot.set_chosen_index(ci);
                 }
                 let _ = boot.sync(MustSync::Sync);
-                boot_snapshot.clone_from(&disk.snapshot);
             }
         }
         Self {
             boot,
-            boot_snapshot,
             world,
             key,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
+            staged_floor: None,
         }
     }
 
@@ -241,6 +241,7 @@ impl NodeStorage for DurableStorage {
         let ballot = self.staged_ballot.take();
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
+        let floor = self.staged_floor.take();
         self.with_disk(|d| {
             if let Some(b) = ballot {
                 d.hard_state.max_promised_ballot = b;
@@ -251,19 +252,20 @@ impl NodeStorage for DurableStorage {
             if let Some(c) = chosen {
                 d.hard_state.chosen_index = Some(c);
             }
-        })
-    }
-
-    fn install_snapshot(&mut self, up_to: Slot, bytes: &[u8]) -> Result<(), StorageError> {
-        let bytes = bytes.to_vec();
-        self.with_disk(|d| {
-            d.snapshot = Some(bytes);
-            d.accepted.retain(|s, _| *s > up_to);
+            // Apply the truncation last, after the chosen index it sits behind, so
+            // a flushed floor never outruns the flushed chosen index.
+            if let Some(f) = floor {
+                d.first_slot = d.first_slot.max(f);
+                d.accepted.retain(|s, _| *s >= d.first_slot);
+            }
         })
     }
 
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
-        self.with_disk(|d| d.accepted.retain(|s, _| *s >= first))
+        // Stage the floor like every other write: it reaches the durable world
+        // only on the next Sync flush (Truncate classifies as MustSync::Sync).
+        self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        Ok(())
     }
 }
 
@@ -279,9 +281,6 @@ impl Storage for DurableStorage {
     }
     fn last_slot(&self) -> Slot {
         self.boot.last_slot()
-    }
-    fn snapshot(&self) -> Option<Vec<u8>> {
-        self.boot_snapshot.clone()
     }
 }
 

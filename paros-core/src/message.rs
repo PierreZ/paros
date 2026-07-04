@@ -31,6 +31,12 @@ pub enum Message {
     /// Acceptor → proposer: a promise covering every slot at or after `from_slot`,
     /// reporting all previously accepted `(ballot, entry)` in that suffix so the
     /// new leader can re-propose in-flight values (gap fill).
+    ///
+    /// An acceptor whose compaction floor is above `from_slot` answers a `Nack`
+    /// instead: it truncated the accepted entries for `[from_slot, first_slot)`, so
+    /// a Promise could not report them, and the candidate would treat those
+    /// already-chosen slots as free. A candidate that far behind must recover the
+    /// compacted prefix out of band.
     Promise {
         /// Sender.
         from: NodeId,
