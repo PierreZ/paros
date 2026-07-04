@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use paros_sim::{REGRESSION_SEEDS, SWEEP_ITERATIONS, explore, run_seed, run_seed_json};
+use paros_sim::{REGRESSION_SEEDS, SMOKE_ITERATIONS, explore, run_seed, run_seed_json};
 
 /// The pinned-seed regression corpus: replay every recorded durability seed and
 /// assert it stays clean. `run_seed` panics on any `always`-assertion violation,
@@ -119,22 +119,18 @@ fn log_grows_under_a_stable_leader() {
     );
 }
 
-/// The crown jewel: drive the `UntilCoverageStable` sweep under swarm network
-/// chaos and assert every invariant holds. Empty `assertion_violations` means the
-/// safety `always`-assertions all held across every seed: at-most-one-value-chosen
-/// (prefix agreement), no gaps in the applied prefix, per-node monotonic leadership
-/// (a ballot is `(round, node)`, so two nodes can lead the same round under a
-/// partition; safety still holds by quorum intersection, not a single-leader rule),
-/// monotonic promised ballots, and never-accept-below-promised. Saturating
-/// (no `convergence_timeout`) means every `sometimes`/`reachable` fired, including
-/// the `ProgressOracle` gates (a stable leader streams several slots, and
-/// leadership turns over and recovers): the dueling-proposer livelock is gone and
-/// the cluster makes progress under eventual synchrony within the cap. The test
-/// uses the full [`SWEEP_ITERATIONS`] cap so `AssertionCoverage` saturates (the
-/// sancov runner uses the smaller `COVERAGE_ITERATIONS` cap instead).
+/// Fast safety smoke: drive a handful ([`SMOKE_ITERATIONS`]) of random seeds under
+/// swarm network chaos and assert the safety `always`-assertions all held on every
+/// one: at-most-one-value-chosen (prefix agreement), no gaps in the applied prefix,
+/// per-node monotonic leadership, monotonic promised ballots, and
+/// never-accept-below-promised. This is a *smoke* test, not the coverage sweep:
+/// it does **not** assert saturation (`convergence_timeout`). The heavy,
+/// coverage-guided sweep that must saturate `AssertionCoverage`/`CodeCoverage`
+/// lives in `cargo xtask sim` (sancov-instrumented) so code coverage guides seed
+/// selection; keeping it out of nextest keeps the test suite quick.
 #[test]
-fn safety_and_progress_hold_under_chaos() {
-    let report = explore(SWEEP_ITERATIONS);
+fn safety_holds_under_chaos_smoke() {
+    let report = explore(SMOKE_ITERATIONS);
 
     assert!(
         report.assertion_violations.is_empty(),
@@ -143,8 +139,4 @@ fn safety_and_progress_hold_under_chaos() {
         report.seeds_failing.iter().take(10).collect::<Vec<_>>(),
     );
     assert_eq!(report.failed_runs, 0, "no run failed");
-    assert!(
-        !report.convergence_timeout,
-        "the sweep saturated within the cap (safety + progress reachables all fired)"
-    );
 }

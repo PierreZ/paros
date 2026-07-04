@@ -21,6 +21,15 @@ target). Clippy pedantic is on (`[workspace.lints]` in `Cargo.toml`).
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). Registry is empty
   until Stage 1.
 
+**Sim sweep vs. sim smoke — where each lives.** The heavy, coverage-guided sweep (the one that
+must *saturate* `AssertionCoverage`/`CodeCoverage`) always runs via `cargo xtask sim` so the
+sancov code-coverage instrumentation guides seed selection; that runner (`paros-sim-runner`) exits
+non-zero on any safety violation, so it is the real CI gate. The `cargo nextest` sim tests are only
+a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safety oracles) plus the
+pinned `REGRESSION_SEEDS`; they do **not** assert coverage saturation. So: to prove a new red→green
+oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
+green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
+
 ## Architecture
 
 Sans-IO core driven by moonpool (etcd-raft `RawNode`/`Node` model). `paros-core` is a pure

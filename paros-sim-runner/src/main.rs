@@ -40,7 +40,7 @@ fn main() {
             s.plateau_seeds,
         );
     }
-    if report.assertion_violations.is_empty() {
+    if report.assertion_violations.is_empty() && report.failed_runs == 0 {
         println!("  no safety violations — single-decree Paxos chose at most one value");
     } else {
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
@@ -48,6 +48,9 @@ fn main() {
             "  FAILING SEEDS (replay with run_seed): {:?}",
             report.seeds_failing
         );
+        // This runner is the coverage-guided sweep gate (`cargo xtask sim`): a
+        // safety violation or a failed run must fail the process so CI catches it.
+        std::process::exit(1);
     }
 
     // 2. A single seed, with its full message timeline for eyeballing.

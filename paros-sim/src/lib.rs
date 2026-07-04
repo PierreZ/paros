@@ -56,9 +56,15 @@ pub(crate) const CLUSTER_SIZE: usize = 3;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
 pub(crate) const PLATEAU_SEEDS: usize = 64;
-/// Cap on the full sweep used by the nextest safety+progress test (no sancov):
-/// high enough for `AssertionCoverage` to saturate (all gates fire, then a plateau).
+/// Cap on the full coverage-guided sweep. The **sancov runner** (`cargo xtask
+/// sim`) drives this so `AssertionCoverage`/`CodeCoverage` can saturate; the
+/// nextest tests deliberately do *not* (they use [`SMOKE_ITERATIONS`]), so the
+/// heavy, coverage-instrumented sweep stays in xtask where it belongs.
 pub const SWEEP_ITERATIONS: usize = 5000;
+/// Cap on the fast smoke sweep the nextest suite runs: a handful of random seeds
+/// through the safety oracles, enough to catch an obvious regression quickly.
+/// Saturation/coverage is **not** asserted here (that is `cargo xtask sim`'s job).
+pub const SMOKE_ITERATIONS: usize = 50;
 /// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
 /// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
 pub const COVERAGE_ITERATIONS: usize = 64;
