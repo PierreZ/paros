@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Entry, NodeId, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -44,21 +44,21 @@ pub enum Message {
         ballot: Ballot,
         /// First slot this promise covers (echoes the prepare's `from_slot`).
         from_slot: Slot,
-        /// All accepted entries for slots `>= from_slot`. Empty if none.
-        accepted: BTreeMap<Slot, (Ballot, Entry)>,
+        /// All accepted commands for slots `>= from_slot`. Empty if none.
+        accepted: BTreeMap<Slot, (Ballot, Command)>,
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----
-    /// Proposer → acceptors: "accept `entry` for `slot` at `ballot`."
+    /// Proposer → acceptors: "accept `command` for `slot` at `ballot`."
     Accept {
         /// Sender.
         from: NodeId,
-        /// The ballot under which the entry is proposed.
+        /// The ballot under which the command is proposed.
         ballot: Ballot,
         /// The target slot.
         slot: Slot,
-        /// The proposed entry (value plus its client tag).
-        entry: Entry,
+        /// The proposed command (an opaque client entry or a control command).
+        command: Command,
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
@@ -81,16 +81,16 @@ pub enum Message {
     },
 
     // ---- Learning ----
-    /// Any → any: `entry` is chosen for `slot` (decided at `ballot`).
+    /// Any → any: `command` is chosen for `slot` (decided at `ballot`).
     Commit {
         /// Sender.
         from: NodeId,
-        /// The ballot at which the entry was chosen.
+        /// The ballot at which the command was chosen.
         ballot: Ballot,
         /// The chosen slot.
         slot: Slot,
-        /// The chosen entry.
-        entry: Entry,
+        /// The chosen command (an opaque client entry or a control command).
+        command: Command,
     },
 
     // ---- Catch-up (commit replay) ----
@@ -114,8 +114,34 @@ pub enum Message {
     CatchUpResponse {
         /// Sender (the serving peer).
         from: NodeId,
-        /// Decided entries by slot, contiguous from the request's `from_slot`.
-        entries: BTreeMap<Slot, (Ballot, Entry)>,
+        /// Decided commands by slot, contiguous from the request's `from_slot`.
+        entries: BTreeMap<Slot, (Ballot, Command)>,
+    },
+
+    // ---- Snapshot transfer (below-floor recovery) ----
+    /// An up-to-date peer → a requester whose needed prefix sits **below the
+    /// server's compaction floor** (it was truncated, so no [`CatchUpResponse`]
+    /// could replay it). Carries an **opaque application snapshot** at
+    /// `chosen_index` (the core never interprets `snapshot`; the application
+    /// produced it). The requester jumps its chosen prefix to `chosen_index`,
+    /// adopts `max(promise, ballot)` (so its durable promise never regresses —
+    /// the safety hinge), and truncates to a fully-compacted log above it.
+    ///
+    /// This is a recovery accelerator, not log bounding: it exists precisely for a
+    /// node that was down while the cluster advanced and truncated past it, so
+    /// commit-replay catch-up can no longer heal it.
+    InstallSnapshot {
+        /// Sender (the serving peer).
+        from: NodeId,
+        /// The ballot the requester adopts (`>=` every ballot the snapshot's
+        /// prefix was chosen under); it takes `max(promise, ballot)`.
+        ballot: Ballot,
+        /// The chosen index the snapshot brings the requester up to. Everything at
+        /// or below it is decided and folded into `snapshot`.
+        chosen_index: Slot,
+        /// Opaque application snapshot bytes at `chosen_index`. Paros never
+        /// interprets them; the application owns their meaning.
+        snapshot: Value,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----

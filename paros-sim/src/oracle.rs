@@ -12,7 +12,7 @@ use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, asser
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_RECV,
     EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
-    EV_SYNCED,
+    EV_SNAPSHOT_INSTALLED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -733,6 +733,18 @@ fn collect_compactions(q: &dyn TraceQuery) -> Vec<(u64, u64, u64)> {
         .collect()
 }
 
+/// The snapshot-install events (`snapshot_installed`), time-ordered, as
+/// `(time_ms, node, chosen_index)` where `chosen_index` is the commit index the
+/// snapshot brought the node up to. Used to admit the applied-index jump an
+/// install performs (a below-floor node jumps straight to the chosen prefix) and
+/// to prove below-floor recovery is actually exercised.
+fn collect_snapshots(q: &dyn TraceQuery) -> Vec<(u64, u64, u64)> {
+    q.snapshot(EV_SNAPSHOT_INSTALLED)
+        .iter()
+        .filter_map(|e| Some((e.time_ms, e.u64("node")?, e.u64("chosen_index")?)))
+        .collect()
+}
+
 /// Recovery oracle (safety only): a node's durable state survives a crash intact.
 /// After a restart, the state the core rebuilds from storage must not contradict
 /// what the node persisted before the crash — a durable accepted `(slot -> value)`
@@ -811,8 +823,15 @@ impl Invariant for NoGapsOracle {
         // both streams in capture order), so a legitimate boot-replay jump to the
         // floor is distinguished from a real gap.
         let compactions = collect_compactions(q);
+        let snapshots = collect_snapshots(q);
         let mut ci = 0;
+        let mut si = 0;
         let mut floor: HashMap<u64, u64> = HashMap::new();
+        // Every slot a node jumped to via a snapshot install; a forward jump to any
+        // of them is legal (the folded prefix is in that snapshot). A node can
+        // install more than one snapshot in a single drain (two peers each serve
+        // it), so this is a set, not just the latest landing.
+        let mut snap_landings: HashMap<u64, HashSet<u64>> = HashMap::new();
         let mut frontier: HashMap<u64, u64> = HashMap::new();
         let mut max_applied = 0_u64;
         for e in q.snapshot(EV_APPLIED) {
@@ -825,17 +844,28 @@ impl Invariant for NoGapsOracle {
                 *f = (*f).max(cf);
                 ci += 1;
             }
+            while si < snapshots.len() && snapshots[si].0 <= e.time_ms {
+                let (_, sn, sc) = snapshots[si];
+                snap_landings.entry(sn).or_default().insert(sc);
+                si += 1;
+            }
             max_applied = max_applied.max(idx);
             let next = frontier.entry(node).or_insert(0);
             if idx == *next {
                 // Advancing the frontier by exactly one (no gap).
                 *next += 1;
             } else if idx > *next {
-                // A forward jump is only legal at the node's compaction floor: a
-                // boot replay of a truncated log resumes there, not at slot 0.
+                // A forward jump is only legal at the node's compaction floor (a
+                // boot replay of a truncated log resumes there, not at slot 0) or
+                // at a snapshot install (the folded prefix jumps straight to the
+                // snapshot's chosen index).
+                let at_floor = idx == floor.get(&node).copied().unwrap_or(0);
+                let at_snapshot = snap_landings
+                    .get(&node)
+                    .is_some_and(|landings| landings.contains(&idx));
                 assert_always!(
-                    idx == floor.get(&node).copied().unwrap_or(0),
-                    "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor)"
+                    at_floor || at_snapshot,
+                    "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor or a snapshot install)"
                 );
                 *next = idx + 1;
             }
@@ -1054,10 +1084,13 @@ impl Invariant for ConvergenceOracle {
 
         // Each node's final durable compaction floor (the max over its truncation
         // events). A lagging node whose next needed slot has been truncated on
-        // *every* peer cannot catch up through paros: no live peer can serve it.
-        // Per the compaction doctrine, recovering it is the application's job
-        // (out-of-band state transfer), so paros guarantees safety, not liveness,
-        // there: that node is exempt from convergence.
+        // *every* peer cannot catch up through commit-replay: no live peer can
+        // serve it a contiguous range. That case used to be *exempt* from
+        // convergence (recovering it was the application's out-of-band job).
+        // Snapshot transfer now recovers it through paros, so convergence is
+        // demanded of every stable live node; the below-floor case is kept as a
+        // reachability gate (proof the hard path was actually exercised) rather
+        // than an escape hatch.
         let mut final_floor: HashMap<u64, u64> = HashMap::new();
         for (_t, node, first) in collect_compactions(q) {
             let f = final_floor.entry(node).or_insert(0);
@@ -1069,20 +1102,47 @@ impl Invariant for ConvergenceOracle {
                 continue;
             }
             let next_needed = m + 1;
-            let unservable = per_node_max
+            let below_all_floors = per_node_max
                 .keys()
                 .filter(|&&p| p != node)
                 .all(|&p| next_needed < final_floor.get(&p).copied().unwrap_or(0));
-            if unservable {
+            if below_all_floors {
+                // Reached the hard case: a node below every peer's floor, which
+                // only snapshot transfer can heal. Fire the reachability gate, then
+                // still demand convergence (the fix must actually work).
                 assert_reachable!(
-                    "a node lags below every peer's compaction floor (app-owned recovery)"
+                    "a node fell below every peer's compaction floor (recovers via snapshot transfer)"
                 );
-                continue;
             }
             assert_always!(
                 m == cluster_max,
-                "every servable live node converges to the cluster's chosen prefix"
+                "every stable live node converges to the cluster's chosen prefix (via catch-up or snapshot)"
             );
+        }
+    }
+}
+
+/// Snapshot oracle (coverage): the below-floor recovery *mechanism* is actually
+/// exercised. The [`ConvergenceOracle`] demands the liveness (a below-floor node
+/// reaches the cluster prefix); this proves the path that heals it — an opaque
+/// snapshot install — really fires, so the red→green result is not vacuous. The
+/// install's promise-never-lowers safety is covered by [`SafetyOracle`]
+/// invariant 2 (the boot/`node_state` monotonic-promise check).
+pub(crate) struct SnapshotOracle;
+
+impl Invariant for SnapshotOracle {
+    fn name(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let installed = !collect_snapshots(q).is_empty();
+        assert_sometimes!(
+            installed,
+            "a below-floor node recovers via snapshot transfer"
+        );
+        if installed {
+            assert_reachable!("a snapshot was installed to recover a below-floor node");
         }
     }
 }

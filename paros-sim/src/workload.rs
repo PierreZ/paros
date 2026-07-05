@@ -86,33 +86,39 @@ impl Workload for ProposeClient {
                     if let Ok(ack) = clients[target].propose.get_reply(proposal).await {
                         assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
                         if ack.committed {
-                            break ack.slot;
+                            // Carry the leader hint alongside the slot so the
+                            // truncate watermark below can be sent to the leader.
+                            break (ack.leader, ack.slot);
                         }
                     }
                     target = (target + 1) % n;
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
                 }
             };
-            let outcome: Option<Option<u64>> = tokio::select! {
+            let outcome: Option<(Option<u64>, Option<u64>)> = tokio::select! {
                 v = attempt => Some(v),
                 () = shutdown.cancelled() => None,
                 _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
             };
 
-            if let Some(slot) = outcome {
+            if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
                 tracing::info!(seq_id = seq, "client_acknowledged");
                 if let Some(s) = slot {
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
                 }
-                // Notify every node it may compact its log up to the highest slot
-                // this client has seen chosen. Each node clamps to its own chosen
-                // index, so floors diverge per node (the aggressive policy): a node
-                // that lagged keeps a lower floor, which is what makes a below-floor
-                // Prepare reachable. Fire-and-forget; the ack is not awaited.
-                if let Some(up_to) = max_slot {
-                    for client in &clients {
-                        let _ = client.compact.send(Compact { up_to });
+                // Leader-driven truncation: tell the leader the highest slot this
+                // client has seen chosen; it decides a `Truncate` control command
+                // into the log, and every node truncates lazily when it applies
+                // that slot (one cluster-wide floor, forwarded by normal
+                // replication + catch-up). Fire-and-forget to the leader hint; a
+                // node still down when the truncate is decided comes back below the
+                // floor, which is what makes snapshot restore reachable. The ack is
+                // observed via `EV_COMPACTED`.
+                if let (Some(up_to), Some(leader_id)) = (max_slot, leader) {
+                    let idx = usize::try_from(leader_id).unwrap_or(0);
+                    if idx < n {
+                        let _ = clients[idx].compact.send(Compact { up_to });
                     }
                 }
             } else {

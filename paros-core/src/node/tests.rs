@@ -7,13 +7,13 @@ use super::{NodeRole, ProposeResult, RawNode};
 use crate::message::Message;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
+use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
 /// tests): the durable scalars plus a per-slot accepted log.
 struct TestStorage {
     hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
     config: Config,
     first_slot: Slot,
 }
@@ -49,7 +49,7 @@ impl Storage for TestStorage {
     fn initial_state(&self) -> (HardState, Config) {
         (self.hard_state.clone(), self.config.clone())
     }
-    fn accepted(&self, slot: Slot) -> Option<(Ballot, Entry)> {
+    fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
         self.accepted.get(&slot).cloned()
     }
     fn first_slot(&self) -> Slot {
@@ -76,6 +76,11 @@ fn entry(client: u64, seq: u64, b: u8) -> Entry {
     }
 }
 
+/// A client [`Command`] wrapping [`entry`], the common per-slot value in tests.
+fn ucmd(client: u64, seq: u64, b: u8) -> Command {
+    Command::User(entry(client, seq, b))
+}
+
 fn ballot(round: u64, node: u64) -> Ballot {
     Ballot {
         round,
@@ -91,9 +96,13 @@ fn drain(n: &mut RawNode) -> Vec<(NodeId, Message)> {
     msgs
 }
 
-/// The chosen value at `slot` on this node, if any.
+/// The chosen client value at `slot` on this node, if any (a control command has
+/// no client value and reads back as `None`).
 fn chosen_at(n: &RawNode, slot: u64) -> Option<Value> {
-    n.chosen.get(&Slot(slot)).map(|e| e.value.clone())
+    n.chosen
+        .get(&Slot(slot))
+        .and_then(Command::user)
+        .map(|e| e.value.clone())
 }
 
 /// Deliver `queue` to addressed recipients, dropping any `(to, msg)` for which
@@ -304,7 +313,7 @@ fn promise_and_accept_batches_require_fsync() {
         from: NodeId(1),
         ballot: ballot(3, 1),
         slot: Slot(0),
-        entry: entry(1, 1, 9),
+        command: ucmd(1, 1, 9),
     });
     {
         let r = n.ready();
@@ -408,12 +417,12 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
         node(2, &[0, 1, 2]),
     ];
     let old = ballot(1, 0);
-    let recovered = entry(5, 1, 99);
+    let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
         from: NodeId(0),
         ballot: old,
         slot: Slot(0),
-        entry: recovered.clone(),
+        command: recovered.clone(),
     });
     let _ = drain(&mut nodes[1]); // Accepted reply, dropped (node 0 is gone)
     assert!(nodes[1].accepted().contains_key(&Slot(0)));
@@ -453,8 +462,8 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     let _ = drain(&mut n);
     let camp = n.ballot();
 
-    let low = (ballot(1, 0), entry(1, 1, 1));
-    let high = (ballot(1, 3), entry(1, 1, 2));
+    let low = (ballot(1, 0), ucmd(1, 1, 1));
+    let high = (ballot(1, 3), ucmd(1, 1, 2));
     let mut acc_low = BTreeMap::new();
     acc_low.insert(Slot(0), low);
     let mut acc_high = BTreeMap::new();
@@ -490,13 +499,13 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
         from: NodeId(0),
         ballot: b,
         slot: Slot(0),
-        entry: entry(1, 1, 10),
+        command: ucmd(1, 1, 10),
     });
     n.step(Message::Commit {
         from: NodeId(0),
         ballot: b,
         slot: Slot(2),
-        entry: entry(1, 3, 30),
+        command: ucmd(1, 3, 30),
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -507,7 +516,7 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
         from: NodeId(0),
         ballot: b,
         slot: Slot(1),
-        entry: entry(1, 2, 20),
+        command: ucmd(1, 2, 20),
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -572,9 +581,9 @@ fn restart_rebuilds_state_from_hard_state() {
     // A node that had chosen slots 0..=1 and accepted (uncommitted) slot 2
     // recovers ballot, next_slot, and dedup tables on construction.
     let mut accepted = BTreeMap::new();
-    accepted.insert(Slot(0), (ballot(2, 0), entry(1, 1, 10)));
-    accepted.insert(Slot(1), (ballot(2, 0), entry(1, 2, 20)));
-    accepted.insert(Slot(2), (ballot(2, 0), entry(1, 3, 30)));
+    accepted.insert(Slot(0), (ballot(2, 0), ucmd(1, 1, 10)));
+    accepted.insert(Slot(1), (ballot(2, 0), ucmd(1, 2, 20)));
+    accepted.insert(Slot(2), (ballot(2, 0), ucmd(1, 3, 30)));
     let hard_state = HardState {
         max_promised_ballot: ballot(2, 0),
         chosen_index: Some(Slot(1)),
@@ -630,7 +639,7 @@ fn acceptor_rejects_below_promised_ballot() {
         from: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(0),
-        entry: entry(1, 1, 9),
+        command: ucmd(1, 1, 9),
     });
     assert!(
         !n.accepted().contains_key(&Slot(0)),
@@ -657,7 +666,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
         from: NodeId(1),
         ballot: ballot(1, 1),
         slot: Slot(0),
-        entry: entry(9, 9, 1),
+        command: ucmd(9, 9, 1),
     });
 
     // Learn a DIFFERENT value was chosen for slot 0 at a higher ballot (this node
@@ -666,7 +675,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
         from: NodeId(2),
         ballot: ballot(2, 2),
         slot: Slot(0),
-        entry: entry(7, 7, 2),
+        command: ucmd(7, 7, 2),
     });
     assert_eq!(
         chosen_at(&n, 0),
@@ -729,6 +738,68 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
     assert_eq!(leader.first_slot(), Slot(3));
     assert!(leader.accepted().is_empty());
     assert!(leader.chosen.is_empty());
+}
+
+#[test]
+fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
+    // Leader-driven, Paxos-decided truncation: the leader decides a
+    // `Truncate` control command into the log; every node truncates lazily when it
+    // applies that slot (the fused-node analogue of a cluster-wide floor).
+    let mut nodes = cluster_with_three_chosen();
+    for n in &nodes {
+        assert_eq!(n.first_slot(), Slot(0), "no truncation yet");
+        assert_eq!(n.hard_state().chosen_index, Some(Slot(2)));
+    }
+
+    // The leader admits the truncate as a control command at the next slot (3).
+    let r = nodes[0].propose_control(Control::Truncate { up_to: Slot(1) });
+    assert!(
+        matches!(r, ProposeResult::Accepted(Slot(3))),
+        "control command takes the next free slot"
+    );
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // Once every node applied slot 3, it lazily compacted up to the decided
+    // watermark (slot 1): the floor rose to 2 everywhere, and the control slot
+    // itself is chosen.
+    for (i, n) in nodes.iter().enumerate() {
+        assert_eq!(
+            n.first_slot(),
+            Slot(2),
+            "node {i} truncated to the decided floor"
+        );
+        assert_eq!(
+            n.hard_state().chosen_index,
+            Some(Slot(3)),
+            "node {i} chose the control slot"
+        );
+        assert!(
+            !n.accepted().contains_key(&Slot(0)),
+            "node {i} dropped slot 0"
+        );
+        assert!(
+            !n.accepted().contains_key(&Slot(1)),
+            "node {i} dropped slot 1"
+        );
+        assert!(n.accepted().contains_key(&Slot(2)), "node {i} keeps slot 2");
+    }
+}
+
+#[test]
+fn propose_control_is_leader_only() {
+    let mut nodes = cluster_with_three_chosen();
+    // A follower refuses to admit a control command and redirects to the leader.
+    let r = nodes[1].propose_control(Control::Truncate { up_to: Slot(1) });
+    assert!(
+        matches!(r, ProposeResult::NotLeader(Some(NodeId(0)))),
+        "a non-leader redirects the truncate to the leader"
+    );
+    assert_eq!(
+        nodes[1].first_slot(),
+        Slot(0),
+        "no truncation on a redirect"
+    );
 }
 
 #[test]
@@ -875,7 +946,7 @@ fn accept_below_floor_is_ignored() {
         from: NodeId(1),
         ballot: ballot(9, 1),
         slot: Slot(1),
-        entry: entry(1, 1, 99),
+        command: ucmd(1, 1, 99),
     });
     let out = drain(n);
     assert!(
@@ -899,7 +970,7 @@ fn commit_below_floor_is_not_relearned() {
         from: NodeId(1),
         ballot: ballot(1, 0),
         slot: Slot(1),
-        entry: entry(7, 7, 88),
+        command: ucmd(7, 7, 88),
     });
     assert!(
         chosen_at(n, 1).is_none(),
@@ -908,6 +979,108 @@ fn commit_below_floor_is_not_relearned() {
     assert!(
         !n.accepted().contains_key(&Slot(1)),
         "a below-floor commit records nothing below the floor"
+    );
+}
+
+#[test]
+fn below_floor_catchup_request_offers_a_snapshot() {
+    // A node truncated its chosen prefix; a peer that missed it asks for a slot
+    // below the floor. We cannot replay the truncated entries, so we offer a
+    // snapshot at our chosen prefix instead of serving nothing.
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[0];
+    n.compact(Slot(2)); // floor -> 3, chosen_index 2
+    let _ = drain(n);
+
+    n.step(Message::CatchUpRequest {
+        from: NodeId(1),
+        from_slot: Slot(0), // below our floor
+    });
+    assert_eq!(n.pending_snapshot_offers.len(), 1, "a snapshot was offered");
+    let (to, chosen_index, _ballot) = n.pending_snapshot_offers[0];
+    assert_eq!(to, NodeId(1), "offered to the requester");
+    assert_eq!(
+        chosen_index,
+        Slot(2),
+        "snapshot brings it up to our chosen prefix"
+    );
+    // The offer carries no bytes (the driver attaches them); no CatchUpResponse.
+    let out = drain(n);
+    assert!(
+        !out.iter()
+            .any(|(_, m)| matches!(m, Message::CatchUpResponse { .. })),
+        "a below-floor request is answered by a snapshot offer, not a replay"
+    );
+}
+
+#[test]
+fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
+    use crate::write::{MustSync, WriteOp};
+
+    // A node that missed a truncated prefix installs a snapshot at chosen_index 5
+    // under ballot {3,0}: it jumps its chosen prefix, fully compacts to floor 6,
+    // and adopts the ballot as its promise.
+    let mut n = node(1, &[0, 1, 2]);
+    assert_eq!(n.hard_state().chosen_index, None);
+
+    n.step(Message::InstallSnapshot {
+        from: NodeId(0),
+        ballot: ballot(3, 0),
+        chosen_index: Slot(5),
+        snapshot: Value(vec![1, 2, 3]),
+    });
+    assert_eq!(
+        n.hard_state().chosen_index,
+        Some(Slot(5)),
+        "jumped to the snapshot's chosen prefix"
+    );
+    assert_eq!(
+        n.first_slot(),
+        Slot(6),
+        "fully compacted up to the snapshot"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        ballot(3, 0),
+        "adopted the choosing ballot as the promise"
+    );
+
+    let r = n.ready();
+    assert_eq!(
+        r.must_sync(),
+        MustSync::Sync,
+        "an install is fsync'd before send"
+    );
+    assert!(
+        r.writes().iter().any(|w| matches!(
+            w,
+            WriteOp::InstallSnapshot { chosen_index, .. } if *chosen_index == Slot(5)
+        )),
+        "the install surfaced a durable WriteOp::InstallSnapshot"
+    );
+    assert!(
+        r.committed().is_empty(),
+        "snapshot-xor-entries: no committed user entries for the folded prefix"
+    );
+    r.advance();
+
+    // A stale snapshot at or below our prefix is ignored (no going backward), even
+    // though it carries a higher ballot.
+    n.step(Message::InstallSnapshot {
+        from: NodeId(0),
+        ballot: ballot(9, 0),
+        chosen_index: Slot(4),
+        snapshot: Value(vec![]),
+    });
+    assert_eq!(
+        n.hard_state().chosen_index,
+        Some(Slot(5)),
+        "a stale snapshot does not move the chosen prefix backward"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        ballot(3, 0),
+        "an ignored stale snapshot changes nothing"
     );
 }
 

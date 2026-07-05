@@ -3,7 +3,7 @@
 
 use crate::message::Message;
 use crate::node::RawNode;
-use crate::types::{Entry, NodeId, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
@@ -70,11 +70,26 @@ impl<'a> Ready<'a> {
         self.node.pending_messages()
     }
 
-    /// Newly chosen `(slot, entry)` pairs to apply **after** they are durable
-    /// (step 3), surfaced in contiguous slot order (no gaps).
+    /// Newly chosen `(slot, command)` pairs to apply **after** they are durable
+    /// (step 3), surfaced in contiguous slot order (no gaps). Each is a
+    /// [`Command::User`] client entry to hand the application, or a
+    /// [`Command::Control`] the driver acts on (a `Truncate` records the durable
+    /// floor).
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Entry)] {
+    pub fn committed(&self) -> &[(Slot, Command)] {
         self.node.pending_committed()
+    }
+
+    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`. The core
+    /// decided a peer needs a snapshot (it asked for a prefix below this node's
+    /// compaction floor) but holds no application state, so the **driver** must
+    /// read the opaque snapshot bytes from storage, build a
+    /// [`Message::InstallSnapshot`] at `chosen_index`/`ballot`, and send it to
+    /// `to`. Process these alongside [`Ready::messages`] (step 2), after the batch
+    /// is durable.
+    #[must_use]
+    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
+        self.node.pending_snapshot_offers()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

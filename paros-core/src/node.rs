@@ -7,7 +7,7 @@ use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
+use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
 use crate::write::WriteOp;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
@@ -54,9 +54,9 @@ pub enum ProposeResult {
 struct Proposing {
     /// The ballot this slot is being accepted under.
     ballot: Ballot,
-    /// The entry being accepted for this slot.
-    entry: Entry,
-    /// Acceptors (incl. self) that have accepted this slot's entry at `ballot`.
+    /// The command being accepted for this slot.
+    command: Command,
+    /// Acceptors (incl. self) that have accepted this slot's command at `ballot`.
     accepted_by: BTreeSet<NodeId>,
 }
 
@@ -68,9 +68,9 @@ struct Election {
     from_slot: Slot,
     /// Acceptors (incl. self) that have promised `ballot`.
     promised_by: BTreeSet<NodeId>,
-    /// Highest-ballot accepted entry per slot seen across the promise quorum,
+    /// Highest-ballot accepted command per slot seen across the promise quorum,
     /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
-    recovered: BTreeMap<Slot, (Ballot, Entry)>,
+    recovered: BTreeMap<Slot, (Ballot, Command)>,
 }
 
 /// The pure, synchronous, single-threaded Multi-Paxos state machine.
@@ -98,7 +98,7 @@ pub struct RawNode {
     /// scans for Phase-1 recovery / Phase-2 gap-fill). Volatile — rebuilt on boot
     /// from the durable log (see [`RawNode::new`]); durably persisted one record
     /// at a time via [`WriteOp::AppendAccepted`], never as a blob.
-    accepted: BTreeMap<Slot, (Ballot, Entry)>,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// The compaction floor: the first slot still retained. Everything below it
     /// has been truncated away (see [`RawNode::compact`]). Rebuilt on boot from
     /// [`Storage::first_slot`]. Always `<= first_unchosen()`: only chosen slots
@@ -110,7 +110,12 @@ pub struct RawNode {
     /// Semantic durable write deltas produced this batch, in apply order.
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(NodeId, Message)>,
-    pending_committed: Vec<(Slot, Entry)>,
+    pending_committed: Vec<(Slot, Command)>,
+    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`. The core
+    /// decides *who* needs a snapshot and *up to where* (a below-floor catch-up
+    /// request), but holds no application state, so the driver attaches the opaque
+    /// snapshot bytes (from storage) and sends the [`Message::InstallSnapshot`].
+    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
 
     /// Logical clock, advanced by [`RawNode::tick`].
     tick_count: u64,
@@ -147,8 +152,8 @@ pub struct RawNode {
     next_slot: Slot,
 
     // ---- learner / dedup ----
-    /// Entries this node has learned are chosen, per slot. Volatile.
-    chosen: BTreeMap<Slot, Entry>,
+    /// Commands this node has learned are chosen, per slot. Volatile.
+    chosen: BTreeMap<Slot, Command>,
     /// Highest applied `ClientSeq` per client (for at-most-once dedup). Rebuilt
     /// from `HardState` on construction.
     applied_seq: BTreeMap<ClientId, ClientSeq>,
@@ -169,7 +174,7 @@ impl RawNode {
 
         // Rebuild the working accepted log by scanning the durable per-slot log
         // (first_slot..=last_slot); gaps read back as `None` and are skipped.
-        let mut accepted: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
+        let mut accepted: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let first_slot = storage.first_slot();
         let (first, last) = (first_slot.0, storage.last_slot().0);
         for s in first..=last {
@@ -181,17 +186,21 @@ impl RawNode {
         let mut chosen = BTreeMap::new();
         let mut applied_seq: BTreeMap<ClientId, ClientSeq> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
-        for (slot, (_b, entry)) in &accepted {
+        for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
             if is_chosen {
-                chosen.insert(*slot, entry.clone());
-                let bump = applied_seq
-                    .get(&entry.client)
-                    .is_none_or(|c| entry.seq > *c);
-                if bump {
-                    applied_seq.insert(entry.client, entry.seq);
+                chosen.insert(*slot, command.clone());
+                // Only client entries carry a `(client, seq)` dedup key; a control
+                // command never dedups.
+                if let Command::User(entry) = command {
+                    let bump = applied_seq
+                        .get(&entry.client)
+                        .is_none_or(|c| entry.seq > *c);
+                    if bump {
+                        applied_seq.insert(entry.client, entry.seq);
+                    }
                 }
-            } else {
+            } else if let Command::User(entry) = command {
                 inflight.insert((entry.client, entry.seq), *slot);
             }
         }
@@ -211,6 +220,7 @@ impl RawNode {
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
+            pending_snapshot_offers: Vec::new(),
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,
@@ -249,18 +259,24 @@ impl RawNode {
                 from,
                 ballot,
                 slot,
-                entry,
-            } => self.on_accept(from, ballot, slot, entry),
+                command,
+            } => self.on_accept(from, ballot, slot, command),
             Message::Accepted { from, ballot, slot } => self.on_accepted(from, ballot, slot),
             Message::Nack { ballot, slot, .. } => self.on_nack(ballot, slot),
             Message::Commit {
                 ballot,
                 slot,
-                entry,
+                command,
                 ..
-            } => self.on_commit(ballot, slot, &entry),
+            } => self.on_commit(ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
             Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
+            Message::InstallSnapshot {
+                ballot,
+                chosen_index,
+                snapshot,
+                ..
+            } => self.on_install_snapshot(ballot, chosen_index, snapshot),
             Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
@@ -287,7 +303,27 @@ impl RawNode {
         self.next_slot = Slot(slot.0 + 1);
         let entry = Entry { client, seq, value };
         self.inflight.insert((client, seq), slot);
-        self.start_accept_round(slot, entry);
+        self.start_accept_round(slot, Command::User(entry));
+        ProposeResult::Accepted(slot)
+    }
+
+    /// Leader entry point for a **control command**: get `control` chosen into the
+    /// next log slot by ordinary Paxos. Only the leader admits it; a non-leader
+    /// returns [`ProposeResult::NotLeader`] with a redirect hint.
+    ///
+    /// A control command carries no `(client, seq)` and so is never deduplicated;
+    /// each proposal takes a fresh slot. It is a normal Phase-2 round from the
+    /// acceptors' point of view (they store it opaquely, exactly like a client
+    /// entry). Its *effect* — for [`Control::Truncate`], dropping the log prefix —
+    /// is applied lazily by every node when the slot enters its contiguous chosen
+    /// prefix (see [`RawNode::advance_chosen_index`]).
+    pub fn propose_control(&mut self, control: Control) -> ProposeResult {
+        if self.role != NodeRole::Leader {
+            return ProposeResult::NotLeader(self.leader);
+        }
+        let slot = self.next_slot;
+        self.next_slot = Slot(slot.0 + 1);
+        self.start_accept_round(slot, Command::Control(control));
         ProposeResult::Accepted(slot)
     }
 
@@ -389,7 +425,7 @@ impl RawNode {
         self.set_promise(self.ballot);
 
         let from_slot = self.first_unchosen();
-        let recovered: BTreeMap<Slot, (Ballot, Entry)> = self
+        let recovered: BTreeMap<Slot, (Ballot, Command)> = self
             .accepted
             .range(from_slot..)
             .map(|(s, v)| (*s, v.clone()))
@@ -431,7 +467,7 @@ impl RawNode {
         from: NodeId,
         ballot: Ballot,
         from_slot: Slot,
-        accepted: BTreeMap<Slot, (Ballot, Entry)>,
+        accepted: BTreeMap<Slot, (Ballot, Command)>,
     ) {
         {
             let Some(e) = self.election.as_mut() else {
@@ -441,10 +477,10 @@ impl RawNode {
                 return;
             }
             e.promised_by.insert(from);
-            for (slot, (ab, entry)) in accepted {
+            for (slot, (ab, command)) in accepted {
                 let supersedes = e.recovered.get(&slot).is_none_or(|(rb, _)| ab > *rb);
                 if supersedes {
-                    e.recovered.insert(slot, (ab, entry));
+                    e.recovered.insert(slot, (ab, command));
                 }
             }
         }
@@ -472,14 +508,16 @@ impl RawNode {
         self.election_elapsed = 0;
         self.proposer.clear();
 
-        for (slot, (_old, entry)) in e.recovered {
+        for (slot, (_old, command)) in e.recovered {
             // A slot below our floor is chosen (only chosen slots are truncated),
             // so it needs no re-proposal.
             if slot < self.first_slot || self.chosen.contains_key(&slot) {
                 continue;
             }
-            self.inflight.insert((entry.client, entry.seq), slot);
-            self.start_accept_round(slot, entry);
+            if let Command::User(entry) = &command {
+                self.inflight.insert((entry.client, entry.seq), slot);
+            }
+            self.start_accept_round(slot, command);
         }
         self.next_slot = self
             .accepted
@@ -523,7 +561,7 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
-            let accepted: BTreeMap<Slot, (Ballot, Entry)> = self
+            let accepted: BTreeMap<Slot, (Ballot, Command)> = self
                 .accepted
                 .range(from_slot..)
                 .map(|(s, v)| (*s, v.clone()))
@@ -551,7 +589,7 @@ impl RawNode {
 
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
-    fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, entry: Entry) {
+    fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
         // Floor guard: a slot below our floor is already chosen (only chosen slots
         // are ever truncated). Ignore the Accept rather than Nack: the slot is
         // decided, so re-accepting a different value there would break agreement,
@@ -572,7 +610,7 @@ impl RawNode {
                 self.ballot = ballot;
             }
             self.set_promise(ballot);
-            self.record_accepted(slot, ballot, entry);
+            self.record_accepted(slot, ballot, command);
             self.pending_messages.push((
                 from,
                 Message::Accepted {
@@ -621,12 +659,12 @@ impl RawNode {
         }
     }
 
-    /// Learner: an entry was chosen elsewhere. Record it; advance the prefix.
-    fn on_commit(&mut self, ballot: Ballot, slot: Slot, entry: &Entry) {
+    /// Learner: a command was chosen elsewhere. Record it; advance the prefix.
+    fn on_commit(&mut self, ballot: Ballot, slot: Slot, command: &Command) {
         if ballot >= self.ballot {
             self.election_elapsed = 0;
         }
-        self.mark_chosen(slot, entry, ballot);
+        self.mark_chosen(slot, command, ballot);
     }
 
     /// Leader self-beat or a follower receiving a peer beat.
@@ -641,17 +679,17 @@ impl RawNode {
                 ballot: self.ballot,
                 commit,
             });
-            let pending: Vec<(Slot, Ballot, Entry)> = self
+            let pending: Vec<(Slot, Ballot, Command)> = self
                 .proposer
                 .iter()
-                .map(|(s, p)| (*s, p.ballot, p.entry.clone()))
+                .map(|(s, p)| (*s, p.ballot, p.command.clone()))
                 .collect();
-            for (slot, ballot, entry) in pending {
+            for (slot, ballot, command) in pending {
                 self.broadcast(&Message::Accept {
                     from: me,
                     ballot,
                     slot,
-                    entry,
+                    command,
                 });
             }
             return;
@@ -730,21 +768,27 @@ impl RawNode {
         let Some(ci) = self.hard_state.chosen_index else {
             return;
         };
-        // Below our floor the decided entries have been truncated away: we cannot
-        // serve a contiguous range, so we serve nothing (the peer must recover its
-        // pre-floor state out of band).
-        if from_slot < self.first_slot || from_slot > ci {
+        // Below our floor the decided entries have been truncated away, so no
+        // contiguous `CatchUpResponse` can replay them. Offer a snapshot instead:
+        // record the offer (the driver attaches the opaque application bytes and
+        // sends the `InstallSnapshot`), bringing the peer up to our chosen prefix.
+        if from_slot < self.first_slot {
+            self.pending_snapshot_offers
+                .push((to, ci, self.hard_state.max_promised_ballot));
             return;
         }
-        let mut entries: BTreeMap<Slot, (Ballot, Entry)> = BTreeMap::new();
-        for (slot, entry) in self.chosen.range(from_slot..=ci) {
+        if from_slot > ci {
+            return;
+        }
+        let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
+        for (slot, command) in self.chosen.range(from_slot..=ci) {
             if entries.len() >= CATCHUP_BATCH {
                 break;
             }
             // The choosing ballot is the ballot recorded for this slot in the
             // accepted log (a chosen value is recorded authoritatively there).
             let ballot = self.accepted.get(slot).map_or(self.ballot, |(b, _)| *b);
-            entries.insert(*slot, (ballot, entry.clone()));
+            entries.insert(*slot, (ballot, command.clone()));
         }
         if entries.is_empty() {
             return;
@@ -756,14 +800,56 @@ impl RawNode {
     /// Learn every decided entry a peer replayed to us. Each is chosen (durable,
     /// quorum-decided), so `mark_chosen` records it authoritatively and advances
     /// the contiguous prefix — filling the hole a missed `Accept`+`Commit` left.
-    fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Entry)>) {
-        for (slot, (ballot, entry)) in entries {
-            self.mark_chosen(slot, &entry, ballot);
+    fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Command)>) {
+        for (slot, (ballot, command)) in entries {
+            self.mark_chosen(slot, &command, ballot);
         }
     }
 
+    /// Install an opaque application snapshot from a peer (below-floor recovery):
+    /// jump the chosen prefix to `chosen_index`, adopt `max(promise, ballot)` (the
+    /// durable promise never regresses — the safety hinge that keeps a recovered
+    /// node from re-voting under a stale ballot), and fully compact the log up to
+    /// the snapshot (its state is folded into the opaque bytes). A stale snapshot
+    /// that would not advance us is ignored.
+    fn on_install_snapshot(&mut self, ballot: Ballot, chosen_index: Slot, snapshot: Value) {
+        // Never go backward: a snapshot at or below our chosen prefix teaches us
+        // nothing and must not lower the floor or re-truncate live slots.
+        if self
+            .hard_state
+            .chosen_index
+            .is_some_and(|ci| chosen_index <= ci)
+        {
+            return;
+        }
+        // Adopt the choosing ballot. `set_promise` only ever raises the promise
+        // (it is a max), so even a far-behind node cannot regress its durable
+        // promise here — installing the log does not un-promise a higher ballot.
+        if ballot > self.hard_state.max_promised_ballot {
+            self.set_promise(ballot);
+        }
+        let first = Slot(chosen_index.0 + 1);
+        self.hard_state.chosen_index = Some(chosen_index);
+        // Fully compact up to the snapshot: everything at or below `chosen_index`
+        // is folded into the opaque bytes, so drop the in-memory prefix and raise
+        // the floor to `first`.
+        self.first_slot = first;
+        self.accepted = self.accepted.split_off(&first);
+        self.chosen = self.chosen.split_off(&first);
+        self.proposer.retain(|slot, _| *slot >= first);
+        self.next_slot = self.next_slot.max(first);
+        // Persist the install (opaque bytes + boundary). Snapshot-xor-entries: this
+        // batch surfaces no committed user entries for the folded prefix; the
+        // application installs the opaque state via the driver's storage write.
+        self.pending_writes.push(WriteOp::InstallSnapshot {
+            chosen_index,
+            ballot,
+            snapshot,
+        });
+    }
+
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
-    fn start_accept_round(&mut self, slot: Slot, entry: Entry) {
+    fn start_accept_round(&mut self, slot: Slot, command: Command) {
         let me = self.config.id;
         let ballot = self.ballot;
         let mut accepted_by = BTreeSet::new();
@@ -772,14 +858,14 @@ impl RawNode {
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
         if ballot >= self.hard_state.max_promised_ballot {
             self.set_promise(ballot);
-            self.record_accepted(slot, ballot, entry.clone());
+            self.record_accepted(slot, ballot, command.clone());
             accepted_by.insert(me);
         }
         self.proposer.insert(
             slot,
             Proposing {
                 ballot,
-                entry: entry.clone(),
+                command: command.clone(),
                 accepted_by,
             },
         );
@@ -787,7 +873,7 @@ impl RawNode {
             from: me,
             ballot,
             slot,
-            entry,
+            command,
         });
         self.try_decide(slot);
     }
@@ -798,18 +884,18 @@ impl RawNode {
         let quorum = self.quorum();
         let me = self.config.id;
         let decided = match self.proposer.get(&slot) {
-            Some(p) if p.accepted_by.len() >= quorum => Some((p.ballot, p.entry.clone())),
+            Some(p) if p.accepted_by.len() >= quorum => Some((p.ballot, p.command.clone())),
             _ => None,
         };
-        let Some((ballot, entry)) = decided else {
+        let Some((ballot, command)) = decided else {
             return;
         };
-        self.mark_chosen(slot, &entry, ballot);
+        self.mark_chosen(slot, &command, ballot);
         self.broadcast(&Message::Commit {
             from: me,
             ballot,
             slot,
-            entry,
+            command,
         });
         self.proposer.remove(&slot);
     }
@@ -834,19 +920,19 @@ impl RawNode {
         }
     }
 
-    /// Record `(ballot, entry)` as accepted for `slot` in the working log and
+    /// Record `(ballot, command)` as accepted for `slot` in the working log and
     /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
     /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
-    fn record_accepted(&mut self, slot: Slot, ballot: Ballot, entry: Entry) {
+    fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
         debug_assert!(
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
         );
-        self.accepted.insert(slot, (ballot, entry.clone()));
+        self.accepted.insert(slot, (ballot, command.clone()));
         self.pending_writes.push(WriteOp::AppendAccepted {
             slot,
             ballot,
-            entry,
+            command,
         });
     }
 
@@ -886,7 +972,7 @@ impl RawNode {
 
     /// Record `(slot, entry)` as chosen: persist, update dedup tables, and
     /// advance the contiguous chosen prefix. Idempotent.
-    fn mark_chosen(&mut self, slot: Slot, entry: &Entry, ballot: Ballot) {
+    fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it
         // (that would re-insert a record below the floor via `record_accepted`).
         if slot < self.first_slot {
@@ -895,24 +981,29 @@ impl RawNode {
         if self.chosen.contains_key(&slot) {
             return;
         }
-        // Record the *chosen* value as the authoritative accepted entry. Using
+        // Record the *chosen* value as the authoritative accepted command. Using
         // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
         // lower-ballot accept it picked up from a failed earlier ballot, and
         // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
         // would resurrect a value the cluster never chose for this slot. A chosen
         // value is durable and safe to record at its choosing ballot.
-        self.record_accepted(slot, ballot, entry.clone());
+        self.record_accepted(slot, ballot, command.clone());
         if ballot > self.hard_state.max_promised_ballot {
             self.set_promise(ballot);
         }
-        self.chosen.insert(slot, entry.clone());
-        self.inflight.remove(&(entry.client, entry.seq));
-        let bump = self
-            .applied_seq
-            .get(&entry.client)
-            .is_none_or(|c| entry.seq > *c);
-        if bump {
-            self.applied_seq.insert(entry.client, entry.seq);
+        self.chosen.insert(slot, command.clone());
+        // Only a client entry carries `(client, seq)` dedup state; a control
+        // command has none, and its `Truncate` effect is applied in
+        // `advance_chosen_index` when it enters the contiguous chosen prefix.
+        if let Command::User(entry) = command {
+            self.inflight.remove(&(entry.client, entry.seq));
+            let bump = self
+                .applied_seq
+                .get(&entry.client)
+                .is_none_or(|c| entry.seq > *c);
+            if bump {
+                self.applied_seq.insert(entry.client, entry.seq);
+            }
         }
         self.advance_chosen_index();
     }
@@ -921,11 +1012,27 @@ impl RawNode {
     /// `(slot, entry)` for the application in order (no gaps).
     fn advance_chosen_index(&mut self) {
         let mut next = self.first_unchosen();
-        while let Some(entry) = self.chosen.get(&next).cloned() {
+        // Highest `up_to` from any `Truncate` control command that entered the
+        // contiguous chosen prefix this pass. Applied *after* the walk so the
+        // mutation `compact` makes to `chosen`/`accepted` cannot disturb the
+        // iteration above.
+        let mut truncate_up_to: Option<Slot> = None;
+        while let Some(command) = self.chosen.get(&next).cloned() {
             self.hard_state.chosen_index = Some(next);
             self.pending_writes.push(WriteOp::SetChosenIndex(next));
-            self.pending_committed.push((next, entry));
+            if let Command::Control(Control::Truncate { up_to }) = &command {
+                truncate_up_to = Some(truncate_up_to.map_or(*up_to, |u| u.max(*up_to)));
+            }
+            self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);
+        }
+        // Apply (lazily, "in the background") the truncation the control command
+        // decided: drop the now-safe prefix and raise the floor. `compact` clamps
+        // to the chosen index just advanced, is idempotent, and emits a
+        // `WriteOp::Truncate` ordered *after* the `SetChosenIndex` writes above, so
+        // a durable floor never outruns the durable chosen index.
+        if let Some(up_to) = truncate_up_to {
+            self.compact(up_to);
         }
     }
 
@@ -946,7 +1053,7 @@ impl RawNode {
     /// The working per-slot accepted log (rebuilt from durable storage on boot).
     /// A read view for drivers/oracles; writes go through [`Ready`] deltas.
     #[must_use]
-    pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Entry)> {
+    pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Command)> {
         &self.accepted
     }
 
@@ -1004,14 +1111,19 @@ impl RawNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Entry)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Command)] {
         &self.pending_committed
+    }
+
+    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
+        &self.pending_snapshot_offers
     }
 
     pub(crate) fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_committed.clear();
+        self.pending_snapshot_offers.clear();
     }
 }
 

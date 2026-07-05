@@ -22,8 +22,8 @@ use moonpool_core::{
 };
 use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Entry, Message, NodeId, NodeRole, ProposeResult, RawNode, Slot,
-    Value, WriteOp,
+    Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
+    RawNode, Slot, Value, WriteOp,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -131,6 +131,14 @@ pub const EV_APPLIED: &str = "log_applied";
 /// below the floor is ever persisted or recovered again.
 pub const EV_COMPACTED: &str = "compacted";
 
+/// Tracing event: this node installed an opaque application snapshot from a peer
+/// (a `WriteOp::InstallSnapshot`), jumping its chosen prefix. Carries `node`,
+/// `chosen_index` (the commit index the snapshot brought it up to), and `first`
+/// (the new compaction floor). Emitted only after the install is fsync'd. The
+/// snapshot oracle reads it to confirm a below-floor node recovered, and the
+/// no-gaps oracle reads it to admit the applied-index jump the install performs.
+pub const EV_SNAPSHOT_INSTALLED: &str = "snapshot_installed";
+
 /// Tracing event: this node received a `Prepare` whose `from_slot` is below its
 /// own compaction floor. Carries `node`, `from_slot`, and `floor`. Purely
 /// observational: it marks that the dangerous "campaign against a truncated
@@ -169,21 +177,32 @@ pub struct ProposeAck {
     pub slot: Option<u64>,
 }
 
-/// An application request to compact the log: drop every slot at or below
-/// `up_to`. The application owns compaction of its own state and tells the node
-/// how far its log may be truncated (see [`paros_core::RawNode::compact`]).
+/// An application request to truncate the log: drop every slot at or below
+/// `up_to` across the cluster. The application owns compaction of its own state
+/// and tells the **leader** how far the log may be truncated; the leader decides
+/// a [`paros_core::Control::Truncate`] control command into the log, and every
+/// node truncates lazily when it applies that slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Compact {
-    /// The last slot the application permits dropping (inclusive). Clamped to the
-    /// node's chosen prefix, so nothing undecided is ever dropped.
+    /// The last slot the application permits dropping (inclusive). Each node
+    /// clamps to its own chosen prefix, so nothing undecided is ever dropped.
     pub up_to: u64,
 }
 
-/// The node's acknowledgement of a [`Compact`]: the new durable compaction floor
-/// (the first slot still retained) once the truncation is fsync'd.
+/// The node's acknowledgement of a [`Compact`]. Because truncation is now decided
+/// through Paxos and applied lazily, the ack reports admission (did the leader
+/// propose the control command?) plus the node's current floor — not a
+/// synchronously-updated floor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactAck {
-    /// The first slot still retained after truncation.
+    /// The node to (re)try: `Some(self)` when the leader admitted the request,
+    /// `Some(other)` to redirect, `None` when leadership is unknown.
+    pub leader: Option<u64>,
+    /// Whether the leader admitted the truncate (proposed the control command).
+    /// `false` is a redirect: retry `leader`.
+    pub accepted: bool,
+    /// The node's current durable compaction floor (best-effort; the decided
+    /// truncation reaches this node's floor once it applies the control command).
     pub first_slot: u64,
 }
 
@@ -231,6 +250,22 @@ fn value_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+/// The value hash for a decided [`Command`], for observability. A client entry
+/// hashes its opaque value bytes; a control command hashes a stable, distinct
+/// encoding of its metadata, so every node agrees on the per-slot hash the safety
+/// oracle compares (a control command decided for a slot is the same on all
+/// nodes).
+fn command_hash(command: &Command) -> u64 {
+    match command {
+        Command::User(entry) => value_hash(&entry.value.0),
+        Command::Control(Control::Truncate { up_to }) => {
+            let mut bytes = vec![0xff_u8];
+            bytes.extend_from_slice(&up_to.0.to_le_bytes());
+            value_hash(&bytes)
+        }
+    }
+}
+
 /// A short, stable label for a [`Message`] variant, for observability.
 fn message_kind(m: &Message) -> &'static str {
     match m {
@@ -242,6 +277,7 @@ fn message_kind(m: &Message) -> &'static str {
         Message::Commit { .. } => "commit",
         Message::CatchUpRequest { .. } => "catchup_request",
         Message::CatchUpResponse { .. } => "catchup_response",
+        Message::InstallSnapshot { .. } => "install_snapshot",
         Message::CheckLeader { .. } => "check_leader",
         Message::Heartbeat { .. } => "heartbeat",
         _ => "unknown",
@@ -278,6 +314,12 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             ballot,
             commit,
         } => Some((*from, *ballot, *commit)),
+        Message::InstallSnapshot {
+            from,
+            ballot,
+            chosen_index,
+            ..
+        } => Some((*from, *ballot, *chosen_index)),
         _ => None,
     }
 }
@@ -307,7 +349,8 @@ where
     let writes: Vec<WriteOp> = ready.writes().to_vec();
     let must_sync = ready.must_sync();
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
-    let committed: Vec<(Slot, Entry)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
@@ -348,14 +391,38 @@ where
         }
     }
 
+    // 2b. Serve snapshot offers: the core decided a peer needs a snapshot (it
+    //     asked for a prefix below our floor). Attach the opaque application bytes
+    //     from storage and send the InstallSnapshot — the driver holds the state
+    //     the core does not.
+    for (to, chosen_index, ballot) in &snapshot_offers {
+        let msg = Message::InstallSnapshot {
+            from: NodeId(self_id),
+            ballot: *ballot,
+            chosen_index: *chosen_index,
+            snapshot: Value(storage.snapshot()),
+        };
+        tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind = "install_snapshot",
+            slot = chosen_index.0,
+            "msg_sent"
+        );
+        if let Some(addr) = addrs.get(to) {
+            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
+            let _ = client.deliver.send(msg);
+        }
+    }
+
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
-    for (slot, entry) in &committed {
+    for (slot, command) in &committed {
         tracing::info!(
             node = self_id,
             slot = slot.0,
-            vhash = value_hash(&entry.value.0),
+            vhash = command_hash(command),
             "value_chosen"
         );
         tracing::info!(
@@ -364,6 +431,12 @@ where
             applied_index = slot.0,
             "log_applied"
         );
+        // A control command carries no client waiter (a `Truncate`'s effect is the
+        // durable floor the core's `WriteOp::Truncate` already persisted this
+        // batch); only a client entry acks a proposer.
+        if matches!(command, Command::Control(_)) {
+            continue;
+        }
         if let Some(waiters) = pending.remove(slot) {
             for (seq, w) in waiters {
                 w.send(ProposeAck {
@@ -409,10 +482,10 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
             WriteOp::AppendAccepted {
                 slot,
                 ballot,
-                entry,
+                command,
             } => {
                 storage
-                    .append_accepted(*slot, *ballot, entry.clone())
+                    .append_accepted(*slot, *ballot, command.clone())
                     .map_err(|e| storage_err(&e))?;
             }
             WriteOp::SetChosenIndex(slot) => {
@@ -422,6 +495,15 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
             }
             WriteOp::Truncate { first } => {
                 storage.truncate(*first).map_err(|e| storage_err(&e))?;
+            }
+            WriteOp::InstallSnapshot {
+                chosen_index,
+                ballot,
+                snapshot,
+            } => {
+                storage
+                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone())
+                    .map_err(|e| storage_err(&e))?;
             }
         }
     }
@@ -463,7 +545,7 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
             WriteOp::AppendAccepted {
                 slot,
                 ballot,
-                entry,
+                command,
             } => {
                 tracing::info!(
                     node = self_id,
@@ -472,12 +554,31 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
                     pbnode = promised.node.0,
                     around = ballot.round,
                     abnode = ballot.node.0,
-                    vhash = value_hash(&entry.value.0),
+                    vhash = command_hash(command),
                     "persist"
                 );
             }
             WriteOp::Truncate { first } => {
                 tracing::info!(node = self_id, first = first.0, "compacted");
+            }
+            WriteOp::InstallSnapshot { chosen_index, .. } => {
+                let first = chosen_index.0 + 1;
+                tracing::info!(
+                    node = self_id,
+                    chosen_index = chosen_index.0,
+                    first,
+                    "snapshot_installed"
+                );
+                // The install jumps the applied prefix to `chosen_index` without
+                // replaying entries (snapshot-xor-entries); surface the jump so the
+                // no-gaps oracle (which admits it as a snapshot jump) and the
+                // convergence oracle see the node reach the cluster prefix.
+                tracing::info!(
+                    node = self_id,
+                    slot = chosen_index.0,
+                    applied_index = chosen_index.0,
+                    "log_applied"
+                );
             }
             WriteOp::SetPromise(_) | WriteOp::SetChosenIndex(_) => {}
         }
@@ -569,22 +670,22 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
         pbnode = promised.node.0,
         "node_state"
     );
-    for (slot, (ballot, entry)) in node.accepted() {
+    for (slot, (ballot, command)) in node.accepted() {
         tracing::info!(
             node = self_id,
             slot = slot.0,
             around = ballot.round,
             abnode = ballot.node.0,
-            vhash = value_hash(&entry.value.0),
+            vhash = command_hash(command),
             "recovered"
         );
     }
     if let Some(ci) = node.hard_state().chosen_index {
-        for (slot, (_b, entry)) in node.accepted().range(..=ci) {
+        for (slot, (_b, command)) in node.accepted().range(..=ci) {
             tracing::info!(
                 node = self_id,
                 slot = slot.0,
-                vhash = value_hash(&entry.value.0),
+                vhash = command_hash(command),
                 "value_chosen"
             );
             tracing::info!(
@@ -719,13 +820,25 @@ where
             }
             Some((req, reply)) = svc.compact.recv() => {
                 // The application permits dropping the log prefix up to `up_to`.
-                // compact() clamps to the chosen prefix and returns the new floor;
-                // drain_ready persists the truncation (fsync'd) before we ack, so a
-                // CompactAck means "durably truncated".
-                let first = node.compact(Slot(req.up_to));
+                // Only the leader admits it: it proposes a `Truncate` control
+                // command into the next slot, decided by ordinary Paxos and
+                // forwarded to every node, each of which truncates lazily when it
+                // applies that slot. A non-leader redirects (like `propose`).
+                let ack = match node.propose_control(Control::Truncate { up_to: Slot(req.up_to) }) {
+                    ProposeResult::NotLeader(hint) => CompactAck {
+                        leader: hint.map(|n| n.0),
+                        accepted: false,
+                        first_slot: node.first_slot().0,
+                    },
+                    _ => CompactAck {
+                        leader: Some(self_id),
+                        accepted: true,
+                        first_slot: node.first_slot().0,
+                    },
+                };
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
-                reply.send(CompactAck { first_slot: first.0 });
+                reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();

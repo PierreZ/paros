@@ -9,7 +9,7 @@
 //! whole, the log persists per record — and is what lets later stages truncate,
 //! checksum, and recover per entry without a blob rewrite.
 
-use crate::types::{Ballot, Entry, Slot};
+use crate::types::{Ballot, Command, Slot, Value};
 
 /// A single semantic durable write the driver must apply to stable storage,
 /// **in order**, before sending the batch's messages.
@@ -26,16 +26,16 @@ use crate::types::{Ballot, Entry, Slot};
 pub enum WriteOp {
     /// Persist a raised promised ballot (Phase 1). Monotonically non-decreasing.
     SetPromise(Ballot),
-    /// Persist the `(ballot, entry)` accepted for `slot` (Phase 2). An
+    /// Persist the `(ballot, command)` accepted for `slot` (Phase 2). An
     /// upsert-by-slot: overwriting a stale lower-ballot accept for a now-chosen
     /// slot is load-bearing for restart safety (see [`crate::RawNode`]).
     AppendAccepted {
         /// The slot this accept is for.
         slot: Slot,
-        /// The ballot the entry was accepted under.
+        /// The ballot the command was accepted under.
         ballot: Ballot,
-        /// The accepted entry.
-        entry: Entry,
+        /// The accepted command (an opaque client entry or a control command).
+        command: Command,
     },
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
@@ -46,6 +46,20 @@ pub enum WriteOp {
     Truncate {
         /// The first slot still retained. Everything below it is dropped.
         first: Slot,
+    },
+    /// Install an opaque application snapshot: record `chosen_index` as the
+    /// durable commit index, `chosen_index + 1` as the durable compaction floor,
+    /// `ballot` as (at least) the durable promise, and persist the opaque
+    /// `snapshot` bytes (so a restart boots from them and the node can serve them
+    /// onward). Produced only by [`crate::Message::InstallSnapshot`]; the bytes are
+    /// never interpreted by the core.
+    InstallSnapshot {
+        /// The commit index the snapshot brings the node up to.
+        chosen_index: Slot,
+        /// The ballot adopted with the snapshot (the promise takes its max).
+        ballot: Ballot,
+        /// Opaque application snapshot bytes at `chosen_index`.
+        snapshot: Value,
     },
 }
 
@@ -77,7 +91,10 @@ impl WriteOp {
     pub fn needs_sync(&self) -> bool {
         matches!(
             self,
-            WriteOp::SetPromise(_) | WriteOp::AppendAccepted { .. } | WriteOp::Truncate { .. }
+            WriteOp::SetPromise(_)
+                | WriteOp::AppendAccepted { .. }
+                | WriteOp::Truncate { .. }
+                | WriteOp::InstallSnapshot { .. }
         )
     }
 }
@@ -96,7 +113,7 @@ pub fn classify(writes: &[WriteOp]) -> MustSync {
 #[cfg(test)]
 mod tests {
     use super::{MustSync, WriteOp, classify};
-    use crate::types::{Ballot, ClientId, ClientSeq, Entry, NodeId, Slot, Value};
+    use crate::types::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, Slot, Value};
 
     fn ballot() -> Ballot {
         Ballot {
@@ -109,11 +126,11 @@ mod tests {
         WriteOp::AppendAccepted {
             slot: Slot(slot),
             ballot: ballot(),
-            entry: Entry {
+            command: Command::User(Entry {
                 client: ClientId(1),
                 seq: ClientSeq(1),
                 value: Value(vec![7]),
-            },
+            }),
         }
     }
 

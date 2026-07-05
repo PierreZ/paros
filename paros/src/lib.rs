@@ -18,21 +18,23 @@ pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER,
     EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_RECOVERED, EV_SYNCED, Paros, Propose, ProposeAck, WLTOKEN_PAROS, is_seam_crash, parse_addr,
-    run_node,
+    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, WLTOKEN_PAROS,
+    is_seam_crash, parse_addr, run_node,
 };
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, Entry, HardState, Message, MustSync, NodeId,
-    NodeRole, ProposeResult, QuorumSystem, RawNode, Ready, Slot, Storage, Value, WriteOp,
+    Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, Message, MustSync,
+    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, Ready, Slot, Storage, Value, WriteOp,
 };
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use paros_core::{Ballot, ClientId, ClientSeq, Entry, Message, NodeId, Slot, Value};
+    use paros_core::{
+        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
+    };
 
     /// One representative of every `Message` variant.
     fn every_variant() -> Vec<Message> {
@@ -45,10 +47,15 @@ mod tests {
             seq: ClientSeq(2),
             value: Value(vec![1, 2, 3]),
         };
+        let command = Command::User(entry.clone());
+        // A control command in the accepted suffix exercises `Command::Control`
+        // serde alongside the client-entry case.
+        let control = Command::Control(Control::Truncate { up_to: Slot(3) });
         let mut accepted = BTreeMap::new();
-        accepted.insert(Slot(5), (ballot, entry.clone()));
+        accepted.insert(Slot(5), (ballot, command.clone()));
+        accepted.insert(Slot(6), (ballot, control));
         let mut catchup = BTreeMap::new();
-        catchup.insert(Slot(4), (ballot, entry.clone()));
+        catchup.insert(Slot(4), (ballot, command.clone()));
         vec![
             Message::Prepare {
                 from: NodeId(1),
@@ -65,7 +72,7 @@ mod tests {
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
-                entry: entry.clone(),
+                command: command.clone(),
             },
             Message::Accepted {
                 from: NodeId(2),
@@ -81,7 +88,7 @@ mod tests {
                 from: NodeId(0),
                 ballot,
                 slot: Slot(6),
-                entry,
+                command,
             },
             Message::CatchUpRequest {
                 from: NodeId(1),
@@ -90,6 +97,12 @@ mod tests {
             Message::CatchUpResponse {
                 from: NodeId(0),
                 entries: catchup,
+            },
+            Message::InstallSnapshot {
+                from: NodeId(0),
+                ballot,
+                chosen_index: Slot(5),
+                snapshot: Value(vec![9, 9, 9]),
             },
             Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {
