@@ -10,7 +10,10 @@
   /* IBM Plex, self-hosted and staged next to this file (build-wasm-demo.sh copies
      them from nixpkgs#ibm-plex). If the woff2 files are absent, the CSS font
      stacks in tokens.js fall back to system-ui / ui-monospace — the demo still
-     works, it just loses the exact Plex look. */
+     works, it just loses the exact Plex look. The plex-fonts markers let the
+     build script strip this block from the staged copy when staging fails, so
+     the book never 404s on fonts that are not there. */
+  /* plex-fonts-begin */
   @font-face { font-family: 'IBM Plex Sans'; font-weight: 400; font-display: swap;
     src: url('./app/fonts/IBMPlexSans-Regular.woff2') format('woff2'); }
   @font-face { font-family: 'IBM Plex Sans'; font-weight: 700; font-display: swap;
@@ -19,6 +22,7 @@
     src: url('./app/fonts/IBMPlexMono-Regular.woff2') format('woff2'); }
   @font-face { font-family: 'IBM Plex Mono'; font-weight: 700; font-display: swap;
     src: url('./app/fonts/IBMPlexMono-Bold.woff2') format('woff2'); }
+  /* plex-fonts-end */
   html, body { margin: 0; }
   body {
     background: #0A0C10; color: #E7EBF2;

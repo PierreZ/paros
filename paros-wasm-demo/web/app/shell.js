@@ -56,7 +56,7 @@ function injectStyle() {
     background:linear-gradient(90deg,transparent,var(--stage)); font-size:9px; color:var(--faint);
     writing-mode:vertical-rl; text-orientation:mixed; letter-spacing:.1em; }
   .paros.is-mobile .paros-stagewrap{ overflow-x:auto; }
-  .paros.is-mobile .paros-swipe{ display:flex; }
+  .paros.is-mobile .paros-stagewrap.can-swipe .paros-swipe{ display:flex; }
 
   .paros-progress{ min-height:8px; }
   .paros-track{ width:100%; height:auto; display:block; }
@@ -124,6 +124,9 @@ function injectStyle() {
   @media (max-width:640px){
     .paros{ padding:14px; border-radius:16px; }
     .paros-appbar{ flex-direction:column; align-items:stretch; gap:8px; }
+    /* the caption is absolutely positioned top-right on desktop; on a narrow card a
+       long heading runs underneath it, so let it flow after the text instead */
+    .paros-card .cap{ position:static; display:block; margin-top:8px; text-align:right; }
     .paros-inspector{ position:fixed; left:0; right:0; bottom:0; z-index:50; border-radius:14px 14px 0 0;
       box-shadow:0 -8px 24px rgba(0,0,0,.5); }
   }
@@ -168,7 +171,7 @@ export class Shell {
     const tabs = document.createElement('div');
     tabs.className = 'paros-tabs';
     this.tabEls = {};
-    for (const id of ['single', 'multi']) {
+    for (const id of Object.keys(this.registry)) {
       const rr = this.registry[id];
       if (!rr) continue;
       const b = document.createElement('button');
@@ -305,8 +308,8 @@ export class Shell {
     this._renderDigest();
     this._renderOracle();
     this._layout(); // sets viewBox for current breakpoint
-    const still = this.params.has('still') ? parseInt(this.params.get('still'), 10) : null;
-    if (still !== null) {
+    const still = this.params.has('still') ? parseInt(this.params.get('still'), 10) : NaN;
+    if (Number.isFinite(still)) {
       this.showFrame(this._frameForLeg(still), 1);
       this._setTransportEnabled(false);
       return;
@@ -502,11 +505,15 @@ export class Shell {
   }
 
   // The single-decree 5-stop phase track (doubles as legend), grouped Phase 1 / 2.
+  // The svg scales to the shell width, so on mobile the viewBox is narrower and the
+  // type larger — with the desktop 1000-unit box a 360px shell renders ~4px labels.
   _phaseTrack(p) {
-    const W = 1000, H = 96;
+    const m = this.mobile;
+    const W = m ? 560 : 1000, H = m ? 132 : 96;
     const svg = el('svg', { class: 'paros-track', viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet' });
     const n = PHASE_TRACK.length;
-    const padX = 90, y = 30;
+    const padX = m ? 54 : 90, y = m ? 42 : 30;
+    const fNum = m ? 15 : 11, fLabel = m ? 16 : 12, fBracket = m ? 14 : 10;
     const xOf = (i) => padX + (W - 2 * padX) * (i / (n - 1));
     const activeIdx = p.activeIndex;
     // baseline up to active in phase colour, rest hairline
@@ -519,20 +526,20 @@ export class Shell {
       const done = i < activeIdx;
       const col = PHASE[stop.phase];
       if (on) {
-        svg.appendChild(el('circle', { cx: x, cy: y, r: 12, fill: 'none', stroke: col, 'stroke-width': 1.5, opacity: 0.5 }));
-        svg.appendChild(el('circle', { cx: x, cy: y, r: 7, fill: col }));
+        svg.appendChild(el('circle', { cx: x, cy: y, r: m ? 14 : 12, fill: 'none', stroke: col, 'stroke-width': 1.5, opacity: 0.5 }));
+        svg.appendChild(el('circle', { cx: x, cy: y, r: m ? 8 : 7, fill: col }));
       } else {
-        svg.appendChild(el('circle', { cx: x, cy: y, r: 5, fill: C.stage, stroke: done ? col : C.dim, 'stroke-width': 1.6 }));
+        svg.appendChild(el('circle', { cx: x, cy: y, r: m ? 6 : 5, fill: C.stage, stroke: done ? col : C.dim, 'stroke-width': 1.6 }));
       }
-      svg.appendChild(el('text', { x, y: y - 18, 'text-anchor': 'middle', class: 'mono', 'font-size': 11, fill: on ? col : C.faint }, String(i + 1)));
-      svg.appendChild(el('text', { x, y: y + 24, 'text-anchor': 'middle', 'font-size': 12, 'font-weight': on ? 700 : 400, fill: on ? C.text : C.faint }, stop.label));
+      svg.appendChild(el('text', { x, y: y - (m ? 22 : 18), 'text-anchor': 'middle', class: 'mono', 'font-size': fNum, fill: on ? col : C.faint }, String(i + 1)));
+      svg.appendChild(el('text', { x, y: y + (m ? 30 : 24), 'text-anchor': 'middle', 'font-size': fLabel, 'font-weight': on ? 700 : 400, fill: on ? C.text : C.faint }, stop.label));
     });
     // phase 1 / phase 2 bracket captions
     const bx0 = xOf(0), bx1 = xOf(1), bx2 = xOf(2), bx4 = xOf(4);
     const bracket = (x0, x1, label) => {
-      const yb = y + 40;
+      const yb = y + (m ? 50 : 40);
       svg.appendChild(el('path', { d: `M ${x0} ${yb - 4} L ${x0} ${yb} L ${x1} ${yb} L ${x1} ${yb - 4}`, fill: 'none', stroke: C.softline, 'stroke-width': 1 }));
-      svg.appendChild(el('text', { x: (x0 + x1) / 2, y: yb + 12, 'text-anchor': 'middle', 'font-size': 10, fill: C.faint }, label));
+      svg.appendChild(el('text', { x: (x0 + x1) / 2, y: yb + (m ? 16 : 12), 'text-anchor': 'middle', 'font-size': fBracket, fill: C.faint }, label));
     };
     bracket(bx0, bx1, 'Phase 1');
     bracket(bx2, bx4, 'Phase 2');
@@ -600,8 +607,11 @@ export class Shell {
     this.svg.setAttribute('viewBox', `0 0 ${size.w} ${size.h}`);
     this.svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     // when the stage overflows on mobile, give it a min pixel width so it scrolls
-    if (this.mobile && size.scrollW) this.svg.style.minWidth = size.scrollW + 'px';
+    // (and only then show the swipe hint — a stage that fits has nothing to swipe)
+    const swipes = !!(this.mobile && size.scrollW);
+    if (swipes) this.svg.style.minWidth = size.scrollW + 'px';
     else this.svg.style.minWidth = '';
+    this.svg.parentElement.classList.toggle('can-swipe', swipes);
   }
 
   _onKey(e) {

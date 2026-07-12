@@ -121,7 +121,10 @@ These would enrich the multi inspector; v1 renders correctly without them.
 ## Fonts
 
 The design system asks for IBM Plex Sans (UI) and IBM Plex Mono (all protocol
-state). `build-wasm-demo.sh` stages the woff2 best-effort from `nixpkgs#ibm-plex`
-(or `PLEX_WOFF2_DIR`). If they can't be found the build still succeeds and the CSS
-falls back to `system-ui` / `ui-monospace` — the mono-vs-sans distinction (the load-
-bearing teaching cue) survives; only the exact Plex glyphs are lost.
+state). `build-wasm-demo.sh` stages the woff2 best-effort: from `PLEX_WOFF2_DIR`
+if set, else from `nixpkgs#ibm-plex` — which ships OTF only, so each face is
+converted with `woff2_compress` (`nixpkgs#woff2`). If staging fails the build
+still succeeds: the `@font-face` block is stripped from the *staged* index.html
+(the `plex-fonts` markers) so the book never 404s, and the CSS falls back to
+`system-ui` / `ui-monospace` — the mono-vs-sans distinction (the load-bearing
+teaching cue) survives; only the exact Plex glyphs are lost.

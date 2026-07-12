@@ -60,7 +60,8 @@ function lastBallot(frames) {
 function layout(dims) {
   const { w, h, mobile } = dims;
   if (mobile) {
-    const cy = h * 0.30;
+    // proposer on top, acceptor row at the bottom: each eyebrow sits just above
+    // its own group (a shared mid-height row belongs to neither).
     return {
       left: { x: w * 0.5, y: h * 0.16 },
       right: [
@@ -69,7 +70,9 @@ function layout(dims) {
         { x: w * 0.78, y: h * 0.66 },
       ],
       client: { x: w * 0.12, y: h * 0.16 },
-      r: 18, eyebrowY: cy,
+      r: 18,
+      eyeProposer: { x: w * 0.5, y: h * 0.16 - 52 },
+      eyeAcceptors: { x: w * 0.5, y: h * 0.66 - 62 },
     };
   }
   return {
@@ -80,7 +83,9 @@ function layout(dims) {
       { x: w * 0.76, y: h * 0.78 },
     ],
     client: { x: w * 0.1, y: h * 0.84 },
-    r: 21, eyebrowY: 22,
+    r: 21,
+    eyeProposer: { x: w * 0.24, y: 22 },
+    eyeAcceptors: { x: w * 0.76, y: 22 },
   };
 }
 
@@ -118,14 +123,15 @@ export const single = {
     const acting = new Set(frame.legs.map((l) => l.from).concat(frame.legs.map((l) => l.to)));
     const propId = frame.ballot ? frame.ballot.n : frame.propose ?? 0;
     const color = PHASE[frame.phase] || C.neutralRing;
+    const fs = ctx.dims.mobile ? 14 : 10; // in-stage label size (see eyebrow note)
 
     // eyebrows
-    g.appendChild(eyebrow(geo.left.x, geo.eyebrowY, 'PROPOSER', ctx.dims.mobile));
-    g.appendChild(eyebrow(geo.right[0].x, geo.eyebrowY, 'ACCEPTORS', ctx.dims.mobile));
+    g.appendChild(eyebrow(geo.eyeProposer.x, geo.eyeProposer.y, 'PROPOSER', ctx.dims.mobile));
+    g.appendChild(eyebrow(geo.eyeAcceptors.x, geo.eyeAcceptors.y, 'ACCEPTORS', ctx.dims.mobile));
 
     // faint client hint
     g.appendChild(nodeDisc(geo.client.x, geo.client.y, geo.r * 0.7, 'C', { ring: C.dim }));
-    g.appendChild(el('text', { x: geo.client.x, y: geo.client.y + geo.r + 6, 'text-anchor': 'middle', 'font-size': 10, fill: C.faint }, 'client'));
+    g.appendChild(el('text', { x: geo.client.x, y: geo.client.y + geo.r + 6, 'text-anchor': 'middle', 'font-size': fs, fill: C.faint }, 'client'));
 
     // static links for this frame's legs
     const linksG = el('g', {});
@@ -141,7 +147,7 @@ export const single = {
       ring: propActs ? color : C.neutralRing, active: propActs, glowColor: color,
     }), propId, ctx));
     if (frame.ballot) {
-      g.appendChild(el('text', { x: geo.left.x, y: geo.left.y + geo.r + 15, 'text-anchor': 'middle', class: 'mono', 'font-size': 11, fill: C.muted }, `ballot (${frame.ballot.r},${frame.ballot.n})`));
+      g.appendChild(el('text', { x: geo.left.x, y: geo.left.y + geo.r + 15, 'text-anchor': 'middle', class: 'mono', 'font-size': ctx.dims.mobile ? 14 : 11, fill: C.muted }, `ballot (${frame.ballot.r},${frame.ballot.n})`));
     }
 
     // acceptors (right)
@@ -159,13 +165,13 @@ export const single = {
       }
       if (isChosen) g.appendChild(badgeChosen(pos.x + geo.r - 2, pos.y - geo.r + 2));
       // promised ballot label
-      g.appendChild(el('text', { x: pos.x, y: pos.y + geo.r + 15, 'text-anchor': 'middle', class: 'mono', 'font-size': 10, fill: C.muted }, `promised (${s.promised.r},${s.promised.n})`));
+      g.appendChild(el('text', { x: pos.x, y: pos.y + geo.r + 15, 'text-anchor': 'middle', class: 'mono', 'font-size': fs, fill: C.muted }, `promised (${s.promised.r},${s.promised.n})`));
       // selection highlight ring
       if (ctx.selection === i) g.appendChild(el('circle', { cx: pos.x, cy: pos.y, r: geo.r + 5, fill: 'none', stroke: C.text, 'stroke-width': 1, 'stroke-dasharray': '2 3', opacity: 0.7 }));
     });
 
     // faint quorum hint near the acceptors
-    g.appendChild(el('text', { x: geo.right[2].x, y: geo.right[2].y + geo.r + 30, 'text-anchor': 'middle', class: 'mono', 'font-size': 10, fill: C.faint }, 'quorum 2 / 3'));
+    g.appendChild(el('text', { x: geo.right[2].x, y: geo.right[2].y + geo.r + (ctx.dims.mobile ? 34 : 30), 'text-anchor': 'middle', class: 'mono', 'font-size': fs, fill: C.faint }, 'quorum 2 / 3'));
 
     // particle layer
     const pg = el('g', {});
@@ -291,7 +297,8 @@ single.frames = function (run) {
 };
 
 function eyebrow(x, y, text, mobile) {
-  return el('text', { x, y, 'text-anchor': 'middle', 'font-size': 10, 'letter-spacing': '1.6', fill: C.muted, 'font-weight': 700 }, text);
+  // the mobile viewBox renders at ~0.6 scale, so bump the type to stay legible
+  return el('text', { x, y, 'text-anchor': 'middle', 'font-size': mobile ? 14 : 10, 'letter-spacing': '1.6', fill: C.muted, 'font-weight': 700 }, text);
 }
 function clickable(node, id, ctx) {
   node.style.cursor = 'pointer';

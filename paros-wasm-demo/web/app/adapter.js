@@ -94,7 +94,7 @@ export function downWindows(run, i) {
   return wins;
 }
 
-export const SEAM_TAG = { before_sync: 'pre-fsync', after_sync_before_send: 'fsync✓ · send✗' };
+export const SEAM_TAG = { before_sync: 'pre-fsync', after_sync_before_send: 'fsync ok · send lost' };
 
 // ---- oracle badge (green by construction; surfaced to be legible) ----------
 // The sim panics on any safety/recovery violation, so a returned run is always
