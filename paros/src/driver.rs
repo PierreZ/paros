@@ -177,6 +177,34 @@ pub struct ProposeAck {
     pub slot: Option<u64>,
 }
 
+/// A client read request. Reads are idempotent, so there is no dedup; `seq` is
+/// echoed for client-side matching only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Read {
+    /// Client identity.
+    pub client: u64,
+    /// Per-client request sequence number.
+    pub seq: u64,
+}
+
+/// The node's acknowledgement of a [`Read`]. A `committed` ack observes the
+/// node's applied log prefix: `read_index` is the highest contiguously applied
+/// slot (`None` when the prefix is empty — entries are opaque, so the watermark
+/// *is* the local state a read serves). Otherwise it is a redirect to `leader`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadAck {
+    /// Echoed request sequence number.
+    pub seq: u64,
+    /// The node to (re)try: `Some(self)` when this node served the read,
+    /// `Some(other)` to redirect, `None` when the leader is unknown.
+    pub leader: Option<u64>,
+    /// Whether the read was served. `false` is a redirect: retry `leader`.
+    pub committed: bool,
+    /// The applied watermark observed, when `committed` is `true`: the highest
+    /// contiguously applied slot, `None` for an empty prefix.
+    pub read_index: Option<u64>,
+}
+
 /// An application request to truncate the log: drop every slot at or below
 /// `up_to` across the cluster. The application owns compaction of its own state
 /// and tells the **leader** how far the log may be truncated; the leader decides
@@ -214,6 +242,9 @@ pub struct CompactAck {
 pub trait Paros {
     /// A client proposes a command; the node acknowledges it.
     async fn propose(&self, req: Propose) -> Result<ProposeAck, RpcError>;
+    /// A client reads the applied log prefix; the node acknowledges with the
+    /// observed watermark or redirects to the leader.
+    async fn read(&self, req: Read) -> Result<ReadAck, RpcError>;
     /// A peer delivers a Paxos protocol message into this node's `step()` inbox.
     /// One-way: the reply is empty (peers use fire-and-forget `send`).
     async fn deliver(&self, msg: Message) -> Result<(), RpcError>;
@@ -718,6 +749,10 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 /// durability seam — the caller recovers by re-running `run_node` with fresh
 /// storage. Production passes [`NoCrash`](crate::NoCrash), which never fires.
 #[tracing::instrument(skip_all)]
+// One cohesive select loop: every arm is a thin feed into the core plus the
+// same drain/maintain tail; splitting arms out would only scatter the loop's
+// shared state.
+#[allow(clippy::too_many_lines)]
 pub async fn run_node<P, S, C>(
     providers: P,
     mut storage: S,
@@ -779,6 +814,28 @@ where
                 }
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+            }
+            Some((req, reply)) = svc.read.recv() => {
+                // A client read, served straight off the local applied prefix
+                // whenever this node believes it leads. No leadership
+                // confirmation: a deposed or freshly elected leader can serve a
+                // stale watermark here.
+                let seq = req.seq;
+                if node.is_leader() {
+                    reply.send(ReadAck {
+                        seq,
+                        leader: Some(self_id),
+                        committed: true,
+                        read_index: node.hard_state().chosen_index.map(|s| s.0),
+                    });
+                } else {
+                    reply.send(ReadAck {
+                        seq,
+                        leader: node.leader().map(|n| n.0),
+                        committed: false,
+                        read_index: None,
+                    });
+                }
             }
             Some((msg, reply)) = svc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same

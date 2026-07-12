@@ -5,7 +5,7 @@
 //! - [`ClientLivenessOracle`] wires the `assert_*` contract macros off the same
 //!   event stream — a worked example of moonpool's oracle harness.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
@@ -21,6 +21,10 @@ use serde::Serialize;
 const EV_ISSUED: &str = "client_issued";
 const EV_ACKED: &str = "client_acknowledged";
 const EV_FAILED: &str = "client_failed";
+/// Client read events — the history the [`LinearizabilityOracle`] checks.
+const EV_READ_ISSUED: &str = "client_read_issued";
+const EV_READ_ACKED: &str = "client_read_acknowledged";
+const EV_READ_FAILED: &str = "client_read_failed";
 
 /// Node A — the client.
 const NODE_A: u8 = 0;
@@ -655,6 +659,151 @@ impl Invariant for ClientLivenessOracle {
         assert_sometimes!(acked > 0, "at least one proposal is acknowledged");
         if acked > 0 {
             assert_reachable!("a client proposal is acknowledged");
+        }
+    }
+}
+
+/// The linearizability oracle — the client-history checker (the king oracle:
+/// every later stage asserts client-observed correctness through it). The
+/// register under check is the **applied log prefix**: an acked write is a
+/// state transition at its committed `slot`, and a committed read observes the
+/// watermark `read_index`. Because the log totally orders writes and the single
+/// client is sequential (`W0 R0 W1 R1 …`, each op issued only after the
+/// previous op's terminal event), a full Wing & Gong search is unnecessary: the
+/// history is linearizable iff three seq-order conditions hold. Real-time
+/// precedence is derived from program order (seq numbers), never from
+/// `time_ms` — a write ack and the next read routinely share a millisecond.
+/// A future multi-client workload must add a client id to these events before
+/// this oracle can go multi-client.
+///
+/// Failed / timed-out operations enter no constraint: a timed-out write may
+/// still commit later, so it is deliberately unconstrained; a committed write
+/// ack without a slot (the dedup-retry path) constrains nothing per-slot
+/// either.
+pub(crate) struct LinearizabilityOracle;
+
+impl Invariant for LinearizabilityOracle {
+    fn name(&self) -> &'static str {
+        "linearizability"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // A terminal read event is only ever recorded for a read that was issued.
+        let issued = q.len(EV_READ_ISSUED);
+        let acked = q.len(EV_READ_ACKED);
+        let failed = q.len(EV_READ_FAILED);
+        assert_always!(
+            acked + failed <= issued,
+            "no read is acked/failed before it is issued"
+        );
+
+        // Acked writes with a known slot, and committed reads with their
+        // observed watermark, both keyed by seq (= program order). A watermark
+        // is `Option<u64>`: an absent `read_index` field is the empty applied
+        // prefix, and `None < Some(0)` is exactly the watermark order.
+        let mut write_slot: BTreeMap<u64, u64> = BTreeMap::new();
+        for e in q.snapshot(EV_ACKED) {
+            let Some(seq) = e.u64("seq_id") else { continue };
+            if let Some(slot) = e.u64("slot") {
+                write_slot.entry(seq).or_insert(slot);
+            }
+        }
+        let read_acks = q.snapshot(EV_READ_ACKED);
+        let mut read_wm: BTreeMap<u64, Option<u64>> = BTreeMap::new();
+        for e in &read_acks {
+            let Some(seq) = e.u64("seq_id") else { continue };
+            read_wm.entry(seq).or_insert(e.u64("read_index"));
+        }
+
+        // C1 — a committed read observes every write acked before it began:
+        // read `k` starts after write `j`'s ack for every `j <= k`, so its
+        // watermark covers the running max acked slot (two-pointer over seq).
+        let mut max_acked_slot: Option<u64> = None;
+        let mut writes = write_slot.iter().peekable();
+        for (&rk, &wm) in &read_wm {
+            while let Some(&(&wj, &slot)) = writes.peek() {
+                if wj > rk {
+                    break;
+                }
+                max_acked_slot = max_acked_slot.max(Some(slot));
+                writes.next();
+            }
+            assert_always!(
+                wm >= max_acked_slot,
+                "a committed read's watermark covers every write acked before it began"
+            );
+        }
+
+        // C2 — reads do not overlap (the client is sequential), so their
+        // watermarks never move backwards.
+        let mut prev: Option<u64> = None;
+        for &wm in read_wm.values() {
+            assert_always!(wm >= prev, "committed-read watermarks never move backwards");
+            prev = prev.max(wm);
+        }
+
+        // C3 — a write issued after a committed read must land above that
+        // read's watermark (a slot at or below it would place the write inside
+        // the prefix the read already observed). Guards against an inflated /
+        // speculative watermark.
+        let mut max_read_wm: Option<u64> = None;
+        let mut reads = read_wm.iter().peekable();
+        for (&wj, &slot) in &write_slot {
+            while let Some(&(&rk, &wm)) = reads.peek() {
+                if rk >= wj {
+                    break;
+                }
+                max_read_wm = max_read_wm.max(wm);
+                reads.next();
+            }
+            if let Some(i) = max_read_wm {
+                assert_always!(
+                    slot > i,
+                    "a write issued after a committed read lands above its watermark"
+                );
+            }
+        }
+
+        // Coverage gates (`UntilCoverageStable` only saturates once these fire).
+        assert_sometimes!(!read_wm.is_empty(), "a linearizable read commits");
+        if !read_wm.is_empty() {
+            assert_reachable!("a linearizable read commits");
+        }
+        let multi_slot = read_wm.values().any(|wm| *wm >= Some(1));
+        assert_sometimes!(multi_slot, "a committed read observes a multi-slot prefix");
+        if multi_slot {
+            assert_reachable!("a committed read observes a multi-slot prefix");
+        }
+        // A read served after leadership changed hands (the window where a
+        // naive local read goes stale): the first `leader_elected` at a round
+        // different from the initial one marks the change.
+        let mut first_round: Option<u64> = None;
+        let mut leader_change_ms: Option<u64> = None;
+        for e in q.snapshot(EV_LEADER) {
+            let Some(round) = e.u64("round") else {
+                continue;
+            };
+            match first_round {
+                None => first_round = Some(round),
+                Some(r) if round != r => {
+                    leader_change_ms = Some(e.time_ms);
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        let read_after_change =
+            leader_change_ms.is_some_and(|t| read_acks.iter().any(|e| e.time_ms > t));
+        assert_sometimes!(read_after_change, "a read commits after a leader change");
+        if read_after_change {
+            assert_reachable!("a read commits after a leader change");
+        }
+        let retried = read_acks
+            .iter()
+            .any(|e| e.u64("attempts").is_some_and(|a| a > 1));
+        assert_sometimes!(retried, "a read is retried across nodes before committing");
+        if retried {
+            assert_reachable!("a read is retried across nodes before committing");
         }
     }
 }

@@ -11,15 +11,18 @@ use moonpool_sim::{
 };
 use moonpool_transport::NetTransportBuilder;
 
-use paros::{Compact, Paros, Propose, WLTOKEN_PAROS, parse_addr};
+use paros::{Compact, Paros, Propose, Read, WLTOKEN_PAROS, parse_addr};
 
 use crate::{GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
-/// A client that sends a fixed number of proposals and records each outcome.
-/// Each proposal is deduplicated by `(client_id, seq)`; on a redirect (a
-/// non-leader replies `committed = false`) the client cycles to the next node
-/// until the leader holds and commits it (ack-on-commit). This exercises the
-/// redirect path and, under chaos, leader loss and re-election.
+/// A client that interleaves a fixed number of proposals with reads and records
+/// each outcome. Each proposal is deduplicated by `(client_id, seq)`; on a
+/// redirect (a non-leader replies `committed = false`) the client cycles to the
+/// next node until the leader holds and commits it (ack-on-commit). Each write
+/// is followed by a read of the applied watermark, so the recorded history
+/// alternates `W0 R0 W1 R1 …` — the program order the linearizability oracle
+/// linearizes against. This exercises the redirect path and, under chaos,
+/// leader loss and re-election on both paths.
 pub struct ProposeClient;
 
 #[async_trait]
@@ -28,6 +31,11 @@ impl Workload for ProposeClient {
         "propose-client"
     }
 
+    // One sequential client script: the write and read attempt loops are
+    // deliberately the same shape (cycle-on-redirect, one deadline), and the
+    // strict `W0 R0 W1 R1 …` alternation the oracle linearizes against is
+    // easiest to audit as one straight-line function.
+    #[allow(clippy::too_many_lines)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
         if servers.is_empty() {
@@ -59,6 +67,7 @@ impl Workload for ProposeClient {
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         let n = clients.len();
         let mut acknowledged: u32 = 0;
+        let mut reads_acked: u32 = 0;
         // Highest slot this client has seen committed, the compaction watermark it
         // hands to every node (playing the application that owns compaction).
         let mut max_slot: Option<u64> = None;
@@ -103,9 +112,14 @@ impl Workload for ProposeClient {
 
             if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
-                tracing::info!(seq_id = seq, "client_acknowledged");
+                // The ack event carries the committed slot when known (the
+                // `Chosen` dedup-retry path acks without one); the
+                // linearizability oracle only constrains slot-carrying acks.
                 if let Some(s) = slot {
+                    tracing::info!(seq_id = seq, slot = s, "client_acknowledged");
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
+                } else {
+                    tracing::info!(seq_id = seq, "client_acknowledged");
                 }
                 // Leader-driven truncation: tell the leader the highest slot this
                 // client has seen chosen; it decides a `Truncate` control command
@@ -125,6 +139,56 @@ impl Workload for ProposeClient {
                 tracing::info!(seq_id = seq, "client_failed");
             }
 
+            // Read `seq`, after write `seq`'s terminal event (program order: the
+            // oracle derives real-time precedence from this alternation). Same
+            // redirect-cycling shape as the write, bounded by the same deadline.
+            tracing::info!(seq_id = seq, "client_read_issued");
+            let read_attempt = async {
+                let mut target = usize::try_from(seq).unwrap_or(0) % n;
+                let mut attempts: u64 = 0;
+                loop {
+                    attempts += 1;
+                    let request = Read {
+                        client: client_id,
+                        seq,
+                    };
+                    if let Ok(ack) = clients[target].read.get_reply(request).await {
+                        assert_always!(ack.seq == seq, "read ack echoes the request it answered");
+                        if ack.committed {
+                            break (ack.read_index, attempts);
+                        }
+                    }
+                    target = (target + 1) % n;
+                    time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                }
+            };
+            let read_outcome: Option<(Option<u64>, u64)> = tokio::select! {
+                v = read_attempt => Some(v),
+                () = shutdown.cancelled() => None,
+                _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
+            };
+            match read_outcome {
+                // The ack event carries the observed watermark; an absent
+                // `read_index` field is the empty applied prefix (`None`), which
+                // the oracle orders below `Some(0)`.
+                Some((Some(read_index), attempts)) => {
+                    reads_acked += 1;
+                    tracing::info!(
+                        seq_id = seq,
+                        read_index,
+                        attempts,
+                        "client_read_acknowledged"
+                    );
+                }
+                Some((None, attempts)) => {
+                    reads_acked += 1;
+                    tracing::info!(seq_id = seq, attempts, "client_read_acknowledged");
+                }
+                None => {
+                    tracing::info!(seq_id = seq, "client_read_failed");
+                }
+            }
+
             // A small gap so node ticks interleave and the timeline spreads out.
             time.sleep(Duration::from_millis(GAP_MS)).await.ok();
         }
@@ -134,6 +198,10 @@ impl Workload for ProposeClient {
         assert_sometimes!(
             acknowledged > 0,
             "a client run acknowledges at least one committed proposal"
+        );
+        assert_sometimes!(
+            reads_acked > 0,
+            "a client run commits at least one linearizable read"
         );
 
         // Settle / quiescence window. The single workload returning is what
