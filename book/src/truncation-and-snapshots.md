@@ -95,7 +95,7 @@ sequenceDiagram
     Note over P: serve_catchup: those slots are truncated —<br/>a CatchUpResponse cannot replay them
     end
     rect rgba(70, 170, 110, 0.25)
-    Note over P: record a snapshot offer (to, chosen_index, ballot);<br/>the driver attaches NodeStorage::snapshot() bytes
+    Note over P: record a snapshot offer (to, chosen_index, ballot),<br/>and the driver attaches NodeStorage::snapshot() bytes
     P->>B: InstallSnapshot{chosen_index, ballot, opaque bytes}
     Note over B: jump chosen_index, adopt max(promise, ballot),<br/>compact to the snapshot, install the bytes
     end
