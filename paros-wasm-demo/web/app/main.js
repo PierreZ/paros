@@ -24,12 +24,22 @@ const statusEl = document.getElementById('status');
 const rawEl = document.getElementById('raw');
 const rootEl = document.getElementById('paros-root');
 
+// Posts the content height to the parent once real content exists (no-op outside
+// ?embed). Gated: the load event and early timers fire while the document is still
+// the bare ~50px status line — posting that height squashes the iframe to the
+// parent's 200px floor until the synchronous wasm run finally unblocks this frame.
+let reportHeight = () => {};
+
 if (EMBED) {
   document.body.classList.add('embed');
   // report our content height to the parent page so it can auto-size the iframe.
   // Do NOT rename the message: iframe-autosize.js listens for `paros-resize`.
   if (window.parent !== window) {
-    const postHeight = () => window.parent.postMessage({ type: 'paros-resize', height: document.body.offsetHeight }, '*');
+    let ready = false;
+    const postHeight = () => {
+      if (ready) window.parent.postMessage({ type: 'paros-resize', height: document.body.offsetHeight }, '*');
+    };
+    reportHeight = () => { ready = true; postHeight(); };
     if ('ResizeObserver' in window) new ResizeObserver(postHeight).observe(document.body);
     window.addEventListener('load', postHeight);
     // a couple of delayed posts to catch async layout (fonts, wasm-driven render)
@@ -44,6 +54,7 @@ function runOne(s) {
   if (DUMP) {
     if (rawEl) { rawEl.style.display = 'block'; rawEl.textContent = json; }
     if (statusEl) statusEl.textContent = `dumped seed ${s}`;
+    reportHeight();
     return null;
   }
   return JSON.parse(json);
@@ -76,9 +87,11 @@ init()
     if (!run) return; // ?dump path
     if (statusEl) statusEl.style.display = 'none';
     boot(run);
+    reportHeight();
   })
   .catch((e) => {
     if (statusEl) statusEl.textContent = 'failed to load wasm: ' + e;
+    reportHeight();
     // eslint-disable-next-line no-console
     console.error(e);
   });

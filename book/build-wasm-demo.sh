@@ -12,10 +12,12 @@ wasm-bindgen --target web --out-dir paros-wasm-demo/web/pkg \
 
 # Best-effort: stage the IBM Plex Sans/Mono woff2 the design system asks for, so
 # the widget renders in Plex rather than the system fallback. Never fatal — if the
-# fonts can't be found, tokens.js falls back to system-ui / ui-monospace and the
-# demo still builds and works. Set PLEX_WOFF2_DIR to a directory of *.woff2 to use
-# your own; otherwise we try nixpkgs#ibm-plex (which ships woff2 under a
-# fonts/ibm-plex/*/woff2/ tree). See paros-wasm-demo/README.md.
+# fonts can't be staged, the @font-face block is stripped from the *staged*
+# index.html (the plex-fonts markers) so the book never 404s, and the CSS stacks
+# fall back to system-ui / ui-monospace. Set PLEX_WOFF2_DIR to a directory of
+# *.woff2 to use your own; otherwise we use nixpkgs#ibm-plex, which ships OTF
+# only, so each face is converted with woff2_compress (nixpkgs#woff2).
+FONTS_OK=1
 stage_fonts() {
   local out="paros-wasm-demo/web/app/fonts"
   mkdir -p "$out"
@@ -26,16 +28,26 @@ stage_fonts() {
     [ -n "$plex" ] && src="$plex"
   fi
   local want=(IBMPlexSans-Regular IBMPlexSans-Bold IBMPlexMono-Regular IBMPlexMono-Bold)
-  local ok=1
   for f in "${want[@]}"; do
+    [ -s "$out/${f}.woff2" ] && continue # already staged by an earlier build
     if [ -n "$src" ]; then
       local found
       found="$(find -L "$src" -name "${f}.woff2" 2>/dev/null | head -n1 || true)"
       if [ -n "$found" ]; then cp "$found" "$out/${f}.woff2"; continue; fi
+      # OTF-only source (nixpkgs#ibm-plex): copy out of the read-only store and convert
+      found="$(find -L "$src" -name "${f}.otf" 2>/dev/null | head -n1 || true)"
+      if [ -n "$found" ] && command -v nix >/dev/null 2>&1 \
+        && cp "$found" "$out/${f}.otf" 2>/dev/null \
+        && nix shell nixpkgs#woff2 -c woff2_compress "$out/${f}.otf" >/dev/null 2>&1 \
+        && [ -s "$out/${f}.woff2" ]; then
+        rm -f "$out/${f}.otf"
+        continue
+      fi
+      rm -f "$out/${f}.otf"
     fi
-    ok=0
+    FONTS_OK=0
   done
-  if [ "$ok" = 1 ]; then echo "staged IBM Plex woff2."; else
+  if [ "$FONTS_OK" = 1 ]; then echo "staged IBM Plex woff2."; else
     echo "note: IBM Plex woff2 not staged — using system-ui / ui-monospace fallback."; fi
 }
 stage_fonts
@@ -46,5 +58,9 @@ mkdir -p book/src/wasm-demo
 cp paros-wasm-demo/web/index.html book/src/wasm-demo/index.html
 cp -r paros-wasm-demo/web/app book/src/wasm-demo/app
 cp -r paros-wasm-demo/web/pkg book/src/wasm-demo/pkg
+if [ "$FONTS_OK" != 1 ]; then
+  # no fonts staged: drop the @font-face block so the book page loads without 404s
+  sed -i '/plex-fonts-begin/,/plex-fonts-end/d' book/src/wasm-demo/index.html
+fi
 
 echo "done. book/src/wasm-demo/ ready for mdbook build."

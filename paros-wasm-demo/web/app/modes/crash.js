@@ -46,10 +46,11 @@ export const crash = {
     const laneY = (i) => padT + laneH * (i + 0.5);
     const ok = promisesIntact(run);
 
-    // header
-    g.appendChild(el('text', { x: padL, y: 30, class: 'mono', 'font-size': 13, 'font-weight': 700, fill: C.text }, `seed ${run.seed} — crash & recovery timeline`));
-    g.appendChild(el('text', { x: padL, y: 50, 'font-size': 12, 'font-weight': 700, fill: ok ? PHASE.chosen : PHASE.nack }, ok ? '✓ recovery oracle: no promise lowered across any restart' : '✗ recovery oracle VIOLATED'));
-    g.appendChild(el('text', { x: padL, y: 70, 'font-size': 11, fill: C.muted }, '⚡ crash at seam   ↻ restart   ▬ down (volatile lost)   ━ durable (survives)   ◆ chosen'));
+    // header (starts at the lane-label gutter, x=12, so the narrow mobile view
+    // shows it before any swipe; the oracle verdict is colour + words, no glyph)
+    g.appendChild(el('text', { x: 12, y: 30, class: 'mono', 'font-size': 13, 'font-weight': 700, fill: C.text }, `seed ${run.seed} — crash & recovery timeline`));
+    g.appendChild(el('text', { x: 12, y: 50, 'font-size': 12, 'font-weight': 700, fill: ok ? PHASE.chosen : PHASE.nack }, ok ? 'recovery oracle: no promise lowered across any restart' : 'recovery oracle VIOLATED: a promise went backwards'));
+    legend(g, 12, 68);
 
     // time axis + gridlines
     const axisY = h - padB;
@@ -96,12 +97,21 @@ export const crash = {
         }
       }
 
-      // crash ⚡ (seam line + tag) and restart ↻
-      for (const c of run.crashes) if (c.node === i) {
+      // crash (seam line + tag) and restart. Tags of crashes that land close in
+      // time would overprint each other, so each tag takes the first of three
+      // stacked rows whose previous tag it does not overlap.
+      const crashes = run.crashes.filter((c) => c.node === i).sort((a, b) => a.time_ms - b.time_ms);
+      const tagRowEnd = [-Infinity, -Infinity, -Infinity];
+      for (const c of crashes) {
         const x = xOf(c.time_ms);
         g.appendChild(el('line', { x1: x, y1: y - 20, x2: x, y2: y + 16, stroke: PHASE.nack, 'stroke-opacity': 0.5, 'stroke-width': 1, 'stroke-dasharray': '2 2' }));
         g.appendChild(badgeCrash(x, y + 1));
-        g.appendChild(el('text', { x, y: y - 24, 'text-anchor': 'middle', 'font-size': 9, fill: '#f0b6b3' }, SEAM_TAG[c.seam] || c.seam));
+        const tag = SEAM_TAG[c.seam] || c.seam;
+        const half = tag.length * 5.4 / 2; // ~9px type
+        let row = tagRowEnd.findIndex((end) => x - half > end);
+        if (row < 0) row = tagRowEnd.indexOf(Math.min(...tagRowEnd));
+        tagRowEnd[row] = x + half;
+        g.appendChild(el('text', { x, y: y - 24 - row * 11, 'text-anchor': 'middle', 'font-size': 9, fill: '#f0b6b3' }, tag));
       }
       for (const r of run.restarts) if (r.node === i) {
         g.appendChild(badgeReboot(xOf(r.time_ms), y + 2));
@@ -153,3 +163,22 @@ export const crash = {
     return rows;
   },
 };
+
+// The legend row, built from the same vector marks the timeline uses — never font
+// glyphs (svg.js doctrine: a machine without an emoji font must not show tofu).
+function legend(g, x, y) {
+  const label = (lx, text) => {
+    g.appendChild(el('text', { x: lx, y: y + 4, 'font-size': 11, fill: C.muted }, text));
+    return lx + text.length * 6 + 26; // ~6px/char at 11px + gap to the next mark
+  };
+  g.appendChild(badgeCrash(x + 4, y));
+  x = label(x + 12, 'crash at seam');
+  g.appendChild(badgeReboot(x + 5, y));
+  x = label(x + 14, 'restart');
+  g.appendChild(el('rect', { x, y: y - 5, width: 16, height: 10, fill: PHASE.nack, 'fill-opacity': 0.14, stroke: PHASE.nack, 'stroke-opacity': 0.5, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+  x = label(x + 22, 'down (volatile lost)');
+  g.appendChild(el('line', { x1: x, y1: y, x2: x + 16, y2: y, stroke: '#238636', 'stroke-width': 3 }));
+  x = label(x + 22, 'durable (survives)');
+  g.appendChild(el('line', { x1: x + 2, y1: y - 5, x2: x + 2, y2: y + 5, stroke: PHASE.chosen, 'stroke-width': 2 }));
+  label(x + 10, 'chosen');
+}
