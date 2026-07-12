@@ -28,9 +28,10 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, NoGapsOracle, ProgressOracle,
-    ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
-    SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
+    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle,
+    ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle,
+    RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle,
+    build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -88,7 +89,13 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// below a peer's compaction floor, and instead of stalling it recovers through
 /// paros via an `InstallSnapshot` (the [`oracle::SnapshotOracle`] coverage gate
 /// fires and the [`oracle::ConvergenceOracle`] — now with no below-floor exemption
-/// — confirms it converges). Each replays clean via [`run_seed`].
+/// — confirms it converges). Seed `286172402316494352` is where the
+/// [`oracle::LinearizabilityOracle`] first went red: a *naive* leader read (serve
+/// the local `chosen_index` whenever `role == Leader`, no confirmation round)
+/// returned a watermark below a write the client had already seen acknowledged —
+/// a stale leader belief served as a committed read — until the read-index
+/// protocol (heartbeat-ack quorum round + the fresh-leader read floor) landed.
+/// Each replays clean via [`run_seed`].
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
@@ -97,6 +104,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     5,
     18_153_519_926_117_387_038,
     11_316_277_997_507_784_505,
+    286_172_402_316_494_352,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
@@ -159,6 +167,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(RecoveryRecorder::new(recovery.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(LinearizabilityOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
@@ -198,6 +207,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
+        .invariant(LinearizabilityOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)

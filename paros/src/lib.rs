@@ -18,14 +18,15 @@ pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER,
     EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, WLTOKEN_PAROS,
-    is_seam_crash, parse_addr, run_node,
+    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck,
+    WLTOKEN_PAROS, is_seam_crash, parse_addr, run_node,
 };
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, Message, MustSync,
-    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, Ready, Slot, Storage, Value, WriteOp,
+    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready,
+    Slot, Storage, Value, WriteOp,
 };
 
 #[cfg(test)]
@@ -109,6 +110,12 @@ mod tests {
                 from: NodeId(0),
                 ballot,
                 commit: Slot(2),
+                seq: 9,
+            },
+            Message::HeartbeatAck {
+                from: NodeId(1),
+                ballot,
+                seq: 9,
             },
         ]
     }

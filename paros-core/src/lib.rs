@@ -34,7 +34,7 @@ mod types;
 mod write;
 
 pub use message::Message;
-pub use node::{NodeRole, ProposeResult, RawNode};
+pub use node::{NodeRole, ProposeResult, RawNode, ReadIndexResult, ReadState};
 pub use ready::Ready;
 pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;

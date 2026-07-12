@@ -183,7 +183,8 @@ uses of piggybacking. Here is the list, and where paros stands:
 | Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up, *and* snapshot transfer once it falls below the floor |
 | No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | not yet: paros re-proposes recovered in-flight slots instead |
 | Command batching | pack many client commands into one slot | not yet |
-| Leader leases | serve linearizable reads locally for a lease period | not yet |
+| Read-index reads | linearizable reads with no log write, one heartbeat-ack round | yes: see [Why reads are not free](linearizable-reads.md) |
+| Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | not yet |
 | Truncation and snapshots | discard the applied log prefix; snapshot the state | yes: a leader-decided `Truncate` control command (one cluster-wide floor), plus opaque snapshot transfer for below-floor recovery — see [Truncation and snapshot restore](truncation-and-snapshots.md) |
 
 The "not yet" rows are the roadmap past this part: they are what turns a correct

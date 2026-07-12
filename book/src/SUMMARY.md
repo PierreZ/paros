@@ -16,3 +16,4 @@
 - [Watch it live](multi-paxos.md)
 - [Crash and recovery: what survives](crash-and-recovery.md)
 - [Truncation and snapshot restore](truncation-and-snapshots.md)
+- [Why reads are not free](linearizable-reads.md)

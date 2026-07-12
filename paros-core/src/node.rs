@@ -20,6 +20,12 @@ const HEARTBEAT_TICKS: u64 = 1;
 /// backlog is drained over several rounds rather than one unbounded message.
 const CATCHUP_BATCH: usize = 64;
 
+/// Ticks a pending read-index round may wait for its ack quorum before the
+/// leader garbage-collects it (lost acks, an unreachable quorum). Dropped
+/// silently: the round carries no durable obligation, and the driver owns the
+/// client reply (its retry sweep answers first, well inside this window).
+const READ_ROUND_TTL_TICKS: u64 = 20;
+
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -48,6 +54,50 @@ pub enum ProposeResult {
     Duplicate(Slot),
     /// Already chosen and applied; the driver acks immediately (idempotent).
     Chosen,
+}
+
+/// The outcome of [`RawNode::read_index`], telling the driver how to answer the
+/// reading client: redirect on `NotLeader`, or park the reply and wait for the
+/// matching [`ReadState`] to surface via [`Ready::read_states`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadIndexResult {
+    /// This node is not the leader; the client should retry the hinted node
+    /// (`None` if leadership is currently unknown).
+    NotLeader(Option<NodeId>),
+    /// The round is running; a [`ReadState`] with this call's `ctx` surfaces via
+    /// [`Ready::read_states`] once confirmed (possibly in the very next batch).
+    /// A round that cannot confirm (leadership lost, acks lost) surfaces
+    /// nothing — the driver owns the client-facing timeout.
+    Pending,
+}
+
+/// A confirmed read-index round, surfaced via [`Ready::read_states`]: at the
+/// moment the round began this node was leader (a heartbeat-ack quorum at its
+/// ballot proved it afterwards) and `index` was covered by the applied prefix
+/// by confirmation time — the linearization point a read at `ctx` observes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadState {
+    /// The driver-supplied correlation token from [`RawNode::read_index`].
+    pub ctx: u64,
+    /// The read index: the applied watermark the read observes (`None` = empty
+    /// prefix). The node's chosen index is at or past it on confirmation.
+    pub index: Option<Slot>,
+}
+
+/// Volatile state of one in-flight read-index round (leader only).
+struct ReadRound {
+    /// The driver-supplied correlation token.
+    ctx: u64,
+    /// The captured read index: `max(chosen_index, read_floor)` at capture time.
+    index: Option<Slot>,
+    /// The beat sequence an ack must answer (at or after) to credit this round:
+    /// the heartbeat broadcast when the round began. Later beats' acks count
+    /// too, so one ack can confirm every older pending round.
+    required_seq: u64,
+    /// Peers (incl. self) that acked a qualifying beat at the round's ballot.
+    acked_by: BTreeSet<NodeId>,
+    /// Tick the round was created on, for TTL garbage collection.
+    created_tick: u64,
 }
 
 /// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
@@ -116,6 +166,9 @@ pub struct RawNode {
     /// request), but holds no application state, so the driver attaches the opaque
     /// snapshot bytes (from storage) and sends the [`Message::InstallSnapshot`].
     pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
+    /// Read-index rounds confirmed this batch, drained via
+    /// [`Ready::read_states`] after the batch's committed entries are applied.
+    pending_read_states: Vec<ReadState>,
 
     /// Logical clock, advanced by [`RawNode::tick`].
     tick_count: u64,
@@ -142,6 +195,23 @@ pub struct RawNode {
     heartbeat_elapsed: u64,
     /// Fixed heartbeat interval in ticks (not randomized).
     heartbeat_timeout: u64,
+    /// Monotone per-ballot beat sequence, bumped at each broadcast
+    /// ([`RawNode::broadcast_heartbeat`]); reset on winning an election. Acks
+    /// echo it, so a read round knows which beats prove leadership *after* it
+    /// began.
+    heartbeat_seq: u64,
+
+    // ---- linearizable reads (all volatile: a read round carries no durable
+    // ---- obligation — losing one merely fails an RPC whose reply promise dies
+    // ---- with the process, and the client retries) ----
+    /// The fresh-leader read fence: the highest slot the winning prepare quorum
+    /// reported (`next_slot - 1` at election). Everything a previous leader may
+    /// have acked sits at or below it (quorum intersection + the Prepare floor
+    /// guard), so no read round confirms until the chosen prefix covers it —
+    /// Raft's "no-op at term start" problem, solved by waiting instead.
+    read_floor: Option<Slot>,
+    /// In-flight read-index rounds, in creation order (leader only).
+    read_rounds: Vec<ReadRound>,
 
     // ---- proposer (multi-decree) ----
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
@@ -221,6 +291,7 @@ impl RawNode {
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
             pending_snapshot_offers: Vec::new(),
+            pending_read_states: Vec::new(),
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,
@@ -230,6 +301,9 @@ impl RawNode {
             needs_election_timeout: true,
             heartbeat_elapsed: 0,
             heartbeat_timeout: HEARTBEAT_TICKS,
+            heartbeat_seq: 0,
+            read_floor: None,
+            read_rounds: Vec::new(),
             proposer: BTreeMap::new(),
             election: None,
             next_slot,
@@ -282,7 +356,11 @@ impl RawNode {
                 from,
                 ballot,
                 commit,
-            } => self.on_heartbeat(from, ballot, commit),
+                seq,
+            } => self.on_heartbeat(from, ballot, commit, seq),
+            Message::HeartbeatAck { from, ballot, seq } => {
+                self.on_heartbeat_ack(from, ballot, seq);
+            }
         }
     }
 
@@ -325,6 +403,39 @@ impl RawNode {
         self.next_slot = Slot(slot.0 + 1);
         self.start_accept_round(slot, Command::Control(control));
         ProposeResult::Accepted(slot)
+    }
+
+    /// Leader entry point for a **linearizable read**: capture the current
+    /// applied watermark as the read index and start a heartbeat-ack quorum
+    /// round to confirm this node is still leader — no log write. The confirmed
+    /// round surfaces as a [`ReadState`] carrying `ctx` via
+    /// [`Ready::read_states`], once a quorum has acked a beat broadcast at or
+    /// after this call **and** the chosen prefix covers the captured index
+    /// (the fresh-leader fence, see the `read_floor` field). A non-leader
+    /// returns [`ReadIndexResult::NotLeader`] with a redirect hint.
+    pub fn read_index(&mut self, ctx: u64) -> ReadIndexResult {
+        if self.role != NodeRole::Leader {
+            return ReadIndexResult::NotLeader(self.leader);
+        }
+        // The fence dominates: a fresh leader must not serve below the highest
+        // slot its prepare quorum reported, even while its own chosen prefix
+        // still lags the recovered suffix.
+        let index = self.hard_state.chosen_index.max(self.read_floor);
+        // Beat immediately (rather than waiting for the next tick) so the
+        // round's confirmation costs one network round trip, not a tick.
+        self.broadcast_heartbeat();
+        let mut acked_by = BTreeSet::new();
+        acked_by.insert(self.config.id);
+        self.read_rounds.push(ReadRound {
+            ctx,
+            index,
+            required_seq: self.heartbeat_seq,
+            acked_by,
+            created_tick: self.tick_count,
+        });
+        // A single-node cluster is its own quorum: confirm in this same batch.
+        self.try_confirm_reads();
+        ReadIndexResult::Pending
     }
 
     /// Application-driven log compaction: drop every retained slot at or below
@@ -377,8 +488,16 @@ impl RawNode {
                     from: me,
                     ballot: self.ballot,
                     commit,
+                    seq: 0,
                 });
             }
+            // GC read rounds that outlived their TTL (lost acks, an unreachable
+            // quorum). No re-broadcast logic is needed for the live ones: every
+            // leader tick already broadcasts a fresh, higher-seq beat whose acks
+            // confirm all older pending rounds.
+            let now = self.tick_count;
+            self.read_rounds
+                .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
         } else {
             self.election_elapsed += 1;
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
@@ -524,6 +643,14 @@ impl RawNode {
             .keys()
             .next_back()
             .map_or(self.first_unchosen(), |s| Slot(s.0 + 1));
+        // The fresh-leader read fence: nothing decided under an earlier ballot
+        // can sit above `next_slot - 1` (the prepare quorum reported it all), so
+        // reads wait until the chosen prefix covers that slot. Beat seqs are
+        // per-ballot; cross-ballot ack confusion is impossible because an ack
+        // must echo the current ballot to count.
+        self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
+        self.heartbeat_seq = 0;
+        self.read_rounds.clear();
     }
 
     // ---- acceptor ---------------------------------------------------------
@@ -667,18 +794,29 @@ impl RawNode {
         self.mark_chosen(slot, command, ballot);
     }
 
-    /// Leader self-beat or a follower receiving a peer beat.
-    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot) {
+    /// Broadcast one leader beat at a fresh, monotonically increasing
+    /// per-ballot sequence number. Both the tick self-trigger and
+    /// [`RawNode::read_index`] beat through here, so every broadcast beat
+    /// carries a seq an ack can be matched against.
+    fn broadcast_heartbeat(&mut self) {
+        self.heartbeat_seq += 1;
+        let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
+        self.broadcast(&Message::Heartbeat {
+            from: self.config.id,
+            ballot: self.ballot,
+            commit,
+            seq: self.heartbeat_seq,
+        });
+    }
+
+    /// Leader self-beat or a follower receiving a peer beat. The self event's
+    /// `seq` is ignored (the real seq is assigned at broadcast).
+    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot, seq: u64) {
         let me = self.config.id;
         if from == me {
             // Leader self-trigger: broadcast the beat and re-send un-acked
             // `Accept`s so lagging peers catch up.
-            let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
-            self.broadcast(&Message::Heartbeat {
-                from: me,
-                ballot: self.ballot,
-                commit,
-            });
+            self.broadcast_heartbeat();
             let pending: Vec<(Slot, Ballot, Command)> = self
                 .proposer
                 .iter()
@@ -706,6 +844,20 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
+            // Ack the beat, echoing `(ballot, seq)`: the leader counts these
+            // toward read-index confirmation quorums. Below-promise beats fall
+            // through unacked, so a deposed leader's read rounds starve instead
+            // of confirming. No durable write precedes the ack — it claims only
+            // "my promise is at or below `ballot` right now", which the guard
+            // above just checked and promise monotonicity preserves.
+            self.pending_messages.push((
+                from,
+                Message::HeartbeatAck {
+                    from: me,
+                    ballot,
+                    seq,
+                },
+            ));
         }
         // Commit-replay catch-up reconciles the sender's advertised contiguous
         // chosen prefix (`commit`) against ours, in **both** directions. It is
@@ -737,6 +889,48 @@ impl RawNode {
             // nodes pull.
             Some(ci) if commit < ci => self.serve_catchup(from, commit),
             _ => {}
+        }
+    }
+
+    /// Leader: a peer answered a beat at `(ballot, seq)`. Credit every read
+    /// round the ack qualifies for: same ballot as ours, and a seq at or after
+    /// the round's required beat — an ack to an *earlier* beat proves nothing
+    /// about leadership after the round began, so it never counts. Stale or
+    /// cross-ballot acks are dropped whole.
+    fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
+        if self.role != NodeRole::Leader || ballot != self.ballot {
+            return;
+        }
+        for round in &mut self.read_rounds {
+            if seq >= round.required_seq {
+                round.acked_by.insert(from);
+            }
+        }
+        self.try_confirm_reads();
+    }
+
+    /// Confirm the eligible prefix of pending read rounds, in creation order: a
+    /// round resolves once a quorum (incl. self) acked a qualifying beat AND the
+    /// chosen prefix covers the round's index (the fresh-leader fence resolves
+    /// here, via [`RawNode::advance_chosen_index`]). Confirmability is monotone
+    /// in creation order — a later round's index and required seq are both at or
+    /// above an earlier one's — so scanning the front suffices.
+    fn try_confirm_reads(&mut self) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        let quorum = self.quorum();
+        while let Some(round) = self.read_rounds.first() {
+            let confirmed =
+                round.acked_by.len() >= quorum && self.hard_state.chosen_index >= round.index;
+            if !confirmed {
+                break;
+            }
+            let round = self.read_rounds.remove(0);
+            self.pending_read_states.push(ReadState {
+                ctx: round.ctx,
+                index: round.index,
+            });
         }
     }
 
@@ -958,6 +1152,10 @@ impl RawNode {
         self.leader = leader;
         self.election = None;
         self.proposer.clear();
+        // Unconfirmed read rounds die with the leadership; already-confirmed
+        // `pending_read_states` stay — they were valid at their linearization
+        // point and the driver drains them this same batch.
+        self.read_rounds.clear();
         self.election_elapsed = 0;
         self.needs_election_timeout = true;
     }
@@ -1034,6 +1232,9 @@ impl RawNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
+        // A read round waiting on the apply condition (`chosen_index >= index`,
+        // the fresh-leader fence) resolves exactly here. No-op on a follower.
+        self.try_confirm_reads();
     }
 
     // ---- accessors --------------------------------------------------------
@@ -1119,11 +1320,16 @@ impl RawNode {
         &self.pending_snapshot_offers
     }
 
+    pub(crate) fn pending_read_states(&self) -> &[ReadState] {
+        &self.pending_read_states
+    }
+
     pub(crate) fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_committed.clear();
         self.pending_snapshot_offers.clear();
+        self.pending_read_states.clear();
     }
 }
 
