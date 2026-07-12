@@ -161,5 +161,26 @@ pub enum Message {
         ballot: Ballot,
         /// The leader's highest contiguous chosen slot.
         commit: Slot,
+        /// Monotone per-ballot beat sequence number, assigned at broadcast
+        /// (`0` on the tick-injected self event, which never leaves the node).
+        /// Echoed by [`Message::HeartbeatAck`] so the leader can tell which
+        /// beat an ack answers — the freshness a read-index round counts.
+        seq: u64,
+    },
+
+    /// Follower → leader: acknowledges a [`Message::Heartbeat`] whose ballot the
+    /// follower accepts (its promise is at or below it), echoing `(ballot, seq)`.
+    /// A quorum of acks at the leader's current ballot, for beats broadcast at or
+    /// after a read-index round began, proves the node was still leader after the
+    /// read was captured — the no-log-write leadership confirmation linearizable
+    /// reads need. Carries no durable obligation: the ack claims only "my promise
+    /// is at or below `ballot` right now".
+    HeartbeatAck {
+        /// The acknowledging follower.
+        from: NodeId,
+        /// The heartbeat's ballot, echoed.
+        ballot: Ballot,
+        /// The heartbeat's beat sequence number, echoed.
+        seq: u64,
     },
 }

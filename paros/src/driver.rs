@@ -23,7 +23,7 @@ use moonpool_core::{
 use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
 use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
-    RawNode, Slot, Value, WriteOp,
+    RawNode, ReadIndexResult, ReadState, Slot, Value, WriteOp,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +38,12 @@ pub const WLTOKEN_PAROS: u32 = 4;
 
 /// How often a node advances its logical clock.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Ticks a parked read reply may wait for its read-index confirmation before
+/// the driver answers a retry redirect (500 ms — well inside the sim client's
+/// 1000 ms deadline, and inside the core's own round TTL, so a late core
+/// confirmation just finds the ctx gone and is ignored).
+const READ_RETRY_TICKS: u64 = 10;
 
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,
@@ -311,6 +317,7 @@ fn message_kind(m: &Message) -> &'static str {
         Message::InstallSnapshot { .. } => "install_snapshot",
         Message::CheckLeader { .. } => "check_leader",
         Message::Heartbeat { .. } => "heartbeat",
+        Message::HeartbeatAck { .. } => "heartbeat_ack",
         _ => "unknown",
     }
 }
@@ -344,6 +351,7 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             from,
             ballot,
             commit,
+            ..
         } => Some((*from, *ballot, *commit)),
         Message::InstallSnapshot {
             from,
@@ -355,6 +363,16 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
     }
 }
 
+/// The client replies this node is holding open: proposals wait on their
+/// slot's commit (ack-on-commit), reads wait on their read-index round's
+/// confirmation `(client seq, tick parked at, the held reply)`, keyed by the
+/// core's `ctx` token.
+#[derive(Default)]
+struct ClientWaiters {
+    pending: BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
+    pending_reads: BTreeMap<u64, (u64, u64, ReplyPromise<ReadAck>)>,
+}
+
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
@@ -364,7 +382,7 @@ fn drain_ready<P, S, C>(
     transport: &Arc<NetTransport<P>>,
     addrs: &BTreeMap<NodeId, NetworkAddress>,
     self_id: u64,
-    pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
+    waiters: &mut ClientWaiters,
     crash: &C,
 ) -> SimulationResult<()>
 where
@@ -382,6 +400,7 @@ where
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
+    let read_states: Vec<ReadState> = ready.read_states().to_vec();
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
@@ -468,8 +487,8 @@ where
         if matches!(command, Command::Control(_)) {
             continue;
         }
-        if let Some(waiters) = pending.remove(slot) {
-            for (seq, w) in waiters {
+        if let Some(replies) = waiters.pending.remove(slot) {
+            for (seq, w) in replies {
                 w.send(ProposeAck {
                     seq,
                     leader: Some(self_id),
@@ -477,6 +496,21 @@ where
                     slot: Some(slot.0),
                 });
             }
+        }
+    }
+
+    // 3b. Answer confirmed reads — after the apply loop, so the applied prefix
+    //     this same batch carried is covered by what the read observes. The ack
+    //     reports the *serve-time* chosen index (at or past the confirmed read
+    //     index): that is the local state actually served.
+    for state in &read_states {
+        if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
+            waiter.send(ReadAck {
+                seq,
+                leader: Some(self_id),
+                committed: true,
+                read_index: node.hard_state().chosen_index.map(|s| s.0),
+            });
         }
     }
 
@@ -658,7 +692,7 @@ fn maintain<P: Providers>(
     node: &mut RawNode,
     providers: &P,
     last_role: &mut NodeRole,
-    pending: &mut BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
+    waiters: &mut ClientWaiters,
     self_id: u64,
 ) {
     if node.needs_election_timeout() {
@@ -672,7 +706,19 @@ fn maintain<P: Providers>(
             "leader_elected"
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
-        pending.clear();
+        waiters.pending.clear();
+        // Parked reads have no slot whose commit could ever answer them:
+        // redirect explicitly so the client retries the new leader now rather
+        // than burning its deadline (writes time out instead, on purpose —
+        // their slot may still commit under the new leader).
+        for (_, (seq, _, waiter)) in std::mem::take(&mut waiters.pending_reads) {
+            waiter.send(ReadAck {
+                seq,
+                leader: node.leader().map(|n| n.0),
+                committed: false,
+                read_index: None,
+            });
+        }
     }
     *last_role = role;
 }
@@ -784,8 +830,10 @@ where
 
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
-    // Client replies held until their slot commits (ack-on-commit), keyed by slot.
-    let mut pending: BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>> = BTreeMap::new();
+    // The held client replies: proposals keyed by slot (ack-on-commit), reads
+    // keyed by their read-index ctx.
+    let mut waiters = ClientWaiters::default();
+    let mut next_read_ctx: u64 = 0;
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     node.set_election_timeout(draw_election_timeout(&providers));
     let mut last_role = node.role();
@@ -805,37 +853,35 @@ where
                         reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
-                        pending.entry(slot).or_default().push((seq, reply));
+                        waiters.pending.entry(slot).or_default().push((seq, reply));
                     }
                     ProposeResult::Chosen => {
                         // Already applied before this call; the slot is not tracked here.
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
-                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((req, reply)) = svc.read.recv() => {
-                // A client read, served straight off the local applied prefix
-                // whenever this node believes it leads. No leadership
-                // confirmation: a deposed or freshly elected leader can serve a
-                // stale watermark here.
+                // A client read via read-index: the leader captures its applied
+                // watermark, confirms it is still leader with a heartbeat-ack
+                // quorum round (no log write), and the reply is parked until the
+                // confirmed `ReadState` surfaces after apply — a deposed or
+                // freshly elected leader can no longer serve a stale watermark.
+                // A non-leader redirects immediately.
                 let seq = req.seq;
-                if node.is_leader() {
-                    reply.send(ReadAck {
-                        seq,
-                        leader: Some(self_id),
-                        committed: true,
-                        read_index: node.hard_state().chosen_index.map(|s| s.0),
-                    });
-                } else {
-                    reply.send(ReadAck {
-                        seq,
-                        leader: node.leader().map(|n| n.0),
-                        committed: false,
-                        read_index: None,
-                    });
+                match node.read_index(next_read_ctx) {
+                    ReadIndexResult::NotLeader(hint) => {
+                        reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
+                    }
+                    ReadIndexResult::Pending => {
+                        waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
+                        next_read_ctx += 1;
+                    }
                 }
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -871,8 +917,8 @@ where
                     );
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
-                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(());
             }
             Some((req, reply)) = svc.compact.recv() => {
@@ -893,15 +939,29 @@ where
                         first_slot: node.first_slot().0,
                     },
                 };
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
-                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
                 ticks += 1;
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut pending, crash)?;
-                maintain(&mut node, &providers, &mut last_role, &mut pending, self_id);
+                // Expire parked reads whose confirmation is overdue (lost acks, a
+                // minority-partitioned leader that never steps down): answer a
+                // retry redirect while the client still has deadline left. A late
+                // core confirmation finds the ctx gone and is ignored.
+                let overdue: Vec<u64> = waiters.pending_reads
+                    .iter()
+                    .filter(|(_, (_, parked_at, _))| ticks.saturating_sub(*parked_at) > READ_RETRY_TICKS)
+                    .map(|(ctx, _)| *ctx)
+                    .collect();
+                for ctx in overdue {
+                    if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
+                        waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
+                    }
+                }
+                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }
             () = shutdown.cancelled() => return Ok(()),

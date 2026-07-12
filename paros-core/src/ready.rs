@@ -2,7 +2,7 @@
 //! enforces "one batch in flight".
 
 use crate::message::Message;
-use crate::node::RawNode;
+use crate::node::{RawNode, ReadState};
 use crate::types::{Ballot, Command, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
 
@@ -25,7 +25,9 @@ use crate::write::{self, MustSync, WriteOp};
 ///    safety violation (a crash could un-promise / un-accept).
 /// 3. **Apply** [`Ready::committed`] to the application state machine — these are
 ///    already chosen *and* durable.
-/// 4. Call [`Ready::advance`] to release the gate and unlock the next batch.
+/// 4. **Answer** [`Ready::read_states`] — *after* step 3, so the applied state a
+///    read serves covers the confirmed read index this same batch carried.
+/// 5. Call [`Ready::advance`] to release the gate and unlock the next batch.
 ///
 /// # Async drivers
 ///
@@ -90,6 +92,17 @@ impl<'a> Ready<'a> {
     #[must_use]
     pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
         self.node.pending_snapshot_offers()
+    }
+
+    /// Read-index rounds confirmed this batch: each [`ReadState`] certifies that
+    /// this node was still leader after the read at `ctx` began (a heartbeat-ack
+    /// quorum proved it) and that the applied prefix covers `index`. Answer them
+    /// **after** applying [`Ready::committed`] (step 4) — the same batch may
+    /// carry the very entries that satisfied the read's index. Consume-once:
+    /// cleared on [`Ready::advance`], like every bucket.
+    #[must_use]
+    pub fn read_states(&self) -> &[ReadState] {
+        self.node.pending_read_states()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

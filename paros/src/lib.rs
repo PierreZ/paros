@@ -25,7 +25,8 @@ pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, Message, MustSync,
-    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, Ready, Slot, Storage, Value, WriteOp,
+    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready,
+    Slot, Storage, Value, WriteOp,
 };
 
 #[cfg(test)]
@@ -109,6 +110,12 @@ mod tests {
                 from: NodeId(0),
                 ballot,
                 commit: Slot(2),
+                seq: 9,
+            },
+            Message::HeartbeatAck {
+                from: NodeId(1),
+                ballot,
+                seq: 9,
             },
         ]
     }
