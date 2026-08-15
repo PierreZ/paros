@@ -159,8 +159,12 @@ pub enum Message {
         from: NodeId,
         /// The leader's current ballot (lets a follower adopt or refuse it).
         ballot: Ballot,
-        /// The leader's highest contiguous chosen slot.
-        commit: Slot,
+        /// The leader's highest contiguous chosen slot — `None` when it has
+        /// applied nothing. `Slot(0)` is a real log position, so it cannot double
+        /// as the empty sentinel: a follower missing exactly slot 0 must read a
+        /// leader that holds slot 0 as *ahead* of it, or it never asks for the
+        /// catch-up that would heal it.
+        commit: Option<Slot>,
         /// Monotone per-ballot beat sequence number, assigned at broadcast
         /// (`0` on the tick-injected self event, which never leaves the node).
         /// Echoed by [`Message::HeartbeatAck`] so the leader can tell which

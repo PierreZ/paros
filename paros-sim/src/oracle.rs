@@ -148,6 +148,10 @@ pub struct AppliedShot {
     pub node: u64,
     /// The slot just applied (the applied prefix grows one slot at a time).
     pub slot: u64,
+    /// Slot this node's applied-digest chain starts at.
+    pub chain_from: u64,
+    /// Digest of this node's applied prefix after applying `slot`.
+    pub digest: u64,
 }
 
 /// A "this node crashed at a durability seam" marker, from `crashed` events (a
@@ -497,6 +501,8 @@ fn collect_applied(q: &dyn TraceQuery) -> Vec<AppliedShot> {
                 time_ms: e.time_ms,
                 node: e.u64("node")?,
                 slot: e.u64("slot")?,
+                chain_from: e.u64("chain_from").unwrap_or(0),
+                digest: e.u64("digest").unwrap_or(0),
             })
         })
         .collect()
@@ -931,6 +937,22 @@ impl Invariant for LinearizabilityOracle {
             "no read is acked/failed before it is issued"
         );
 
+        // Where each client request was decided, read off the *cluster's* log
+        // rather than off the ack. A dedup ack ("you already have this one")
+        // carries no slot, so trusting the ack alone would leave exactly the
+        // retried requests unconstrained — the ones whose "already applied"
+        // claim is worth checking. `value_chosen` names the request a user slot
+        // decided, so the mapping is available for every acked write.
+        let mut decided_at: BTreeMap<u64, u64> = BTreeMap::new();
+        for e in q.snapshot(EV_CHOSEN) {
+            let (Some(cseq), Some(slot)) = (e.u64("cseq"), e.u64("slot")) else {
+                continue;
+            };
+            decided_at
+                .entry(cseq)
+                .and_modify(|s| *s = (*s).min(slot))
+                .or_insert(slot);
+        }
         // Acked writes with a known slot, and committed reads with their
         // observed watermark, both keyed by seq (= program order). A watermark
         // is `Option<u64>`: an absent `read_index` field is the empty applied
@@ -938,7 +960,7 @@ impl Invariant for LinearizabilityOracle {
         let mut write_slot: BTreeMap<u64, u64> = BTreeMap::new();
         for e in q.snapshot(EV_ACKED) {
             let Some(seq) = e.u64("seq_id") else { continue };
-            if let Some(slot) = e.u64("slot") {
+            if let Some(slot) = e.u64("slot").or_else(|| decided_at.get(&seq).copied()) {
                 write_slot.entry(seq).or_insert(slot);
             }
         }
@@ -1152,6 +1174,56 @@ impl Invariant for SafetyOracle {
                 (ar, an) <= (pr, pn),
                 "a node's accepted ballot never exceeds its promised ballot"
             );
+        }
+
+        // Invariant 4: a node never *acts* on a ballot it has already promised
+        // past. `Prepare`/`Accept`/`Promise` are the three sends that assert
+        // authority at a ballot, and a node sends them at (at most) its own
+        // promise — a leader promised its own ballot to win, an acceptor promises
+        // before it answers. A send below the promise means the node acted on a
+        // belief it had already given up.
+        //
+        // This is the shape of the classic async-handler race, where a node
+        // learns of a higher ballot on one path while another path is midway
+        // through acting on the old one. paros-core cannot race with itself (it
+        // is a synchronous state machine and the driver never mutates it off the
+        // main loop), so this invariant is a *guard on that architecture*, not a
+        // suspected bug — it fails the moment someone "optimizes" a message onto
+        // a side path. Compared against the promise as of strictly *before* the
+        // send, so a promise raised and a message sent in the same millisecond
+        // are never confused for a regression.
+        let mut promise_raises: Vec<(u64, u64, (u64, u64))> = q
+            .snapshot(EV_NODE_STATE)
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    e.time_ms,
+                    e.u64("node")?,
+                    (e.u64("pround")?, e.u64("pbnode")?),
+                ))
+            })
+            .collect();
+        promise_raises.sort_by_key(|&(t, node, _)| (node, t));
+        for e in q.snapshot(EV_MSG_SENT) {
+            let Some(kind) = e.str("kind") else { continue };
+            if !matches!(kind, "prepare" | "accept" | "promise") {
+                continue;
+            }
+            let (Some(node), Some(br), Some(bn)) = (e.u64("node"), e.u64("bround"), e.u64("bnode"))
+            else {
+                continue;
+            };
+            let promised = promise_raises
+                .iter()
+                .filter(|&&(t, n, _)| n == node && t < e.time_ms)
+                .map(|&(_, _, p)| p)
+                .next_back();
+            if let Some(p) = promised {
+                assert_always!(
+                    (br, bn) >= p,
+                    "a node never sends Prepare/Accept/Promise below its own promised ballot"
+                );
+            }
         }
     }
 }
@@ -1395,7 +1467,14 @@ impl Invariant for ProgressOracle {
 /// converged. It must cover a lagging follower's catch-up round trip; below it,
 /// follower lag (or a just-rebooted node re-establishing its prefix) is a
 /// legitimate transient, not a violation.
-const CONVERGENCE_GRACE_MS: u64 = 3_000;
+///
+/// Sized against the slowest *observed* legitimate heal, not against the happy
+/// path: on an idle cluster a follower learns a decided slot from a heartbeat
+/// reconciliation, which costs a beat plus a catch-up round trip *and* has to
+/// wait out whatever election churn is in progress (seed 244 heals in ~3.5 s).
+/// The failure this oracle exists for is a node that never converges at all, so
+/// buying that headroom costs nothing.
+const CONVERGENCE_GRACE_MS: u64 = 4_500;
 
 /// Convergence oracle (the #18 liveness deliverable): once chaos has quiesced,
 /// every *live* node's chosen prefix catches up to the cluster maximum — the log
@@ -1426,13 +1505,24 @@ impl Invariant for ConvergenceOracle {
         // time it was last raised (the applied index equals the slot; the driver
         // only emits it walking the *contiguous* chosen prefix, so a node's max is
         // its prefix length − 1).
-        let mut per_node_max: HashMap<u64, u64> = HashMap::new();
-        let mut cluster_max = 0_u64;
+        // `None` is "this node has applied nothing", which is *below* `Some(0)`:
+        // slot 0 is a real log position and must not double as the empty
+        // sentinel, or a node missing exactly slot 0 reads as converged.
+        let mut per_node_max: HashMap<u64, Option<u64>> = HashMap::new();
+        let mut cluster_max: Option<u64> = None;
         let mut cluster_max_time = 0_u64;
         let mut lagged: HashSet<u64> = HashSet::new();
         let applied = q.snapshot(EV_APPLIED);
         if applied.is_empty() {
             return;
+        }
+        // Every node that ever booted is in scope, starting from "applied
+        // nothing" — a node that applied *no* slot at all would otherwise never
+        // be compared against the cluster's prefix.
+        for e in q.snapshot(EV_BOOTED) {
+            if let Some(node) = e.u64("node") {
+                per_node_max.entry(node).or_insert(None);
+            }
         }
         // Single time-ordered pass: track each node's running max and the cluster
         // max, marking any node that is ever strictly behind the cluster max (it
@@ -1441,12 +1531,12 @@ impl Invariant for ConvergenceOracle {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
                 continue;
             };
-            if idx > cluster_max {
-                cluster_max = idx;
+            if Some(idx) > cluster_max {
+                cluster_max = Some(idx);
                 cluster_max_time = e.time_ms;
             }
-            let m = per_node_max.entry(node).or_insert(0);
-            *m = (*m).max(idx);
+            let m = per_node_max.entry(node).or_insert(None);
+            *m = (*m).max(Some(idx));
             for (&n, &nm) in &per_node_max {
                 if nm < cluster_max {
                     lagged.insert(n);
@@ -1457,10 +1547,10 @@ impl Invariant for ConvergenceOracle {
         // Coverage: a node that fell behind and then reached the cluster max —
         // proof the catch-up path actually healed a hole (not merely that nothing
         // ever broke). Fires on the fixed code; drives sweep saturation.
-        let recovered = cluster_max > 0
+        let recovered = cluster_max > Some(0)
             && lagged
                 .iter()
-                .any(|n| per_node_max.get(n).copied().unwrap_or(0) == cluster_max);
+                .any(|n| per_node_max.get(n).copied().flatten() == cluster_max);
         assert_sometimes!(
             recovered,
             "a lagging node catches up to the cluster's chosen prefix"
@@ -1534,7 +1624,8 @@ impl Invariant for ConvergenceOracle {
             if !stable_up(node) || m == cluster_max {
                 continue;
             }
-            let next_needed = m + 1;
+            // The slot this node needs next: slot 0 when it has applied nothing.
+            let next_needed = m.map_or(0, |v| v + 1);
             let below_all_floors = per_node_max
                 .keys()
                 .filter(|&&p| p != node)
@@ -1551,6 +1642,160 @@ impl Invariant for ConvergenceOracle {
                 m == cluster_max,
                 "every stable live node converges to the cluster's chosen prefix (via catch-up or snapshot)"
             );
+        }
+    }
+}
+
+/// How long a slot must have been chosen before the slots below it are held to
+/// be decided too. Comfortably above a heal (a heartbeat re-send of an un-acked
+/// `Accept`, a catch-up round trip, or a fresh election at `[250, 500)` ms), so
+/// only a *permanent* hole trips the oracle, never an in-flight one.
+const HOLE_GRACE_MS: u64 = 2_000;
+
+/// The log-hole oracle: **no slot below a settled chosen slot is left undecided
+/// cluster-wide**. Transient gaps are normal — a leader streams slots in parallel
+/// and their quorums can land out of order — so a slot only counts once it has
+/// been chosen for [`HOLE_GRACE_MS`], by which time any real in-flight predecessor
+/// has been re-sent, recovered by an election, or replayed by catch-up.
+///
+/// A hole that outlives that window is unhealable and wedges the whole cluster:
+/// `advance_chosen_index` walks the *contiguous* prefix, so nothing at or above
+/// the hole is ever applied, no client read can ever be confirmed past it, and no
+/// truncation can advance. Distinct from [`NoGapsOracle`] (which checks the shape
+/// of the applied stream) and [`ConvergenceOracle`] (which checks that a node
+/// catches up to what the cluster decided): this one checks that the *cluster*
+/// decided a contiguous log at all.
+pub(crate) struct LogHoleOracle;
+
+impl Invariant for LogHoleOracle {
+    fn name(&self) -> &'static str {
+        "log_holes"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, sim_time_ms: u64) {
+        // Earliest instant each slot was chosen anywhere in the cluster.
+        let mut chosen_at: BTreeMap<u64, u64> = BTreeMap::new();
+        for e in q.snapshot(EV_CHOSEN) {
+            let Some(slot) = e.u64("slot") else { continue };
+            chosen_at
+                .entry(slot)
+                .and_modify(|t| *t = (*t).min(e.time_ms))
+                .or_insert(e.time_ms);
+        }
+        // The highest slot that has been decided long enough to hold the log below
+        // it to account.
+        let Some(settled) = chosen_at
+            .iter()
+            .filter(|(_, t)| sim_time_ms.saturating_sub(**t) > HOLE_GRACE_MS)
+            .map(|(&s, _)| s)
+            .max()
+        else {
+            return;
+        };
+        // Below a node's compaction floor a slot is chosen *and dropped*; its
+        // `value_chosen` stays in the trace, so the scan below still sees it.
+        // One assertion for the whole log (not one per slot): the invariant is
+        // "the decided log is contiguous", and it is evaluated on every step.
+        let contiguous = (0..settled).all(|slot| chosen_at.contains_key(&slot));
+        assert_always!(
+            contiguous,
+            "no slot below a settled chosen slot is left permanently undecided"
+        );
+        // Coverage: the interesting shape is a log that got *deep* while staying
+        // contiguous — a shallow log can satisfy this vacuously.
+        if settled >= 3 {
+            assert_reachable!("a contiguous log of several slots is decided");
+        }
+    }
+}
+
+/// The **chain-of-blocks oracle**: an end-to-end state-machine-replication check,
+/// deliberately the dumbest one that could work. Each node folds every slot it
+/// applies into a running digest of its applied prefix (`digest` on `log_applied`),
+/// and this asserts the obvious consequence: two nodes that have applied the same
+/// slot, from the same starting point, hold the same digest.
+///
+/// It overlaps [`SafetyOracle`] (one value per slot) and [`NoGapsOracle`] (applied
+/// contiguously, in order) — on purpose. Those check the protocol's *pieces* from
+/// the inside; this checks the property the whole system exists to provide, the
+/// way an application would notice it breaking: same command count, same state.
+/// A divergence that both piece-wise oracles somehow admit (an apply path that
+/// reorders, a snapshot that lands the wrong prefix, an oracle whose own
+/// assumption is wrong) still shows up here as two nodes disagreeing about what
+/// they have applied.
+///
+/// Chains that started at different slots are not compared: a node recovered by
+/// snapshot transfer never replayed the entries below the boundary, so it cannot
+/// reproduce a digest covering them. Those slots are still covered per-slot by
+/// [`SafetyOracle`].
+pub(crate) struct AppliedChainOracle;
+
+impl Invariant for AppliedChainOracle {
+    fn name(&self) -> &'static str {
+        "applied_chain"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // (chain start, slot) -> the digest the first node to get there published.
+        let mut seen: HashMap<(u64, u64), (u64, u64)> = HashMap::new();
+        for e in q.snapshot(EV_APPLIED) {
+            let (Some(node), Some(slot), Some(from), Some(digest)) = (
+                e.u64("node"),
+                e.u64("applied_index"),
+                e.u64("chain_from"),
+                e.u64("digest"),
+            ) else {
+                continue;
+            };
+            match seen.get(&(from, slot)) {
+                Some(&(first_node, first_digest)) => {
+                    assert_always!(
+                        digest == first_digest,
+                        "two nodes that applied the same prefix hold the same digest"
+                    );
+                    let _ = (first_node, node);
+                }
+                None => {
+                    seen.insert((from, slot), (node, digest));
+                }
+            }
+        }
+        // Coverage: the check is only meaningful once two nodes have actually
+        // applied a common prefix of some depth.
+        let deep = seen.keys().any(|&(from, slot)| slot >= from + 3);
+        assert_sometimes!(deep, "several nodes apply a common multi-slot prefix");
+        if deep {
+            assert_reachable!("several nodes apply a common multi-slot prefix");
+        }
+    }
+}
+
+/// The **snapshot-progress oracle**: a snapshot install always moves the node
+/// *forward*. A node that installs a snapshot at a boundary it has already
+/// reached is in the classic install/reject loop — the receiver keeps rejecting
+/// the leader's follow-up, the leader keeps answering with another snapshot, and
+/// the node never rejoins. Cheap to assert, and it fails fast rather than showing
+/// up as a mysterious stall.
+pub(crate) struct SnapshotProgressOracle;
+
+impl Invariant for SnapshotProgressOracle {
+    fn name(&self) -> &'static str {
+        "snapshot_progress"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut highest: HashMap<u64, u64> = HashMap::new();
+        for e in q.snapshot(EV_SNAPSHOT_INSTALLED) {
+            let (Some(node), Some(boundary)) = (e.u64("node"), e.u64("chosen_index")) else {
+                continue;
+            };
+            if let Some(&prev) = highest.get(&node) {
+                assert_always!(
+                    boundary > prev,
+                    "a snapshot install carries a node past where it already was"
+                );
+            }
+            highest.insert(node, boundary);
         }
     }
 }

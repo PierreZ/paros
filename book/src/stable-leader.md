@@ -181,7 +181,7 @@ uses of piggybacking. Here is the list, and where paros stands:
 | Pipelining | propose slot `i+1` before slot `i` is chosen | yes, the leader streams `Accept`s |
 | Randomized backoff | jittered election timeout plus step-down on `Nack`, to break the proposer duel | yes, `draw_election_timeout` |
 | Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up, *and* snapshot transfer once it falls below the floor |
-| No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | not yet: paros re-proposes recovered in-flight slots instead |
+| No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | yes: on winning Phase 1 a leader re-proposes every recovered slot **and** fills the holes between them with `Control::Noop` |
 | Command batching | pack many client commands into one slot | not yet |
 | Read-index reads | linearizable reads with no log write, one heartbeat-ack round | yes: see [Why reads are not free](linearizable-reads.md) |
 | Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | not yet |

@@ -103,6 +103,29 @@ applied prefix **"advances one slot at a time (no gaps)"** and **"starts at slot
 0"** (`paros-sim/src/oracle.rs`). A node can never reveal a value it skipped a
 slot to reach.
 
+### Somebody has to fill the hole
+
+Waiting works only if the hole is eventually *decided*. Slot 7 above is fine: some
+leader is still driving it, and a leader re-sends its un-acked `Accept`s on every
+beat. The dangerous case is a hole nobody is driving — the old leader allocated
+slot 7, its `Accept`s died in the network, and then the leader itself died. A new
+leader's Phase 1 asks the cluster for its accepted suffix, and a quorum can only
+report a slot *someone accepted*: slot 7 comes back from nobody, while slot 8
+comes back from whoever accepted it. A leader that re-proposed only what was
+reported would carry on from slot 9 and leave slot 7 empty for good — and an empty
+slot 7 is not a pause, it is a wall. Nothing at or above it is ever applied,
+`chosen_index` is frozen, no read can be confirmed past it, and no truncation can
+advance.
+
+So a new leader fills them: every hole inside the range its prepare quorum
+reported is proposed as a `Control::Noop`, a slot that decides *nothing* but
+decides it properly, by consensus. That is safe for the usual reason — had any
+value been chosen at that slot, quorum intersection guarantees a member of this
+prepare quorum would have reported it — and it is what "gap fill" has to mean:
+filling the *gaps*, not just replaying the accepted values around them. The
+`LogHoleOracle` holds the cluster to it: no slot below a slot that has been
+decided for a while may be left undecided.
+
 ## Five roles, collapsed into one node
 
 [Paxos Made Moderately Complex](https://www.cs.cornell.edu/home/rvr/Paxos/)

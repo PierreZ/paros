@@ -93,7 +93,7 @@ values are only ever a `u64` `vhash` (never bytes). All derivations live in
 | `node_states[]` | `time_ms`,`node`, `pround`,`pbnode`, `has_accepted`, `around`,`abnode`,`vhash` | per-acceptor promised + accepted@slot0 → node rings, swatches, single-decree inspector |
 | `chosen[]` | `time_ms`,`node`,`slot`,`vhash` | chosen diamonds, "chosen by k/3", per-slot value colour |
 | `leaders[]` | `time_ms`,`node`,`round` | multi leader column + badge, ballot trail, failovers |
-| `applied[]` | `time_ms`,`node`,`slot` | multi committed-prefix high-water |
+| `applied[]` | `time_ms`,`node`,`slot`, `chain_from`,`digest` | multi committed-prefix high-water; the digest is the applied-prefix "chain of blocks" the `AppliedChainOracle` compares across nodes |
 | `crashes[]` | `time_ms`,`node`,`seam` | crash ⚡ + seam tag |
 | `restarts[]` | `time_ms`,`node` | restart ↻ |
 | `syncs[]` | `time_ms`,`node`,`sync`,`writes` | fsync'd vs relaxed batches (digest) |

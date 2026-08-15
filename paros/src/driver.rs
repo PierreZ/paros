@@ -319,6 +319,60 @@ fn value_hash(bytes: &[u8]) -> u64 {
     h
 }
 
+/// A node's running digest over its **applied prefix** — the "chain of blocks"
+/// end-to-end check for state-machine replication. Each applied slot folds its
+/// command hash into the digest, so two nodes that have applied the same slots in
+/// the same order hold the same digest, and any divergence in *content or order*
+/// shows up immediately rather than having to be reconstructed slot by slot.
+///
+/// `from` is the **first slot this chain covers**: slot 0 for a node that replayed
+/// its whole log, its compaction floor for a node that replayed a truncated one,
+/// or one past the boundary for a node a snapshot install jumped forward. Two
+/// digests are comparable only when their chains cover the same starting slot — a
+/// node recovered by snapshot transfer never replays the entries below the
+/// boundary, so it cannot reproduce a digest that includes them, and a node that
+/// *did* replay them must not be compared against it.
+#[derive(Debug, Clone, Copy)]
+struct AppliedChain {
+    /// Slot this chain starts at (inclusive).
+    from: u64,
+    /// Digest of every slot applied since `from`.
+    digest: u64,
+    /// Highest slot folded in so far, if any.
+    last: Option<u64>,
+}
+
+impl AppliedChain {
+    /// A fresh chain covering `from` onwards — a boot replay's floor, or one past
+    /// a snapshot boundary.
+    fn rooted_at(from: u64) -> Self {
+        Self {
+            from,
+            digest: value_hash(&from.to_le_bytes()),
+            last: None,
+        }
+    }
+
+    /// Fold one applied slot into the chain and return the digest of the prefix.
+    ///
+    /// Idempotent under replay: re-applying a slot at or below the highest one
+    /// already folded leaves the digest alone. A node re-drives the apply of its
+    /// durable prefix after a crash, and that replay must not change what the
+    /// digest says about the prefix — the digest is a function of *which slots
+    /// have been applied*, not of how many times the driver walked them.
+    fn apply(&mut self, slot: u64, vhash: u64) -> u64 {
+        if self.last.is_some_and(|l| slot <= l) {
+            return self.digest;
+        }
+        let mut bytes = self.digest.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&slot.to_le_bytes());
+        bytes.extend_from_slice(&vhash.to_le_bytes());
+        self.digest = value_hash(&bytes);
+        self.last = Some(slot);
+        self.digest
+    }
+}
+
 /// The value hash for a decided [`Command`], for observability. A client entry
 /// hashes its opaque value bytes; a control command hashes a stable, distinct
 /// encoding of its metadata, so every node agrees on the per-slot hash the safety
@@ -332,6 +386,7 @@ fn command_hash(command: &Command) -> u64 {
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
             value_hash(&bytes)
         }
+        Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
     }
 }
 
@@ -379,12 +434,16 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
         | Message::Commit {
             from, ballot, slot, ..
         } => Some((*from, *ballot, *slot)),
+        // A beat's route carries the leader's contiguous prefix as its slot; a
+        // leader that has decided nothing has no slot to report, so the beat is
+        // recorded without one (the observability contract's `slot` field is for
+        // the six ballot-carrying Paxos kinds).
         Message::Heartbeat {
             from,
             ballot,
             commit,
             ..
-        } => Some((*from, *ballot, *commit)),
+        } => Some((*from, *ballot, commit.unwrap_or(Slot(0)))),
         Message::InstallSnapshot {
             from,
             ballot,
@@ -393,6 +452,14 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
         } => Some((*from, *ballot, *chosen_index)),
         _ => None,
     }
+}
+
+/// The network side of a drain: the transport to send on and the address book to
+/// resolve a [`NodeId`] with. Bundled because they are always used together and
+/// always describe the same thing — how this node reaches its peers.
+struct Peers<'a, P: Providers> {
+    transport: &'a Arc<NetTransport<P>>,
+    addrs: &'a BTreeMap<NodeId, NetworkAddress>,
 }
 
 /// A client read whose reply is parked until its read-index round confirms.
@@ -422,11 +489,11 @@ struct ClientWaiters {
 fn drain_ready<P, S, C>(
     node: &mut RawNode,
     storage: &mut S,
-    transport: &Arc<NetTransport<P>>,
-    addrs: &BTreeMap<NodeId, NetworkAddress>,
+    peers: &Peers<'_, P>,
     self_id: u64,
     waiters: &mut ClientWaiters,
     crash: &C,
+    chain: &mut AppliedChain,
 ) -> SimulationResult<()>
 where
     P: Providers,
@@ -450,7 +517,7 @@ where
     //    surface the persisted state for the safety + recovery oracles. The
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, crash)?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, crash, chain)?;
 
     // Crash seam: after the batch is durable but before its messages leave. The
     // durable writes survive; the batch's messages are dropped (never sent), so a
@@ -478,8 +545,8 @@ where
         } else {
             tracing::info!(node = self_id, to = to.0, kind, "msg_sent");
         }
-        if let Some(addr) = addrs.get(to) {
-            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
+        if let Some(addr) = peers.addrs.get(to) {
+            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, peers.transport);
             let _ = client.deliver.send(msg.clone());
         }
     }
@@ -502,8 +569,8 @@ where
             slot = chosen_index.0,
             "msg_sent"
         );
-        if let Some(addr) = addrs.get(to) {
-            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, transport);
+        if let Some(addr) = peers.addrs.get(to) {
+            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, peers.transport);
             let _ = client.deliver.send(msg);
         }
     }
@@ -512,16 +579,27 @@ where
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
     for (slot, command) in &committed {
+        // `client`/`cseq` name the request a user slot decided, so an oracle can
+        // map a client request to the slot it landed in *without* trusting the
+        // ack to carry one (a dedup ack does not). Absent for a control command.
+        let entry = command.user();
+        let vhash = command_hash(command);
         tracing::info!(
             node = self_id,
             slot = slot.0,
-            vhash = command_hash(command),
+            vhash,
+            client = entry.map(|e| e.client.0),
+            cseq = entry.map(|e| e.seq.0),
             "value_chosen"
         );
+        let chain_from = chain.from;
+        let digest = chain.apply(slot.0, vhash);
         tracing::info!(
             node = self_id,
             slot = slot.0,
             applied_index = slot.0,
+            chain_from,
+            digest,
             "log_applied"
         );
         // A control command carries no client waiter (a `Truncate`'s effect is the
@@ -595,6 +673,31 @@ fn answer_confirmed_reads(
 /// claim a write the `BeforeSync` crash seam then discards: a crash before the
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
+/// Surface a durable snapshot install: the `snapshot_installed` marker, the
+/// applied-index jump it performs (snapshot-xor-entries, so no per-slot apply
+/// events fire), and the re-rooting of the applied-digest chain — the node adopts
+/// a prefix it never replayed, so its digest can only cover what follows the
+/// boundary.
+fn record_snapshot_install(self_id: u64, chosen_index: Slot, chain: &mut AppliedChain) {
+    tracing::info!(
+        node = self_id,
+        chosen_index = chosen_index.0,
+        first = chosen_index.0 + 1,
+        "snapshot_installed"
+    );
+    // The chain covers what this node will apply *after* the boundary: the
+    // snapshot's own prefix is opaque application bytes it never replayed.
+    *chain = AppliedChain::rooted_at(chosen_index.0 + 1);
+    tracing::info!(
+        node = self_id,
+        slot = chosen_index.0,
+        applied_index = chosen_index.0,
+        chain_from = chain.from,
+        digest = chain.digest,
+        "log_applied"
+    );
+}
+
 fn persist_writes<S: NodeStorage, C: CrashSeam>(
     storage: &mut S,
     writes: &[WriteOp],
@@ -602,6 +705,7 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
     promised: Ballot,
     self_id: u64,
     crash: &C,
+    chain: &mut AppliedChain,
 ) -> SimulationResult<()> {
     let mut promise_changed = false;
     for op in writes {
@@ -695,23 +799,7 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
                 tracing::info!(node = self_id, first = first.0, "compacted");
             }
             WriteOp::InstallSnapshot { chosen_index, .. } => {
-                let first = chosen_index.0 + 1;
-                tracing::info!(
-                    node = self_id,
-                    chosen_index = chosen_index.0,
-                    first,
-                    "snapshot_installed"
-                );
-                // The install jumps the applied prefix to `chosen_index` without
-                // replaying entries (snapshot-xor-entries); surface the jump so the
-                // no-gaps oracle (which admits it as a snapshot jump) and the
-                // convergence oracle see the node reach the cluster prefix.
-                tracing::info!(
-                    node = self_id,
-                    slot = chosen_index.0,
-                    applied_index = chosen_index.0,
-                    "log_applied"
-                );
+                record_snapshot_install(self_id, *chosen_index, chain);
             }
             WriteOp::SetPromise(_) | WriteOp::SetChosenIndex(_) => {}
         }
@@ -815,7 +903,7 @@ fn maintain<P: Providers>(
 /// accepted log starts at its floor, so the replay naturally covers only the
 /// retained prefix. A clean first boot has empty scalars/log, so this is a near
 /// no-op.
-fn replay_boot_state(node: &RawNode, self_id: u64) {
+fn replay_boot_state(node: &RawNode, self_id: u64, chain: &mut AppliedChain) {
     // Mark this incarnation coming up. The recovery recorder turns every `booted`
     // after a node's first into a *restart* event for the animation.
     tracing::info!(node = self_id, "booted");
@@ -838,17 +926,21 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
         );
     }
     if let Some(ci) = node.hard_state().chosen_index {
+        // Re-root the applied-digest chain at the first slot this incarnation can
+        // actually replay: everything below the compaction floor is gone, so a
+        // digest that claimed to cover it would not be comparable to a peer's.
+        *chain = AppliedChain::rooted_at(node.first_slot().0);
         for (slot, (_b, command)) in node.accepted().range(..=ci) {
-            tracing::info!(
-                node = self_id,
-                slot = slot.0,
-                vhash = command_hash(command),
-                "value_chosen"
-            );
+            let vhash = command_hash(command);
+            tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
+            let chain_from = chain.from;
+            let digest = chain.apply(slot.0, vhash);
             tracing::info!(
                 node = self_id,
                 slot = slot.0,
                 applied_index = slot.0,
+                chain_from,
+                digest,
                 "log_applied"
             );
         }
@@ -906,9 +998,16 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&node, self_id);
+    // The applied-digest chain this incarnation builds (re-rooted by the replay
+    // below, and again by any snapshot install).
+    let mut chain = AppliedChain::rooted_at(node.first_slot().0);
+    replay_boot_state(&node, self_id, &mut chain);
 
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
+    let peers = Peers {
+        transport: &transport,
+        addrs: &addrs,
+    };
 
     // The held client replies: proposals keyed by slot (ack-on-commit), reads
     // keyed by their read-index ctx.
@@ -940,7 +1039,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &peers, self_id, &mut waiters, crash, &mut chain)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((req, reply)) = svc.read.recv() => {
@@ -986,7 +1085,7 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &peers, self_id, &mut waiters, crash, &mut chain)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -1023,7 +1122,7 @@ where
                     );
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &peers, self_id, &mut waiters, crash, &mut chain)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(());
             }
@@ -1045,7 +1144,7 @@ where
                         first_slot: node.first_slot().0,
                     },
                 };
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &peers, self_id, &mut waiters, crash, &mut chain)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(ack);
             }
@@ -1073,7 +1172,7 @@ where
                         p.reply.send(ReadAck { seq: p.seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &peers, self_id, &mut waiters, crash, &mut chain)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 tracing::info!(tick = ticks, "node_tick");
             }

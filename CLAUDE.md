@@ -51,7 +51,9 @@ application state. The application owns compaction of its own state. What paros 
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:
 
 - **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `User(Entry)` (opaque client bytes) or a `Control(Truncate{up_to})` metadata command. A client
+  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, or the
+  `Noop` a new leader fills recovery holes with (a slot must be *decided*, never skipped, or the
+  contiguous prefix wedges below it forever). A client
   asks the **leader** to truncate (the `Compact` RPC → `RawNode::propose_control`); the leader
   decides `Truncate` into a slot by ordinary consensus, and every node truncates *lazily* when it
   applies that slot (`RawNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**

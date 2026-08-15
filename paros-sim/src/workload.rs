@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     SimContext, SimulationError, SimulationResult, TimeProvider, Workload, assert_always,
-    assert_sometimes,
+    assert_sometimes, buggify_with_prob,
 };
 use moonpool_transport::NetTransportBuilder;
 
@@ -112,9 +112,10 @@ impl Workload for ProposeClient {
 
             if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
-                // The ack event carries the committed slot when known (the
-                // `Chosen` dedup-retry path acks without one); the
-                // linearizability oracle only constrains slot-carrying acks.
+                // The ack event carries the committed slot when known. A dedup
+                // ack (`ProposeResult::Chosen`) carries none, so the oracle
+                // recovers that slot from the cluster's own `value_chosen`
+                // stream rather than leaving the retried writes unconstrained.
                 if let Some(s) = slot {
                     tracing::info!(seq_id = seq, slot = s, "client_acknowledged");
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
@@ -191,6 +192,26 @@ impl Workload for ProposeClient {
 
             // A small gap so node ticks interleave and the timeline spreads out.
             time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+
+            // Occasionally the client just… stops, leaving the cluster idle with a
+            // very short log for the whole settle tail. That state is otherwise
+            // unreachable here (a client that keeps writing hides any staleness
+            // behind the next commit), and it is exactly where a follower that
+            // missed the only decided slot must still be healed by heartbeats
+            // alone. `buggify` keeps it rare and seed-deterministic.
+            if seq > 0 && buggify_with_prob!(0.05) {
+                tracing::info!(after = seq, "client_went_idle");
+                // Hold the run open for an extra settle window: the point of going
+                // idle is to *watch* the idle cluster, and a node that only learns
+                // a decided slot from heartbeat reconciliation needs that quiet
+                // stretch to be long enough to be judged (see the convergence
+                // oracle's grace).
+                tokio::select! {
+                    _ = time.sleep(Duration::from_millis(SETTLE_MS)) => {}
+                    () = shutdown.cancelled() => {}
+                }
+                break;
+            }
         }
 
         // Under eventual synchrony a stable leader commits proposals; this also

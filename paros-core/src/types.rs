@@ -56,6 +56,13 @@ pub struct Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
+    /// A slot that decides *nothing*. A new leader fills the holes inside the
+    /// range its Phase-1 quorum reported with these, so the log it inherits is
+    /// contiguous and its applied prefix can advance past them (see
+    /// `RawNode::try_become_leader`). Applying one is a no-op by construction —
+    /// which is the point: the slot must be **decided**, not skipped, because a
+    /// slot nobody ever decides blocks the contiguous prefix forever.
+    Noop,
     /// Truncate the log: every node drops its retained prefix up to `up_to`
     /// (clamped to its own chosen index) when it applies this slot. The
     /// leader-decided, cluster-wide analogue of a local

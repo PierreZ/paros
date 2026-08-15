@@ -488,11 +488,10 @@ impl RawNode {
             self.heartbeat_elapsed += 1;
             if self.heartbeat_elapsed >= self.heartbeat_timeout {
                 self.heartbeat_elapsed = 0;
-                let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
                 self.step(Message::Heartbeat {
                     from: me,
                     ballot: self.ballot,
-                    commit,
+                    commit: self.hard_state.chosen_index,
                     seq: 0,
                 });
             }
@@ -632,7 +631,33 @@ impl RawNode {
         self.election_elapsed = 0;
         self.proposer.clear();
 
-        for (slot, (_old, command)) in e.recovered {
+        // The recovered range is `[from_slot, highest reported]`. Everything the
+        // prepare quorum reported gets re-proposed under the new ballot; every
+        // *hole* inside that range gets a `Noop`. Filling the holes is what makes
+        // this gap fill rather than a suffix replay: the quorum reports a slot
+        // only if someone accepted it, so a slot the old leader allocated but
+        // whose `Accept`s all died is reported by nobody — and skipping it strands
+        // it undecided forever, wedging the contiguous prefix (and with it every
+        // apply, every read, and every truncation) below it. Proposing a fresh
+        // value there is safe by the ordinary quorum-intersection argument: had
+        // anything been *chosen* at that slot, a member of this prepare quorum
+        // would have reported it.
+        let recovered_top = e.recovered.keys().next_back().copied();
+        let mut to_propose: BTreeMap<Slot, Command> = e
+            .recovered
+            .into_iter()
+            .map(|(slot, (_old, command))| (slot, command))
+            .collect();
+        if let Some(top) = recovered_top {
+            let mut slot = e.from_slot.max(self.first_slot);
+            while slot < top {
+                to_propose
+                    .entry(slot)
+                    .or_insert(Command::Control(Control::Noop));
+                slot = Slot(slot.0 + 1);
+            }
+        }
+        for (slot, command) in to_propose {
             // A slot below our floor is chosen (only chosen slots are truncated),
             // so it needs no re-proposal.
             if slot < self.first_slot || self.chosen.contains_key(&slot) {
@@ -643,11 +668,15 @@ impl RawNode {
             }
             self.start_accept_round(slot, command);
         }
-        self.next_slot = self
-            .accepted
-            .keys()
-            .next_back()
-            .map_or(self.first_unchosen(), |s| Slot(s.0 + 1));
+        // Allocate above everything this ballot may have to decide — the recovered
+        // top, or (having filled the holes below it) our own contiguous prefix.
+        // Reading `accepted` alone would be wrong on a node whose log has a hole
+        // no live quorum can fill; `recovered_top` is the slot the *cluster* knows
+        // about, and the loop above guarantees no gap remains beneath it.
+        self.next_slot = recovered_top.map_or_else(
+            || self.first_unchosen(),
+            |top| Slot(top.0 + 1).max(self.first_unchosen()),
+        );
         // The fresh-leader read fence: nothing decided under an earlier ballot
         // can sit above `next_slot - 1` (the prepare quorum reported it all), so
         // reads wait until the chosen prefix covers that slot. Beat seqs are
@@ -805,7 +834,7 @@ impl RawNode {
     /// carries a seq an ack can be matched against.
     fn broadcast_heartbeat(&mut self) {
         self.heartbeat_seq += 1;
-        let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
+        let commit = self.hard_state.chosen_index;
         self.broadcast(&Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,
@@ -816,7 +845,7 @@ impl RawNode {
 
     /// Leader self-beat or a follower receiving a peer beat. The self event's
     /// `seq` is ignored (the real seq is assigned at broadcast).
-    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot, seq: u64) {
+    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Option<Slot>, seq: u64) {
         let me = self.config.id;
         if from == me {
             // Leader self-trigger: broadcast the beat and re-send un-acked
@@ -892,7 +921,9 @@ impl RawNode {
             // a follower that *does* know the slot is decided replays it to the
             // leader, which then advertises the true prefix and the genuinely-behind
             // nodes pull.
-            Some(ci) if commit < ci => self.serve_catchup(from, commit),
+            Some(ci) if commit < Some(ci) => {
+                self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));
+            }
             _ => {}
         }
     }
@@ -939,15 +970,12 @@ impl RawNode {
         }
     }
 
-    /// Whether the leader's advertised contiguous chosen prefix (`commit`) names a
-    /// slot we have not yet chosen contiguously. `commit` defaults to `Slot(0)` on
-    /// a leader that has chosen nothing, so a bare `Slot(0)` from a follower that
-    /// also has nothing is (correctly) not treated as lagging.
-    fn lags_behind(&self, commit: Slot) -> bool {
-        match self.hard_state.chosen_index {
-            Some(ci) => commit > ci,
-            None => commit > Slot(0),
-        }
+    /// Whether the sender's advertised contiguous chosen prefix (`commit`) names a
+    /// slot we have not yet chosen contiguously. Both sides are `Option<Slot>`
+    /// with `None` = "nothing decided", and `None < Some(0)` is exactly the order
+    /// we want: a peer holding slot 0 is ahead of a node holding nothing.
+    fn lags_behind(&self, commit: Option<Slot>) -> bool {
+        commit > self.hard_state.chosen_index
     }
 
     /// Serve a lagging peer's catch-up request by replaying the decided range.
@@ -1198,15 +1226,18 @@ impl RawNode {
         // Only a client entry carries `(client, seq)` dedup state; a control
         // command has none, and its `Truncate` effect is applied in
         // `advance_chosen_index` when it enters the contiguous chosen prefix.
+        //
+        // Learning a slot is chosen binds the request to *that slot*, nothing
+        // more. A slot can be learned out of order (its predecessor still
+        // missing), so it is not applied yet: promoting the request to
+        // `applied_seq` here would let a retry be answered `Chosen` — "already
+        // chosen and applied", which the driver acks immediately — while the
+        // applied prefix, the very state a linearizable read observes, does not
+        // contain it. The promotion belongs to the contiguous walk below; until
+        // then the mapping keeps a retry resolving to `Duplicate(slot)`, which
+        // the driver holds until that slot commits.
         if let Command::User(entry) = command {
-            self.inflight.remove(&(entry.client, entry.seq));
-            let bump = self
-                .applied_seq
-                .get(&entry.client)
-                .is_none_or(|c| entry.seq > *c);
-            if bump {
-                self.applied_seq.insert(entry.client, entry.seq);
-            }
+            self.inflight.insert((entry.client, entry.seq), slot);
         }
         self.advance_chosen_index();
     }
@@ -1225,6 +1256,21 @@ impl RawNode {
             self.pending_writes.push(WriteOp::SetChosenIndex(next));
             if let Command::Control(Control::Truncate { up_to }) = &command {
                 truncate_up_to = Some(truncate_up_to.map_or(*up_to, |u| u.max(*up_to)));
+            }
+            // The request is *applied* now: retire its slot mapping and raise the
+            // client's dedup watermark, so a later retry is answered `Chosen`
+            // ("chosen and applied") only once that is actually true. This mirrors
+            // the boot rebuild, which derives `applied_seq` from the durable
+            // chosen prefix and `inflight` from everything above it.
+            if let Command::User(entry) = &command {
+                self.inflight.remove(&(entry.client, entry.seq));
+                let bump = self
+                    .applied_seq
+                    .get(&entry.client)
+                    .is_none_or(|c| entry.seq > *c);
+                if bump {
+                    self.applied_seq.insert(entry.client, entry.seq);
+                }
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);

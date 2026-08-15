@@ -110,7 +110,7 @@ mod tests {
             Message::Heartbeat {
                 from: NodeId(0),
                 ballot,
-                commit: Slot(2),
+                commit: Some(Slot(2)),
                 seq: 9,
             },
             Message::HeartbeatAck {

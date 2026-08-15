@@ -31,9 +31,10 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle,
-    ProgressOracle, ProtocolData, ProtocolRecorder, ReadData, ReadRecorder, RecorderData,
-    RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder,
+    AppliedChainOracle, ClientLivenessOracle, ConvergenceOracle, LeadershipOracle,
+    LinearizabilityOracle, LogHoleOracle, NoGapsOracle, ProgressOracle, ProtocolData,
+    ProtocolRecorder, ReadData, ReadRecorder, RecorderData, RecoveryData, RecoveryOracle,
+    RecoveryRecorder, SafetyOracle, SnapshotOracle, SnapshotProgressOracle, TimelineRecorder,
     TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
@@ -175,6 +176,9 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(LinearizabilityOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
+        .invariant(LogHoleOracle)
+        .invariant(AppliedChainOracle)
+        .invariant(SnapshotProgressOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         .invariant(ConvergenceOracle)
@@ -216,6 +220,9 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(LinearizabilityOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
+        .invariant(LogHoleOracle)
+        .invariant(AppliedChainOracle)
+        .invariant(SnapshotProgressOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         // `ConvergenceOracle` is deliberately *not* in the adaptive sweep. The

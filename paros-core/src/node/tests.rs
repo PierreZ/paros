@@ -1507,3 +1507,167 @@ fn read_after_compaction_confirms_normally() {
         "the compaction floor is irrelevant to the confirm condition"
     );
 }
+
+// ---- election recovery must not leave a hole below `next_slot` -------------
+
+/// A new leader's Phase-1 quorum can report an accepted slot *above* a slot it
+/// reports nothing for: the old leader's `Accept` for the lower slot reached only
+/// itself (or nodes outside the quorum) before it died. The recovered suffix is
+/// then `{1: X}` with slot 0 empty, and allocating `next_slot = max(accepted) + 1`
+/// steps straight over slot 0 — which nobody will ever propose again. The chosen
+/// prefix can never pass it, so `chosen_index` is wedged at `None` forever while
+/// higher slots keep committing.
+#[test]
+fn a_new_leader_fills_holes_inside_the_recovered_range() {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Two slots in flight under the old leader. Slot 0's Accept reaches nobody
+    // else; slot 1's reaches node 1 only. Neither is chosen.
+    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(
+        &mut nodes,
+        q,
+        |_, m| !matches!(m, Message::Accept { slot, .. } if *slot == Slot(0)),
+    );
+    let _ = nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        to == NodeId(1) && matches!(m, Message::Accept { slot, .. } if *slot == Slot(1))
+    });
+    assert!(
+        nodes[1].accepted().contains_key(&Slot(1)),
+        "node 1 holds the higher in-flight slot"
+    );
+    assert!(
+        !nodes[1].accepted().contains_key(&Slot(0)),
+        "and nothing at all for the lower one"
+    );
+
+    // The old leader dies: elect node 1 with the {1, 2} quorum, node 0 excluded.
+    nodes[1].set_election_timeout(1);
+    nodes[1].tick();
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(nodes[1].is_leader(), "node 1 wins the election");
+    // Let the re-proposals (and any gap fill) settle among the live pair.
+    for _ in 0..3 {
+        let q = drain(&mut nodes[1]);
+        deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+        let q = drain(&mut nodes[2]);
+        deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    }
+
+    assert!(
+        nodes[1].chosen.contains_key(&Slot(0)),
+        "slot 0 was inside the recovered range and must be decided, not skipped"
+    );
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(1)),
+        "the applied prefix covers both slots — a hole would wedge it at None"
+    );
+}
+
+/// `ProposeResult::Chosen` is documented as "already chosen **and applied**", and
+/// the driver acks it immediately with no slot. Recording the dedup watermark the
+/// instant a slot is *learned* chosen breaks that: a slot learned out of order
+/// (its predecessor still missing) is not in the applied prefix, so a retry of
+/// that client request would be acked as complete while the applied prefix — the
+/// very state a linearizable read observes — does not contain it yet.
+#[test]
+fn a_retry_is_not_acked_as_applied_before_its_slot_enters_the_prefix() {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0 is in flight (accepted nowhere else, never chosen). Slot 1 is
+    // learned chosen out of order.
+    let _ = nodes[0].propose(ClientId(7), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
+    let b = nodes[0].ballot();
+    nodes[0].step(Message::Commit {
+        from: NodeId(0),
+        ballot: b,
+        slot: Slot(1),
+        command: ucmd(7, 2, 20),
+    });
+    assert_eq!(
+        nodes[0].hard_state().chosen_index,
+        None,
+        "slot 0 is still missing, so nothing has been applied"
+    );
+
+    // The client retries request (7, 2) — its ack was lost. It is chosen but not
+    // applied, so the honest answer is "it already has slot 1; wait for it".
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
+        ProposeResult::Duplicate(Slot(1)),
+        "a chosen-but-unapplied retry resolves to its slot, not to `Chosen`"
+    );
+
+    // Once the prefix covers it, `Chosen` becomes the right answer.
+    nodes[0].step(Message::Commit {
+        from: NodeId(0),
+        ballot: b,
+        slot: Slot(0),
+        command: ucmd(7, 1, 10),
+    });
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(1)));
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
+        ProposeResult::Chosen,
+        "now it really is chosen *and* applied"
+    );
+}
+
+/// `Slot(0)` is a valid log position, so it cannot also be the "nothing decided"
+/// sentinel on a heartbeat. A follower that missed the `Commit` for slot 0 has
+/// `chosen_index = None`; a leader with exactly slot 0 chosen advertises
+/// `Slot(0)`. Comparing those two must say "you are behind" — otherwise the
+/// follower never asks for catch-up, and healthy heartbeats keep resetting its
+/// election clock, so it stays stale for as long as the cluster is idle.
+#[test]
+fn a_follower_missing_only_slot_zero_still_catches_up() {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0 is chosen by the {0, 2} quorum; node 1 misses every message for it.
+    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(1));
+    let q = drain(&mut nodes[2]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(1));
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        None,
+        "node 1 missed the whole slot"
+    );
+
+    // The cluster goes idle: only heartbeats flow. They must reveal the gap.
+    for _ in 0..4 {
+        nodes[0].tick();
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(0)),
+        "an idle cluster's heartbeats healed the follower's missing slot 0"
+    );
+}
