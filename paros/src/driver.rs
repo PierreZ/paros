@@ -152,6 +152,38 @@ pub const EV_SNAPSHOT_INSTALLED: &str = "snapshot_installed";
 /// once the acceptor floor guard is in place.
 pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 
+/// Tracing event: a leader captured a read index for a client read and started
+/// the heartbeat-ack confirmation round. Carries `node`, `client`, `seq` (the
+/// client's request sequence), `ctx` (the core correlation token) and, when the
+/// applied prefix is non-empty, `index` — the captured watermark. An absent
+/// `index` field is the empty prefix, the same convention [`ReadAck::read_index`]
+/// uses. This is the read's *linearization candidate*: it is captured here and
+/// answered only at [`EV_READ_CONFIRMED`], never in between.
+pub const EV_READ_CAPTURED: &str = "read_captured";
+
+/// Tracing event: a captured read round confirmed — a quorum acked a beat at the
+/// leader's ballot *and* the applied prefix reached the captured index, so the
+/// parked reply is answered from local state. Carries `node`, `ctx`, the
+/// confirmed `index` (absent = empty prefix), `served` (the chosen index actually
+/// served, at or past `index`), and `client`/`seq` when the waiting client is
+/// still parked (a confirmation that arrives after the driver already timed the
+/// read out carries neither, and is dropped).
+pub const EV_READ_CONFIRMED: &str = "read_confirmed";
+
+/// Tracing event: a read was answered without being served. Carries `node`,
+/// `client`, `seq`, and `kind` — one of:
+///
+/// - `not_leader` — this node cannot capture a read index at all; `leader` names
+///   the redirect hint when it knows one.
+/// - `stepped_down` — the node held a parked read and then lost its ballot, so
+///   the round is abandoned unconfirmed and the reply released as a retry.
+/// - `timeout` — the round did not confirm inside the driver's retry window
+///   (lost acks, a minority-partitioned leader that has not yet stepped down).
+///
+/// The last two are what a client sees when the leader it captured on was
+/// deposed mid-read: the read outlives one leader and completes under the next.
+pub const EV_READ_REDIRECT: &str = "read_redirect";
+
 /// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Propose {
@@ -363,14 +395,25 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
     }
 }
 
+/// A client read whose reply is parked until its read-index round confirms.
+struct ParkedRead {
+    /// Client identity, echoed on the read's observability events.
+    client: u64,
+    /// The client's request sequence number, echoed in the [`ReadAck`].
+    seq: u64,
+    /// Tick the read was parked on, for the driver-side retry deadline.
+    parked_at: u64,
+    /// The held reply, answered on confirmation (or released as a redirect).
+    reply: ReplyPromise<ReadAck>,
+}
+
 /// The client replies this node is holding open: proposals wait on their
 /// slot's commit (ack-on-commit), reads wait on their read-index round's
-/// confirmation `(client seq, tick parked at, the held reply)`, keyed by the
-/// core's `ctx` token.
+/// confirmation, keyed by the core's `ctx` token.
 #[derive(Default)]
 struct ClientWaiters {
     pending: BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
-    pending_reads: BTreeMap<u64, (u64, u64, ReplyPromise<ReadAck>)>,
+    pending_reads: BTreeMap<u64, ParkedRead>,
 }
 
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
@@ -500,21 +543,46 @@ where
     }
 
     // 3b. Answer confirmed reads — after the apply loop, so the applied prefix
-    //     this same batch carried is covered by what the read observes. The ack
-    //     reports the *serve-time* chosen index (at or past the confirmed read
-    //     index): that is the local state actually served.
-    for state in &read_states {
-        if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
-            waiter.send(ReadAck {
-                seq,
+    //     this same batch carried is covered by what the read observes.
+    answer_confirmed_reads(node, &read_states, waiters, self_id);
+
+    Ok(())
+}
+
+/// Answer every read-index round the core confirmed this batch (`Ready` step 4):
+/// the barrier cleared, so the parked reply is released from local state. The ack
+/// reports the *serve-time* chosen index (at or past the confirmed read index):
+/// that is the state actually served.
+fn answer_confirmed_reads(
+    node: &RawNode,
+    read_states: &[ReadState],
+    waiters: &mut ClientWaiters,
+    self_id: u64,
+) {
+    for state in read_states {
+        let served = node.hard_state().chosen_index.map(|s| s.0);
+        // A confirmation whose client is gone (the driver already released the
+        // read as a retry) is still worth surfacing: it is the barrier clearing
+        // after the reader gave up on this node.
+        let parked = waiters.pending_reads.remove(&state.ctx);
+        tracing::info!(
+            node = self_id,
+            ctx = state.ctx,
+            index = state.index.map(|s| s.0),
+            served,
+            client = parked.as_ref().map(|p| p.client),
+            seq = parked.as_ref().map(|p| p.seq),
+            "read_confirmed"
+        );
+        if let Some(p) = parked {
+            p.reply.send(ReadAck {
+                seq: p.seq,
                 leader: Some(self_id),
                 committed: true,
-                read_index: node.hard_state().chosen_index.map(|s| s.0),
+                read_index: served,
             });
         }
     }
-
-    Ok(())
 }
 
 /// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
@@ -711,9 +779,21 @@ fn maintain<P: Providers>(
         // redirect explicitly so the client retries the new leader now rather
         // than burning its deadline (writes time out instead, on purpose —
         // their slot may still commit under the new leader).
-        for (_, (seq, _, waiter)) in std::mem::take(&mut waiters.pending_reads) {
-            waiter.send(ReadAck {
-                seq,
+        for (_, p) in std::mem::take(&mut waiters.pending_reads) {
+            // The read outlives the leader it captured on: its round is
+            // abandoned unconfirmed, and the client re-issues under the next
+            // leader. This is the event the timeline draws as a read waiting
+            // out a leader change.
+            tracing::info!(
+                node = self_id,
+                client = p.client,
+                seq = p.seq,
+                kind = "stepped_down",
+                leader = node.leader().map(|n| n.0),
+                "read_redirect"
+            );
+            p.reply.send(ReadAck {
+                seq: p.seq,
                 leader: node.leader().map(|n| n.0),
                 committed: false,
                 read_index: None,
@@ -873,10 +953,36 @@ where
                 let seq = req.seq;
                 match node.read_index(next_read_ctx) {
                     ReadIndexResult::NotLeader(hint) => {
+                        tracing::info!(
+                            node = self_id,
+                            client = req.client,
+                            seq,
+                            kind = "not_leader",
+                            leader = hint.map(|n| n.0),
+                            "read_redirect"
+                        );
                         reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
                     }
-                    ReadIndexResult::Pending => {
-                        waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
+                    ReadIndexResult::Pending { index } => {
+                        // The capture instant: the watermark is pinned *now*, and
+                        // the answer waits for the quorum round + the applied
+                        // barrier. Surfacing it here (not only on confirmation) is
+                        // what lets the timeline show a read that waits — or one
+                        // whose round is abandoned when its leader is deposed.
+                        tracing::info!(
+                            node = self_id,
+                            client = req.client,
+                            seq,
+                            ctx = next_read_ctx,
+                            index = index.map(|s| s.0),
+                            "read_captured"
+                        );
+                        waiters.pending_reads.insert(next_read_ctx, ParkedRead {
+                            client: req.client,
+                            seq,
+                            parked_at: ticks,
+                            reply,
+                        });
                         next_read_ctx += 1;
                     }
                 }
@@ -952,12 +1058,19 @@ where
                 // core confirmation finds the ctx gone and is ignored.
                 let overdue: Vec<u64> = waiters.pending_reads
                     .iter()
-                    .filter(|(_, (_, parked_at, _))| ticks.saturating_sub(*parked_at) > READ_RETRY_TICKS)
+                    .filter(|(_, p)| ticks.saturating_sub(p.parked_at) > READ_RETRY_TICKS)
                     .map(|(ctx, _)| *ctx)
                     .collect();
                 for ctx in overdue {
-                    if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
-                        waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
+                    if let Some(p) = waiters.pending_reads.remove(&ctx) {
+                        tracing::info!(
+                            node = self_id,
+                            client = p.client,
+                            seq = p.seq,
+                            kind = "timeout",
+                            "read_redirect"
+                        );
+                        p.reply.send(ReadAck { seq: p.seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
                 drain_ready(&mut node, &mut storage, &transport, &addrs, self_id, &mut waiters, crash)?;

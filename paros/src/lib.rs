@@ -18,8 +18,9 @@ pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER,
     EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck,
-    WLTOKEN_PAROS, is_seam_crash, parse_addr, run_node,
+    EV_READ_CAPTURED, EV_READ_CONFIRMED, EV_READ_REDIRECT, EV_RECOVERED, EV_SNAPSHOT_INSTALLED,
+    EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck, WLTOKEN_PAROS, is_seam_crash, parse_addr,
+    run_node,
 };
 pub use storage::{MemStorage, NodeStorage, StorageError};
 

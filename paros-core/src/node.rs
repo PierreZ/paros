@@ -68,7 +68,12 @@ pub enum ReadIndexResult {
     /// [`Ready::read_states`] once confirmed (possibly in the very next batch).
     /// A round that cannot confirm (leadership lost, acks lost) surfaces
     /// nothing — the driver owns the client-facing timeout.
-    Pending,
+    ///
+    /// `index` is the read index captured *now* (`None` = empty prefix): the
+    /// watermark the read will observe, handed back so the driver can surface
+    /// the capture the moment it happens rather than only on confirmation — a
+    /// round that never confirms is exactly the interesting one.
+    Pending { index: Option<Slot> },
 }
 
 /// A confirmed read-index round, surfaced via [`Ready::read_states`]: at the
@@ -435,7 +440,7 @@ impl RawNode {
         });
         // A single-node cluster is its own quorum: confirm in this same batch.
         self.try_confirm_reads();
-        ReadIndexResult::Pending
+        ReadIndexResult::Pending { index }
     }
 
     /// Application-driven log compaction: drop every retained slot at or below

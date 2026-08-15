@@ -36,6 +36,9 @@ export const PHASE = {
   chosen: '#35D07F',
   nack: '#F0544F',
   leader: '#E9B949',
+  // linearizable reads — a violet that no protocol message uses, so a read
+  // marker never reads as a Paxos phase
+  read: '#A78BFA',
   // synthetic / neutral steps
   propose: '#8FA0BE',
   commit: '#35D07F',
@@ -51,6 +54,7 @@ export const PHASE_LABEL = {
   chosen: 'Chosen',
   nack: 'Nack',
   leader: 'Leader',
+  read: 'Read',
   propose: 'Propose',
   commit: 'Commit',
 };

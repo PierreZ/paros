@@ -17,7 +17,10 @@ mod oracle;
 mod workload;
 
 pub use node::NodeProcess;
-pub use oracle::{ChosenShot, NodeStateShot, Outcome, ProtocolShot, RunResult, Shot};
+pub use oracle::{
+    ChosenShot, NodeStateShot, Outcome, ProtocolShot, ReadRedirectShot, ReadRoundShot, ReadShot,
+    RunResult, Shot,
+};
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -29,9 +32,9 @@ use moonpool_sim::{
 
 use crate::oracle::{
     ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle,
-    ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle,
-    RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle,
-    build_result,
+    ProgressOracle, ProtocolData, ProtocolRecorder, ReadData, ReadRecorder, RecorderData,
+    RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder,
+    TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -159,12 +162,14 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = Arc::new(Mutex::new(RecorderData::default()));
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
+    let reads = Arc::new(Mutex::new(ReadData::default()));
     let report = SimulationBuilder::new()
         .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(RecoveryRecorder::new(recovery.clone()))
+        .invariant(ReadRecorder::new(reads.clone()))
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(LinearizabilityOracle)
@@ -190,7 +195,8 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
     let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
-    build_result(seed, &data, &proto, &recovery)
+    let reads = reads.lock().unwrap_or_else(PoisonError::into_inner);
+    build_result(seed, &data, &proto, &recovery, &reads)
 }
 
 /// Run the DST bug-finding sweep: swarm network chaos + the safety oracle under

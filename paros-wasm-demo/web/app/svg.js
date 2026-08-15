@@ -136,6 +136,21 @@ export function badgeDrop(cx, cy, color = PHASE.nack) {
   ]);
 }
 
+// A read marker: a lens (circle + handle). Hollow while the read waits at the
+// commit barrier, filled once it has been served.
+export function badgeRead(cx, cy, color = PHASE.read, { filled = false, r = 5 } = {}) {
+  return el('g', {}, [
+    el('circle', {
+      cx, cy, r, fill: filled ? color : 'none', 'fill-opacity': filled ? 0.9 : 0,
+      stroke: color, 'stroke-width': 1.6,
+    }),
+    el('line', {
+      x1: cx + r * 0.72, y1: cy + r * 0.72, x2: cx + r * 1.7, y2: cy + r * 1.7,
+      stroke: color, 'stroke-width': 1.6, 'stroke-linecap': 'round',
+    }),
+  ]);
+}
+
 export function badgeLeader(cx, cy, color = PHASE.leader) {
   // gold ring + a small gold dot badge
   return el('g', {}, [

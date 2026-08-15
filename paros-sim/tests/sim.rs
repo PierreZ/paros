@@ -103,6 +103,93 @@ fn chaotic_run_is_well_formed() {
     );
 }
 
+/// The read timeline the browser draws is well-formed, on a calm seed and on the
+/// churn-heavy seed the book embeds. This pins the read-index *contract* at the
+/// data level (the `LinearizabilityOracle` checks the client history; this checks
+/// the lifecycle the demo renders): a served read is always backed by a round
+/// that was captured first, confirmed second, and answered third, and the
+/// watermarks a sequential client observes never move backwards.
+#[test]
+fn read_timeline_is_well_formed() {
+    for seed in [0_u64, 19] {
+        let r = run_seed(seed);
+        assert_eq!(r.reads.len(), 12, "seed {seed}: every read was recorded");
+        let mut prev: Option<u64> = None;
+        for read in &r.reads {
+            for round in &read.rounds {
+                assert!(
+                    round.captured_ms >= read.issued_ms,
+                    "seed {seed}: read {} captured an index before it was issued",
+                    read.seq
+                );
+                if let Some(confirmed) = round.confirmed_ms {
+                    assert!(
+                        confirmed >= round.captured_ms,
+                        "seed {seed}: read {} confirmed before it captured",
+                        read.seq
+                    );
+                    assert!(
+                        round.served_index >= round.index,
+                        "seed {seed}: read {} served below its own read index",
+                        read.seq
+                    );
+                }
+            }
+            let Some(served_ms) = read.served_ms else {
+                continue;
+            };
+            let backing = read
+                .rounds
+                .iter()
+                .find(|q| q.confirmed_ms.is_some_and(|c| c <= served_ms));
+            assert!(
+                backing.is_some(),
+                "seed {seed}: read {} was answered without a confirmed round",
+                read.seq
+            );
+            assert!(
+                read.read_index >= prev,
+                "seed {seed}: read {} observed a watermark below an earlier read's",
+                read.seq
+            );
+            prev = prev.max(read.read_index);
+        }
+    }
+}
+
+/// The scenario the book embeds (`?mode=multi&seed=19`): under heavy leadership
+/// churn a read is parked on a leader that is then deposed — its round is
+/// abandoned unconfirmed — and the read is still answered, by the *next* leader.
+/// Pinned so the chapter's narration cannot silently stop matching the run.
+#[test]
+fn a_parked_read_outlives_its_leader_on_the_book_seed() {
+    let r = run_seed(19);
+    let waited_out = r.reads.iter().find(|read| {
+        read.served_ms.is_some()
+            && read.rounds.iter().any(|q| q.confirmed_ms.is_none())
+            && read.rounds.iter().any(|q| q.confirmed_ms.is_some())
+    });
+    let read = waited_out.expect("seed 19 has a read whose first round was abandoned");
+    let abandoned = read
+        .rounds
+        .iter()
+        .find(|q| q.confirmed_ms.is_none())
+        .expect("the abandoned round");
+    let confirmed = read
+        .rounds
+        .iter()
+        .find(|q| q.confirmed_ms.is_some())
+        .expect("the round that finally confirmed");
+    assert_ne!(
+        abandoned.node, confirmed.node,
+        "the read completed under a different node than the one that lost the ballot"
+    );
+    assert!(
+        read.redirects.iter().any(|x| x.kind == "stepped_down"),
+        "the deposed leader released the parked reply as a retry"
+    );
+}
+
 /// A stable leader streams a multi-slot log: across a handful of seeds the chosen
 /// log grows past slot 0 (Stage 3's stable-leader Phase-2 streaming). A concrete,
 /// cheap complement to the sweep's `ProgressOracle` reachability gate.

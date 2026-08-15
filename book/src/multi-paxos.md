@@ -22,6 +22,11 @@ random, and read what actually happened.
   a *chosen* value, coloured by the value: **the same colour in the same slot across
   nodes is prefix agreement**, the property the safety oracle asserts. The green
   edge marks each node's committed (contiguous applied) prefix.
+- **Reads waiting at the barrier.** The violet lane on the right is the client's
+  linearizable reads. A read pins a **read index** in the log and is answered only
+  once a heartbeat-ack quorum proves the leader still leads *and* the applied
+  prefix covers that index — never from local state alone. [Why reads are not
+  free](linearizable-reads.md) is the chapter for it.
 - **Phase 1 once, Phase 2 streamed.** The stable-leader win: the leader runs Phase 1
   a single time per ballot, then streams **Accept** per slot with no further
   Prepare. The digest counts these *piggybacked* slots; the narration calls them out

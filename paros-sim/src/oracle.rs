@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_RECV,
-    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
-    EV_SNAPSHOT_INSTALLED, EV_SYNCED,
+    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_READ_CAPTURED,
+    EV_READ_CONFIRMED, EV_READ_REDIRECT, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -205,6 +205,66 @@ pub struct RecoveredShot {
     pub vhash: u64,
 }
 
+/// One read-index round a leader ran for a client read, from the `read_captured`
+/// / `read_confirmed` streams. This is the read's wait made visible: `index` is
+/// pinned at `captured_ms`, and the answer is legal only from `confirmed_ms` —
+/// once a heartbeat-ack quorum proved leadership *and* the applied prefix reached
+/// `index`. A round with no `confirmed_ms` was abandoned: its leader was deposed
+/// (or its acks were lost) before the barrier cleared, and the client retried
+/// elsewhere.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadRoundShot {
+    /// The leader that captured this round.
+    pub node: u64,
+    /// The core's correlation token, unique per node.
+    pub ctx: u64,
+    /// Simulated time the read index was captured, in milliseconds.
+    pub captured_ms: u64,
+    /// The captured read index: `max(chosen_index, read_floor)` at capture time.
+    /// `None` is the empty applied prefix.
+    pub index: Option<u64>,
+    /// Simulated time the round confirmed (quorum + applied barrier), if it ever
+    /// did. `None` marks an abandoned round.
+    pub confirmed_ms: Option<u64>,
+    /// The chosen index actually served on confirmation (at or past `index`).
+    pub served_index: Option<u64>,
+}
+
+/// One node answering a read without serving it, from the `read_redirect` stream:
+/// the node was not the leader (`not_leader`), it stepped down while the read was
+/// parked (`stepped_down`), or its round did not confirm inside the driver's retry
+/// window (`timeout`). Every redirect costs the client another hop.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadRedirectShot {
+    /// Simulated time the redirect was sent, in milliseconds.
+    pub time_ms: u64,
+    /// The node that redirected.
+    pub node: u64,
+    /// Why: `not_leader`, `stepped_down`, or `timeout`.
+    pub kind: String,
+}
+
+/// One client read, reconstructed end to end: issued → captured (possibly more
+/// than once, across leaders) → confirmed → served. Drives the read marker that
+/// waits at the commit barrier in the multi-Paxos view.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadShot {
+    /// The client's request sequence number (also its program order).
+    pub seq: u64,
+    /// Simulated time the client issued the read, in milliseconds.
+    pub issued_ms: u64,
+    /// Simulated time the client received a committed ack, if it ever did.
+    pub served_ms: Option<u64>,
+    /// The watermark the client observed, when served (`None` = empty prefix).
+    pub read_index: Option<u64>,
+    /// How many nodes the client had to ask before one served it.
+    pub attempts: u64,
+    /// Every read-index round run for this read, in capture order.
+    pub rounds: Vec<ReadRoundShot>,
+    /// Every redirect this read collected, in time order.
+    pub redirects: Vec<ReadRedirectShot>,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +294,8 @@ pub struct RunResult {
     /// Durable accepted records read back on (re)boot, in time order — the durable
     /// state that survives a crash.
     pub recovered: Vec<RecoveredShot>,
+    /// Client reads, in program (seq) order: the read-index lifecycle of each.
+    pub reads: Vec<ReadShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -262,6 +324,7 @@ impl RunResult {
             restarts: Vec::new(),
             syncs: Vec::new(),
             recovered: Vec::new(),
+            reads: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -543,6 +606,177 @@ impl Invariant for RecoveryRecorder {
     }
 }
 
+/// One `read_captured` event: a leader pinned a read index and started a
+/// confirmation round.
+struct RawCapture {
+    time_ms: u64,
+    node: u64,
+    seq: u64,
+    ctx: u64,
+    index: Option<u64>,
+}
+
+/// One `read_confirmed` event, matched back to its capture by `(node, ctx)` —
+/// `ctx` is a per-node counter, so the node is part of the key.
+struct RawConfirm {
+    time_ms: u64,
+    node: u64,
+    ctx: u64,
+    served_index: Option<u64>,
+}
+
+/// Raw read timeline the [`ReadRecorder`] accumulates: the client's issue/serve
+/// events plus the node-side capture/confirm/redirect streams, stitched into
+/// [`ReadShot`]s by [`build_reads`].
+#[derive(Default)]
+pub(crate) struct ReadData {
+    /// `(seq, time_ms)` for each read the client issued.
+    issued: Vec<(u64, u64)>,
+    /// `(seq, time_ms, observed watermark, attempts)` for each committed ack.
+    acked: Vec<(u64, u64, Option<u64>, u64)>,
+    captures: Vec<RawCapture>,
+    confirms: Vec<RawConfirm>,
+    /// `(seq, redirect)` — the read that was bounced, and by whom.
+    redirects: Vec<(u64, ReadRedirectShot)>,
+}
+
+/// The read-timeline recorder: the read-index lifecycle (issued → captured →
+/// confirmed → served), kept separate from the client/protocol/recovery recorders
+/// so each owns one concern. Purely observational — the *checking* of read
+/// behaviour is [`LinearizabilityOracle`]'s job.
+pub(crate) struct ReadRecorder {
+    data: Arc<Mutex<ReadData>>,
+}
+
+impl ReadRecorder {
+    pub(crate) fn new(data: Arc<Mutex<ReadData>>) -> Self {
+        Self { data }
+    }
+}
+
+impl Invariant for ReadRecorder {
+    fn name(&self) -> &'static str {
+        "read_recorder"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        d.issued = collect_seq(q, EV_READ_ISSUED);
+        d.acked = q
+            .snapshot(EV_READ_ACKED)
+            .into_iter()
+            .filter_map(|e| {
+                Some((
+                    e.u64("seq_id")?,
+                    e.time_ms,
+                    // An absent `read_index` field is the empty applied prefix.
+                    e.u64("read_index"),
+                    e.u64("attempts").unwrap_or(1),
+                ))
+            })
+            .collect();
+        d.captures = q
+            .snapshot(EV_READ_CAPTURED)
+            .into_iter()
+            .filter_map(|e| {
+                Some(RawCapture {
+                    time_ms: e.time_ms,
+                    node: e.u64("node")?,
+                    seq: e.u64("seq")?,
+                    ctx: e.u64("ctx")?,
+                    index: e.u64("index"),
+                })
+            })
+            .collect();
+        d.confirms = q
+            .snapshot(EV_READ_CONFIRMED)
+            .into_iter()
+            .filter_map(|e| {
+                Some(RawConfirm {
+                    time_ms: e.time_ms,
+                    node: e.u64("node")?,
+                    ctx: e.u64("ctx")?,
+                    served_index: e.u64("served"),
+                })
+            })
+            .collect();
+        d.redirects = q
+            .snapshot(EV_READ_REDIRECT)
+            .into_iter()
+            .filter_map(|e| {
+                Some((
+                    e.u64("seq")?,
+                    ReadRedirectShot {
+                        time_ms: e.time_ms,
+                        node: e.u64("node")?,
+                        kind: e.str("kind").unwrap_or("unknown").to_string(),
+                    },
+                ))
+            })
+            .collect();
+    }
+}
+
+/// Stitch the read streams into one [`ReadShot`] per issued read, in program
+/// (seq) order. Each capture is matched to its confirmation by `(node, ctx)`; a
+/// capture with no match is an abandoned round (the leader was deposed before the
+/// barrier cleared). Order-independent: every stream is sorted here, so the JSON
+/// is byte-identical natively and in the browser.
+fn build_reads(d: &ReadData) -> Vec<ReadShot> {
+    let confirms: HashMap<(u64, u64), &RawConfirm> =
+        d.confirms.iter().map(|c| ((c.node, c.ctx), c)).collect();
+
+    let mut rounds: BTreeMap<u64, Vec<ReadRoundShot>> = BTreeMap::new();
+    for c in &d.captures {
+        let hit = confirms.get(&(c.node, c.ctx));
+        rounds.entry(c.seq).or_default().push(ReadRoundShot {
+            node: c.node,
+            ctx: c.ctx,
+            captured_ms: c.time_ms,
+            index: c.index,
+            confirmed_ms: hit.map(|h| h.time_ms),
+            served_index: hit.and_then(|h| h.served_index),
+        });
+    }
+    for v in rounds.values_mut() {
+        v.sort_by_key(|r| (r.captured_ms, r.node, r.ctx));
+    }
+
+    let mut redirects: BTreeMap<u64, Vec<ReadRedirectShot>> = BTreeMap::new();
+    for (seq, r) in &d.redirects {
+        redirects.entry(*seq).or_default().push(r.clone());
+    }
+    for v in redirects.values_mut() {
+        v.sort_by_key(|r| (r.time_ms, r.node));
+    }
+
+    let acks: HashMap<u64, (u64, Option<u64>, u64)> = d
+        .acked
+        .iter()
+        .map(|&(seq, t, idx, attempts)| (seq, (t, idx, attempts)))
+        .collect();
+
+    let mut issued: Vec<(u64, u64)> = d.issued.clone();
+    issued.sort_unstable();
+    issued.dedup_by_key(|&mut (seq, _)| seq);
+
+    issued
+        .into_iter()
+        .map(|(seq, issued_ms)| {
+            let ack = acks.get(&seq);
+            ReadShot {
+                seq,
+                issued_ms,
+                served_ms: ack.map(|a| a.0),
+                read_index: ack.and_then(|a| a.1),
+                attempts: ack.map_or(0, |a| a.2),
+                rounds: rounds.remove(&seq).unwrap_or_default(),
+                redirects: redirects.remove(&seq).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
 /// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
 /// inter-node Paxos messages and the node-state / chosen streams the single-decree
 /// visualization needs (the client recorder above stays focused on client events).
@@ -764,47 +998,97 @@ impl Invariant for LinearizabilityOracle {
             }
         }
 
-        // Coverage gates (`UntilCoverageStable` only saturates once these fire).
-        assert_sometimes!(!read_wm.is_empty(), "a linearizable read commits");
-        if !read_wm.is_empty() {
-            assert_reachable!("a linearizable read commits");
-        }
-        let multi_slot = read_wm.values().any(|wm| *wm >= Some(1));
-        assert_sometimes!(multi_slot, "a committed read observes a multi-slot prefix");
-        if multi_slot {
-            assert_reachable!("a committed read observes a multi-slot prefix");
-        }
-        // A read served after leadership changed hands (the window where a
-        // naive local read goes stale): the first `leader_elected` at a round
-        // different from the initial one marks the change.
-        let mut first_round: Option<u64> = None;
-        let mut leader_change_ms: Option<u64> = None;
-        for e in q.snapshot(EV_LEADER) {
-            let Some(round) = e.u64("round") else {
-                continue;
-            };
-            match first_round {
-                None => first_round = Some(round),
-                Some(r) if round != r => {
-                    leader_change_ms = Some(e.time_ms);
-                    break;
-                }
-                Some(_) => {}
+        read_coverage_gates(q, &read_wm);
+    }
+}
+
+/// The linearizable-read coverage gates: the interleavings the sweep must keep
+/// reaching for the read path to stay under test. Split out of
+/// [`LinearizabilityOracle::observe`], which owns the three *checked* conditions;
+/// these only assert that the interesting histories keep happening.
+fn read_coverage_gates(q: &dyn TraceQuery, read_wm: &BTreeMap<u64, Option<u64>>) {
+    let read_acks = q.snapshot(EV_READ_ACKED);
+    // Coverage gates (`UntilCoverageStable` only saturates once these fire).
+    assert_sometimes!(!read_wm.is_empty(), "a linearizable read commits");
+    if !read_wm.is_empty() {
+        assert_reachable!("a linearizable read commits");
+    }
+    let multi_slot = read_wm.values().any(|wm| *wm >= Some(1));
+    assert_sometimes!(multi_slot, "a committed read observes a multi-slot prefix");
+    if multi_slot {
+        assert_reachable!("a committed read observes a multi-slot prefix");
+    }
+    // A read served after leadership changed hands (the window where a
+    // naive local read goes stale): the first `leader_elected` at a round
+    // different from the initial one marks the change.
+    let mut first_round: Option<u64> = None;
+    let mut leader_change_ms: Option<u64> = None;
+    for e in q.snapshot(EV_LEADER) {
+        let Some(round) = e.u64("round") else {
+            continue;
+        };
+        match first_round {
+            None => first_round = Some(round),
+            Some(r) if round != r => {
+                leader_change_ms = Some(e.time_ms);
+                break;
             }
+            Some(_) => {}
         }
-        let read_after_change =
-            leader_change_ms.is_some_and(|t| read_acks.iter().any(|e| e.time_ms > t));
-        assert_sometimes!(read_after_change, "a read commits after a leader change");
-        if read_after_change {
-            assert_reachable!("a read commits after a leader change");
-        }
-        let retried = read_acks
-            .iter()
-            .any(|e| e.u64("attempts").is_some_and(|a| a > 1));
-        assert_sometimes!(retried, "a read is retried across nodes before committing");
-        if retried {
-            assert_reachable!("a read is retried across nodes before committing");
-        }
+    }
+    let read_after_change =
+        leader_change_ms.is_some_and(|t| read_acks.iter().any(|e| e.time_ms > t));
+    assert_sometimes!(read_after_change, "a read commits after a leader change");
+    if read_after_change {
+        assert_reachable!("a read commits after a leader change");
+    }
+    let retried = read_acks
+        .iter()
+        .any(|e| e.u64("attempts").is_some_and(|a| a > 1));
+    assert_sometimes!(retried, "a read is retried across nodes before committing");
+    if retried {
+        assert_reachable!("a read is retried across nodes before committing");
+    }
+
+    // The barrier itself, the thing the visualization teaches: a read index
+    // is captured at one instant and answered at a strictly later one, once
+    // the quorum round returned and the applied prefix covered it. A read
+    // served straight out of local state would confirm in the same
+    // millisecond it captured. (`ctx` is a per-node counter, so a round is
+    // keyed by `(node, ctx)`.)
+    let captured_at: HashMap<(u64, u64), u64> = q
+        .snapshot(EV_READ_CAPTURED)
+        .into_iter()
+        .filter_map(|e| Some(((e.u64("node")?, e.u64("ctx")?), e.time_ms)))
+        .collect();
+    let waited = q.snapshot(EV_READ_CONFIRMED).into_iter().any(|e| {
+        e.u64("node")
+            .zip(e.u64("ctx"))
+            .and_then(|k| captured_at.get(&k).copied())
+            .is_some_and(|c| e.time_ms > c)
+    });
+    assert_sometimes!(
+        waited,
+        "a read waits at the commit barrier before it is served"
+    );
+    if waited {
+        assert_reachable!("a read waits at the commit barrier before it is served");
+    }
+
+    // The sharp end of the same story: a read parked on a leader that was
+    // then deposed. Its round never confirms, the driver hands the client a
+    // retry, and the read completes under the *next* leader — never from the
+    // deposed one's stale belief.
+    let outlived_leader = q
+        .snapshot(EV_READ_REDIRECT)
+        .into_iter()
+        .any(|e| e.str("kind") == Some("stepped_down"));
+    assert_sometimes!(
+        outlived_leader,
+        "a parked read outlives the leader that captured it"
+    );
+    if outlived_leader {
+        assert_reachable!("a parked read outlives the leader that captured it");
     }
 }
 
@@ -1382,36 +1666,11 @@ impl Invariant for TruncationOracle {
     }
 }
 
-/// Turn the recorded timeline into the animation [`RunResult`]: match each issued
-/// proposal to its acknowledgement (delivered) or failure (dropped), and
-/// synthesize the legs of every round trip.
-pub(crate) fn build_result(
-    seed: u64,
-    data: &RecorderData,
-    proto: &ProtocolData,
-    rec: &RecoveryData,
-) -> RunResult {
-    let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
-    let crashes = rec.crashes.clone();
-    let restarts = rec.restarts.clone();
-    let syncs = rec.syncs.clone();
-    let recovered = rec.recovered.clone();
-
-    if data.issued.is_empty() {
-        return RunResult {
-            protocol,
-            node_states,
-            chosen,
-            leaders,
-            applied,
-            crashes,
-            restarts,
-            syncs,
-            recovered,
-            ..RunResult::empty(seed)
-        };
-    }
-
+/// Pair each issued client proposal with its ack (or failure) into the two
+/// client-level [`Shot`] legs the request timeline animates, plus the delivered /
+/// dropped / slowest-RTT counters. Split out of [`build_result`] so each function
+/// owns one shape of the timeline.
+fn build_client_shots(data: &RecorderData) -> (Vec<Shot>, u32, u32, u64) {
     let ack: HashMap<u64, u64> = data.acked.iter().copied().collect();
     let fail: HashMap<u64, u64> = data.failed.iter().copied().collect();
     let mut issued = data.issued.clone();
@@ -1462,6 +1721,44 @@ pub(crate) fn build_result(
         }
     }
 
+    (shots, delivered, dropped, longest_rtt_ms)
+}
+
+/// Turn the recorded timeline into the animation [`RunResult`]: match each issued
+/// proposal to its acknowledgement (delivered) or failure (dropped), synthesize
+/// the legs of every round trip, and stitch the read lifecycles.
+pub(crate) fn build_result(
+    seed: u64,
+    data: &RecorderData,
+    proto: &ProtocolData,
+    rec: &RecoveryData,
+    read: &ReadData,
+) -> RunResult {
+    let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
+    let crashes = rec.crashes.clone();
+    let restarts = rec.restarts.clone();
+    let syncs = rec.syncs.clone();
+    let recovered = rec.recovered.clone();
+    let reads = build_reads(read);
+
+    if data.issued.is_empty() {
+        return RunResult {
+            protocol,
+            node_states,
+            chosen,
+            leaders,
+            applied,
+            crashes,
+            restarts,
+            syncs,
+            recovered,
+            reads,
+            ..RunResult::empty(seed)
+        };
+    }
+
+    let (shots, delivered, dropped, longest_rtt_ms) = build_client_shots(data);
+
     // The animation spans the latest of any observable event: a client leg, a
     // protocol leg, a node-state change, a chosen marker, or a crash/restart —
     // the crash/recovery tail must not be truncated.
@@ -1476,12 +1773,13 @@ pub(crate) fn build_result(
         .chain(crashes.iter().map(|s| s.time_ms))
         .chain(restarts.iter().map(|s| s.time_ms))
         .chain(recovered.iter().map(|s| s.time_ms))
+        .chain(reads.iter().filter_map(|r| r.served_ms))
         .max()
         .unwrap_or(0);
 
     RunResult {
         seed,
-        requests: u32::try_from(issued.len()).unwrap_or(u32::MAX),
+        requests: u32::try_from(data.issued.len()).unwrap_or(u32::MAX),
         shots,
         protocol,
         node_states,
@@ -1492,6 +1790,7 @@ pub(crate) fn build_result(
         restarts,
         syncs,
         recovered,
+        reads,
         delivered,
         dropped,
         ticks: data.ticks,

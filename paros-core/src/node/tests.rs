@@ -1178,7 +1178,12 @@ fn read_on_a_follower_redirects_to_the_leader() {
 #[test]
 fn read_confirms_on_a_heartbeat_ack_quorum_and_clears_on_advance() {
     let mut nodes = cluster_with_three_chosen();
-    assert_eq!(nodes[0].read_index(7), ReadIndexResult::Pending);
+    assert_eq!(
+        nodes[0].read_index(7),
+        ReadIndexResult::Pending {
+            index: Some(Slot(2))
+        }
+    );
     assert!(
         nodes[0].pending_read_states.is_empty(),
         "only the self ack so far: no quorum, nothing to serve"
@@ -1253,7 +1258,13 @@ fn fresh_leader_read_waits_for_the_read_floor() {
 
     // A full ack quorum arrives — and must NOT confirm the read: the fence
     // holds until the chosen prefix covers the floor.
-    assert_eq!(nodes[1].read_index(9), ReadIndexResult::Pending);
+    assert_eq!(
+        nodes[1].read_index(9),
+        ReadIndexResult::Pending {
+            index: Some(Slot(3))
+        },
+        "the fresh leader captures its read floor, above its own chosen prefix"
+    );
     let beats = drain(&mut nodes[1]);
     let mut acks = Vec::new();
     for (to, m) in beats {
@@ -1312,7 +1323,12 @@ fn single_node_read_confirms_in_the_same_batch() {
     let _ = n.propose(ClientId(1), ClientSeq(1), val(1));
     assert_eq!(n.hard_state().chosen_index, Some(Slot(0)));
 
-    assert_eq!(n.read_index(3), ReadIndexResult::Pending);
+    assert_eq!(
+        n.read_index(3),
+        ReadIndexResult::Pending {
+            index: Some(Slot(0))
+        }
+    );
     assert_eq!(
         n.pending_read_states,
         vec![ReadState {
@@ -1465,7 +1481,12 @@ fn read_after_compaction_confirms_normally() {
     assert_eq!(nodes[0].first_slot(), Slot(2));
     let _ = drain(&mut nodes[0]);
 
-    assert_eq!(nodes[0].read_index(4), ReadIndexResult::Pending);
+    assert_eq!(
+        nodes[0].read_index(4),
+        ReadIndexResult::Pending {
+            index: Some(Slot(2))
+        }
+    );
     let beats = drain(&mut nodes[0]);
     for (to, m) in beats {
         if to == NodeId(1) {

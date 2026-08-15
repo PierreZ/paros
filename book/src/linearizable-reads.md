@@ -233,8 +233,73 @@ read retried across nodes), and the deterministic core test
 `fresh_leader_read_waits_for_the_read_floor` pins the trap mechanism at the
 state-machine level.
 
-What read-index deliberately does not buy: locality. Every read still goes
-through the leader and still costs a round trip. Leader leases (serve reads
+## Watch a read wait
+
+Reading about a barrier is not the same as watching one hold. The multi-Paxos
+demo now draws the read path on the same stage as the log: a **read lane** down
+the right-hand side, sharing the log's rows, because a read *is* an index into
+that log. Seed 19 is a churn-heavy run — eighteen leader terms in one run — so
+reads have to work for their answers.
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=multi&seed=19"
+  title="paros: a linearizable read waiting at the commit barrier (seed 19)"
+  style="width:100%;height:940px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+Step to **“Read 2 pins its index”** and then to the step after it. That pair is
+the whole chapter in two frames:
+
+- **Pinned, not answered.** N0 captures read index `slot 3` and parks the reply.
+  The dashed violet line across the log *is* the barrier: the read may not be
+  answered from anything above it until the applied prefix crosses it and a
+  quorum has acked a beat at N0's ballot. The lens marker sits in the lane at
+  that row, hollow, tied by a dashed line to the node holding the round.
+- **Answered by someone else.** N0 loses its ballot before its quorum lands. Its
+  round is abandoned (no confirmation ever surfaces for it), the driver releases
+  the parked reply as a retry, and the read completes 584 ms later under the next
+  leader — at the same index, from a node that could actually prove it leads. A
+  naive local read would have answered instantly at step one, from a leader that
+  was already deposed.
+
+Other things to read off the lane:
+
+- **The trail.** Every answered read leaves a dot at the watermark it observed.
+  The trail only ever climbs — that is linearizability's condition 2, drawn.
+- **`applied k < i`.** When a round pins an index its own node has not applied
+  yet, the gap is shaded in that node's column. That is the fresh-leader fence
+  from the previous section, on screen.
+- **Timed-out reads** (`R4 ✗`, red). Under this much churn some reads never find
+  a leader that can prove freshness inside the client's deadline, and they are
+  refused rather than answered from a stale belief. The badge stays green:
+  an unanswered read constrains nothing.
+- **The chips.** `reads served`, `longest read wait`, and `reads that changed
+  hands` are all derived from the run, as is the `linearizable · watermarks never
+  regress` badge — the browser re-checks condition 2 on the very data the sim
+  produced.
+
+For contrast, the same view on a calm seed, where one leader holds throughout and
+every read is one round trip behind its write:
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=multi&seed=0"
+  title="paros: linearizable reads under a stable leader (seed 0)"
+  style="width:100%;height:940px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+Both runs are the same code path CI runs: the read lifecycle is reconstructed
+from the driver's `read_captured` / `read_confirmed` / `read_redirect` events
+into `ReadShot`s on `RunResult` (`paros-sim/src/oracle.rs`), and `?dump` shows
+the raw JSON the browser drew. Note that a served read reports the watermark at
+*serve* time, which may be **past** the index it pinned — the barrier is a floor
+on freshness, not a ceiling.
+
+## What read-index does not buy
+
+Locality. Every read still goes through the leader and still costs a round
+trip — the demo's `longest read wait` chip is that bill, itemized. Leader leases (serve reads
 locally for a clock-bounded period) and follower/quorum reads are performance
 variants on top of this baseline, tracked for a later stage; the
 [optimizations table](stable-leader.md#optimizations-at-a-glance) keeps the
