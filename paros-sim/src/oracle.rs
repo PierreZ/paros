@@ -25,6 +25,10 @@ const EV_FAILED: &str = "client_failed";
 const EV_READ_ISSUED: &str = "client_read_issued";
 const EV_READ_ACKED: &str = "client_read_acknowledged";
 const EV_READ_FAILED: &str = "client_read_failed";
+/// Per-run client workload mode (`"sequential"` / `"pipelined"`), emitted once
+/// by `paros_sim::workload::ProposeClient` so [`LinearizabilityOracle`] can
+/// tell which per-seq ordering guarantee this run's history satisfies.
+const EV_WORKLOAD_MODE: &str = "client_workload_mode";
 
 /// Node A — the client.
 const NODE_A: u8 = 0;
@@ -663,6 +667,28 @@ impl Invariant for ClientLivenessOracle {
     }
 }
 
+/// This run's workload mode (`paros_sim::workload::ProposeClient` draws it
+/// once, from the sim config RNG). Sometimes-gated here so the sweep proves
+/// both modes rotate. Returns whether this run drew `Pipelined`.
+fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
+    let mode_events = q.snapshot(EV_WORKLOAD_MODE);
+    let sequential = mode_events
+        .iter()
+        .any(|e| e.str("mode") == Some("sequential"));
+    let pipelined = mode_events
+        .iter()
+        .any(|e| e.str("mode") == Some("pipelined"));
+    assert_sometimes!(sequential, "a run uses the sequential client workload mode");
+    if sequential {
+        assert_reachable!("a run uses the sequential client workload mode");
+    }
+    assert_sometimes!(pipelined, "a run uses the pipelined client workload mode");
+    if pipelined {
+        assert_reachable!("a run uses the pipelined client workload mode");
+    }
+    pipelined
+}
+
 /// The linearizability oracle — the client-history checker (the king oracle:
 /// every later stage asserts client-observed correctness through it). The
 /// register under check is the **applied log prefix**: an acked write is a
@@ -675,6 +701,12 @@ impl Invariant for ClientLivenessOracle {
 /// `time_ms` — a write ack and the next read routinely share a millisecond.
 /// A future multi-client workload must add a client id to these events before
 /// this oracle can go multi-client.
+///
+/// The workload also rotates a `Pipelined` mode (`paros_sim::workload`) that
+/// fires several proposals concurrently — no single program order to
+/// linearize against, so C1-C3 below are gated off for it (via the
+/// `client_workload_mode` event) and degrade to the per-slot [`SafetyOracle`]
+/// checks only, until a multi-client checker lands.
 ///
 /// Failed / timed-out operations enter no constraint: a timed-out write may
 /// still commit later, so it is deliberately unconstrained; a committed write
@@ -715,52 +747,59 @@ impl Invariant for LinearizabilityOracle {
             read_wm.entry(seq).or_insert(e.u64("read_index"));
         }
 
-        // C1 — a committed read observes every write acked before it began:
-        // read `k` starts after write `j`'s ack for every `j <= k`, so its
-        // watermark covers the running max acked slot (two-pointer over seq).
-        let mut max_acked_slot: Option<u64> = None;
-        let mut writes = write_slot.iter().peekable();
-        for (&rk, &wm) in &read_wm {
-            while let Some(&(&wj, &slot)) = writes.peek() {
-                if wj > rk {
-                    break;
-                }
-                max_acked_slot = max_acked_slot.max(Some(slot));
-                writes.next();
-            }
-            assert_always!(
-                wm >= max_acked_slot,
-                "a committed read's watermark covers every write acked before it began"
-            );
-        }
+        // C1-C3 below only hold for `Sequential`'s single-client program
+        // order (see the doc comment above), so they are skipped for
+        // `Pipelined`.
+        let pipelined = observe_workload_mode(q);
 
-        // C2 — reads do not overlap (the client is sequential), so their
-        // watermarks never move backwards.
-        let mut prev: Option<u64> = None;
-        for &wm in read_wm.values() {
-            assert_always!(wm >= prev, "committed-read watermarks never move backwards");
-            prev = prev.max(wm);
-        }
-
-        // C3 — a write issued after a committed read must land above that
-        // read's watermark (a slot at or below it would place the write inside
-        // the prefix the read already observed). Guards against an inflated /
-        // speculative watermark.
-        let mut max_read_wm: Option<u64> = None;
-        let mut reads = read_wm.iter().peekable();
-        for (&wj, &slot) in &write_slot {
-            while let Some(&(&rk, &wm)) = reads.peek() {
-                if rk >= wj {
-                    break;
+        if !pipelined {
+            // C1 — a committed read observes every write acked before it began:
+            // read `k` starts after write `j`'s ack for every `j <= k`, so its
+            // watermark covers the running max acked slot (two-pointer over seq).
+            let mut max_acked_slot: Option<u64> = None;
+            let mut writes = write_slot.iter().peekable();
+            for (&rk, &wm) in &read_wm {
+                while let Some(&(&wj, &slot)) = writes.peek() {
+                    if wj > rk {
+                        break;
+                    }
+                    max_acked_slot = max_acked_slot.max(Some(slot));
+                    writes.next();
                 }
-                max_read_wm = max_read_wm.max(wm);
-                reads.next();
-            }
-            if let Some(i) = max_read_wm {
                 assert_always!(
-                    slot > i,
-                    "a write issued after a committed read lands above its watermark"
+                    wm >= max_acked_slot,
+                    "a committed read's watermark covers every write acked before it began"
                 );
+            }
+
+            // C2 — reads do not overlap (the client is sequential), so their
+            // watermarks never move backwards.
+            let mut prev: Option<u64> = None;
+            for &wm in read_wm.values() {
+                assert_always!(wm >= prev, "committed-read watermarks never move backwards");
+                prev = prev.max(wm);
+            }
+
+            // C3 — a write issued after a committed read must land above that
+            // read's watermark (a slot at or below it would place the write inside
+            // the prefix the read already observed). Guards against an inflated /
+            // speculative watermark.
+            let mut max_read_wm: Option<u64> = None;
+            let mut reads = read_wm.iter().peekable();
+            for (&wj, &slot) in &write_slot {
+                while let Some(&(&rk, &wm)) = reads.peek() {
+                    if rk >= wj {
+                        break;
+                    }
+                    max_read_wm = max_read_wm.max(wm);
+                    reads.next();
+                }
+                if let Some(i) = max_read_wm {
+                    assert_always!(
+                        slot > i,
+                        "a write issued after a committed read lands above its watermark"
+                    );
+                }
             }
         }
 
