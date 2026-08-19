@@ -148,7 +148,7 @@ impl Workload for ProposeClient {
                         time.sleep(Duration::from_millis(GAP_MS)).await.ok();
                     }
                 };
-                let outcome: Option<(Option<u64>, Option<u64>)> = tokio::select! {
+                let outcome: Option<(Option<u64>, Option<u64>)> = moonpool_sim::select! {
                     v = attempt => Some(v),
                     () = shutdown.cancelled() => None,
                     _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
@@ -187,7 +187,7 @@ impl Workload for ProposeClient {
                         time.sleep(Duration::from_millis(GAP_MS)).await.ok();
                     }
                 };
-                let outcome: Option<(Option<u64>, u64)> = tokio::select! {
+                let outcome: Option<(Option<u64>, u64)> = moonpool_sim::select! {
                     v = attempt => Some(v),
                     () = shutdown.cancelled() => None,
                     _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
@@ -317,7 +317,7 @@ impl Workload for ProposeClient {
         // so this is a quiet tail in which the leader keeps heartbeating and any
         // node still short of the chosen prefix converges. The `ConvergenceOracle`
         // asserts over exactly this tail.
-        tokio::select! {
+        moonpool_sim::select! {
             _ = time.sleep(Duration::from_millis(SETTLE_MS)) => {}
             () = shutdown.cancelled() => {}
         }

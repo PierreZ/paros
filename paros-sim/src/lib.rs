@@ -96,6 +96,14 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// a stale leader belief served as a committed read — until the read-index
 /// protocol (heartbeat-ack quorum round + the fresh-leader read floor) landed.
 /// Each replays clean via [`run_seed`].
+///
+/// All of the above predate the moonpool deterministic-executor bump (rev
+/// `f7a6d52`, #65): that change replaced tokio's FIFO task scheduling with
+/// seeded-random scheduling, so a seed's *meaning* (the exact task interleaving
+/// it drives) shifted. These seeds still replay clean (no safety oracle trips),
+/// but they no longer reproduce the original bug interleavings described above
+/// — they are historical markers of what each seed once caught, not live
+/// reproductions of it.
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
