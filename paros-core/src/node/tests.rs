@@ -536,6 +536,7 @@ fn nack_steps_a_candidate_down_instead_of_stalling() {
     n.step(Message::Nack {
         from: NodeId(1),
         ballot: camp,
+        promised: camp,
         slot: Slot(0),
     });
     assert_eq!(
@@ -546,6 +547,38 @@ fn nack_steps_a_candidate_down_instead_of_stalling() {
     assert!(
         n.needs_election_timeout(),
         "and asks for a fresh randomized timeout"
+    );
+}
+
+#[test]
+fn nack_ratchets_the_next_campaign_past_the_acceptors_promised_round() {
+    // A candidate nacked by an acceptor already promised at a much higher round
+    // must not climb one round per election timeout: it should jump straight
+    // past the reported promise on its next campaign.
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick(); // Candidate at round 1
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+    n.step(Message::Nack {
+        from: NodeId(1),
+        ballot: camp,
+        promised: ballot(50, 1),
+        slot: Slot(0),
+    });
+    assert_eq!(n.role(), NodeRole::Follower, "the Nack steps us down");
+    let _ = drain(&mut n);
+
+    n.tick(); // election timeout fires again -> next campaign
+    assert_eq!(
+        n.role(),
+        NodeRole::Candidate,
+        "the fresh election timeout starts a new campaign"
+    );
+    assert_eq!(
+        n.ballot(),
+        ballot(51, 0),
+        "the next campaign starts past the acceptor's promised round, not one above our own"
     );
 }
 

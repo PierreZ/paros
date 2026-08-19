@@ -181,6 +181,13 @@ pub struct RawNode {
     /// The ballot this node operates under as Candidate/Leader (and the highest
     /// leader ballot it has adopted as a Follower).
     ballot: Ballot,
+    /// The highest round some acceptor has reported already promised, via a
+    /// [`Message::Nack`] matching an in-flight campaign or accept round, even
+    /// when we never adopted that ballot ourselves. Floors the round
+    /// [`RawNode::on_check_leader`] picks for the next campaign, so a candidate
+    /// facing a much higher remote promise converges in one hop instead of
+    /// climbing one round per election timeout. Monotonically non-decreasing.
+    known_promised_round: u64,
     /// Ticks since the last leader contact (reset on `Prepare`/`Accept`/
     /// `Heartbeat`/`Commit` at a ballot `>=` ours, and on becoming Leader).
     election_elapsed: u64,
@@ -296,6 +303,7 @@ impl RawNode {
             role: NodeRole::Follower,
             leader: None,
             ballot,
+            known_promised_round: 0,
             election_elapsed: 0,
             election_timeout: 0,
             needs_election_timeout: true,
@@ -336,7 +344,12 @@ impl RawNode {
                 command,
             } => self.on_accept(from, ballot, slot, command),
             Message::Accepted { from, ballot, slot } => self.on_accepted(from, ballot, slot),
-            Message::Nack { ballot, slot, .. } => self.on_nack(ballot, slot),
+            Message::Nack {
+                ballot,
+                promised,
+                slot,
+                ..
+            } => self.on_nack(ballot, promised, slot),
             Message::Commit {
                 ballot,
                 slot,
@@ -537,6 +550,7 @@ impl RawNode {
             .max_promised_ballot
             .round
             .max(self.ballot.round)
+            .max(self.known_promised_round)
             + 1;
         self.role = NodeRole::Candidate;
         self.leader = None;
@@ -674,6 +688,7 @@ impl RawNode {
                 Message::Nack {
                     from: me,
                     ballot,
+                    promised: self.hard_state.max_promised_ballot,
                     slot: from_slot,
                 },
             ));
@@ -708,6 +723,7 @@ impl RawNode {
                 Message::Nack {
                     from: me,
                     ballot,
+                    promised: self.hard_state.max_promised_ballot,
                     slot: from_slot,
                 },
             ));
@@ -752,6 +768,7 @@ impl RawNode {
                 Message::Nack {
                     from: me,
                     ballot,
+                    promised: self.hard_state.max_promised_ballot,
                     slot,
                 },
             ));
@@ -777,12 +794,17 @@ impl RawNode {
     /// A rejection of an in-flight ballot. Step down to Follower and let the
     /// randomized election timeout reschedule us. We do **not** immediately
     /// re-prepare: that (with the randomized timeout) is the dueling-proposer
-    /// livelock fix.
-    fn on_nack(&mut self, ballot: Ballot, slot: Slot) {
+    /// livelock fix. We do, however, remember the acceptor's reported `promised`
+    /// ballot so the *next* campaign starts past it instead of climbing one round
+    /// per timeout.
+    fn on_nack(&mut self, ballot: Ballot, promised: Ballot, slot: Slot) {
         let superseded = self.election.as_ref().is_some_and(|e| e.ballot == ballot)
             || self.proposer.get(&slot).is_some_and(|p| p.ballot == ballot);
         if superseded {
             self.become_follower(None);
+            if promised.round > self.known_promised_round {
+                self.known_promised_round = promised.round;
+            }
         }
     }
 

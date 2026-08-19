@@ -69,13 +69,18 @@ pub enum Message {
         /// The accepted slot.
         slot: Slot,
     },
-    /// Acceptor → proposer: rejection, reporting the higher `ballot` it has
-    /// already promised so the proposer can catch up.
+    /// Acceptor → proposer: rejection of a `Prepare` or `Accept`.
     Nack {
         /// Sender.
         from: NodeId,
-        /// The higher ballot already promised by the acceptor.
+        /// The rejected ballot, echoed from the `Prepare`/`Accept` that was
+        /// refused (matches the proposer's in-flight campaign or accept round).
         ballot: Ballot,
+        /// The acceptor's current `max_promised_ballot`, so the proposer's next
+        /// campaign can jump straight past it instead of climbing one round at a
+        /// time. Below the acceptor's compaction floor this still reports the
+        /// current promise, but sending it never raises that promise.
+        promised: Ballot,
         /// The contested slot.
         slot: Slot,
     },
