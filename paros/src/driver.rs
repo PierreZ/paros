@@ -343,7 +343,9 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             from, ballot, slot, ..
         }
         | Message::Accepted { from, ballot, slot }
-        | Message::Nack { from, ballot, slot }
+        | Message::Nack {
+            from, ballot, slot, ..
+        }
         | Message::Commit {
             from, ballot, slot, ..
         } => Some((*from, *ballot, *slot)),

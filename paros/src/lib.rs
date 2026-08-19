@@ -83,6 +83,10 @@ mod tests {
             Message::Nack {
                 from: NodeId(2),
                 ballot,
+                promised: Ballot {
+                    round: 9,
+                    node: NodeId(4),
+                },
                 slot: Slot(6),
             },
             Message::Commit {
