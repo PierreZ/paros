@@ -844,7 +844,7 @@ where
     let mut ticks: u64 = 0;
 
     loop {
-        tokio::select! {
+        moonpool_core::select! {
             Some((req, reply)) = svc.propose.recv() => {
                 // A client value → the leader (deduplicated by (client, seq)). The
                 // reply is held until the slot commits (ack-on-commit); a non-leader
