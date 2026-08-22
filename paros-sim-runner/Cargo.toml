@@ -9,7 +9,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-paros-sim = { path = "../paros-sim", version = "0.1.0" }
+paros-sim = { path = "../paros-sim", version = "0.2.0" }
 
 [lints]
 workspace = true

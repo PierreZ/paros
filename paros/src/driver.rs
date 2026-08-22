@@ -162,6 +162,23 @@ pub const EV_MSG_FILTERED: &str = "msg_filtered";
 /// is reachable at all.
 pub const EV_READ_ROUND_EXPIRED: &str = "read_round_expired";
 
+/// Tracing event: this node, on winning an election, filled at least one undecided
+/// hole in the recovered suffix with a [`Control::Noop`]. Carries `node`, `round`
+/// (the ballot round it now leads at) and `gaps` (how many slots it filled). The
+/// gap-fill oracle reads it as the reachability gate proving the fill path is
+/// genuinely exercised, not merely present.
+pub const EV_GAP_FILLED: &str = "election_gap_filled";
+
+/// Tracing event: this node holds a **chosen gap** — a slot it knows is chosen
+/// sitting above its contiguous applied prefix (see [`RawNode::chosen_gap`]).
+/// Carries `node`, `hole` (the first slot missing from the prefix) and `above`
+/// (the highest chosen slot past it). Emitted once per tick while the gap exists,
+/// so its *persistence* is what the trace records, not a single instant. A gap is
+/// an ordinary transient (pipelining, a missed `Commit`); one that outlives
+/// quiescence is a wedged cluster, which is what the gap-fill oracle asserts
+/// against. Purely observational.
+pub const EV_CHOSEN_GAP: &str = "chosen_gap";
+
 /// Tracing event: this node received a `Prepare` whose `from_slot` is below its
 /// own compaction floor. Carries `node`, `from_slot`, and `floor`. Purely
 /// observational: it marks that the dangerous "campaign against a truncated
@@ -317,6 +334,10 @@ fn command_hash(command: &Command) -> u64 {
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
             value_hash(&bytes)
         }
+        // A distinct one-byte tag: no `Truncate` encoding can collide with it (they
+        // are nine bytes and start `0xff`), and every node hashes the same no-op to
+        // the same digest, so per-slot prefix agreement stays checkable.
+        Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
     }
 }
 
@@ -340,6 +361,17 @@ pub fn message_kind(m: &Message) -> &'static str {
         Message::HeartbeatAck { .. } => "heartbeat_ack",
         _ => "unknown",
     }
+}
+
+/// The log slot a message concerns, for observability — and the field a
+/// [`SendFilter`] narrows a message class down to a *single slot* on. Exposed for
+/// the same reason as [`message_kind`]: so a filter reads the slot the trace
+/// already carries instead of re-deriving (and drifting from) it. `None` for the
+/// messages that name no slot (the tick self-events, `CatchUpRequest`,
+/// `CatchUpResponse`).
+#[must_use]
+pub fn message_slot(m: &Message) -> Option<Slot> {
+    message_route(m).map(|(_, _, slot)| slot)
 }
 
 /// The `(sender, ballot, slot)` triple a ballot-carrying Paxos message routes on,
@@ -780,6 +812,18 @@ fn maintain<P: Providers>(
             round = node.ballot().round,
             "leader_elected"
         );
+        // This election found holes the promise quorum reported nothing for and
+        // filled them with no-ops. Rare and mechanism-specific, so surface it: it is
+        // the only outside evidence the fill path ran.
+        let gaps = node.election_gap_fills();
+        if gaps > 0 {
+            tracing::info!(
+                node = self_id,
+                round = node.ballot().round,
+                gaps,
+                "election_gap_filled"
+            );
+        }
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
         waiters.pending.clear();
         // Parked reads have no slot whose commit could ever answer them:
@@ -1067,6 +1111,14 @@ where
                 }
                 drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                // Surface a chosen slot stranded above the applied prefix. The
+                // `Ready` handshake only ever hands out the *contiguous* prefix, so
+                // a hole below a chosen slot is otherwise invisible from outside the
+                // core. Re-emitted every tick while it lasts: the oracle reads its
+                // persistence past quiescence, not a single instant.
+                if let Some((hole, above)) = node.chosen_gap() {
+                    tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
+                }
                 tracing::info!(tick = ticks, "node_tick");
             }
             () = shutdown.cancelled() => return Ok(()),

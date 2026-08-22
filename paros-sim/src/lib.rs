@@ -29,10 +29,10 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle,
-    NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData,
-    RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder,
-    TruncationOracle, build_result,
+    ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
+    LinearizabilityOracle, NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData,
+    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
+    SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -96,7 +96,12 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// returned a watermark below a write the client had already seen acknowledged —
 /// a stale leader belief served as a committed read — until the read-index
 /// protocol (heartbeat-ack quorum round + the fresh-leader read floor) landed.
-/// Each replays clean via [`run_seed`].
+/// Seed 53 is where the [`oracle::GapFillOracle`] first went red: under a
+/// `crate::nemesis` slot starvation a slot reached the leader alone below a later
+/// slot that reached the promise quorum, the leader lost it to a crash, and the
+/// election that followed stepped clean over it — freezing every node's chosen
+/// prefix one below the hole for the rest of the run, with reads fenced above it,
+/// until the `Control::Noop` gap fill landed. Each replays clean via [`run_seed`].
 ///
 /// All of the above predate the moonpool deterministic-executor bump (rev
 /// `f7a6d52`, #65): that change replaced tokio's FIFO task scheduling with
@@ -114,6 +119,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     18_153_519_926_117_387_038,
     11_316_277_997_507_784_505,
     286_172_402_316_494_352,
+    53,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
@@ -182,6 +188,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         .invariant(ConvergenceOracle)
+        .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
         .invariant(NemesisOracle)
@@ -233,6 +240,14 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
         // red→green result is reproducible; the deterministic core unit test
         // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
+        //
+        // [`oracle::GapFillOracle`] *is* in the sweep, despite being liveness-shaped
+        // too, because the failure it names has no slow-but-eventual version: a slot
+        // no leader will ever propose is not a node taking its time, it is a hole
+        // nothing can fill, and it stays reported for the whole settle tail. Keeping
+        // it in the adaptive sweep is what makes the election-hole bug findable
+        // across the seed space rather than only on a pinned seed.
+        .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
         .invariant(NemesisOracle)
