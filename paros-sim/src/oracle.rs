@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_LEADER,
-    EV_MSG_FILTERED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_GAP_FILLED,
+    EV_LEADER, EV_MSG_FILTERED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
     EV_PREPARE_BELOW_FLOOR, EV_READ_ROUND_EXPIRED, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
 };
 use serde::Serialize;
@@ -1376,6 +1376,16 @@ impl Invariant for GapFillOracle {
     }
 
     fn observe(&self, q: &dyn TraceQuery, sim_time_ms: u64) {
+        // Coverage: the fill path actually ran. Bare `assert_reachable!` rather than
+        // `assert_sometimes!`, following [`TruncationOracle`]'s below-floor Prepare
+        // gate: a fill happens only when a slot reached the old leader *alone* below
+        // a later slot that reached the promise quorum, which is a rare
+        // interleaving. Demanding it on a plateau of seeds would stall saturation
+        // forever; demanding it at least once across exploration is the honest bar.
+        if !q.snapshot(EV_GAP_FILLED).is_empty() {
+            assert_reachable!("a new leader gap-fills a hole its promise quorum never reported");
+        }
+
         let Some((_, prefix_grew_ms)) = cluster_applied_max(q) else {
             return;
         };

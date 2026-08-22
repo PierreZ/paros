@@ -58,14 +58,19 @@ production impl — never a forked sim-only driver. There are two, both followin
   target a whole **message class** in one direction (`paros_sim::nemesis`), which is how the
   mechanism-specific starvations are reached: only `Commit` toward one follower leaves catch-up as
   its sole cure, only `HeartbeatAck` toward the leader reaches the read-round TTL sweep, and
-  `Defer` reorders one class against all others. An IP-level partition expresses none of these.
+  `Defer` reorders one class against all others. A plan may also carry a per-slot **stride**,
+  narrowing `Accept` to one slot in every N cluster-wide: the starved slots stay accepted on the
+  leader alone while their neighbours decide, which is the only way to get an undecided slot
+  *below* a decided one — the election hole `Control::Noop` gap fill exists for. An IP-level
+  partition expresses none of these.
 
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:
 
 - **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `User(Entry)` (opaque client bytes) or a `Control(Truncate{up_to})` metadata command. A client
+  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, or the
+  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below). A client
   asks the **leader** to truncate (the `Compact` RPC → `RawNode::propose_control`); the leader
   decides `Truncate` into a slot by ordinary consensus, and every node truncates *lazily* when it
   applies that slot (`RawNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
@@ -86,6 +91,20 @@ application state. The application owns compaction of its own state. What paros 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) is still
 out of scope: a snapshot restores the log, not the promise, so a naive rejoin can regress the
 promise (a real safety violation). That belongs to the disk-fault stage (`prob_wipe` stays 0).
+
+**Election gap fill.** A new leader has two duties, not one. It re-proposes every slot its promise
+quorum reported accepted (the P2c value-selection rule), *and* it fills every slot in
+`first_unchosen()..next_slot` the quorum reported **nothing** for with a `Control::Noop`. The second
+is not optional: pipelining lets a slot reach the old leader alone while a *later* slot reaches the
+quorum, so the earlier slot lands in neither `chosen` nor `Election::recovered` while `next_slot`
+(derived from the accepted log) steps over it. Nothing would ever propose it again — `propose` only
+allocates `next_slot`, and a restart recomputes `next_slot` the same way — and the contiguous chosen
+prefix would freeze one below it cluster-wide and forever, with reads fenced above it and
+commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
+quorum intersection: a value already chosen there would have been reported by some Promise. The core
+surfaces the failure through `RawNode::chosen_gap()` (the `Ready` handshake only ever hands out the
+*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver traces each
+tick and `paros_sim::oracle::GapFillOracle` asserts against at quiescence.
 
 ## Simulation-driven development
 

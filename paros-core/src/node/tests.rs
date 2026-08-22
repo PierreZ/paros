@@ -286,6 +286,154 @@ fn follower_fills_a_hole_via_commit_replay_catch_up() {
     );
 }
 
+/// Build the #54 wedge: slot 1 reaches the leader alone, slot 2 reaches a
+/// follower and is chosen, then the leader dies and the survivors elect. Returns
+/// the three nodes with node 1 freshly elected. The hole at slot 1 is what the
+/// promise quorum {1,2} never saw — and what `next_slot` (3, from the recovered
+/// slot 2) jumped clean over.
+fn wedge_after_election() -> [RawNode; 3] {
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0: healthy, so every node's chosen prefix starts at slot 0.
+    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // Slot 1: every `Accept` is lost, so only the leader holds it. Undecided.
+    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, msg| {
+        !matches!(msg, Message::Accept { .. })
+    });
+
+    // Slot 2: the `Accept` reaches node 1 only — enough for the {0,1} quorum, so
+    // slot 2 *is* chosen and both followers learn it from the `Commit`.
+    nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, msg| {
+        !(matches!(msg, Message::Accept { .. }) && to == NodeId(2))
+    });
+    assert_eq!(
+        chosen_at(&nodes[1], 2),
+        Some(val(30)),
+        "slot 2 is chosen even though slot 1 never left the leader"
+    );
+
+    // Node 0 dies. Node 1 campaigns; the promise quorum is {1,2}, neither of which
+    // ever saw slot 1, so `Election::recovered` holds only slot 2.
+    nodes[1].set_election_timeout(1);
+    nodes[1].tick();
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(nodes[1].is_leader(), "the survivors elected node 1");
+    nodes
+}
+
+#[test]
+fn election_fills_a_hole_the_promise_quorum_never_reported() {
+    // Pins the #54 bug: `try_become_leader` used to re-propose only the slots in
+    // `Election::recovered`, so a slot that reached the old leader alone — below a
+    // later slot that *did* reach the promise quorum — was neither recovered nor
+    // re-allocated (`next_slot` jumped over it). Nothing would ever propose it
+    // again, freezing the contiguous chosen prefix one below it forever. The new
+    // leader now fills it with a `Control::Noop`. The `GapFillOracle` catches this
+    // in simulation (seed 53); this is the deterministic unit pin.
+    let mut nodes = wedge_after_election();
+
+    assert_eq!(
+        nodes[1].election_gap_fills(),
+        1,
+        "the election found exactly one hole (slot 1) and filled it"
+    );
+    assert!(
+        matches!(
+            nodes[1].accepted.get(&Slot(1)),
+            Some((_, Command::Control(Control::Noop)))
+        ),
+        "the hole was filled with a no-op, not a client value"
+    );
+
+    // The fill is an ordinary Phase-2 round: node 2 accepts it, the quorum decides,
+    // and the frozen prefix finally walks past the hole.
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(2)),
+        "the chosen prefix advances over the filled hole to the recovered suffix"
+    );
+    assert_eq!(
+        nodes[1].chosen_gap(),
+        None,
+        "no chosen slot is stranded above the applied prefix any more"
+    );
+
+    // And the leader can serve fresh proposals past it, which is what the wedge
+    // used to make impossible.
+    nodes[1].propose(ClientId(1), ClientSeq(4), val(40));
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert_eq!(
+        nodes[1].hard_state().chosen_index,
+        Some(Slot(3)),
+        "the log keeps growing after the fill"
+    );
+}
+
+#[test]
+fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
+    // The dedup half of #54. `RawNode::new` rebuilds `inflight` from every
+    // accepted-but-unchosen entry, so the restarted old leader boots holding
+    // `(client 1, seq 2) -> slot 1`. When slot 1 decides as a `Noop`, that mapping
+    // must go: keeping it would answer the client's retry with `Duplicate(slot 1)`,
+    // a reply parked on a slot whose commit never acks a proposer (the driver skips
+    // waiters for control commands), so it would hang forever. Cleared by slot, the
+    // retry takes a fresh slot and commits.
+    let mut storage = TestStorage::new(0, &[0, 1, 2]);
+    storage.hard_state.chosen_index = Some(Slot(0));
+    storage.hard_state.max_promised_ballot = ballot(1, 0);
+    storage
+        .accepted
+        .insert(Slot(0), (ballot(1, 0), ucmd(1, 1, 10)));
+    storage
+        .accepted
+        .insert(Slot(1), (ballot(1, 0), ucmd(1, 2, 20)));
+    let mut n = RawNode::new(&storage);
+    assert_eq!(
+        n.inflight.get(&(ClientId(1), ClientSeq(2))),
+        Some(&Slot(1)),
+        "the boot rebuilt the in-flight mapping from the unchosen accepted entry"
+    );
+
+    // The cluster decided a no-op at slot 1 under a later ballot; we learn it.
+    n.step(Message::Commit {
+        from: NodeId(1),
+        ballot: ballot(2, 1),
+        slot: Slot(1),
+        command: Command::Control(Control::Noop),
+    });
+    assert_eq!(
+        n.inflight.get(&(ClientId(1), ClientSeq(2))),
+        None,
+        "the decision frees the slot's in-flight client request, whatever was decided"
+    );
+
+    // As leader, the client's retry is admitted at a fresh slot rather than being
+    // parked on the no-op's slot forever.
+    let mut nodes = [n, node(1, &[0, 1, 2]), node(2, &[0, 1, 2])];
+    make_leader(&mut nodes, 0);
+    assert_eq!(
+        nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
+        ProposeResult::Accepted(Slot(2)),
+        "the retry is re-proposed at a fresh slot, not deduped onto the no-op's"
+    );
+}
+
 #[test]
 fn promise_and_accept_batches_require_fsync() {
     use crate::write::MustSync;

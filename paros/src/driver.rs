@@ -162,6 +162,13 @@ pub const EV_MSG_FILTERED: &str = "msg_filtered";
 /// is reachable at all.
 pub const EV_READ_ROUND_EXPIRED: &str = "read_round_expired";
 
+/// Tracing event: this node, on winning an election, filled at least one undecided
+/// hole in the recovered suffix with a [`Control::Noop`]. Carries `node`, `round`
+/// (the ballot round it now leads at) and `gaps` (how many slots it filled). The
+/// gap-fill oracle reads it as the reachability gate proving the fill path is
+/// genuinely exercised, not merely present.
+pub const EV_GAP_FILLED: &str = "election_gap_filled";
+
 /// Tracing event: this node holds a **chosen gap** — a slot it knows is chosen
 /// sitting above its contiguous applied prefix (see [`RawNode::chosen_gap`]).
 /// Carries `node`, `hole` (the first slot missing from the prefix) and `above`
@@ -327,6 +334,10 @@ fn command_hash(command: &Command) -> u64 {
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
             value_hash(&bytes)
         }
+        // A distinct one-byte tag: no `Truncate` encoding can collide with it (they
+        // are nine bytes and start `0xff`), and every node hashes the same no-op to
+        // the same digest, so per-slot prefix agreement stays checkable.
+        Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
     }
 }
 
@@ -801,6 +812,18 @@ fn maintain<P: Providers>(
             round = node.ballot().round,
             "leader_elected"
         );
+        // This election found holes the promise quorum reported nothing for and
+        // filled them with no-ops. Rare and mechanism-specific, so surface it: it is
+        // the only outside evidence the fill path ran.
+        let gaps = node.election_gap_fills();
+        if gaps > 0 {
+            tracing::info!(
+                node = self_id,
+                round = node.ballot().round,
+                gaps,
+                "election_gap_filled"
+            );
+        }
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
         waiters.pending.clear();
         // Parked reads have no slot whose commit could ever answer them:

@@ -674,6 +674,45 @@ impl RawNode {
             .keys()
             .next_back()
             .map_or(self.first_unchosen(), |s| Slot(s.0 + 1));
+        // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
+        //
+        // Re-proposing `recovered` covers every slot the quorum saw accepted, and
+        // `next_slot` now sits one past the highest of them. What that leaves is the
+        // dangerous case *between* them: a slot the old leader accepted alone, while
+        // a later slot reached the quorum. It is in neither `chosen` nor
+        // `recovered`, and `next_slot` jumped clean over it — so no one would ever
+        // propose it again. `propose`/`propose_control` only allocate `next_slot`,
+        // and a restart recomputes `next_slot` from the accepted log the same way.
+        // The hole would be permanent, and it is not a quiet one: the contiguous
+        // chosen prefix freezes one below it cluster-wide (`advance_chosen_index`
+        // walks contiguously) while higher slots keep being chosen, the fresh-leader
+        // read fence sits above it so no read ever confirms again, and commit-replay
+        // catch-up cannot heal it — every node's prefix is frozen below the hole, so
+        // no peer has anything to replay.
+        //
+        // Filling it with a [`Control::Noop`] is safe for the ordinary Phase-1
+        // reason. Any value already chosen at that slot was accepted by a quorum,
+        // which intersects this promise quorum, so at least one Promise would have
+        // reported it (an acceptor that truncated the range Nacks instead of
+        // under-reporting — see the floor guard in `on_prepare`). Nothing was
+        // reported, so nothing is chosen there and the slot is genuinely free.
+        let fill: Vec<Slot> = (self.first_unchosen().0..self.next_slot.0)
+            .map(Slot)
+            .filter(|s| !self.proposer.contains_key(s))
+            .collect();
+        let mut filled = 0_u64;
+        for slot in fill {
+            // Re-checked per slot, not once up front: a fill can decide in this same
+            // loop (a single-node cluster is its own quorum), advancing the chosen
+            // prefix underneath it. Starting a round on an already-chosen slot would
+            // overwrite its authoritative accepted record with the no-op.
+            if slot < self.first_slot || self.chosen.contains_key(&slot) {
+                continue;
+            }
+            self.start_accept_round(slot, Command::Control(Control::Noop));
+            filled += 1;
+        }
+        self.election_gap_fills = filled;
         // The fresh-leader read fence: nothing decided under an earlier ballot
         // can sit above `next_slot - 1` (the prepare quorum reported it all), so
         // reads wait until the chosen prefix covers that slot. Beat seqs are
@@ -1229,11 +1268,21 @@ impl RawNode {
             self.set_promise(ballot);
         }
         self.chosen.insert(slot, command.clone());
+        // Whatever was decided here, this slot can no longer be the landing place of
+        // an in-flight client request, so drop any that still points at it. Keyed on
+        // the *slot*, not on a matching `Command::User`: a node that booted holding
+        // an accepted-but-unchosen entry at this slot (`RawNode::new` rebuilds
+        // `inflight` from exactly those) keeps a dangling mapping when the slot
+        // decides as something else — a `Noop` filled in by a new leader, say. The
+        // client's retry would then get `ProposeResult::Duplicate(slot)` for a slot
+        // whose commit never acks a proposer (a control command has no client
+        // waiter), and the reply would hang to the client's deadline forever.
+        // Clearing by slot lets the retry take a fresh slot and actually commit.
+        self.inflight.retain(|_, s| *s != slot);
         // Only a client entry carries `(client, seq)` dedup state; a control
         // command has none, and its `Truncate` effect is applied in
         // `advance_chosen_index` when it enters the contiguous chosen prefix.
         if let Command::User(entry) = command {
-            self.inflight.remove(&(entry.client, entry.seq));
             let bump = self
                 .applied_seq
                 .get(&entry.client)
@@ -1339,6 +1388,16 @@ impl RawNode {
     #[must_use]
     pub fn needs_election_timeout(&self) -> bool {
         self.needs_election_timeout
+    }
+
+    /// How many undecided holes this node filled with a [`Control::Noop`] when it
+    /// won its current leadership — 0 on a node that has never led, and re-set at
+    /// each election it wins. A read-only observability counter (the same shape as
+    /// [`RawNode::read_rounds_expired`]): the driver reads it on the transition to
+    /// Leader so a simulation can prove the gap-fill path is genuinely reached.
+    #[must_use]
+    pub fn election_gap_fills(&self) -> u64 {
+        self.election_gap_fills
     }
 
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`

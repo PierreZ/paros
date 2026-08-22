@@ -65,6 +65,22 @@ pub enum Control {
         /// The last slot the application permits dropping (inclusive).
         up_to: Slot,
     },
+    /// A **no-op**: decides the slot without doing anything at apply time.
+    ///
+    /// The gap filler. A new leader re-proposes every slot its promise quorum
+    /// reported accepted, but a slot the quorum reported *nothing* for — one the
+    /// old leader accepted alone, below a later slot that did reach the quorum —
+    /// would otherwise never be proposed by anyone again, freezing the contiguous
+    /// chosen prefix one below it forever (see
+    /// [`RawNode::chosen_gap`](crate::RawNode::chosen_gap)). Deciding a `Noop`
+    /// there is safe for the ordinary Phase-1 reason: quorum intersection
+    /// guarantees a value already chosen at that slot would have been reported, so
+    /// the slot is genuinely free.
+    ///
+    /// It is an entry like any other — persisted, replicated, truncatable — and
+    /// carries no `(client, seq)`, so it takes part in no dedup. Applying it
+    /// advances the applied prefix and nothing else.
+    Noop,
 }
 
 /// What a single log slot decides: either an opaque client [`Entry`] or a
