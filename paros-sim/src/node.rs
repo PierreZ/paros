@@ -23,6 +23,8 @@ use paros::{
     Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
+use crate::nemesis::{MessageNemesis, nemesis_plan};
+
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
@@ -79,6 +81,16 @@ impl Process for NodeProcess {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
         };
+        // This node's view of the iteration's shared message-class nemesis: the
+        // driver's per-message send filter. Drawn once per iteration (the first
+        // node to boot wins the get-or-create) and shared, so the whole cluster
+        // starves the *same* class in the *same* direction — an independent
+        // per-node draw would leave a quorum intact and starve nothing.
+        let nemesis = MessageNemesis::new(
+            nemesis_plan(ctx.state(), u64::try_from(members.len()).unwrap_or(0)),
+            ctx.time().clone(),
+            self_rank.0,
+        );
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
@@ -95,6 +107,7 @@ impl Process for NodeProcess {
                 members.clone(),
                 ctx.shutdown().clone(),
                 &crash,
+                &nemesis,
             )
             .await
             {

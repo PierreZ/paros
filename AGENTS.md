@@ -46,6 +46,20 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
+**Driver fault hooks.** The same rule binds *fault injection*: a fault the simulation needs at a
+point only the driver can see must be a provider-generic **hook on `run_node`**, with an inert
+production impl — never a forked sim-only driver. There are two, both following the same shape
+(trait + no-op production type, injected by reference):
+
+- `CrashSeam` (`NoCrash` in production) — crash *inside* a `Ready` batch, at the persist/send
+  seams process-level attrition cannot reach.
+- `SendFilter` (`SendAll` in production) — the per-message send hook in `drain_ready`, where the
+  `Message` is still typed. Returning `Drop`/`Duplicate`/`Defer` instead of `Send` lets the sim
+  target a whole **message class** in one direction (`paros_sim::nemesis`), which is how the
+  mechanism-specific starvations are reached: only `Commit` toward one follower leaves catch-up as
+  its sole cure, only `HeartbeatAck` toward the leader reaches the read-round TTL sweep, and
+  `Defer` reorders one class against all others. An IP-level partition expresses none of these.
+
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:
