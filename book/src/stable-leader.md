@@ -79,6 +79,77 @@ This is Paxos Made Moderately Complex's scout-then-commander pattern, with the s
 (Phase 1) and commander (Phase 2) folded into the node's own `Candidate` and
 `Leader` roles.
 
+### The slots the Promises say nothing about
+
+Recovering what the Promises reported is only half the duty, and the missing half
+is easy to overlook: the new leader also has to account for the slots they were
+**silent** about. Pipelining is what makes that possible. The old leader streams
+`Accept`s for several slots at once, so a slot can reach the old leader *alone*
+while a later slot reaches enough acceptors to be chosen. If the promise quorum
+excludes the old leader — it crashed, which is usually why there is an election —
+the earlier slot appears in no Promise at all, and `next_slot` (one past the
+highest recovered slot) steps straight over it.
+
+Nothing would ever propose that slot again. `propose` only ever hands out
+`next_slot`, and a restart recomputes `next_slot` from the accepted log the same
+way, so the hole outlives reboots. And a hole is not a local blemish: the
+contiguous chosen prefix stops one below it **cluster-wide and permanently**,
+because `advance_chosen_index` walks contiguously. Higher slots keep being chosen
+and never apply; the fresh-leader read fence sits above the hole, so no read ever
+confirms again; and commit-replay catch-up is useless, because every node's prefix
+is frozen at the same place and no peer has anything to replay.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant N0 as Node 0, old leader
+    participant N1 as Node 1
+    participant N2 as Node 2
+    Note over N0,N2: chosen_index = 0 everywhere; N0 pipelines slots 1 and 2
+    rect rgba(200, 70, 70, 0.25)
+        N0->>N1: Accept(slot=1, v1)
+        N0->>N2: Accept(slot=1, v1)
+        Note over N1,N2: both lost — slot 1 is accepted on N0 only
+        N0->>N1: Accept(slot=2, v2)
+        N1-->>N0: Accepted(slot=2)
+        Note over N0: quorum {N0,N1} on slot 2: chosen
+        N0->>N1: Commit(slot=2, v2)
+        N0->>N2: Commit(slot=2, v2)
+        Note over N0: N0 crashes, losing the volatile proposer map<br/>that was re-sending slot 1
+    end
+    Note over N1,N2: Election, ballot (2,1), from_slot=1
+    N1->>N2: Prepare(ballot=(2,1), from_slot=1)
+    N2-->>N1: Promise(accepted_suffix={2: v2})
+    Note over N1: recovered = {2}, next_slot = 3.<br/>Slot 1 is in neither chosen nor recovered.
+    rect rgba(70, 170, 110, 0.25)
+        Note over N1: Gap fill: slot 1 is in first_unchosen()..next_slot<br/>and no Promise reported it, so it is free.
+        N1->>N2: Accept(ballot=(2,1), slot=1, Control::Noop)
+        N2-->>N1: Accepted(slot=1)
+        Note over N1: chosen_index 0 -> 2, the prefix walks past the hole
+    end
+```
+
+Filling the hole with a `Control::Noop` is safe for exactly the reason Phase 1
+exists. Any value already chosen at that slot was accepted by a quorum, and that
+quorum intersects this promise quorum, so at least one Promise would have carried
+it (an acceptor that has truncated the range answers `Nack`, never a Promise that
+under-reports). The Promises carried nothing, so nothing is chosen there and the
+slot is genuinely free. The no-op is an entry like any other — persisted,
+replicated, truncatable — that carries no `(client, seq)` and does nothing at
+apply time except let the prefix advance.
+
+Note what the crash in the diagram is doing. A leader re-sends the `Accept`s for
+its still-pending slots on every heartbeat, so a slot that merely lost a few
+messages is not lost at all — the retry lands and it decides. The hole needs the
+leader to *forget*: the `proposer` map is volatile, so a crash or a step-down
+drops it, and slot 1 stops being re-sent by anyone.
+
+`RawNode::chosen_gap` is what makes the failure observable from outside the core:
+`Ready` only ever hands the driver the *contiguous* prefix, so a chosen slot
+stranded above a hole is invisible otherwise. A gap is a normal transient — that is
+what pipelining looks like — while a gap that survives quiescence is the wedge, and
+`paros_sim`'s `GapFillOracle` asserts it never does.
+
 ## Steady state: two messages per command
 
 Once a node is the stable leader, a client command is cheap. There is no Phase 1:
@@ -181,7 +252,7 @@ uses of piggybacking. Here is the list, and where paros stands:
 | Pipelining | propose slot `i+1` before slot `i` is chosen | yes, the leader streams `Accept`s |
 | Randomized backoff | jittered election timeout plus step-down on `Nack`, to break the proposer duel | yes, `draw_election_timeout` |
 | Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up, *and* snapshot transfer once it falls below the floor |
-| No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | not yet: paros re-proposes recovered in-flight slots instead |
+| No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | yes: recovered slots are re-proposed, and every slot the promise quorum reported nothing for is filled with a `Control::Noop` |
 | Command batching | pack many client commands into one slot | not yet |
 | Read-index reads | linearizable reads with no log write, one heartbeat-ack round | yes: see [Why reads are not free](linearizable-reads.md) |
 | Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | not yet |
