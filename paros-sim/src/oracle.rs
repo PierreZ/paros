@@ -1365,9 +1365,15 @@ impl Invariant for ConvergenceOracle {
 ///
 /// A gap itself is perfectly ordinary — pipelining leaves several slots undecided,
 /// and a follower that missed one `Commit` holds one until catch-up runs. So the
-/// assertion is gated on [`quiesced`], exactly like [`ConvergenceOracle`]: only a
-/// gap still being reported after chaos ended, the prefix stopped growing, and
-/// leadership settled is a hole nothing will ever fill.
+/// assertion is gated twice over. First on [`quiesced`], exactly like
+/// [`ConvergenceOracle`]: nothing is asserted until chaos ended, the prefix stopped
+/// growing, and leadership settled. Second, and this is what keeps the two oracles
+/// from overlapping, only a hole **no node has applied** counts. A lagging node's
+/// gap sits below the cluster's applied high-water mark — some peer has that slot
+/// and catch-up can serve it, which is precisely [`ConvergenceOracle`]'s subject
+/// and a known-slow path. The election hole is the other thing entirely: the hole
+/// is *above* the cluster maximum, because every node is frozen at the same place
+/// and nobody has the slot to give.
 pub(crate) struct GapFillOracle;
 
 impl Invariant for GapFillOracle {
@@ -1386,7 +1392,9 @@ impl Invariant for GapFillOracle {
             assert_reachable!("a new leader gap-fills a hole its promise quorum never reported");
         }
 
-        let Some((_, prefix_grew_ms)) = cluster_applied_max(q) else {
+        // A run that applied nothing anywhere is degenerate — the client never got
+        // a value in — and `ProgressOracle` owns that case.
+        let Some((cluster_max, prefix_grew_ms)) = cluster_applied_max(q) else {
             return;
         };
         if !quiesced(q, sim_time_ms, prefix_grew_ms) {
@@ -1397,8 +1405,15 @@ impl Invariant for GapFillOracle {
         // reported it within the last few ticks. Reading the whole grace window
         // instead would flag a gap that opened and healed earlier in the tail — a
         // node rebooting out of the chaos window does exactly that.
+        //
+        // And only a hole above the cluster's applied maximum: below it the slot
+        // exists on some peer and catch-up can serve it, which is a lagging node
+        // ([`ConvergenceOracle`]'s subject), not a hole nothing can fill.
         let since = sim_time_ms.saturating_sub(GAP_STILL_OPEN_MS);
-        let wedged = q.snapshot(EV_CHOSEN_GAP).iter().any(|e| e.time_ms > since);
+        let wedged = q
+            .snapshot(EV_CHOSEN_GAP)
+            .iter()
+            .any(|e| e.time_ms > since && e.u64("hole").is_some_and(|hole| hole > cluster_max));
         assert_always!(
             !wedged,
             "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)"
