@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_RECV,
-    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
-    EV_SNAPSHOT_INSTALLED, EV_SYNCED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_FILTERED,
+    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
+    EV_READ_ROUND_EXPIRED, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
 };
 use serde::Serialize;
+
+use crate::nemesis::EV_NEMESIS_ARMED;
 
 /// Standard transport-client observability events (same names as moonpool's
 /// transport workloads, so tooling is workload-agnostic).
@@ -1331,6 +1333,123 @@ impl Invariant for SnapshotOracle {
         );
         if installed {
             assert_reachable!("a snapshot was installed to recover a below-floor node");
+        }
+    }
+}
+
+/// Nemesis oracle (coverage): the message-class nemesis (`crate::nemesis`)
+/// actually reaches the recovery mechanisms it was built to target.
+///
+/// This oracle asserts no new safety property — every safety invariant the
+/// nemesis could break is already asserted elsewhere (prefix agreement, no gaps,
+/// monotonic promises, convergence), and a dropped/duplicated/deferred message is
+/// something a real network may do anyway. What it adds is *proof the turbulence
+/// lands*: a class-targeted starvation that never happens is a knob that silently
+/// stopped working, and the sweep would go on looking green while testing less.
+///
+/// The two headline gates are the mechanisms an IP-level partition cannot reach:
+/// a leader whose read-index rounds die of their TTL because no `HeartbeatAck`
+/// gets home, and a follower starved of `Commit`s that is healed by commit-replay
+/// catch-up rather than by the `Commit`s it never got.
+pub(crate) struct NemesisOracle;
+
+impl Invariant for NemesisOracle {
+    fn name(&self) -> &'static str {
+        "message_class_nemesis"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // One pass over the filter stream: which actions were taken at all, and —
+        // for the Commit starvation below — when each destination first had a
+        // `Commit` withheld from it. `observe` runs after every trace step, so the
+        // stream is walked once, not once per question asked of it.
+        let mut saw_drop = false;
+        let mut saw_duplicate = false;
+        let mut saw_defer = false;
+        let mut commit_starved_since: HashMap<u64, u64> = HashMap::new();
+        let filtered = q.snapshot(EV_MSG_FILTERED);
+        for e in &filtered {
+            match e.str("action") {
+                Some("drop") => saw_drop = true,
+                Some("duplicate") => saw_duplicate = true,
+                Some("defer") => saw_defer = true,
+                _ => {}
+            }
+            if e.str("action") == Some("drop")
+                && e.str("kind") == Some("commit")
+                && let Some(to) = e.u64("to")
+            {
+                let first = commit_starved_since.entry(to).or_insert(e.time_ms);
+                *first = (*first).min(e.time_ms);
+            }
+        }
+
+        // The plan fired at all: a seed drew a class *and* the driver hook acted on
+        // it. Without this the two mechanism gates below could starve silently.
+        let armed = !q.snapshot(EV_NEMESIS_ARMED).is_empty();
+        assert_sometimes!(
+            armed && !filtered.is_empty(),
+            "the message-class nemesis targets a message class"
+        );
+        if !filtered.is_empty() {
+            assert_reachable!("a message class is dropped, duplicated or deferred by the nemesis");
+        }
+
+        // Per-action reachability. Bare `assert_reachable!` (registered only when
+        // hit), so a seed space that happens to favor one action never blocks
+        // saturation — unlike `assert_sometimes!`, which would demand all three.
+        if saw_drop {
+            assert_reachable!("the nemesis drops a whole message class");
+        }
+        if saw_duplicate {
+            assert_reachable!("the nemesis duplicates a whole message class");
+        }
+        if saw_defer {
+            assert_reachable!("the nemesis defers (reorders) a whole message class");
+        }
+
+        // Gate 1 — the read-index round TTL sweep. Only reachable when a leader
+        // holds a pending round while its `HeartbeatAck` quorum is unreachable for
+        // the full TTL (20 ticks): the nemesis' `heartbeat_ack` class is what makes
+        // that happen on purpose rather than by luck.
+        let ttl_swept = !q.snapshot(EV_READ_ROUND_EXPIRED).is_empty();
+        assert_sometimes!(
+            ttl_swept,
+            "a read-index round is garbage-collected by its TTL"
+        );
+        if ttl_swept {
+            assert_reachable!("a leader's read-index round dies of its TTL (no ack quorum)");
+        }
+
+        // Gate 2 — catch-up heals a Commit-starved follower. A node that had
+        // `Commit`s withheld from it, that then pulled a `CatchUpResponse` *after*
+        // the starvation began, and whose applied prefix reached the cluster
+        // maximum: the hole was healed by the catch-up path, not by the `Commit`s
+        // it never received.
+        let healed = !commit_starved_since.is_empty() && {
+            let mut per_node: HashMap<u64, u64> = HashMap::new();
+            let mut cluster_max = 0_u64;
+            for e in q.snapshot(EV_APPLIED) {
+                let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
+                    continue;
+                };
+                cluster_max = cluster_max.max(idx);
+                let m = per_node.entry(node).or_insert(0);
+                *m = (*m).max(idx);
+            }
+            cluster_max > 0
+                && q.snapshot(EV_MSG_RECV)
+                    .into_iter()
+                    .filter(|e| e.str("kind") == Some("catchup_response"))
+                    .filter_map(|e| {
+                        let node = e.u64("node")?;
+                        (e.time_ms >= *commit_starved_since.get(&node)?).then_some(node)
+                    })
+                    .any(|n| per_node.get(&n).copied().unwrap_or(0) == cluster_max)
+        };
+        assert_sometimes!(healed, "catch-up heals a Commit-starved follower");
+        if healed {
+            assert_reachable!("a follower starved of Commits converges via commit-replay catch-up");
         }
     }
 }

@@ -219,6 +219,12 @@ pub struct RawNode {
     read_floor: Option<Slot>,
     /// In-flight read-index rounds, in creation order (leader only).
     read_rounds: Vec<ReadRound>,
+    /// Monotone count of read-index rounds discarded by the TTL sweep in
+    /// [`RawNode::tick`] (never by a step-down, which abandons rounds for a
+    /// different reason). Purely observational: the driver diffs it to surface a
+    /// `read_round_expired` event, so the simulation can prove the TTL path — the
+    /// one a `HeartbeatAck`-starved leader falls into — is actually reached.
+    read_rounds_expired: u64,
 
     // ---- proposer (multi-decree) ----
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
@@ -312,6 +318,7 @@ impl RawNode {
             heartbeat_seq: 0,
             read_floor: None,
             read_rounds: Vec::new(),
+            read_rounds_expired: 0,
             proposer: BTreeMap::new(),
             election: None,
             next_slot,
@@ -509,8 +516,11 @@ impl RawNode {
             // leader tick already broadcasts a fresh, higher-seq beat whose acks
             // confirm all older pending rounds.
             let now = self.tick_count;
+            let before = self.read_rounds.len();
             self.read_rounds
                 .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
+            let expired = u64::try_from(before - self.read_rounds.len()).unwrap_or(0);
+            self.read_rounds_expired = self.read_rounds_expired.saturating_add(expired);
         } else {
             self.election_elapsed += 1;
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
@@ -1322,6 +1332,17 @@ impl RawNode {
     #[must_use]
     pub fn needs_election_timeout(&self) -> bool {
         self.needs_election_timeout
+    }
+
+    /// Monotone count of in-flight read-index rounds this node has discarded
+    /// because they outlived their TTL (lost `HeartbeatAck`s, an unreachable
+    /// quorum). A read-only observability counter: the driver diffs it across a
+    /// [`RawNode::tick`] and surfaces the delta so a simulation can assert the
+    /// TTL sweep is genuinely reachable. Rounds abandoned on a step-down are
+    /// *not* counted — that is a different path.
+    #[must_use]
+    pub fn read_rounds_expired(&self) -> u64 {
+        self.read_rounds_expired
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

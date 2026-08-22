@@ -12,6 +12,7 @@
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
+mod nemesis;
 mod node;
 mod oracle;
 mod workload;
@@ -28,10 +29,10 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle,
-    ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle,
-    RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle,
-    build_result,
+    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle,
+    NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData,
+    RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder,
+    TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -183,6 +184,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ConvergenceOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
+        .invariant(NemesisOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -233,6 +235,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
+        .invariant(NemesisOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

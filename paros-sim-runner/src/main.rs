@@ -40,6 +40,15 @@ fn main() {
             s.plateau_seeds,
         );
     }
+    // Name the `sometimes`/`reachable` gates that never fired. Saturation is the
+    // sweep's real exit criterion, and "did not saturate" is useless without
+    // knowing *which* gate is starving — that is the knob to tune.
+    if !report.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &report.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
     if report.assertion_violations.is_empty() && report.failed_runs == 0 {
         println!("  no safety violations — single-decree Paxos chose at most one value");
     } else {
