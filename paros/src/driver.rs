@@ -177,6 +177,76 @@ pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 /// is genuinely reached (and the ack oracle needs it named, not hidden).
 pub const EV_PROPOSE_DEDUP_ACK: &str = "propose_dedup_ack";
 
+/// How often the driver takes the **rare-but-valid decisions** the core exposes
+/// as methods, instead of the helpful default.
+///
+/// Neither knob is a fault: both name a choice a Paxos leader is always free to
+/// make, and the core is correct whichever way each goes (see
+/// [`RawNode::resend_pending`] and [`RawNode::step_down`]). What they buy is
+/// *reachability* — with the helpful default taken every single beat, the states
+/// those choices lead to (an undecided slot below a decided one, and a leader
+/// that walks away from it) are essentially unreachable, which is what left #54
+/// invisible to the sweep for 1500 seeds.
+///
+/// **Production passes [`Perturbations::NONE`]**, and with it the driver behaves
+/// exactly as it did before this existed: it re-sends on every beat and never
+/// resigns. The random draws are skipped entirely in that case, so production
+/// does not even consume RNG values and a seeded replay is unaffected.
+///
+/// The deterministic simulation is where non-zero values come from, and it does
+/// **not** hard-code them: `paros-sim` draws each magnitude per seed with
+/// moonpool's `buggify!`, so activation-per-seed in the harness × firing-per-beat
+/// here reproduces `FoundationDB`'s two-level BUGGIFY model across the layer
+/// boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Perturbations {
+    /// Probability, per beat, of *skipping*
+    /// [`RawNode::resend_pending`](paros_core::RawNode::resend_pending) — the
+    /// leader lets its pending `Accept`s wait another beat. `0.0` re-sends every
+    /// beat (production).
+    pub skip_resend: f64,
+    /// Probability, per beat, that a leader calls
+    /// [`RawNode::step_down`](paros_core::RawNode::step_down) and resigns. `0.0`
+    /// never resigns (production). Keep it small: at one beat per
+    /// [`TICK_INTERVAL`] a generous value is a leaderless storm, and progress
+    /// stops being observable.
+    pub step_down: f64,
+}
+
+impl Perturbations {
+    /// The production setting: re-send every beat, never resign. Behaviourally
+    /// identical to a driver with no perturbation code at all.
+    pub const NONE: Self = Self {
+        skip_resend: 0.0,
+        step_down: 0.0,
+    };
+
+    /// Whether this is [`Perturbations::NONE`] — the fast path that draws nothing.
+    fn is_none(self) -> bool {
+        self.skip_resend <= 0.0 && self.step_down <= 0.0
+    }
+}
+
+/// Apply one beat's worth of [`Perturbations`] to the core, right after
+/// [`RawNode::tick`].
+///
+/// Order matters and is the honest one: the beat's re-send (if it happens) goes
+/// out *before* a resignation, so a step-down never silently swallows work the
+/// driver already decided to do.
+fn perturb<P: Providers>(node: &mut RawNode, providers: &P, p: Perturbations) {
+    if p.is_none() {
+        node.resend_pending();
+        return;
+    }
+    let rng = providers.random();
+    if !rng.random_bool(p.skip_resend) {
+        node.resend_pending();
+    }
+    if rng.random_bool(p.step_down) {
+        node.step_down();
+    }
+}
+
 /// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Propose {
@@ -840,6 +910,11 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 /// driver resolves it here. It must be consistent across the cluster and agree
 /// with the `Config` the node read from `storage`.
 ///
+/// `perturbations` decides how often the driver takes the rare-but-valid
+/// alternatives to its helpful defaults (see [`Perturbations`]). Production
+/// passes [`Perturbations::NONE`], which re-sends every beat, never resigns, and
+/// consumes no randomness.
+///
 /// # Errors
 ///
 /// Returns an error if the transport fails to bind or listen on `local_addr`. May
@@ -858,6 +933,7 @@ pub async fn run_node<P, S, C>(
     members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
     crash: &C,
+    perturbations: Perturbations,
 ) -> SimulationResult<()>
 where
     P: Providers,
@@ -1011,6 +1087,11 @@ where
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
+                // The beat's two discretionary decisions: re-send the leader's
+                // still-pending `Accept`s, and (far more rarely) resign. With
+                // `Perturbations::NONE` — production — this is exactly "re-send
+                // every beat", with no draw taken.
+                perturb(&mut node, &providers, perturbations);
                 ticks += 1;
                 // Expire parked reads whose confirmation is overdue (lost acks, a
                 // minority-partitioned leader that never steps down): answer a
