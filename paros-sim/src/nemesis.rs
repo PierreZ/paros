@@ -204,7 +204,9 @@ fn draw_range(lo: u64, hi: u64) -> u64 {
 /// config stream stays aligned across seeds.
 fn draw_plan(cluster_size: u64) -> Option<NemesisPlan> {
     let kind = CLASSES[usize::try_from(draw_bits(3)).unwrap_or(0)];
-    let node = draw_range(0, cluster_size);
+    // `max(1)` keeps the range non-empty: a zero-node cluster is not reachable
+    // here, but `draw_range` divides by the span, so it must never be handed one.
+    let node = draw_range(0, cluster_size.max(1));
     let direction = match draw_bits(2) {
         0 | 1 => Direction::Toward(node),
         2 => Direction::From(node),
