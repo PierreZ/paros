@@ -52,8 +52,19 @@ pub enum ProposeResult {
     Accepted(Slot),
     /// A retry already in flight at this slot; ack when the slot commits.
     Duplicate(Slot),
-    /// Already chosen and applied; the driver acks immediately (idempotent).
-    Chosen,
+    /// Already **applied** (inside this node's contiguous chosen prefix); the
+    /// driver acks immediately (idempotent), reporting this slot.
+    ///
+    /// The slot is the one this client's *highest applied* command landed at —
+    /// this command's own slot for the ordinary retry (a sequential client
+    /// cannot be past the seq it is still retrying), and a slot at or above it
+    /// otherwise. Either way it is inside the applied prefix, which is exactly
+    /// what the immediate ack claims: the write is in the register the project
+    /// defines. An ack naming a slot the node has not applied would be a
+    /// linearizability violation, so this carries a slot rather than nothing —
+    /// it makes the fast path checkable by the simulation's oracles instead of
+    /// exempt from them.
+    Chosen(Slot),
 }
 
 /// The outcome of [`RawNode::read_index`], telling the driver how to answer the
@@ -243,12 +254,25 @@ pub struct RawNode {
     // ---- learner / dedup ----
     /// Commands this node has learned are chosen, per slot. Volatile.
     chosen: BTreeMap<Slot, Command>,
-    /// Highest applied `ClientSeq` per client (for at-most-once dedup). Rebuilt
-    /// from `HardState` on construction.
-    applied_seq: BTreeMap<ClientId, ClientSeq>,
-    /// In-flight client requests mapped to the slot they were proposed at, so a
-    /// retry dedups against the existing slot (including recovered entries a new
-    /// leader inherits). Rebuilt from `HardState` on construction.
+    /// Highest applied `ClientSeq` per client (for at-most-once dedup), with the
+    /// slot that command landed at so the dedup fast path can *name* the slot it
+    /// acks (see [`ProposeResult::Chosen`]). Rebuilt from `HardState` on
+    /// construction.
+    ///
+    /// Written **only** from the contiguous walk in
+    /// [`RawNode::advance_chosen_index`] (and the equivalent boot rebuild), so
+    /// an entry here always means "inside this node's applied prefix" — never
+    /// merely "chosen somewhere above the prefix". That is the whole difference
+    /// between an honest immediate ack and one the client cannot trust.
+    applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)>,
+    /// Client requests mapped to the slot they will land in, so a retry dedups
+    /// against that slot instead of allocating a second one. Covers the whole
+    /// span before the command is applied: proposed at a slot
+    /// ([`RawNode::propose`]), recovered into one by a new leader, or already
+    /// *chosen* at one but not yet in the contiguous prefix
+    /// ([`RawNode::mark_chosen`]). The contiguous walk hands each entry over to
+    /// `applied_seq` when its slot applies. Rebuilt from `HardState` on
+    /// construction.
     inflight: BTreeMap<(ClientId, ClientSeq), Slot>,
 }
 
@@ -273,7 +297,7 @@ impl RawNode {
         }
 
         let mut chosen = BTreeMap::new();
-        let mut applied_seq: BTreeMap<ClientId, ClientSeq> = BTreeMap::new();
+        let mut applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
         for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
@@ -284,9 +308,9 @@ impl RawNode {
                 if let Command::User(entry) = command {
                     let bump = applied_seq
                         .get(&entry.client)
-                        .is_none_or(|c| entry.seq > *c);
+                        .is_none_or(|(c, _)| entry.seq > *c);
                     if bump {
-                        applied_seq.insert(entry.client, entry.seq);
+                        applied_seq.insert(entry.client, (entry.seq, *slot));
                     }
                 }
             } else if let Command::User(entry) = command {
@@ -401,8 +425,10 @@ impl RawNode {
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
             return ProposeResult::Duplicate(slot);
         }
-        if self.applied_seq.get(&client).is_some_and(|c| seq <= *c) {
-            return ProposeResult::Chosen;
+        if let Some(&(applied, at)) = self.applied_seq.get(&client)
+            && seq <= applied
+        {
+            return ProposeResult::Chosen(at);
         }
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
@@ -1109,6 +1135,16 @@ impl RawNode {
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
         self.proposer.retain(|slot, _| *slot >= first);
+        // The prefix jumped without the contiguous walk running, so nothing
+        // handed the folded slots' `inflight` entries over. Drop them: a mapping
+        // to a slot that no longer exists would answer a retry with
+        // `Duplicate(slot)` for a slot whose commit can never ack anyone, and
+        // the reply would hang to the client's deadline every time. (The dedup
+        // state itself is not recoverable here — an opaque snapshot carries the
+        // application's state, not paros' `(client, seq)` table — so a retry of
+        // a command folded into the snapshot is re-proposed. That gap belongs to
+        // the snapshot doctrine, not to the applied-prefix hand-off.)
+        self.inflight.retain(|_, s| *s >= first);
         self.next_slot = self.next_slot.max(first);
         // Persist the install (opaque bytes + boundary). Snapshot-xor-entries: this
         // batch surfaces no committed user entries for the folded prefix; the
@@ -1246,8 +1282,18 @@ impl RawNode {
         }
     }
 
-    /// Record `(slot, entry)` as chosen: persist, update dedup tables, and
-    /// advance the contiguous chosen prefix. Idempotent.
+    /// Record `(slot, entry)` as chosen: persist, re-point the in-flight dedup
+    /// mapping at this slot, and advance the contiguous chosen prefix.
+    /// Idempotent.
+    ///
+    /// **Chosen is not applied.** Two of the three callers hand this
+    /// non-contiguous slots — `on_commit` takes whatever the network delivers,
+    /// and `try_decide` fires the moment a slot's accept quorum completes while
+    /// the leader streams later slots concurrently, so slot 6 routinely decides
+    /// before slot 5. So nothing here may record a command as *applied*: the
+    /// `applied_seq` bump lives in the contiguous walk
+    /// ([`RawNode::advance_chosen_index`]) alongside `pending_committed`, which
+    /// is the definition [`RawNode::new`]'s boot rebuild has always used.
     fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it
         // (that would re-insert a record below the floor via `record_accepted`).
@@ -1268,34 +1314,50 @@ impl RawNode {
             self.set_promise(ballot);
         }
         self.chosen.insert(slot, command.clone());
-        // Whatever was decided here, this slot can no longer be the landing place of
-        // an in-flight client request, so drop any that still points at it. Keyed on
-        // the *slot*, not on a matching `Command::User`: a node that booted holding
-        // an accepted-but-unchosen entry at this slot (`RawNode::new` rebuilds
-        // `inflight` from exactly those) keeps a dangling mapping when the slot
-        // decides as something else — a `Noop` filled in by a new leader, say. The
-        // client's retry would then get `ProposeResult::Duplicate(slot)` for a slot
-        // whose commit never acks a proposer (a control command has no client
-        // waiter), and the reply would hang to the client's deadline forever.
-        // Clearing by slot lets the retry take a fresh slot and actually commit.
+        // Re-point `inflight` at what this slot actually decided. Two halves,
+        // and both matter:
+        //
+        // - Whatever was decided here, this slot can no longer be the landing
+        //   place of some *other* in-flight client request, so drop any that
+        //   still points at it. Keyed on the *slot*, not on a matching
+        //   `Command::User`: a node that booted holding an accepted-but-unchosen
+        //   entry at this slot (`RawNode::new` rebuilds `inflight` from exactly
+        //   those) keeps a dangling mapping when the slot decides as something
+        //   else — a `Noop` filled in by a new leader, say. The client's retry
+        //   would then get `ProposeResult::Duplicate(slot)` for a slot whose
+        //   commit never acks a proposer (a control command has no client
+        //   waiter), and the reply would hang to the client's deadline forever.
+        //   Clearing by slot lets the retry take a fresh slot and commit.
+        // - Then map the entry this slot *did* decide to it. That is what keeps
+        //   the chosen-but-not-yet-applied window safe: `applied_seq` only
+        //   learns the command when the contiguous walk applies it, so between
+        //   "chosen" and "applied" `inflight` is the only table that knows about
+        //   it. A retry in that window must find it here and get
+        //   `Duplicate(slot)` — the driver then parks the reply on `slot` and
+        //   acks it out of the apply loop, exactly when the write enters the
+        //   applied prefix. Miss both tables instead and the retry allocates a
+        //   *fresh* slot for a command already chosen: duplicate execution,
+        //   strictly worse than the early ack. This insert also covers the node
+        //   that learns a slot chosen by `Commit` alone (it never proposed it,
+        //   so it never had an `inflight` mapping to keep).
         self.inflight.retain(|_, s| *s != slot);
-        // Only a client entry carries `(client, seq)` dedup state; a control
-        // command has none, and its `Truncate` effect is applied in
-        // `advance_chosen_index` when it enters the contiguous chosen prefix.
         if let Command::User(entry) = command {
-            let bump = self
-                .applied_seq
-                .get(&entry.client)
-                .is_none_or(|c| entry.seq > *c);
-            if bump {
-                self.applied_seq.insert(entry.client, entry.seq);
-            }
+            self.inflight.insert((entry.client, entry.seq), slot);
         }
         self.advance_chosen_index();
     }
 
     /// Walk the contiguous chosen prefix forward, surfacing each newly-applied
     /// `(slot, entry)` for the application in order (no gaps).
+    ///
+    /// This is also where the **client dedup tables move from "in flight" to
+    /// "applied"**, one slot at a time and only in prefix order. `applied_seq`
+    /// means exactly what its name says and what [`RawNode::new`]'s boot rebuild
+    /// has always meant by it — inside the contiguous chosen prefix — so
+    /// [`RawNode::propose`]'s fast path can answer `Chosen` (an immediate
+    /// `committed: true` to the client) without lying: the write really is in
+    /// the applied prefix by then, and the slot it names really is one the node
+    /// applied.
     fn advance_chosen_index(&mut self) {
         let mut next = self.first_unchosen();
         // Highest `up_to` from any `Truncate` control command that entered the
@@ -1308,6 +1370,22 @@ impl RawNode {
             self.pending_writes.push(WriteOp::SetChosenIndex(next));
             if let Command::Control(Control::Truncate { up_to }) = &command {
                 truncate_up_to = Some(truncate_up_to.map_or(*up_to, |u| u.max(*up_to)));
+            }
+            // The slot is applied now, so it is no longer in flight — and only a
+            // client entry carries `(client, seq)` dedup state at all (a control
+            // command has none; its `Truncate` effect is handled just below).
+            // Clearing by slot, the same key `mark_chosen` re-pointed the mapping
+            // with, is what makes this the exact hand-off: whatever `inflight`
+            // held for this slot leaves as `applied_seq` takes it over.
+            self.inflight.retain(|_, s| *s != next);
+            if let Command::User(entry) = &command {
+                let bump = self
+                    .applied_seq
+                    .get(&entry.client)
+                    .is_none_or(|(c, _)| entry.seq > *c);
+                if bump {
+                    self.applied_seq.insert(entry.client, (entry.seq, next));
+                }
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);

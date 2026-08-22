@@ -29,7 +29,7 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
+    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
     LinearizabilityOracle, NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData,
     ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
     SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
@@ -101,15 +101,23 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// slot that reached the promise quorum, the leader lost it to a crash, and the
 /// election that followed stepped clean over it — freezing every node's chosen
 /// prefix one below the hole for the rest of the run, with reads fenced above it,
-/// until the `Control::Noop` gap fill landed. Each replays clean via [`run_seed`].
+/// until the `Control::Noop` gap fill landed. Seed 11 is where the
+/// [`oracle::AppliedAckOracle`] first went red: a slot chosen above the applied
+/// prefix (the leader streams slots concurrently, so a later slot's accept quorum
+/// completes first) marked its command *applied* the moment it was learned
+/// chosen, so a client retry took the `propose` dedup fast path and was told
+/// `committed: true` for a write no node had applied yet — until the
+/// `applied_seq`/`inflight` hand-off moved into the contiguous walk. Each
+/// replays clean via [`run_seed`].
 ///
-/// All of the above predate the moonpool deterministic-executor bump (rev
-/// `f7a6d52`, #65): that change replaced tokio's FIFO task scheduling with
-/// seeded-random scheduling, so a seed's *meaning* (the exact task interleaving
-/// it drives) shifted. These seeds still replay clean (no safety oracle trips),
-/// but they no longer reproduce the original bug interleavings described above
-/// — they are historical markers of what each seed once caught, not live
-/// reproductions of it.
+/// Every seed above *except seed 11* predates the moonpool deterministic-executor
+/// bump (rev `f7a6d52`, #65): that change replaced tokio's FIFO task scheduling
+/// with seeded-random scheduling, so a seed's *meaning* (the exact task
+/// interleaving it drives) shifted. Those seeds still replay clean (no safety
+/// oracle trips), but they no longer reproduce the original bug interleavings
+/// described above — they are historical markers of what each seed once caught,
+/// not live reproductions of it. Seed 11 was found *after* the bump, so it is a
+/// live reproduction: revert the hand-off and it goes red again.
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
@@ -120,6 +128,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     11_316_277_997_507_784_505,
     286_172_402_316_494_352,
     53,
+    11,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
@@ -183,6 +192,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(LinearizabilityOracle)
+        .invariant(AppliedAckOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
@@ -225,6 +235,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(LinearizabilityOracle)
+        .invariant(AppliedAckOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)

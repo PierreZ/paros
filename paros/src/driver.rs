@@ -186,6 +186,14 @@ pub const EV_CHOSEN_GAP: &str = "chosen_gap";
 /// once the acceptor floor guard is in place.
 pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 
+/// Tracing event: a client proposal was answered by the **dedup fast path** —
+/// the `(client, seq)` was already applied here, so the reply fired immediately
+/// instead of being parked on a slot ([`ProposeResult::Chosen`]). Carries `node`
+/// and the `slot` the ack names. Purely observational: this is the one committed
+/// ack that does not come out of the apply loop, so the sweep needs evidence it
+/// is genuinely reached (and the ack oracle needs it named, not hidden).
+pub const EV_PROPOSE_DEDUP_ACK: &str = "propose_dedup_ack";
+
 /// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Propose {
@@ -991,9 +999,15 @@ where
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
                         waiters.pending.entry(slot).or_default().push((seq, reply));
                     }
-                    ProposeResult::Chosen => {
-                        // Already applied before this call; the slot is not tracked here.
-                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: None });
+                    ProposeResult::Chosen(slot) => {
+                        // Already inside this node's applied prefix before this
+                        // call, so the ack fires immediately — and it *names* the
+                        // slot, exactly like the ack-on-commit path. A committed
+                        // ack that named nothing was unfalsifiable: the client was
+                        // told "applied" with no way for an oracle to check the
+                        // claim against the applied prefix.
+                        tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
+                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
                     }
                 }
                 drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;

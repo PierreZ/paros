@@ -549,9 +549,151 @@ fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
 
     // Once chosen+applied, a retry is reported as already chosen (idempotent).
     let r3 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
-    assert_eq!(r3, ProposeResult::Chosen);
+    assert_eq!(
+        r3,
+        ProposeResult::Chosen(slot),
+        "the idempotent ack names the slot the command applied at"
+    );
     // And no second slot was ever allocated for it.
     assert_eq!(nodes[0].next_slot, Slot(1), "exactly one slot consumed");
+}
+
+#[test]
+fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
+    // Pins #55 on the `try_decide` call site: the leader streams slots
+    // concurrently, so a later slot's accept quorum routinely completes while an
+    // earlier slot is still open. Until the earlier slot fills, the later one is
+    // *chosen* but not *applied*, and `propose` must not answer the client's
+    // retry with `Chosen` — that is an immediate `committed: true` for a write
+    // outside the applied prefix, which a read at the same node would not see.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0 is proposed but its round never leaves the leader (the batch is
+    // dropped on the floor), so nothing is chosen there.
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(1), val(10)),
+        ProposeResult::Accepted(Slot(0))
+    );
+    drop(drain(&mut nodes[0]));
+
+    // Slot 1 goes out and is chosen — above the hole at slot 0.
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
+        ProposeResult::Accepted(Slot(1))
+    );
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(chosen_at(&nodes[0], 1), Some(val(20)), "slot 1 is chosen");
+    assert_eq!(
+        nodes[0].hard_state().chosen_index,
+        None,
+        "but nothing is applied: the prefix is still stuck below the slot-0 hole"
+    );
+
+    // The retry lands in exactly that window. It must dedup onto the slot the
+    // command is already chosen at, so the driver parks the reply there and acks
+    // it when the slot applies — not report it applied, and not (the worse
+    // failure) miss both tables and allocate a second slot for it.
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
+        ProposeResult::Duplicate(Slot(1)),
+        "chosen-but-unapplied dedups to its slot, it is not acked as applied"
+    );
+    assert_eq!(
+        nodes[0].next_slot,
+        Slot(2),
+        "and no second slot was allocated for a command already chosen"
+    );
+
+    // Fill the hole: the leader's heartbeat re-sends the still-pending slot-0
+    // `Accept`, slot 0 is chosen, and the walk applies slots 0 and 1 together.
+    let b = nodes[0].ballot();
+    nodes[0].step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: b,
+        commit: Slot(0),
+        seq: 0,
+    });
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(
+        nodes[0].hard_state().chosen_index,
+        Some(Slot(1)),
+        "the prefix caught up over both slots"
+    );
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
+        ProposeResult::Chosen(Slot(1)),
+        "only now is the retry answered as applied, naming the slot it applied at"
+    );
+}
+
+#[test]
+fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
+    // The same #55 property on the `on_commit` call site, where the slot is
+    // whatever the network delivers: a follower learning a decided slot above
+    // its own hole records it as *in flight at that slot*, never as applied. The
+    // hand-off to `applied_seq` happens in the contiguous walk, so the two
+    // tables are checked on both sides of it.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // Slot 1: node 2 misses both the `Accept` and the `Commit` — a hole.
+    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+
+    // Slot 2 reaches node 2 normally, so it is chosen there, above the hole.
+    nodes[0].propose(ClientId(7), ClientSeq(5), val(30));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(0)),
+        "node 2's applied prefix stalls at the hole"
+    );
+    assert_eq!(
+        nodes[2].applied_seq.get(&ClientId(7)),
+        None,
+        "a slot chosen above the hole is not applied, so it is not in `applied_seq`"
+    );
+    assert_eq!(
+        nodes[2].inflight.get(&(ClientId(7), ClientSeq(5))),
+        Some(&Slot(2)),
+        "it is in flight at its chosen slot instead — node 2 never proposed it, so \
+         only `mark_chosen` could have put it there"
+    );
+
+    // Commit-replay catch-up fills the hole; the walk applies slots 1 and 2 and
+    // hands the entry from one table to the other.
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[2].hard_state().chosen_index, Some(Slot(2)));
+    assert_eq!(
+        nodes[2].applied_seq.get(&ClientId(7)),
+        Some(&(ClientSeq(5), Slot(2))),
+        "applied now, naming the slot it applied at"
+    );
+    assert_eq!(
+        nodes[2].inflight.get(&(ClientId(7), ClientSeq(5))),
+        None,
+        "and no longer in flight"
+    );
 }
 
 #[test]
@@ -788,7 +930,10 @@ fn restart_rebuilds_state_from_hard_state() {
     );
     assert_eq!(n.role(), NodeRole::Follower);
     // Dedup: applied seqs for the chosen prefix; slot 2 still in flight.
-    assert_eq!(n.applied_seq.get(&ClientId(1)), Some(&ClientSeq(2)));
+    assert_eq!(
+        n.applied_seq.get(&ClientId(1)),
+        Some(&(ClientSeq(2), Slot(1)))
+    );
     assert_eq!(n.inflight.get(&(ClientId(1), ClientSeq(3))), Some(&Slot(2)));
 }
 
