@@ -12,18 +12,15 @@
 
 mod crash;
 mod driver;
-mod nemesis;
 mod storage;
 
 pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
-    EV_GAP_FILLED, EV_LEADER, EV_MSG_FILTERED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE,
-    EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_READ_ROUND_EXPIRED,
-    EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck,
-    WLTOKEN_PAROS, is_seam_crash, message_kind, message_slot, parse_addr, run_node,
+    EV_GAP_FILLED, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
+    EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
+    Paros, Propose, ProposeAck, Read, ReadAck, WLTOKEN_PAROS, is_seam_crash, parse_addr, run_node,
 };
-pub use nemesis::{SendAll, SendFilter, SendVerdict};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{

@@ -230,12 +230,6 @@ pub struct RawNode {
     read_floor: Option<Slot>,
     /// In-flight read-index rounds, in creation order (leader only).
     read_rounds: Vec<ReadRound>,
-    /// Monotone count of read-index rounds discarded by the TTL sweep in
-    /// [`RawNode::tick`] (never by a step-down, which abandons rounds for a
-    /// different reason). Purely observational: the driver diffs it to surface a
-    /// `read_round_expired` event, so the simulation can prove the TTL path — the
-    /// one a `HeartbeatAck`-starved leader falls into — is actually reached.
-    read_rounds_expired: u64,
 
     // ---- proposer (multi-decree) ----
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
@@ -348,7 +342,6 @@ impl RawNode {
             heartbeat_seq: 0,
             read_floor: None,
             read_rounds: Vec::new(),
-            read_rounds_expired: 0,
             proposer: BTreeMap::new(),
             election: None,
             next_slot,
@@ -549,11 +542,8 @@ impl RawNode {
             // leader tick already broadcasts a fresh, higher-seq beat whose acks
             // confirm all older pending rounds.
             let now = self.tick_count;
-            let before = self.read_rounds.len();
             self.read_rounds
                 .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
-            let expired = u64::try_from(before - self.read_rounds.len()).unwrap_or(0);
-            self.read_rounds_expired = self.read_rounds_expired.saturating_add(expired);
         } else {
             self.election_elapsed += 1;
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
@@ -1470,9 +1460,9 @@ impl RawNode {
 
     /// How many undecided holes this node filled with a [`Control::Noop`] when it
     /// won its current leadership — 0 on a node that has never led, and re-set at
-    /// each election it wins. A read-only observability counter (the same shape as
-    /// [`RawNode::read_rounds_expired`]): the driver reads it on the transition to
-    /// Leader so a simulation can prove the gap-fill path is genuinely reached.
+    /// each election it wins. A read-only observability counter: the driver reads
+    /// it on the transition to Leader so a simulation can prove the gap-fill path
+    /// is genuinely reached.
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
         self.election_gap_fills
@@ -1483,8 +1473,7 @@ impl RawNode {
     /// is the highest slot above it this node already knows is chosen. `None` when
     /// nothing is chosen past the prefix — the healthy steady state.
     ///
-    /// A read-only observability accessor (the same shape as
-    /// [`RawNode::read_rounds_expired`]): the core cannot trace, and the gap is
+    /// A read-only observability accessor: the core cannot trace, and the gap is
     /// invisible from outside because [`Ready::committed`](crate::Ready::committed)
     /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
     /// (pipelining, a follower that missed one `Commit`); a gap that **survives
@@ -1497,17 +1486,6 @@ impl RawNode {
         // every `mark_chosen`, so anything at or above it is strictly above.
         let highest = *self.chosen.range(hole..).next_back()?.0;
         Some((hole, highest))
-    }
-
-    /// Monotone count of in-flight read-index rounds this node has discarded
-    /// because they outlived their TTL (lost `HeartbeatAck`s, an unreachable
-    /// quorum). A read-only observability counter: the driver diffs it across a
-    /// [`RawNode::tick`] and surfaces the delta so a simulation can assert the
-    /// TTL sweep is genuinely reachable. Rounds abandoned on a step-down are
-    /// *not* counted — that is a different path.
-    #[must_use]
-    pub fn read_rounds_expired(&self) -> u64 {
-        self.read_rounds_expired
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

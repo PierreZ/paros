@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::crash::{CrashSeam, Seam};
-use crate::nemesis::{SendFilter, SendVerdict};
 use crate::storage::{NodeStorage, StorageError};
 
 /// Well-known RPC token the paros node service is registered at. Every node
@@ -145,22 +144,6 @@ pub const EV_COMPACTED: &str = "compacted";
 /// snapshot oracle reads it to confirm a below-floor node recovered, and the
 /// no-gaps oracle reads it to admit the applied-index jump the install performs.
 pub const EV_SNAPSHOT_INSTALLED: &str = "snapshot_installed";
-
-/// Tracing event: the driver's [`SendFilter`] gave a non-`Send` verdict for an
-/// outbound message — the message-class nemesis acted. Carries `node` (sender),
-/// `to` (the destination the core addressed), `kind` (the message variant label,
-/// see [`message_kind`]), and `action` (`"drop"` / `"duplicate"` / `"defer"`).
-/// Inert in production, where [`SendAll`](crate::SendAll) never returns anything
-/// but `Send`. Purely observational: it is the fault-timeline record of which
-/// message class was targeted, in which direction, and when.
-pub const EV_MSG_FILTERED: &str = "msg_filtered";
-
-/// Tracing event: this node discarded in-flight read-index rounds because they
-/// outlived their TTL (see [`RawNode::read_rounds_expired`]) — the leader never
-/// gathered a `HeartbeatAck` quorum for them. Carries `node` and `rounds` (how
-/// many expired on this tick). The nemesis oracle reads it to prove the TTL sweep
-/// is reachable at all.
-pub const EV_READ_ROUND_EXPIRED: &str = "read_round_expired";
 
 /// Tracing event: this node, on winning an election, filled at least one undecided
 /// hole in the recovered suffix with a [`Control::Noop`]. Carries `node`, `round`
@@ -349,11 +332,9 @@ fn command_hash(command: &Command) -> u64 {
     }
 }
 
-/// A short, stable label for a [`Message`] variant, for observability — and the
-/// name a [`SendFilter`] matches a *message class* on, so the filter never has to
-/// re-derive (and drift from) the labels the trace already carries.
-#[must_use]
-pub fn message_kind(m: &Message) -> &'static str {
+/// A short, stable label for a [`Message`] variant, for observability: the `kind`
+/// field on the `msg_sent` / `msg_received` events.
+fn message_kind(m: &Message) -> &'static str {
     match m {
         Message::Prepare { .. } => "prepare",
         Message::Promise { .. } => "promise",
@@ -369,17 +350,6 @@ pub fn message_kind(m: &Message) -> &'static str {
         Message::HeartbeatAck { .. } => "heartbeat_ack",
         _ => "unknown",
     }
-}
-
-/// The log slot a message concerns, for observability — and the field a
-/// [`SendFilter`] narrows a message class down to a *single slot* on. Exposed for
-/// the same reason as [`message_kind`]: so a filter reads the slot the trace
-/// already carries instead of re-deriving (and drifting from) it. `None` for the
-/// messages that name no slot (the tick self-events, `CatchUpRequest`,
-/// `CatchUpResponse`).
-#[must_use]
-pub fn message_slot(m: &Message) -> Option<Slot> {
-    message_route(m).map(|(_, _, slot)| slot)
 }
 
 /// The `(sender, ballot, slot)` triple a ballot-carrying Paxos message routes on,
@@ -435,28 +405,20 @@ struct ClientWaiters {
     pending_reads: BTreeMap<u64, (u64, u64, ReplyPromise<ReadAck>)>,
 }
 
-/// The driver's outbound side: everything needed to put one message on the wire.
-///
-/// Bundled into a struct because the send path now has a policy (the
-/// [`SendFilter`]) and a little state (the [`SendVerdict::Defer`] queue) on top of
-/// the transport and the membership map, and threading five more parameters
-/// through `drain_ready` would say nothing.
-struct Outbound<'a, P: Providers, F: SendFilter> {
+/// The driver's outbound side: everything needed to put one message on the wire —
+/// the transport, the membership map, and this node's id for the observability
+/// events. Bundled so `drain_ready` takes one parameter instead of three.
+struct Outbound<'a, P: Providers> {
     transport: &'a Arc<NetTransport<P>>,
     addrs: &'a BTreeMap<NodeId, NetworkAddress>,
     /// This node's id, for the observability events.
     self_id: u64,
-    filter: &'a F,
-    /// Messages a `Defer` verdict parked, flushed on the node's next logical
-    /// tick. Empty (and never allocating) under the production [`SendAll`].
-    deferred: Vec<(NodeId, Message)>,
 }
 
-impl<P: Providers, F: SendFilter> Outbound<'_, P, F> {
-    /// Put `msg` on the wire, unconditionally (fire-and-forget), and surface the
-    /// send. Only reached for a message the filter let through — so `msg_sent`
-    /// records what genuinely left the node, and a `msg_sent` with no matching
-    /// `msg_received` still means exactly "the network lost it".
+impl<P: Providers> Outbound<'_, P> {
+    /// Put `msg` on the wire (fire-and-forget) and surface the send. `msg_sent`
+    /// records what genuinely left the node, so a `msg_sent` with no matching
+    /// `msg_received` means exactly "the network lost it".
     fn transmit(&self, to: NodeId, msg: &Message) {
         let kind = message_kind(msg);
         if let Some((_, ballot, slot)) = message_route(msg) {
@@ -477,50 +439,15 @@ impl<P: Providers, F: SendFilter> Outbound<'_, P, F> {
             let _ = client.deliver.send(msg.clone());
         }
     }
-
-    /// Consult the [`SendFilter`] for `msg` and act on its verdict. The single
-    /// per-message send point: regular batch messages and snapshot offers both
-    /// go through here, so no message class can quietly escape the filter.
-    fn dispatch(&mut self, to: NodeId, msg: Message) {
-        let verdict = self.filter.on_send(to, &msg);
-        if verdict != SendVerdict::Send {
-            tracing::info!(
-                node = self.self_id,
-                to = to.0,
-                kind = message_kind(&msg),
-                action = verdict.label(),
-                "msg_filtered"
-            );
-        }
-        match verdict {
-            SendVerdict::Send => self.transmit(to, &msg),
-            SendVerdict::Duplicate => {
-                self.transmit(to, &msg);
-                self.transmit(to, &msg);
-            }
-            SendVerdict::Drop => {}
-            SendVerdict::Defer => self.deferred.push((to, msg)),
-        }
-    }
-
-    /// Release everything a `Defer` verdict parked. Called from the tick arm, so
-    /// a deferred message waits up to one [`TICK_INTERVAL`]. Durability ordering
-    /// is unaffected: these messages belong to an *earlier* batch, whose writes
-    /// were fsync'd before they were ever offered to the filter.
-    fn flush_deferred(&mut self) {
-        for (to, msg) in std::mem::take(&mut self.deferred) {
-            self.transmit(to, &msg);
-        }
-    }
 }
 
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<P, S, C, F>(
+fn drain_ready<P, S, C>(
     node: &mut RawNode,
     storage: &mut S,
-    out: &mut Outbound<'_, P, F>,
+    out: &Outbound<'_, P>,
     waiters: &mut ClientWaiters,
     crash: &C,
 ) -> SimulationResult<()>
@@ -528,7 +455,6 @@ where
     P: Providers,
     S: NodeStorage,
     C: CrashSeam,
-    F: SendFilter,
 {
     let self_id = out.self_id;
     // Copy the batch out of the borrow guard, advance to release the gate, then
@@ -560,16 +486,15 @@ where
     }
 
     // 2. Send messages — only after (1) is durable. The core addresses each one;
-    //    the driver maps NodeId → address and fires (fire-and-forget), through the
-    //    per-message `SendFilter` (a no-op in production).
+    //    the driver maps NodeId → address and fires (fire-and-forget).
     for (to, msg) in messages {
-        out.dispatch(to, msg);
+        out.transmit(to, &msg);
     }
 
     // 2b. Serve snapshot offers: the core decided a peer needs a snapshot (it
     //     asked for a prefix below our floor). Attach the opaque application bytes
     //     from storage and send the InstallSnapshot — the driver holds the state
-    //     the core does not. Same filtered send point as every other message.
+    //     the core does not.
     for (to, chosen_index, ballot) in &snapshot_offers {
         let msg = Message::InstallSnapshot {
             from: NodeId(self_id),
@@ -577,7 +502,7 @@ where
             chosen_index: *chosen_index,
             snapshot: Value(storage.snapshot()),
         };
-        out.dispatch(*to, msg);
+        out.transmit(*to, &msg);
     }
 
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
@@ -915,11 +840,6 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 /// driver resolves it here. It must be consistent across the cluster and agree
 /// with the `Config` the node read from `storage`.
 ///
-/// `filter` is the per-message send hook: every outbound message is offered to it
-/// just before it goes on the wire, so a simulation can drop, duplicate or defer
-/// a whole *message class* in one direction. Production passes
-/// [`SendAll`](crate::SendAll), which lets everything through unchanged.
-///
 /// # Errors
 ///
 /// Returns an error if the transport fails to bind or listen on `local_addr`. May
@@ -931,20 +851,18 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state.
 #[allow(clippy::too_many_lines)]
-pub async fn run_node<P, S, C, F>(
+pub async fn run_node<P, S, C>(
     providers: P,
     mut storage: S,
     local_addr: NetworkAddress,
     members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
     crash: &C,
-    filter: &F,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
     C: CrashSeam,
-    F: SendFilter,
 {
     let transport = NetTransportBuilder::new(providers.clone())
         .local_address(local_addr)
@@ -964,14 +882,12 @@ where
 
     let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
 
-    // The outbound side: transport + membership + the per-message send filter and
-    // its defer queue. Every message this incarnation sends goes through it.
-    let mut out = Outbound {
+    // The outbound side: transport + membership. Every message this incarnation
+    // sends goes through it.
+    let out = Outbound {
         transport: &transport,
         addrs: &addrs,
         self_id,
-        filter,
-        deferred: Vec::new(),
     };
 
     // The held client replies: proposals keyed by slot (ack-on-commit), reads
@@ -1010,7 +926,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((req, reply)) = svc.read.recv() => {
@@ -1030,7 +946,7 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -1067,7 +983,7 @@ where
                     );
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(());
             }
@@ -1089,25 +1005,12 @@ where
                         first_slot: node.first_slot().0,
                     },
                 };
-                drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
-                // Release anything the send filter deferred on an earlier batch:
-                // one tick is the bounded delay a `SendVerdict::Defer` imposes.
-                // Inert in production (the queue is always empty).
-                out.flush_deferred();
-                let expired_before = node.read_rounds_expired();
                 node.tick();
-                // The core's tick GC'd read-index rounds that never gathered their
-                // ack quorum. Surface the delta: the TTL sweep is the path a
-                // `HeartbeatAck`-starved leader falls into, and it is otherwise
-                // invisible from outside the core.
-                let expired = node.read_rounds_expired() - expired_before;
-                if expired > 0 {
-                    tracing::info!(node = self_id, rounds = expired, "read_round_expired");
-                }
                 ticks += 1;
                 // Expire parked reads whose confirmation is overdue (lost acks, a
                 // minority-partitioned leader that never steps down): answer a
@@ -1123,7 +1026,7 @@ where
                         waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &mut out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
