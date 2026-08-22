@@ -239,3 +239,45 @@ locally for a clock-bounded period) and follower/quorum reads are performance
 variants on top of this baseline, tracked for a later stage; the
 [optimizations table](stable-leader.md#optimizations-at-a-glance) keeps the
 score.
+
+## The other half: the write ack
+
+Condition 1 says a read observes every write *acknowledged* before it began.
+That leans on the ack meaning something, and for one code path it did not.
+
+A client retry is deduplicated by `(client, seq)`. If the command was already
+applied here, there is nothing to propose: the leader answers immediately, and
+the driver replies `committed: true`. The trouble was upstream of that reply.
+`mark_chosen` — the "this slot is decided" bookkeeping — recorded a command as
+*applied* the moment the slot was learned chosen, and chosen is not applied.
+Two of its three callers hand it slots out of order: a learner takes whatever
+slot the network delivers, and a leader streaming slots concurrently sees slot
+6's accept quorum complete while slot 5 is still open. So with the applied
+prefix stopped at 4 and slot 5 missing, a decision at slot 6 marked its command
+applied, and a retry was told `committed: true` for a write that was in no
+node's applied prefix. A read at that same leader, moments later, honestly
+returned watermark 4 — the write the client had been promised, missing.
+
+The fix is a definition, not a special case: `applied_seq` is written **only**
+by the contiguous walk that advances the prefix, which is what the boot rebuild
+in `RawNode::new` had always meant by it. Both dedup tables move together,
+which matters more than it looks. Move the applied table alone and a retry
+arriving in the chosen-but-not-yet-applied window misses *both* tables and
+takes a fresh slot for a command already chosen — duplicate execution, strictly
+worse than the early ack. So `mark_chosen` re-points the in-flight table at the
+slot instead: between "chosen" and "applied" that mapping is the only record
+the node has, a retry there gets `Duplicate(k)`, the reply parks on slot `k`,
+and it fires from the apply loop — the ack arriving exactly when the write
+enters the prefix it claims to be in.
+
+The blindfold is worth naming, because it is why the sweep had never caught
+this. The fast path acked with *no slot at all*, and both the workload and the
+oracle were explicitly told to skip slotless acks. The exemption was exactly
+the size of the bug. `ProposeResult::Chosen` now carries its slot, so the ack
+is falsifiable: `AppliedAckOracle` joins every committed ack against the acking
+node's own `log_applied` events and asserts the node had already applied the
+slot it named. It went red on seed 11 (twelve seeds in the first two thousand),
+which is now pinned, and the core tests
+`a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied` and
+`a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies` pin the
+mechanism on both call sites.
