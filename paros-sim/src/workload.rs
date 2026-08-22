@@ -197,9 +197,12 @@ impl Workload for ProposeClient {
         };
 
         // Write terminal-outcome bookkeeping: the ack event carries the
-        // committed slot when known (the `Chosen` dedup-retry path acks
-        // without one); the linearizability oracle only constrains
-        // slot-carrying acks. Also does the leader-driven truncation ping: it
+        // committed slot and the node that answered. *Every* committed ack now
+        // names a slot — the dedup fast path included (see
+        // `paros::ProposeResult::Chosen`) — so no committed ack is exempt from
+        // the oracles any more: the linearizability oracle constrains it, and
+        // `oracle::AppliedAckOracle` checks the acking node had really applied
+        // that slot by then. Also does the leader-driven truncation ping: it
         // tells the leader the highest slot this client has seen chosen; the
         // leader decides a `Truncate` control command into the log, and every
         // node truncates lazily when it applies that slot (one cluster-wide
@@ -211,11 +214,17 @@ impl Workload for ProposeClient {
         let mut handle_write = |seq: u64, outcome: Option<(Option<u64>, Option<u64>)>| {
             if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
+                match (slot, leader) {
+                    (Some(s), Some(node)) => {
+                        tracing::info!(seq_id = seq, slot = s, node, "client_acknowledged");
+                    }
+                    (Some(s), None) => {
+                        tracing::info!(seq_id = seq, slot = s, "client_acknowledged");
+                    }
+                    (None, _) => tracing::info!(seq_id = seq, "client_acknowledged"),
+                }
                 if let Some(s) = slot {
-                    tracing::info!(seq_id = seq, slot = s, "client_acknowledged");
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
-                } else {
-                    tracing::info!(seq_id = seq, "client_acknowledged");
                 }
                 if let (Some(up_to), Some(leader_id)) = (max_slot, leader) {
                     let idx = usize::try_from(leader_id).unwrap_or(0);

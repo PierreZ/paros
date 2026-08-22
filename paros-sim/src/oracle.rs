@@ -711,9 +711,10 @@ fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
 /// checks only, until a multi-client checker lands.
 ///
 /// Failed / timed-out operations enter no constraint: a timed-out write may
-/// still commit later, so it is deliberately unconstrained; a committed write
-/// ack without a slot (the dedup-retry path) constrains nothing per-slot
-/// either.
+/// still commit later, so it is deliberately unconstrained. Every *committed*
+/// ack does enter C1-C3, the dedup fast path included: it used to ack with no
+/// slot and so fell outside `write_slot` entirely, and that exemption was the
+/// hole the early-ack bug lived in (see [`AppliedAckOracle`]).
 pub(crate) struct LinearizabilityOracle;
 
 impl Invariant for LinearizabilityOracle {
@@ -845,6 +846,73 @@ impl Invariant for LinearizabilityOracle {
         assert_sometimes!(retried, "a read is retried across nodes before committing");
         if retried {
             assert_reachable!("a read is retried across nodes before committing");
+        }
+    }
+}
+
+/// The ack oracle: **a committed write ack never names a slot the acking node
+/// had not already applied.** `committed = true` is the promise that the write
+/// is in the register this project defines — the *applied* log prefix — so an
+/// ack that outruns the acking node's own apply is a client-visible
+/// linearizability violation on its own, with no later read needed to expose
+/// it. A subsequent read at the same node legitimately returns a watermark
+/// below the "applied" write.
+///
+/// This is the check the trace could not carry until every committed ack named
+/// a slot. The dedup fast path (`paros::ProposeResult::Chosen`) used to ack with
+/// no slot at all, and both the workload and [`LinearizabilityOracle`] were
+/// explicitly told to skip slotless acks — an exemption exactly the size of the
+/// bug it was hiding. Now the fast path names its slot too, so both this oracle
+/// and C1 cover it.
+///
+/// Two events, joined on `(node, slot)`: `client_acknowledged` carries the slot
+/// and the node that answered, `log_applied` carries the node and the slot it
+/// just folded into its contiguous prefix. Unlike C1-C3 this holds for *both*
+/// workload modes — it is a per-ack local claim, not a program-order argument,
+/// so `Pipelined` is checked too.
+pub(crate) struct AppliedAckOracle;
+
+impl Invariant for AppliedAckOracle {
+    fn name(&self) -> &'static str {
+        "ack_after_apply"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        // Earliest time each slot entered each node's applied prefix. First
+        // wins: a restart replays `log_applied` for the recovered prefix, and
+        // the original apply is the moment that matters.
+        let mut applied_at: HashMap<(u64, u64), u64> = HashMap::new();
+        for e in q.snapshot(EV_APPLIED) {
+            let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
+                continue;
+            };
+            applied_at.entry((node, idx)).or_insert(e.time_ms);
+        }
+        let mut checked = 0_usize;
+        for e in q.snapshot(EV_ACKED) {
+            // A failed/slotless ack constrains nothing (and after the
+            // un-blindfold a committed one always carries both fields).
+            let (Some(slot), Some(node)) = (e.u64("slot"), e.u64("node")) else {
+                continue;
+            };
+            checked += 1;
+            let applied_first = applied_at
+                .get(&(node, slot))
+                .is_some_and(|t| *t <= e.time_ms);
+            assert_always!(
+                applied_first,
+                "a committed write ack names a slot the acking node had already applied"
+            );
+        }
+        // Coverage gate: the join above actually had acks to check.
+        assert_sometimes!(
+            checked > 0,
+            "a committed write ack is checked against the acking node's applied prefix"
+        );
+        if checked > 0 {
+            assert_reachable!(
+                "a committed write ack is checked against the acking node's applied prefix"
+            );
         }
     }
 }

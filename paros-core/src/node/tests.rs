@@ -549,7 +549,11 @@ fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
 
     // Once chosen+applied, a retry is reported as already chosen (idempotent).
     let r3 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
-    assert_eq!(r3, ProposeResult::Chosen);
+    assert_eq!(
+        r3,
+        ProposeResult::Chosen(slot),
+        "the idempotent ack names the slot the command applied at"
+    );
     // And no second slot was ever allocated for it.
     assert_eq!(nodes[0].next_slot, Slot(1), "exactly one slot consumed");
 }
@@ -788,7 +792,10 @@ fn restart_rebuilds_state_from_hard_state() {
     );
     assert_eq!(n.role(), NodeRole::Follower);
     // Dedup: applied seqs for the chosen prefix; slot 2 still in flight.
-    assert_eq!(n.applied_seq.get(&ClientId(1)), Some(&ClientSeq(2)));
+    assert_eq!(
+        n.applied_seq.get(&ClientId(1)),
+        Some(&(ClientSeq(2), Slot(1)))
+    );
     assert_eq!(n.inflight.get(&(ClientId(1), ClientSeq(3))), Some(&Slot(2)));
 }
 

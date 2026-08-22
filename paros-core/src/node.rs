@@ -52,8 +52,19 @@ pub enum ProposeResult {
     Accepted(Slot),
     /// A retry already in flight at this slot; ack when the slot commits.
     Duplicate(Slot),
-    /// Already chosen and applied; the driver acks immediately (idempotent).
-    Chosen,
+    /// Already **applied** (inside this node's contiguous chosen prefix); the
+    /// driver acks immediately (idempotent), reporting this slot.
+    ///
+    /// The slot is the one this client's *highest applied* command landed at —
+    /// this command's own slot for the ordinary retry (a sequential client
+    /// cannot be past the seq it is still retrying), and a slot at or above it
+    /// otherwise. Either way it is inside the applied prefix, which is exactly
+    /// what the immediate ack claims: the write is in the register the project
+    /// defines. An ack naming a slot the node has not applied would be a
+    /// linearizability violation, so this carries a slot rather than nothing —
+    /// it makes the fast path checkable by the simulation's oracles instead of
+    /// exempt from them.
+    Chosen(Slot),
 }
 
 /// The outcome of [`RawNode::read_index`], telling the driver how to answer the
@@ -243,9 +254,11 @@ pub struct RawNode {
     // ---- learner / dedup ----
     /// Commands this node has learned are chosen, per slot. Volatile.
     chosen: BTreeMap<Slot, Command>,
-    /// Highest applied `ClientSeq` per client (for at-most-once dedup). Rebuilt
-    /// from `HardState` on construction.
-    applied_seq: BTreeMap<ClientId, ClientSeq>,
+    /// Highest applied `ClientSeq` per client (for at-most-once dedup), with the
+    /// slot that command landed at so the dedup fast path can *name* the slot it
+    /// acks (see [`ProposeResult::Chosen`]). Rebuilt from `HardState` on
+    /// construction.
+    applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)>,
     /// In-flight client requests mapped to the slot they were proposed at, so a
     /// retry dedups against the existing slot (including recovered entries a new
     /// leader inherits). Rebuilt from `HardState` on construction.
@@ -273,7 +286,7 @@ impl RawNode {
         }
 
         let mut chosen = BTreeMap::new();
-        let mut applied_seq: BTreeMap<ClientId, ClientSeq> = BTreeMap::new();
+        let mut applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
         for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
@@ -284,9 +297,9 @@ impl RawNode {
                 if let Command::User(entry) = command {
                     let bump = applied_seq
                         .get(&entry.client)
-                        .is_none_or(|c| entry.seq > *c);
+                        .is_none_or(|(c, _)| entry.seq > *c);
                     if bump {
-                        applied_seq.insert(entry.client, entry.seq);
+                        applied_seq.insert(entry.client, (entry.seq, *slot));
                     }
                 }
             } else if let Command::User(entry) = command {
@@ -401,8 +414,10 @@ impl RawNode {
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
             return ProposeResult::Duplicate(slot);
         }
-        if self.applied_seq.get(&client).is_some_and(|c| seq <= *c) {
-            return ProposeResult::Chosen;
+        if let Some(&(applied, at)) = self.applied_seq.get(&client)
+            && seq <= applied
+        {
+            return ProposeResult::Chosen(at);
         }
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
@@ -1286,9 +1301,9 @@ impl RawNode {
             let bump = self
                 .applied_seq
                 .get(&entry.client)
-                .is_none_or(|c| entry.seq > *c);
+                .is_none_or(|(c, _)| entry.seq > *c);
             if bump {
-                self.applied_seq.insert(entry.client, entry.seq);
+                self.applied_seq.insert(entry.client, (entry.seq, slot));
             }
         }
         self.advance_chosen_index();

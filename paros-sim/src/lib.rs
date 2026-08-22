@@ -29,7 +29,7 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
+    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
     LinearizabilityOracle, NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData,
     ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
     SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
@@ -183,6 +183,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(LinearizabilityOracle)
+        .invariant(AppliedAckOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
@@ -225,6 +226,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(ClientLivenessOracle)
         .invariant(SafetyOracle)
         .invariant(LinearizabilityOracle)
+        .invariant(AppliedAckOracle)
         .invariant(RecoveryOracle)
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
