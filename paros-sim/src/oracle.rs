@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_MSG_FILTERED,
-    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_READ_ROUND_EXPIRED, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_LEADER,
+    EV_MSG_FILTERED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
+    EV_PREPARE_BELOW_FLOOR, EV_READ_ROUND_EXPIRED, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -1154,6 +1154,48 @@ impl Invariant for ProgressOracle {
 /// legitimate transient, not a violation.
 const CONVERGENCE_GRACE_MS: u64 = 3_000;
 
+/// Whether the run has genuinely settled, the shared gate every liveness oracle
+/// hangs its `assert_always` off: chaos is over, the cluster's chosen prefix has
+/// not grown for [`CONVERGENCE_GRACE_MS`] (`prefix_grew_ms` is when it last did),
+/// and leadership has not changed hands for just as long (a lagging node can
+/// neither pull from nor push to a leader that keeps changing under it).
+///
+/// Before this gate, lag and holes are legitimate transients and nothing is
+/// asserted; after it, they are real liveness failures.
+fn quiesced(q: &dyn TraceQuery, sim_time_ms: u64, prefix_grew_ms: u64) -> bool {
+    let last_leader_ms = q
+        .snapshot(EV_LEADER)
+        .iter()
+        .map(|e| e.time_ms)
+        .max()
+        .unwrap_or(0);
+    sim_time_ms > crate::CHAOS_DURATION_MS + CONVERGENCE_GRACE_MS
+        && sim_time_ms.saturating_sub(prefix_grew_ms) > CONVERGENCE_GRACE_MS
+        && sim_time_ms.saturating_sub(last_leader_ms) > CONVERGENCE_GRACE_MS
+}
+
+/// How recently a node must have reported a `chosen_gap` for it to count as
+/// *still open*. The driver re-emits the event every tick (50 ms) for as long as
+/// the gap exists, so ten ticks is a generous "it is still there" window while
+/// still excluding one that opened and healed earlier in the settle tail.
+const GAP_STILL_OPEN_MS: u64 = 500;
+
+/// The cluster's applied high-water mark and the time it was last raised, from the
+/// `log_applied` stream (which arrives in capture/time order). `None` when nothing
+/// has been applied anywhere yet.
+fn cluster_applied_max(q: &dyn TraceQuery) -> Option<(u64, u64)> {
+    let mut max: Option<(u64, u64)> = None;
+    for e in q.snapshot(EV_APPLIED) {
+        let Some(idx) = e.u64("applied_index") else {
+            continue;
+        };
+        if max.is_none_or(|(m, _)| idx > m) {
+            max = Some((idx, e.time_ms));
+        }
+    }
+    max
+}
+
 /// Convergence oracle (the #18 liveness deliverable): once chaos has quiesced,
 /// every *live* node's chosen prefix catches up to the cluster maximum — the log
 /// converges. This is the invariant no prior oracle sees: safety oracles check
@@ -1250,25 +1292,10 @@ impl Invariant for ConvergenceOracle {
             }
         };
 
-        // Time of the most recent leadership change — the cluster is not quiesced
-        // while elections are still turning over (a lagging node cannot pull from,
-        // nor push to, a leader that keeps changing under it).
-        let last_leader_time = q
-            .snapshot(EV_LEADER)
-            .iter()
-            .map(|e| e.time_ms)
-            .max()
-            .unwrap_or(0);
-
-        // Quiescence gate: the cluster has genuinely settled — chaos is over, the
-        // chosen prefix has been stable for the grace window (nothing new is being
-        // chosen), *and* leadership has been stable for the grace window (no
-        // election in flight). Only then is a lagging live node a real convergence
-        // failure rather than a node still catching up under a settling cluster.
-        let quiesced = sim_time_ms > crate::CHAOS_DURATION_MS + CONVERGENCE_GRACE_MS
-            && sim_time_ms.saturating_sub(cluster_max_time) > CONVERGENCE_GRACE_MS
-            && sim_time_ms.saturating_sub(last_leader_time) > CONVERGENCE_GRACE_MS;
-        if !quiesced {
+        // Quiescence gate (shared with [`GapFillOracle`]): only once the cluster
+        // has genuinely settled is a lagging live node a real convergence failure
+        // rather than a node still catching up under a settling cluster.
+        if !quiesced(q, sim_time_ms, cluster_max_time) {
             return;
         }
 
@@ -1309,6 +1336,63 @@ impl Invariant for ConvergenceOracle {
                 "every stable live node converges to the cluster's chosen prefix (via catch-up or snapshot)"
             );
         }
+    }
+}
+
+/// Gap-fill oracle: an election never strands the log behind an **undecided
+/// hole**. Once the cluster has quiesced, no node may still be holding a slot it
+/// knows is chosen above its own applied prefix.
+///
+/// This is the invariant no prior oracle sees, and the reason a wedged cluster
+/// looks like *silence* rather than a violation. A candidate re-proposes only the
+/// slots its promise quorum reported accepted; a slot that reached the old leader
+/// alone, while a *later* slot reached the promise quorum, is neither recovered nor
+/// re-allocated — `next_slot` jumps past it. From then on:
+///
+/// - `advance_chosen_index` freezes the applied prefix one below the hole,
+///   cluster-wide and forever, while higher slots keep being chosen;
+/// - the fresh-leader read fence sits above the hole, so no read ever confirms —
+///   parked reads just hang to the driver timeout;
+/// - commit-replay catch-up cannot heal it: every node's chosen prefix is frozen
+///   below the hole, so no peer has anything to replay.
+///
+/// Every one of those consequences is *quiet*: the safety oracles stay green (no
+/// node disagrees about any slot), [`ConvergenceOracle`] stays green (every node
+/// is frozen at the *same* prefix, so they have all "converged"), and the client
+/// merely times out. The `chosen_gap` event the driver emits each tick is what
+/// makes the wedge visible; asserting it does not survive quiescence is what turns
+/// it into a failure.
+///
+/// A gap itself is perfectly ordinary — pipelining leaves several slots undecided,
+/// and a follower that missed one `Commit` holds one until catch-up runs. So the
+/// assertion is gated on [`quiesced`], exactly like [`ConvergenceOracle`]: only a
+/// gap still being reported after chaos ended, the prefix stopped growing, and
+/// leadership settled is a hole nothing will ever fill.
+pub(crate) struct GapFillOracle;
+
+impl Invariant for GapFillOracle {
+    fn name(&self) -> &'static str {
+        "election_gap_fill"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, sim_time_ms: u64) {
+        let Some((_, prefix_grew_ms)) = cluster_applied_max(q) else {
+            return;
+        };
+        if !quiesced(q, sim_time_ms, prefix_grew_ms) {
+            return;
+        }
+        // Still open *right now*, not merely seen at some point in the tail: the
+        // driver re-emits the gap every tick, so a node that still holds one has
+        // reported it within the last few ticks. Reading the whole grace window
+        // instead would flag a gap that opened and healed earlier in the tail — a
+        // node rebooting out of the chaos window does exactly that.
+        let since = sim_time_ms.saturating_sub(GAP_STILL_OPEN_MS);
+        let wedged = q.snapshot(EV_CHOSEN_GAP).iter().any(|e| e.time_ms > since);
+        assert_always!(
+            !wedged,
+            "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)"
+        );
     }
 }
 

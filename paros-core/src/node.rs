@@ -233,6 +233,12 @@ pub struct RawNode {
     election: Option<Election>,
     /// Next slot the leader allocates to a fresh client proposal.
     next_slot: Slot,
+    /// How many undecided holes this node filled with a [`Control::Noop`] when it
+    /// won its *current* leadership (0 until it wins one, and re-set at each
+    /// election). Purely observational: the driver reads it on the transition to
+    /// Leader and surfaces it, so the simulation can prove the gap-fill path is
+    /// genuinely reached rather than merely present.
+    election_gap_fills: u64,
 
     // ---- learner / dedup ----
     /// Commands this node has learned are chosen, per slot. Volatile.
@@ -322,6 +328,7 @@ impl RawNode {
             proposer: BTreeMap::new(),
             election: None,
             next_slot,
+            election_gap_fills: 0,
             chosen,
             applied_seq,
             inflight,
@@ -1332,6 +1339,27 @@ impl RawNode {
     #[must_use]
     pub fn needs_election_timeout(&self) -> bool {
         self.needs_election_timeout
+    }
+
+    /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`
+    /// is the first slot missing from the contiguous chosen prefix and `highest`
+    /// is the highest slot above it this node already knows is chosen. `None` when
+    /// nothing is chosen past the prefix — the healthy steady state.
+    ///
+    /// A read-only observability accessor (the same shape as
+    /// [`RawNode::read_rounds_expired`]): the core cannot trace, and the gap is
+    /// invisible from outside because [`Ready::committed`](crate::Ready::committed)
+    /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
+    /// (pipelining, a follower that missed one `Commit`); a gap that **survives
+    /// quiescence** is the wedge this exists to make observable — the chosen index
+    /// frozen at `hole - 1` cluster-wide while higher slots keep being chosen.
+    #[must_use]
+    pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
+        let hole = self.first_unchosen();
+        // `hole` itself is never in `chosen`: `advance_chosen_index` runs after
+        // every `mark_chosen`, so anything at or above it is strictly above.
+        let highest = *self.chosen.range(hole..).next_back()?.0;
+        Some((hole, highest))
     }
 
     /// Monotone count of in-flight read-index rounds this node has discarded

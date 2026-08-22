@@ -29,10 +29,10 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    ClientLivenessOracle, ConvergenceOracle, LeadershipOracle, LinearizabilityOracle,
-    NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData, ProtocolRecorder, RecorderData,
-    RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle, TimelineRecorder,
-    TruncationOracle, build_result,
+    ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
+    LinearizabilityOracle, NemesisOracle, NoGapsOracle, ProgressOracle, ProtocolData,
+    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
+    SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -182,6 +182,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
         .invariant(ConvergenceOracle)
+        .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
         .invariant(NemesisOracle)
@@ -233,6 +234,14 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
         // red→green result is reproducible; the deterministic core unit test
         // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
+        //
+        // [`oracle::GapFillOracle`] *is* in the sweep, despite being liveness-shaped
+        // too, because the failure it names has no slow-but-eventual version: a slot
+        // no leader will ever propose is not a node taking its time, it is a hole
+        // nothing can fill, and it stays reported for the whole settle tail. Keeping
+        // it in the adaptive sweep is what makes the election-hole bug findable
+        // across the seed space rather than only on a pinned seed.
+        .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
         .invariant(NemesisOracle)
