@@ -16,16 +16,66 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_with_prob,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify, buggify_knob,
+    buggify_with_prob,
 };
 use paros::{
-    Ballot, Command, Config, CrashSeam, HardState, MemStorage, MustSync, NodeId, NodeStorage, Seam,
-    Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
+    Ballot, Command, Config, CrashSeam, HardState, MemStorage, MustSync, NodeId, NodeStorage,
+    Perturbations, Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
+
+/// Tracing event: this node's driver is running with non-default
+/// [`Perturbations`]. Carries `node`, `skip_resend` and `step_down` (the two
+/// per-beat probabilities, as parts per thousand so the flat tracing fields stay
+/// integers). Emitted once per incarnation, and only when something is actually
+/// perturbed. Purely diagnostic — it is what makes a seed's behaviour readable
+/// after the fact, and what the one coverage gate in
+/// [`crate::oracle::PerturbationOracle`] reads.
+pub(crate) const EV_PERTURBED: &str = "perturbations";
+
+/// Draw this node's driver perturbations for this seed.
+///
+/// Both magnitudes are **buggified config**, not constants: each sits behind its
+/// own `buggify!()` call site, so moonpool activates the two independently once
+/// per run and then fires per node. Most nodes on most seeds therefore run
+/// [`Perturbations::NONE`] — production behaviour — and the interesting seeds are
+/// the ones where a node's driver starts skipping re-sends, or resigning, or
+/// both. The magnitude itself goes through `buggify_knob!`, so a seed
+/// occasionally spikes it to an extreme inside the range instead of the default.
+///
+/// The per-beat firing happens in the driver, off its own seeded
+/// `RandomProvider`. Activation-per-seed here × firing-per-beat there is
+/// `FoundationDB`'s two-level BUGGIFY model, split across the layer boundary that
+/// keeps `paros-core` pure.
+///
+/// Magnitudes are deliberately asymmetric. Skipping a re-send costs nothing but
+/// a delay, so it is generous (default 0.6, up to 0.9): a leader that skips most
+/// beats leaves a pending slot un-offered long enough for something else to
+/// happen to it. Resigning is disruptive — at one beat per 50 ms even a small
+/// probability is several leadership changes per run — so it is small (default
+/// 0.004, at most 0.02), enough to reach the "the holder walked away" state
+/// without turning every run into a leaderless storm the liveness oracles could
+/// not tell from a real regression.
+fn draw_perturbations() -> Perturbations {
+    let skip_resend = if buggify!() {
+        buggify_knob!(0.6_f64, 0.3..0.9)
+    } else {
+        0.0
+    };
+    let step_down = if buggify!() {
+        buggify_knob!(0.004_f64, 0.002..0.02)
+    } else {
+        0.0
+    };
+    Perturbations {
+        skip_resend,
+        step_down,
+    }
+}
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
@@ -79,6 +129,22 @@ impl Process for NodeProcess {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
         };
+        // How often this node's driver takes the rare-but-valid alternative to
+        // its helpful default: skip a beat's `Accept` re-send, or resign. Drawn
+        // once per incarnation; `Perturbations::NONE` (production behaviour) on
+        // most nodes of most seeds.
+        let perturbations = draw_perturbations();
+        if perturbations != Perturbations::NONE {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let per_mille = |p: f64| (p * 1000.0) as u64;
+            tracing::info!(
+                node = self_rank.0,
+                skip_resend = per_mille(perturbations.skip_resend),
+                step_down = per_mille(perturbations.step_down),
+                "perturbations"
+            );
+        }
+
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
         // re-run — a faithful clean crash + recovery. Attrition (process kill) is
@@ -94,6 +160,7 @@ impl Process for NodeProcess {
                 members.clone(),
                 ctx.shutdown().clone(),
                 &crash,
+                perturbations,
             )
             .await
             {

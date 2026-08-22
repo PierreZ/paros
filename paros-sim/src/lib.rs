@@ -29,9 +29,9 @@ use moonpool_sim::{
 
 use crate::oracle::{
     AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
-    LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData, ProtocolRecorder,
-    RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle, SnapshotOracle,
-    TimelineRecorder, TruncationOracle, build_result,
+    LinearizabilityOracle, NoGapsOracle, PerturbationOracle, ProgressOracle, ProtocolData,
+    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
+    SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -200,6 +200,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
+        .invariant(PerturbationOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -259,6 +260,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
+        .invariant(PerturbationOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

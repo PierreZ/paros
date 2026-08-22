@@ -16,6 +16,8 @@ use paros::{
 };
 use serde::Serialize;
 
+use crate::node::EV_PERTURBED;
+
 /// Standard transport-client observability events (same names as moonpool's
 /// transport workloads, so tooling is workload-agnostic).
 const EV_ISSUED: &str = "client_issued";
@@ -1508,6 +1510,34 @@ impl Invariant for SnapshotOracle {
         );
         if installed {
             assert_reachable!("a snapshot was installed to recover a below-floor node");
+        }
+    }
+}
+
+/// Perturbation oracle (coverage only): the driver's rare-but-valid decisions —
+/// skipping a beat's `Accept` re-send, and a leader resigning — are actually
+/// taken on some seeds.
+///
+/// It asserts no new safety property; every consequence either of them can have
+/// is already covered (prefix agreement, no gaps, convergence, the gap fill). All
+/// it proves is that the *knob is still connected*: perturbations that stopped
+/// being drawn would leave the sweep looking green while quietly testing less,
+/// which is precisely how #54 stayed invisible for 1500 seeds before it.
+pub(crate) struct PerturbationOracle;
+
+impl Invariant for PerturbationOracle {
+    fn name(&self) -> &'static str {
+        "driver_perturbations"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let perturbed = !q.snapshot(EV_PERTURBED).is_empty();
+        assert_sometimes!(
+            perturbed,
+            "a node's driver runs with non-default perturbations"
+        );
+        if perturbed {
+            assert_reachable!("a driver skips accept re-sends or resigns leadership");
         }
     }
 }
