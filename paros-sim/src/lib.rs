@@ -122,11 +122,24 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
 /// until #81; it no longer is — replaying it against a build with the
-/// `applied_seq`/`inflight` hand-off reverted comes back **clean**. So every seed
-/// here is kept for what it once caught and as a cheap always-green replay corpus
-/// across the storage, recovery, catch-up, truncation, snapshot and read paths;
-/// none of them is a red→green witness any more. Fresh red seeds for a specific
-/// arc have to be re-hunted against the current tree (#80's seed 1364 included).
+/// `applied_seq`/`inflight` hand-off reverted comes back **clean**. Both are kept
+/// for what they once caught, and for what the whole set is worth as a cheap
+/// always-green replay corpus across the storage, recovery, catch-up, truncation,
+/// snapshot and read paths. Any other arc's red→green witness has to be re-hunted
+/// against the current tree (#80's seed 1364 included).
+///
+/// **Seed 6156 is the exception: it is live, and it is the one #81 re-derived.**
+/// It is the [`oracle::GapFillOracle`] wedge reproduced under the *replacement*
+/// for the slot-starvation nemesis — the driver's
+/// [`Perturbations`](paros::Perturbations), i.e. a leader that skips its `Accept`
+/// re-sends and then resigns, both of which are decisions the core has always
+/// allowed. Revert the `Control::Noop` gap fill in `try_become_leader` and this
+/// seed goes red (`a quiesced cluster holds no chosen slot above its applied
+/// prefix`, on essentially every check of the settle tail); restore it and the
+/// seed is clean. It was found by replaying seeds against a gap-fill-reverted
+/// build: one witness in the ~6 000 seeds swept at these magnitudes, which is the
+/// honest rarity of this interleaving — and exactly why the sweep needs the
+/// perturbations to reach it at all.
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
@@ -138,6 +151,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     286_172_402_316_494_352,
     53,
     11,
+    6_156,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
