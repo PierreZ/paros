@@ -61,14 +61,14 @@ config with `--no-sandbox`).
 Each protocol chapter ends with a **"Watch it live"** demo page embedding the wasm demo:
 `single-decree.md` under *Single-decree Paxos*, `multi-paxos.md` under *Multi-Paxos* (so a
 reader meets the live demo right after the concept it shows). One file,
-`paros-wasm-demo/web/index.html`, serves all modes via a `?mode=` switch (`single` is the
+`crates/paros-wasm-demo/web/index.html`, serves all modes via a `?mode=` switch (`single` is the
 default, `?mode=multi` selects the leader-and-log column scene, `?mode=crash` the crash &
 recovery timeline). The front-end is a **shell + pluggable renderers** (vanilla ES modules
 under `web/app/`, SVG, no bundler): one shell owns the shared chrome (tabs, transport,
 narration, digest chips, oracle badge, responsive stage, the glowing message particle), and
 each mode is a renderer object registered in `app/registry.js`. Adding a mode is a drop-in —
 the shell never changes. All modes read the *same* mode-agnostic `RunResult`; the mode is a
-presentation choice. See `paros-wasm-demo/README.md` for the renderer interface and the
+presentation choice. See `crates/paros-wasm-demo/README.md` for the renderer interface and the
 RunResult contract map.
 
 - **Demos are self-describing.** The browser computes the whole `RunResult`
@@ -93,6 +93,6 @@ RunResult contract map.
   should not.)
 - Embed with an iframe `src="wasm-demo/index.html?embed=1&..."` (`embed=1` hides the page
   chrome). URL params: `?seed=<n>`, `?mode=multi`, `?dump` (raw JSON), `?still=<k>` (frozen
-  frame for screenshots). Build the demo with `book/build-wasm-demo.sh` (the `wasm-bindgen`
-  crate pin in `paros-wasm-demo/Cargo.toml` must match the flake's `wasm-bindgen-cli`); the
+  frame for screenshots). Build the demo with `scripts/build-wasm-demo.sh` (the `wasm-bindgen`
+  crate pin in `crates/paros-wasm-demo/Cargo.toml` must match the flake's `wasm-bindgen-cli`); the
   GitHub Pages workflow (`pages.yml`) runs the same build before `mdbook build`.

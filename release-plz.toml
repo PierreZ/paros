@@ -29,17 +29,17 @@ features_always_increment_minor = true
 # All publishable crates share a version group so they bump in lockstep.
 [[package]]
 name = "paros-core"
-changelog_path = "paros-core/CHANGELOG.md"
+changelog_path = "crates/paros-core/CHANGELOG.md"
 version_group = "paros"
 
 [[package]]
 name = "paros-sim"
-changelog_path = "paros-sim/CHANGELOG.md"
+changelog_path = "crates/paros-sim/CHANGELOG.md"
 version_group = "paros"
 
 [[package]]
 name = "paros"
-changelog_path = "paros/CHANGELOG.md"
+changelog_path = "crates/paros/CHANGELOG.md"
 version_group = "paros"
 
 # Binaries and demos are not published or released.

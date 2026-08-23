@@ -1,12 +1,5 @@
 [workspace]
-members = [
-    "paros",
-    "paros-core",
-    "paros-sim",
-    "paros-sim-runner",
-    "paros-wasm-demo",
-    "xtask",
-]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]

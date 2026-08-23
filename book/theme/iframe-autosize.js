@@ -1,5 +1,5 @@
 // Auto-size the embedded paros wasm demos to their content height. The demo
-// (paros-wasm-demo/web/index.html), when embedded with ?embed=1, posts its
+// (crates/paros-wasm-demo/web/index.html), when embedded with ?embed=1, posts its
 // document height on load / run / resize; here we match the message to the
 // iframe that sent it (via contentWindow) and set that iframe's height. This
 // replaces hand-tuned `height:NNNpx` on each <iframe>, so a demo that grows

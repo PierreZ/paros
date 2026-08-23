@@ -49,7 +49,7 @@
 
             # wasm demo: generate JS/TS bindings for the cdylib. Its version (from
             # nixpkgs) MUST match the `wasm-bindgen` crate pin in
-            # paros-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
+            # crates/paros-wasm-demo/Cargo.toml exactly — a mismatch breaks the bindgen
             # step with an opaque "schema version" error. When `nix flake update`
             # moves this, re-pin the crate to `wasm-bindgen --version`.
             wasm-bindgen-cli
