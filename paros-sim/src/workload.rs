@@ -15,11 +15,27 @@ use moonpool_transport::NetTransportBuilder;
 
 use paros::{Compact, Paros, Propose, Read, WLTOKEN_PAROS, parse_addr};
 
-use crate::{GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
+use crate::{CHAOS_DURATION_MS, GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
+
+/// Probability a run draws [`WorkloadMode::Quiet`], FDB-knob style: the rare
+/// extreme of "how much does this client ask for", against the ordinary
+/// [`REQUESTS`] default. Deliberately the rare mode — it commits a single value,
+/// so it exercises none of the multi-slot streaming, truncation or snapshot paths
+/// the other two modes drive the coverage gates with. One run in eight is often
+/// enough for the sweep to reach the boundary it exists for, and rare enough to
+/// leave the rest of the seed space alone.
+const QUIET_PROB: f64 = 0.125;
+
+/// Granularity of [`WorkloadMode::Quiet`]'s pre-proposal idle, in simulated ms:
+/// the delay is a 4-bit draw times this step, so it lands uniformly across the
+/// chaos window. Anything finer would be false precision — the point is only that
+/// the single decision can fall anywhere chaos is firing, not at one fixed
+/// instant chaos would have to coincide with.
+const QUIET_DELAY_STEP_MS: u64 = CHAOS_DURATION_MS / 16;
 
 /// Per-run client workload mode, drawn once from the (uncounted) config RNG —
-/// the same stream `swarm_for_seed` draws from — so both modes rotate across
-/// the seed sweep without a config knob, and drawing either mode never
+/// the same stream `swarm_for_seed` draws from — so the modes rotate across
+/// the seed sweep without a config knob, and drawing any of them never
 /// perturbs the counted `SIM_RNG` stream that message jitter and fault
 /// injection draw from (the pinned `REGRESSION_SEEDS` scenarios stay
 /// reproducible either way). Recorded via a `client_workload_mode` event so
@@ -36,6 +52,29 @@ enum WorkloadMode {
         /// Number of proposals in flight at once, `2..=8`.
         depth: u32,
     },
+    /// **One decision, then silence**: idle for `delay_ms`, commit a single
+    /// proposal, and idle again through the settle tail. No read, and no
+    /// compaction ping either — a client that keeps asking the leader to
+    /// truncate is a client that is still talking, and the truncate would decide
+    /// a *second* slot, which is the one thing this mode must not do.
+    ///
+    /// It exists for one boundary the other two modes can never reach: a cluster
+    /// whose whole history is slot 0. Slot 0 is where "the leader has chosen
+    /// nothing" and "the leader has chosen its first slot" collide, so it is the
+    /// only prefix at which a watermark that cannot represent *empty* is
+    /// indistinguishable from a real one (#56). The other modes lift the prefix
+    /// off that boundary within milliseconds, and the ambiguity evaporates long
+    /// before any quiescence-gated oracle can look at it.
+    ///
+    /// The pre-proposal idle is what makes the interesting fault reachable: the
+    /// single decision has to land while chaos is firing for a partition or a
+    /// crash to cost one follower the only `Commit` the run will ever send.
+    /// Proposing immediately would only ever be covered by a fault that happens
+    /// to start at zero.
+    Quiet {
+        /// Simulated ms to idle before the single proposal.
+        delay_ms: u64,
+    },
 }
 
 /// A client that interleaves a fixed number of proposals with reads and records
@@ -48,8 +87,9 @@ enum WorkloadMode {
 /// order the linearizability oracle linearizes against; `Pipelined` fires
 /// several fresh-seq proposals concurrently, joins them, then optionally reads
 /// once, at the cost of that oracle's C1-C3 checks (valid only for the single
-/// sequential client). This exercises the redirect path and, under chaos,
-/// leader loss and re-election on both paths.
+/// sequential client); `Quiet` commits one proposal and then says nothing more,
+/// leaving a cluster whose entire chosen history is slot 0. This exercises the
+/// redirect path and, under chaos, leader loss and re-election on all three.
 pub struct ProposeClient;
 
 #[async_trait]
@@ -60,7 +100,7 @@ impl Workload for ProposeClient {
 
     // One client script per mode: the write and read attempt loops are
     // deliberately the same shape (cycle-on-redirect, one deadline) and shared
-    // by both modes, so the strict `W0 R0 W1 R1 …` alternation `Sequential`
+    // by every mode, so the strict `W0 R0 W1 R1 …` alternation `Sequential`
     // relies on stays easy to audit as one straight-line loop.
     #[allow(clippy::too_many_lines)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
@@ -103,7 +143,15 @@ impl Workload for ProposeClient {
         // flips (mirrors `swarm_for_seed`'s own per-decision style) rather
         // than an integer range draw, so it stays on the uncounted config RNG
         // stream too — see the [`WorkloadMode`] doc for why that matters.
-        let mode = if config_random_bool(0.5) {
+        let mode = if config_random_bool(QUIET_PROB) {
+            let mut bits: u64 = 0;
+            for _ in 0..4 {
+                bits = (bits << 1) | u64::from(config_random_bool(0.5));
+            }
+            let delay_ms = bits * QUIET_DELAY_STEP_MS;
+            tracing::info!(mode = "quiet", delay_ms, "client_workload_mode");
+            WorkloadMode::Quiet { delay_ms }
+        } else if config_random_bool(0.5) {
             let mut bits: u32 = 0;
             for _ in 0..3 {
                 bits = (bits << 1) | u32::from(config_random_bool(0.5));
@@ -209,9 +257,13 @@ impl Workload for ProposeClient {
         // floor, forwarded by normal replication + catch-up). Fire-and-forget
         // to the leader hint; a node still down when the truncate is decided
         // comes back below the floor, which is what makes snapshot restore
-        // reachable. The ack is observed via `EV_COMPACTED`. Shared by both
-        // modes.
-        let mut handle_write = |seq: u64, outcome: Option<(Option<u64>, Option<u64>)>| {
+        // reachable. The ack is observed via `EV_COMPACTED`. Shared by all three
+        // modes — `ping_compaction` is what [`WorkloadMode::Quiet`] switches off,
+        // because the truncate the ping decides would be a second chosen slot and
+        // lift that mode's prefix off the boundary it exists to sit on.
+        let mut handle_write = |seq: u64,
+                                outcome: Option<(Option<u64>, Option<u64>)>,
+                                ping_compaction: bool| {
             if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
                 match (slot, leader) {
@@ -226,7 +278,7 @@ impl Workload for ProposeClient {
                 if let Some(s) = slot {
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
                 }
-                if let (Some(up_to), Some(leader_id)) = (max_slot, leader) {
+                if let (true, Some(up_to), Some(leader_id)) = (ping_compaction, max_slot, leader) {
                     let idx = usize::try_from(leader_id).unwrap_or(0);
                     if idx < n {
                         let _ = clients[idx].compact.send(Compact { up_to });
@@ -240,7 +292,7 @@ impl Workload for ProposeClient {
         // Read terminal-outcome bookkeeping. The ack event carries the
         // observed watermark; an absent `read_index` field is the empty
         // applied prefix (`None`), which the oracle orders below `Some(0)`.
-        // Shared by both modes.
+        // Only the modes that read use it.
         let mut handle_read = |seq: u64, outcome: Option<(Option<u64>, u64)>| match outcome {
             Some((Some(read_index), attempts)) => {
                 reads_acked += 1;
@@ -270,7 +322,7 @@ impl Workload for ProposeClient {
                         break;
                     }
                     let outcome = write_one(seq).await;
-                    handle_write(seq, outcome);
+                    handle_write(seq, outcome, true);
                     let read_outcome = read_one(seq).await;
                     handle_read(seq, read_outcome);
                     // A small gap so node ticks interleave and the timeline
@@ -295,7 +347,7 @@ impl Workload for ProposeClient {
                         if outcome.is_some() {
                             last_committed = Some(s);
                         }
-                        handle_write(s, outcome);
+                        handle_write(s, outcome, true);
                     }
                     if let Some(read_seq) = last_committed {
                         let read_outcome = read_one(read_seq).await;
@@ -303,6 +355,30 @@ impl Workload for ProposeClient {
                     }
                     seq = end;
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                }
+            }
+            WorkloadMode::Quiet { delay_ms } => {
+                // Idle up to the drawn point in the chaos window, commit exactly
+                // one proposal, and then stop talking — no read, no compaction
+                // ping (see [`WorkloadMode::Quiet`]).
+                moonpool_sim::select! {
+                    _ = time.sleep(Duration::from_millis(delay_ms)) => {}
+                    () = shutdown.cancelled() => {}
+                }
+                if !shutdown.is_cancelled() {
+                    let outcome = write_one(0).await;
+                    handle_write(0, outcome, false);
+                }
+                // Sleep out the remainder of the chaos window before falling into
+                // the shared settle tail below. Both are needed: the tail is what
+                // keeps the cluster ticking, and reaching past the chaos window
+                // first is what lets the liveness oracles' quiescence gate open at
+                // all on a run whose one decision may have landed near its end.
+                moonpool_sim::select! {
+                    _ = time.sleep(Duration::from_millis(
+                        CHAOS_DURATION_MS.saturating_sub(delay_ms),
+                    )) => {}
+                    () = shutdown.cancelled() => {}
                 }
             }
         }

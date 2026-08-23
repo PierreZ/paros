@@ -27,9 +27,11 @@ const EV_FAILED: &str = "client_failed";
 const EV_READ_ISSUED: &str = "client_read_issued";
 const EV_READ_ACKED: &str = "client_read_acknowledged";
 const EV_READ_FAILED: &str = "client_read_failed";
-/// Per-run client workload mode (`"sequential"` / `"pipelined"`), emitted once
-/// by `paros_sim::workload::ProposeClient` so [`LinearizabilityOracle`] can
-/// tell which per-seq ordering guarantee this run's history satisfies.
+/// Per-run client workload mode (`"sequential"` / `"pipelined"` / `"quiet"`),
+/// emitted once by `paros_sim::workload::ProposeClient` so
+/// [`LinearizabilityOracle`] can tell which per-seq ordering guarantee this run's
+/// history satisfies. `"quiet"` is a single proposal, so its history is trivially
+/// sequential and takes the same checks.
 const EV_WORKLOAD_MODE: &str = "client_workload_mode";
 
 /// Node A — the client.
@@ -671,7 +673,7 @@ impl Invariant for ClientLivenessOracle {
 
 /// This run's workload mode (`paros_sim::workload::ProposeClient` draws it
 /// once, from the sim config RNG). Sometimes-gated here so the sweep proves
-/// both modes rotate. Returns whether this run drew `Pipelined`.
+/// every mode rotates. Returns whether this run drew `Pipelined`.
 fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
     let mode_events = q.snapshot(EV_WORKLOAD_MODE);
     let sequential = mode_events
@@ -687,6 +689,14 @@ fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
     assert_sometimes!(pipelined, "a run uses the pipelined client workload mode");
     if pipelined {
         assert_reachable!("a run uses the pipelined client workload mode");
+    }
+    // The one-decision-then-idle mode: the only run shape whose chosen prefix
+    // stops at slot 0, and therefore the only one in which an empty prefix can be
+    // told apart from a prefix of exactly slot 0 (see [`ConvergenceOracle`]).
+    let quiet = mode_events.iter().any(|e| e.str("mode") == Some("quiet"));
+    assert_sometimes!(quiet, "a run uses the quiet single-decision workload mode");
+    if quiet {
+        assert_reachable!("a cluster decides one slot and then idles");
     }
     pipelined
 }
