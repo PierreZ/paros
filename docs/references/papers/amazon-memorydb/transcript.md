@@ -3,7 +3,7 @@
 **Authors:** Yacine Taleb (AWS, Canada), Kevin McGehee (AWS, USA), Nan Yan (AWS, Canada), Shawn Wang (AWS, USA), Stefan C. Müller (AWS, Canada), Allen Samuels (AWS, USA)
 
 **Date:** SIGMOD-Companion '24, June 9–15, 2024, Santiago, AA, Chile. Received 30 November 2023; accepted 4 February 2024. 12 pages.
-**Source:** https://doi.org/10.1145/3626246.3653380 — PDF: https://assets.amazon.science/e0/1b/ba6c28034babbc1b18f54aa8102e/amazon-memorydb-a-fast-and-durable-memory-first-cloud-database.pdf
+**Source:** https://doi.org/10.1145/3626246.3653380 — PDF: https://cdn.amazon.science/e0/1b/ba6c28034babbc1b18f54aa8102e/amazon-memorydb-a-fast-and-durable-memory-first-cloud-database.pdf
 
 **CCS Concepts:** Information systems → Main memory engines.
 
