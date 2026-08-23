@@ -31,7 +31,7 @@ use crate::oracle::{
     AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle, GapFillOracle,
     LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData,
     ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
-    SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
+    SnapshotOracle, TimelineRecorder, TruncationOracle, assert_final_convergence, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -48,10 +48,11 @@ pub(crate) const GAP_MS: u64 = 20;
 /// Quiescence window the client holds open *after* its last proposal before it
 /// returns (and thereby triggers the harness shutdown). Chaos has ended by now,
 /// so this is a quiet tail in which the leader keeps heartbeating and any lagging
-/// follower runs commit-replay catch-up to converge. The [`oracle::ConvergenceOracle`]
-/// asserts over exactly this tail; it must comfortably exceed a few heartbeat /
-/// election-timeout intervals plus a catch-up round trip.
-pub(crate) const SETTLE_MS: u64 = 5_000;
+/// follower runs commit-replay catch-up to converge. The final convergence check
+/// runs after this tail. Eight seconds covers issue #86's buggified seed 0, where
+/// a delayed leadership turnover made the final follower catch up 6.05 seconds
+/// into the tail.
+pub(crate) const SETTLE_MS: u64 = 8_000;
 /// Number of paros nodes in the cluster.
 pub(crate) const CLUSTER_SIZE: usize = 3;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
@@ -156,7 +157,14 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// one or two, which is what makes it a witness rather than a near-miss. All three
 /// were the only quiet-mode failures in the 1 200 seeds swept, and all three went
 /// green on the fix.
+///
+/// **Seed 0 is #86's live convergence-timing witness.** The shortest-timeout
+/// driver BUGGIFY location shifts the leader-turnover pattern into the first seed:
+/// the old mid-run `assert_always!` failed on all 467 checks even though the final
+/// follower applied slot 1 about 6.05 seconds into the settle tail. It pins both
+/// the eight-second recovery budget and the end-of-run convergence assertion.
 pub const REGRESSION_SEEDS: &[u64] = &[
+    0,
     99,
     42,
     7,
@@ -173,9 +181,8 @@ pub const REGRESSION_SEEDS: &[u64] = &[
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
-/// client's [`SETTLE_MS`] tail so that tail is quiet. The [`oracle::ConvergenceOracle`]
-/// only asserts once `sim_time_ms` is past this window, so it never trips on the
-/// legitimate transient lag while chaos is still firing.
+/// client's [`SETTLE_MS`] tail so that tail is quiet. Convergence is asserted
+/// only after that tail, so legitimate lag while chaos is active is ignored.
 pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
 /// Simulated window over which chaos fires (see [`CHAOS_DURATION_MS`]).
 const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
@@ -216,8 +223,8 @@ fn chaos_surfaces() -> [Chaos; 2] {
 ///
 /// # Panics
 ///
-/// Panics if the safety oracle (or any other `always`-assertion) was violated on
-/// this seed: a safety bug must blow up, in tests and in the wasm demo alike.
+/// Panics if an in-run invariant is violated or the nodes have not converged by
+/// the end of the settle tail.
 #[must_use]
 pub fn run_seed(seed: u64) -> RunResult {
     let data = Arc::new(Mutex::new(RecorderData::default()));
@@ -257,6 +264,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
     let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_final_convergence(&proto);
     build_result(seed, &data, &proto, &recovery)
 }
 
@@ -280,21 +288,15 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(NoGapsOracle)
         .invariant(LeadershipOracle)
         .invariant(ProgressOracle)
-        // `ConvergenceOracle` is deliberately *not* in the adaptive sweep. The
-        // sweep draws a fresh wall-clock base seed each run, and convergence is a
-        // *liveness* property ("every live node eventually catches up"), not a hard
-        // safety invariant: under the harshest interleavings a lagging node can take
-        // many seconds to converge (slow leader-election stabilization after a crash
-        // reverts a relaxed chosen-index), longer than any bounded settle window. As
-        // an `assert_always` over random seeds that reads as a flaky failure — the
-        // #56 hunt measured the rate: replaying 1 200 arbitrary seeds through
-        // [`run_seed`] leaves ~20 of them (1.7%) reporting a still-lagging node at
-        // quiescence, every one of them a full twelve-proposal run, none of them a
-        // real wedge. That is the noise floor this oracle would add to the sweep. The
-        // oracle instead runs on the *deterministic* [`run_seed`] path (the pinned
-        // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
-        // red→green result is reproducible; the deterministic core unit test
-        // `follower_fills_a_hole_via_commit_replay_catch_up` pins the mechanism.
+        // `ConvergenceOracle` is deliberately *not* in the adaptive sweep because
+        // moonpool has no end-of-run invariant hook. Issue #86 proved that a
+        // quiescence-gated mid-run `assert_always!` is still unsound: buggified
+        // seed 0 recorded 467 failures, then a later leader change healed the
+        // follower before shutdown. [`run_seed`] instead records the final state
+        // and calls [`oracle::assert_final_convergence`] after the simulation can
+        // no longer change it. The adaptive runner cannot yet make that final
+        // assertion, so it keeps the convergence oracle out rather than report a
+        // transient as a permanent failure.
         //
         // [`oracle::GapFillOracle`] *is* in the sweep, despite being liveness-shaped
         // too, because the failure it names has no slow-but-eventual version: a slot

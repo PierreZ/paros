@@ -342,4 +342,8 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn resign_leadership(&self) -> bool {
         self.active() && buggify_with_prob!(0.004)
     }
+
+    fn shortest_election_timeout(&self) -> bool {
+        self.active() && buggify_with_prob!(0.5)
+    }
 }

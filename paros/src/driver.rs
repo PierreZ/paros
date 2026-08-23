@@ -102,6 +102,11 @@ pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
 /// Tracing event: the driver deliberately asked the current leader to resign.
 pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
 
+/// Tracing event: the driver selected the shortest valid election timeout.
+/// Carries `node` and `ticks`. The driver-hook oracle uses it to prove the
+/// timeout-jitter BUGGIFY location is active.
+pub const EV_ELECTION_TIMEOUT_EXTREME: &str = "election_timeout_extreme";
+
 /// Tracing event: this node flushed a `Ready` batch's durable writes. Carries
 /// `node`, `sync` (whether the batch required an fsync-before-send —
 /// [`MustSync::Sync`] — or a relaxed write), and `writes` (op count). Emitted once
@@ -792,25 +797,39 @@ pub fn is_seam_crash(e: &SimulationError) -> bool {
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
 /// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
 /// deterministic and dependency-free while a seed still replays bit-identically.
-fn draw_election_timeout<P: Providers>(providers: &P) -> u64 {
-    providers
-        .random()
-        .random_range(ELECTION_TIMEOUT_BASE..ELECTION_TIMEOUT_BASE * 2)
+fn draw_election_timeout<P: Providers, H: DriverHooks>(
+    providers: &P,
+    hooks: &H,
+    self_id: u64,
+) -> u64 {
+    if hooks.shortest_election_timeout() {
+        tracing::info!(
+            node = self_id,
+            ticks = ELECTION_TIMEOUT_BASE,
+            "election_timeout_extreme"
+        );
+        ELECTION_TIMEOUT_BASE
+    } else {
+        providers
+            .random()
+            .random_range(ELECTION_TIMEOUT_BASE..ELECTION_TIMEOUT_BASE * 2)
+    }
 }
 
 /// Post-batch upkeep: feed the core a fresh randomized election timeout whenever
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
 /// new leader).
-fn maintain<P: Providers>(
+fn maintain<P: Providers, H: DriverHooks>(
     node: &mut RawNode,
     providers: &P,
     last_role: &mut NodeRole,
     waiters: &mut ClientWaiters,
     self_id: u64,
+    hooks: &H,
 ) {
     if node.needs_election_timeout() {
-        node.set_election_timeout(draw_election_timeout(providers));
+        node.set_election_timeout(draw_election_timeout(providers, hooks, self_id));
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
@@ -985,7 +1004,7 @@ where
     let mut waiters = ClientWaiters::default();
     let mut next_read_ctx: u64 = 0;
     // Seed the first randomized election timeout (jitter from the driver's RNG).
-    node.set_election_timeout(draw_election_timeout(&providers));
+    node.set_election_timeout(draw_election_timeout(&providers, hooks, self_id));
     let mut last_role = node.role();
 
     let time = providers.time().clone();
@@ -1017,7 +1036,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
             }
             Some((req, reply)) = svc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1037,7 +1056,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1082,7 +1101,7 @@ where
                 }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
                 reply.send(());
             }
             Some((req, reply)) = svc.compact.recv() => {
@@ -1104,7 +1123,7 @@ where
                     },
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
                 reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
@@ -1139,7 +1158,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the
