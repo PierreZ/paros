@@ -222,6 +222,101 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
 }
 
 #[test]
+fn follower_missing_only_slot_zero_catches_up_on_an_idle_beat() {
+    // Pins the #56 bug: the heartbeat used to encode "nothing chosen" as
+    // `Slot(0)`, so a leader that had genuinely chosen slot 0 was
+    // indistinguishable on the wire from a leader that had chosen nothing. A
+    // follower with an empty prefix read the beat as "no lag" and never pulled,
+    // and every other healing path is closed here — the leader re-sends
+    // `Accept`s only for slots still in `proposer` (slot 0 left it at
+    // `try_decide`), the reverse push needs the sender to be strictly behind,
+    // and the healthy beats keep resetting `election_elapsed` so the follower
+    // never campaigns. With `commit: Option<Slot>` the beat says `Some(Slot(0))`,
+    // which is strictly above the follower's `None`, and the ordinary catch-up
+    // pull heals it.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Slot 0 — the *only* slot this cluster ever decides. Node 2 receives the
+    // `Accept` but not the `Commit`, so it accepted the value without ever
+    // learning it was chosen: an empty contiguous prefix (`chosen_index: None`).
+    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        !(to == NodeId(2) && matches!(m, Message::Commit { .. }))
+    });
+    assert_eq!(
+        nodes[0].hard_state().chosen_index,
+        Some(Slot(0)),
+        "the leader chose slot 0"
+    );
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        None,
+        "follower 2 never learned slot 0 was chosen"
+    );
+
+    // The cluster now idles: nothing but heartbeats. Several beats, so a single
+    // dropped round trip could not explain a failure to converge.
+    for _ in 0..3 {
+        nodes[0].tick();
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
+
+    assert_eq!(
+        chosen_at(&nodes[2], 0),
+        Some(val(10)),
+        "an idle beat advertising `Some(Slot(0))` reveals the lag"
+    );
+    assert_eq!(
+        nodes[2].hard_state().chosen_index,
+        Some(Slot(0)),
+        "follower 2 converged to the cluster's one-slot chosen prefix"
+    );
+}
+
+#[test]
+fn a_leader_that_lost_its_chosen_index_is_pushed_the_first_slot_back() {
+    // The other half of #56, on the reverse-push guard: a leader whose relaxed
+    // (non-fsync'd) chosen index did not survive a crash beats `None`, and a
+    // follower that *does* know slot 0 is decided must push it back. Under the
+    // old encoding both sides said `Slot(0)` — the leader meaning "nothing", the
+    // follower meaning "slot 0" — so `commit < ci` was false, nobody pushed, and
+    // the leader kept advertising an empty prefix that no follower could correct.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    // The leader forgets: it beats an empty watermark at its current ballot.
+    let b = nodes[0].ballot();
+    nodes[1].step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: b,
+        commit: None,
+        seq: 1,
+    });
+    let replayed = drain(&mut nodes[1]).into_iter().any(|(to, m)| {
+        to == NodeId(0)
+            && matches!(m, Message::CatchUpResponse { ref entries, .. } if entries.contains_key(&Slot(0)))
+    });
+    assert!(
+        replayed,
+        "the follower pushes the decided slot back to the leader that forgot it"
+    );
+}
+
+#[test]
 fn follower_fills_a_hole_via_commit_replay_catch_up() {
     // Pins the #18 bug: a follower that missed both the `Accept` and the `Commit`
     // for a decided slot keeps a permanent hole (the leader re-sends `Accept`s only
@@ -616,7 +711,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
     nodes[0].step(Message::Heartbeat {
         from: NodeId(0),
         ballot: b,
-        commit: Slot(0),
+        commit: None,
         seq: 0,
     });
     nodes[0].resend_pending();

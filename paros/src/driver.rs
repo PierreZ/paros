@@ -423,9 +423,12 @@ fn message_kind(m: &Message) -> &'static str {
 }
 
 /// The `(sender, ballot, slot)` triple a ballot-carrying Paxos message routes on,
-/// for observability. The six consensus kinds return `Some`; the tick-injected
-/// `CheckLeader`/`Heartbeat` self-events (no ballot/slot) return `None`.
-fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
+/// for observability. Every ballot-carrying kind returns `Some`, `Heartbeat`
+/// included — its "slot" is the commit watermark it advertises, which is
+/// `None` on a leader that has chosen nothing (an empty prefix is not slot 0;
+/// see [`paros_core::Message::Heartbeat`]). The kinds with no ballot at all
+/// (`CheckLeader`, the catch-up pair) return `None` outright.
+fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
     match m {
         // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {
@@ -438,7 +441,7 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             ballot,
             from_slot,
             ..
-        } => Some((*from, *ballot, *from_slot)),
+        } => Some((*from, *ballot, Some(*from_slot))),
         Message::Accept {
             from, ballot, slot, ..
         }
@@ -448,7 +451,7 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
         }
         | Message::Commit {
             from, ballot, slot, ..
-        } => Some((*from, *ballot, *slot)),
+        } => Some((*from, *ballot, Some(*slot))),
         Message::Heartbeat {
             from,
             ballot,
@@ -460,7 +463,7 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Slot)> {
             ballot,
             chosen_index,
             ..
-        } => Some((*from, *ballot, *chosen_index)),
+        } => Some((*from, *ballot, Some(*chosen_index))),
         _ => None,
     }
 }
@@ -491,8 +494,8 @@ impl<P: Providers> Outbound<'_, P> {
     /// `msg_received` means exactly "the network lost it".
     fn transmit(&self, to: NodeId, msg: &Message) {
         let kind = message_kind(msg);
-        if let Some((_, ballot, slot)) = message_route(msg) {
-            tracing::info!(
+        match message_route(msg) {
+            Some((_, ballot, Some(slot))) => tracing::info!(
                 node = self.self_id,
                 to = to.0,
                 kind,
@@ -500,9 +503,19 @@ impl<P: Providers> Outbound<'_, P> {
                 bnode = ballot.node.0,
                 slot = slot.0,
                 "msg_sent"
-            );
-        } else {
-            tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent");
+            ),
+            // A beat from a leader whose chosen prefix is still empty: there is no
+            // slot to report, and reporting a bare `0` would put back on the trace
+            // exactly the sentinel #56 took off the wire.
+            Some((_, ballot, None)) => tracing::info!(
+                node = self.self_id,
+                to = to.0,
+                kind,
+                bround = ballot.round,
+                bnode = ballot.node.0,
+                "msg_sent"
+            ),
+            None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
         }
         if let Some(addr) = self.addrs.get(&to) {
             let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, self.transport);
@@ -1031,8 +1044,8 @@ where
                 // arrival (mirror of `msg_sent`) so the demo can pair sends with
                 // receives and mark the unmatched ones as network drops.
                 let kind = message_kind(&msg);
-                if let Some((from, ballot, slot)) = message_route(&msg) {
-                    tracing::info!(
+                match message_route(&msg) {
+                    Some((from, ballot, Some(slot))) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
@@ -1040,9 +1053,17 @@ where
                         bnode = ballot.node.0,
                         slot = slot.0,
                         "msg_received"
-                    );
-                } else {
-                    tracing::info!(node = self_id, kind, "msg_received");
+                    ),
+                    // The empty-prefix beat: no slot field, mirroring `msg_sent`.
+                    Some((from, ballot, None)) => tracing::info!(
+                        node = self_id,
+                        from = from.0,
+                        kind,
+                        bround = ballot.round,
+                        bnode = ballot.node.0,
+                        "msg_received"
+                    ),
+                    None => tracing::info!(node = self_id, kind, "msg_received"),
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it

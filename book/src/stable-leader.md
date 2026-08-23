@@ -185,9 +185,17 @@ Accepts** so a lagging follower catches up:
 Heartbeat {
     from: NodeId,
     ballot: Ballot,
-    commit: Slot,   // the leader's highest contiguous chosen slot
+    commit: Option<Slot>,   // highest contiguous chosen slot, `None` if nothing
 }
 ```
+
+That `Option` is not decoration. `Slot(0)` is a real log position, so it cannot
+also stand for *no* log position — and a watermark that used a bare `Slot(0)` for
+both made a leader that had just chosen its first slot look exactly like a leader
+that had chosen nothing. A follower missing precisely that slot compared `Slot(0)`
+against its own empty prefix, concluded it was not behind, and never asked. Every
+other repair path is shut in that state, so it stayed stale until some *second*
+slot was chosen and the beat finally carried a number that meant something.
 
 The commit index on each beat is itself a piggyback: it is attached to a message
 the leader already sends, so followers advance their chosen prefix at no extra

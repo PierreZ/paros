@@ -164,8 +164,14 @@ pub enum Message {
         from: NodeId,
         /// The leader's current ballot (lets a follower adopt or refuse it).
         ballot: Ballot,
-        /// The leader's highest contiguous chosen slot.
-        commit: Slot,
+        /// The leader's highest contiguous chosen slot, or `None` when it has
+        /// chosen nothing at all. The `Option` is load-bearing: `Slot(0)` is a
+        /// real log position, so it cannot double as "no log position". Encoding
+        /// the empty prefix as a bare `Slot(0)` made a leader that had chosen its
+        /// *first* slot indistinguishable on the wire from a leader with nothing,
+        /// and a follower missing exactly that slot read the beat as "no lag" and
+        /// never pulled (#56).
+        commit: Option<Slot>,
         /// Monotone per-ballot beat sequence number, assigned at broadcast
         /// (`0` on the tick-injected self event, which never leaves the node).
         /// Echoed by [`Message::HeartbeatAck`] so the leader can tell which
