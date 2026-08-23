@@ -1281,6 +1281,16 @@ fn cluster_applied_max(q: &dyn TraceQuery) -> Option<(u64, u64)> {
 /// [`CONVERGENCE_GRACE_MS`] (no new slots being chosen). Before that gate,
 /// follower lag is legitimate and unasserted. The client's `SETTLE_MS` tail is
 /// what keeps the cluster ticking long enough for this gate to be reached.
+///
+/// It reads the **empty** prefix as its own state (`None`, not `Some(0)`), which
+/// is what lets it see the #56 boundary at all: a node that has applied nothing
+/// emits no `log_applied`, so it is invisible in the applied stream and has to be
+/// found through the boot registry instead. Such a node next to a cluster whose
+/// prefix is exactly slot 0 is the divergence a `0`-initialised oracle reads as
+/// "converged" — the same sentinel confusion the heartbeat watermark used to
+/// carry on the wire. The run shape that exhibits it is a cluster that decides
+/// *one* slot and then goes quiet, which is what `crate::workload`'s quiet mode
+/// exists to produce.
 pub(crate) struct ConvergenceOracle;
 
 impl Invariant for ConvergenceOracle {
@@ -1293,8 +1303,16 @@ impl Invariant for ConvergenceOracle {
         // time it was last raised (the applied index equals the slot; the driver
         // only emits it walking the *contiguous* chosen prefix, so a node's max is
         // its prefix length − 1).
+        //
+        // Both maxima are `Option`s, and that is the point rather than a detail: a
+        // node that has applied *nothing* emits no `log_applied` at all, so an
+        // empty prefix (`None`) is not `Some(0)` and must not be folded into one.
+        // Reading a bare `0` for both is the same sentinel confusion #56 found on
+        // the wire — the leader's heartbeat watermark encoded "nothing chosen" as
+        // `Slot(0)`, indistinguishable from "slot 0 chosen" — and an oracle that
+        // shares it can never go red on it.
         let mut per_node_max: HashMap<u64, u64> = HashMap::new();
-        let mut cluster_max = 0_u64;
+        let mut cluster_max: Option<u64> = None;
         let mut cluster_max_time = 0_u64;
         let mut lagged: HashSet<u64> = HashSet::new();
         let applied = q.snapshot(EV_APPLIED);
@@ -1308,18 +1326,22 @@ impl Invariant for ConvergenceOracle {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
                 continue;
             };
-            if idx > cluster_max {
-                cluster_max = idx;
+            if cluster_max.is_none_or(|m| idx > m) {
+                cluster_max = Some(idx);
                 cluster_max_time = e.time_ms;
             }
             let m = per_node_max.entry(node).or_insert(0);
             *m = (*m).max(idx);
             for (&n, &nm) in &per_node_max {
-                if nm < cluster_max {
+                if Some(nm) < cluster_max {
                     lagged.insert(n);
                 }
             }
         }
+        // Nothing carried an `applied_index`: no cluster prefix to converge to.
+        let Some(cluster_max) = cluster_max else {
+            return;
+        };
 
         // Coverage: a node that fell behind and then reached the cluster max —
         // proof the catch-up path actually healed a hole (not merely that nothing
@@ -1327,7 +1349,7 @@ impl Invariant for ConvergenceOracle {
         let recovered = cluster_max > 0
             && lagged
                 .iter()
-                .any(|n| per_node_max.get(n).copied().unwrap_or(0) == cluster_max);
+                .any(|n| per_node_max.get(n).copied() == Some(cluster_max));
         assert_sometimes!(
             recovered,
             "a lagging node catches up to the cluster's chosen prefix"
@@ -1382,15 +1404,38 @@ impl Invariant for ConvergenceOracle {
             *f = (*f).max(first);
         }
 
-        for (&node, &m) in &per_node_max {
-            if !stable_up(node) || m == cluster_max {
+        // Every node this run ever brought up, not just the ones that applied
+        // something: a node whose prefix is still empty is exactly the case the
+        // applied stream cannot show, because it emits no event to be seen in.
+        let mut cluster: HashSet<u64> = q
+            .snapshot(EV_BOOTED)
+            .iter()
+            .filter_map(|e| e.u64("node"))
+            .collect();
+        cluster.extend(per_node_max.keys().copied());
+
+        for &node in &cluster {
+            if !stable_up(node) {
                 continue;
             }
-            let next_needed = m + 1;
-            let below_all_floors = per_node_max
-                .keys()
-                .filter(|&&p| p != node)
-                .all(|&p| next_needed < final_floor.get(&p).copied().unwrap_or(0));
+            // `None` = this node has applied nothing at all. Under #56's heartbeat
+            // encoding a follower that missed only slot 0's `Commit` sat here
+            // forever — the beat advertised a bare `Slot(0)` it could not tell from
+            // "the leader has nothing", so it never pulled, and no other healing
+            // path is open (the leader re-sends `Accept`s only for slots still in
+            // flight, the reverse push needs a strictly higher local prefix, and
+            // healthy beats keep the election timer from firing). A `0`-sentinel
+            // oracle reads that node as "converged to slot 0"; this one does not.
+            let prefix = per_node_max.get(&node).copied();
+            if prefix == Some(cluster_max) {
+                continue;
+            }
+            let next_needed = prefix.map_or(0, |m| m + 1);
+            let below_all_floors = per_node_max.keys().any(|&p| p != node)
+                && per_node_max
+                    .keys()
+                    .filter(|&&p| p != node)
+                    .all(|&p| next_needed < final_floor.get(&p).copied().unwrap_or(0));
             if below_all_floors {
                 // Reached the hard case: a node below every peer's floor, which
                 // only snapshot transfer can heal. Fire the reachability gate, then
@@ -1400,7 +1445,11 @@ impl Invariant for ConvergenceOracle {
                 );
             }
             assert_always!(
-                m == cluster_max,
+                prefix.is_some(),
+                "a stable live node's chosen prefix is never empty once the cluster has chosen a slot"
+            );
+            assert_always!(
+                prefix == Some(cluster_max),
                 "every stable live node converges to the cluster's chosen prefix (via catch-up or snapshot)"
             );
         }
