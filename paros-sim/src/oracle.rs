@@ -928,8 +928,12 @@ impl Invariant for AppliedAckOracle {
 }
 
 /// The Paxos safety oracle — the heart of the project. Reads the driver's
-/// protocol events ([`EV_CHOSEN`], [`EV_NODE_STATE`]) and asserts the three
-/// single-decree safety invariants on every step.
+/// protocol events ([`EV_CHOSEN`], [`EV_NODE_STATE`], [`EV_PERSIST`],
+/// [`EV_MSG_SENT`]) and asserts the single-decree safety invariants on every
+/// step: at most one value chosen per slot, a monotone promised ballot, never an
+/// accept above the promise, and — the two the #67 arc added — at most one
+/// command *proposed* per `(ballot, slot)` and at most one *accepted* per
+/// `(slot, ballot)`.
 pub(crate) struct SafetyOracle;
 
 impl Invariant for SafetyOracle {
@@ -987,6 +991,77 @@ impl Invariant for SafetyOracle {
                 (ar, an) <= (pr, pn),
                 "a node's accepted ballot never exceeds its promised ballot"
             );
+        }
+
+        // Invariant 4 (the Phase-2 half of P2b, checked *on the wire*): a ballot
+        // proposes at most one command per slot. A ballot names its own proposer
+        // (`Ballot.node`), so exactly one node ever sends `Accept`s at it, and that
+        // node holds one `Proposing` per slot — two different commands under one
+        // `(ballot, slot)` means the proposer allocated a slot it already had in
+        // flight, which destroys the highest-ballot-per-slot value selection a new
+        // leader's Phase 1 depends on (two records at the *same* ballot, no rule to
+        // pick between them).
+        //
+        // This is the check #67's arc needs and the only one that can see it: the
+        // anomaly is upstream of `persist` and `value_chosen` alike, so a
+        // double-allocation an acceptor quorum happens to reject leaves no trace at
+        // all in Invariants 1-3. Reading `msg_sent` rather than `msg_received` is
+        // deliberate — it indicts the *proposer*, not the network.
+        let mut proposed: HashMap<(u64, u64, u64), u64> = HashMap::new();
+        for e in q.snapshot(EV_MSG_SENT) {
+            if e.str("kind") != Some("accept") {
+                continue;
+            }
+            let (Some(br), Some(bn), Some(slot), Some(vhash)) = (
+                e.u64("bround"),
+                e.u64("bnode"),
+                e.u64("slot"),
+                e.u64("vhash"),
+            ) else {
+                continue;
+            };
+            if let Some(prev) = proposed.insert((br, bn, slot), vhash) {
+                assert_always!(
+                    prev == vhash,
+                    "one ballot proposes at most one command for a slot"
+                );
+            }
+        }
+        // Coverage gate: the check above is only as good as the field it reads.
+        // An `accept` whose `vhash` never made it onto the trace is skipped
+        // silently by the destructuring above, and the invariant would be
+        // vacuously true forever. Saturation has to see it fire.
+        assert_sometimes!(
+            !proposed.is_empty(),
+            "a proposed command is checked against its ballot's other proposals"
+        );
+        if !proposed.is_empty() {
+            assert_reachable!("a proposed command is checked against its ballot's other proposals");
+        }
+
+        // Invariant 5 (the durable mirror of 4): at most one command is ever
+        // *accepted* for one `(slot, ballot)` anywhere in the cluster. A chosen
+        // value is re-recorded at its choosing ballot (`mark_chosen`), so the
+        // legitimate paths all write the same command per `(slot, ballot)`; two
+        // different ones would mean an acceptor quorum had ratified a
+        // double-allocation, which is Invariant 4's failure carried all the way to
+        // disk.
+        let mut accepted: HashMap<(u64, u64, u64), u64> = HashMap::new();
+        for e in q.snapshot(EV_PERSIST) {
+            let (Some(slot), Some(ar), Some(an), Some(vhash)) = (
+                e.u64("slot"),
+                e.u64("around"),
+                e.u64("abnode"),
+                e.u64("vhash"),
+            ) else {
+                continue;
+            };
+            if let Some(prev) = accepted.insert((slot, ar, an), vhash) {
+                assert_always!(
+                    prev == vhash,
+                    "at most one command is ever accepted for one (slot, ballot)"
+                );
+            }
         }
     }
 }
@@ -1148,8 +1223,9 @@ impl Invariant for NoGapsOracle {
 }
 
 /// Leadership oracle: a node's leadership ballots strictly increase (it never
-/// becomes leader again at a round at or below one it already led), and elections
-/// do happen. Reads the `leader_elected` stream.
+/// becomes leader again at a round at or below one it already led), a fresh
+/// leader never holds a promise above the ballot it just won, and elections do
+/// happen. Reads the `leader_elected` stream.
 ///
 /// Note: two nodes *can* lead the same round with different ballots (a ballot is
 /// `(round, node)`, ordered by node id) under a partition — that is safe, because
@@ -1157,6 +1233,20 @@ impl Invariant for NoGapsOracle {
 /// asserted by [`SafetyOracle`]). So "≤1 leader per ballot" is structural (the
 /// ballot carries the node); what is worth asserting is the genuinely-true
 /// per-node monotonicity, which catches a node re-leading at a stale ballot.
+///
+/// The promise check is #67's detector, and it is deliberately placed at the
+/// *instant of victory*: winning means having promised your own campaign ballot
+/// and heard nothing higher, so `won >= promised` should be an identity there. It
+/// fails only for a Candidate that raised its promise without dropping its
+/// campaign — which `mark_chosen` and `on_install_snapshot` both do, being the
+/// two promise-raising paths that skip `become_follower` — and then won on a
+/// `Promise` that was in flight before the raise. A tick later the same state is
+/// no longer distinguishable from a sitting leader legitimately learning a
+/// higher-ballot commit, which is why nothing downstream can see it. The
+/// consequences (`next_slot` and the read fence both landing below slots the
+/// promise quorum reported) are what [`SafetyOracle`]'s per-ballot proposal check
+/// and [`LinearizabilityOracle`]'s C1 would catch *if* the stale leader ever got
+/// a quorum to answer it.
 pub(crate) struct LeadershipOracle;
 
 impl Invariant for LeadershipOracle {
@@ -1167,6 +1257,7 @@ impl Invariant for LeadershipOracle {
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         let mut last_round: HashMap<u64, u64> = HashMap::new();
         let mut any = false;
+        let mut checked = 0_usize;
         for e in q.snapshot(EV_LEADER) {
             let (Some(node), Some(round)) = (e.u64("node"), e.u64("round")) else {
                 continue;
@@ -1178,6 +1269,27 @@ impl Invariant for LeadershipOracle {
                     "a node's leadership ballots strictly increase"
                 );
             }
+            // #67: the ballot won vs. the promise held at that instant.
+            let (Some(bn), Some(pr), Some(pn)) = (e.u64("bnode"), e.u64("pround"), e.u64("pbnode"))
+            else {
+                continue;
+            };
+            checked += 1;
+            assert_always!(
+                (round, bn) >= (pr, pn),
+                "a fresh leader has not promised a ballot above the one it won"
+            );
+        }
+        // Coverage gate on the #67 check itself: it reads three fields the
+        // `leader_elected` event has to carry, and a missing one would skip it
+        // silently, leaving the invariant vacuously true. Saturation has to see it
+        // actually compare something.
+        assert_sometimes!(
+            checked > 0,
+            "a fresh leader's promise is checked against the ballot it won"
+        );
+        if checked > 0 {
+            assert_reachable!("a fresh leader's promise is checked against the ballot it won");
         }
         assert_sometimes!(any, "a leader is elected");
         if any {

@@ -108,8 +108,11 @@ pub const EV_CHOSEN: &str = "value_chosen";
 
 /// Tracing event: this node sent a protocol message. Carries `node` (sender),
 /// `to` (destination), and `kind`; for the six ballot-carrying Paxos kinds it
-/// also carries the ballot (`bround`/`bnode`) and `slot`. The wasm demo pairs it
-/// with [`EV_MSG_RECV`] to draw the protocol timeline.
+/// also carries the ballot (`bround`/`bnode`) and `slot`. An `accept` additionally
+/// carries the proposed command's `vhash` — the only message that proposes a
+/// value, and so the only one whose hash the safety oracle needs to check that one
+/// ballot proposes at most one command per slot. The wasm demo pairs it with
+/// [`EV_MSG_RECV`] to draw the protocol timeline.
 pub const EV_MSG_SENT: &str = "msg_sent";
 
 /// Tracing event: this node received a protocol message (the mirror of
@@ -118,9 +121,11 @@ pub const EV_MSG_SENT: &str = "msg_sent";
 /// sent message with no matching receive is one the network dropped.
 pub const EV_MSG_RECV: &str = "msg_received";
 
-/// Tracing event: this node became leader. Carries `node` and `round` (its
-/// ballot round). The leader-uniqueness oracle asserts at most one leader per
-/// round across the cluster.
+/// Tracing event: this node became leader. Carries `node`, the won ballot
+/// (`round`/`bnode`) and the promise it held at the instant of victory
+/// (`pround`/`pbnode`). The leadership oracle asserts per-node ballot
+/// monotonicity, and — the #67 check — that a fresh leader's promise never sits
+/// above the ballot it just won.
 pub const EV_LEADER: &str = "leader_elected";
 
 /// Tracing event: this node advanced its applied (contiguous chosen) prefix.
@@ -494,28 +499,51 @@ impl<P: Providers> Outbound<'_, P> {
     /// `msg_received` means exactly "the network lost it".
     fn transmit(&self, to: NodeId, msg: &Message) {
         let kind = message_kind(msg);
-        match message_route(msg) {
-            Some((_, ballot, Some(slot))) => tracing::info!(
+        // An `Accept` is the only message that carries a *proposal*, so it is the
+        // only one whose command hash the trace needs: it is what lets an oracle
+        // check the Phase-2 half of P2b — one ballot proposes at most one command
+        // per slot — a claim no other event can show, because the anomaly it
+        // guards against (#67) puts two commands for one `(ballot, slot)` on the
+        // wire without either ever being accepted or chosen.
+        match msg {
+            Message::Accept {
+                ballot,
+                slot,
+                command,
+                ..
+            } => tracing::info!(
                 node = self.self_id,
                 to = to.0,
                 kind,
                 bround = ballot.round,
                 bnode = ballot.node.0,
                 slot = slot.0,
+                vhash = command_hash(command),
                 "msg_sent"
             ),
-            // A beat from a leader whose chosen prefix is still empty: there is no
-            // slot to report, and reporting a bare `0` would put back on the trace
-            // exactly the sentinel #56 took off the wire.
-            Some((_, ballot, None)) => tracing::info!(
-                node = self.self_id,
-                to = to.0,
-                kind,
-                bround = ballot.round,
-                bnode = ballot.node.0,
-                "msg_sent"
-            ),
-            None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
+            _ => match message_route(msg) {
+                Some((_, ballot, Some(slot))) => tracing::info!(
+                    node = self.self_id,
+                    to = to.0,
+                    kind,
+                    bround = ballot.round,
+                    bnode = ballot.node.0,
+                    slot = slot.0,
+                    "msg_sent"
+                ),
+                // A beat from a leader whose chosen prefix is still empty: there is
+                // no slot to report, and reporting a bare `0` would put back on the
+                // trace exactly the sentinel #56 took off the wire.
+                Some((_, ballot, None)) => tracing::info!(
+                    node = self.self_id,
+                    to = to.0,
+                    kind,
+                    bround = ballot.round,
+                    bnode = ballot.node.0,
+                    "msg_sent"
+                ),
+                None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
+            },
         }
         if let Some(addr) = self.addrs.get(&to) {
             let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, self.transport);
@@ -823,9 +851,21 @@ fn maintain<P: Providers>(
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
+        // The won ballot *and* the promise held at the instant of victory. They
+        // are normally the same ballot — winning means having promised your own
+        // campaign ballot and heard nothing higher — and the oracle asserts
+        // exactly that: a leader never holds a promise above the ballot it just
+        // won (#67). Emitting both here, on the transition, is what makes the
+        // stale win visible; a tick later the leader may legitimately learn a
+        // higher-ballot commit and the state is no longer distinguishable.
+        let ballot = node.ballot();
+        let promised = node.hard_state().max_promised_ballot;
         tracing::info!(
             node = self_id,
-            round = node.ballot().round,
+            round = ballot.round,
+            bnode = ballot.node.0,
+            pround = promised.round,
+            pbnode = promised.node.0,
             "leader_elected"
         );
         // This election found holes the promise quorum reported nothing for and
