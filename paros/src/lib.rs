@@ -10,18 +10,18 @@
 //! `paros-sim` and adapts a moonpool `Process` to [`run_node`]. The client API
 //! and a `parosd` binary land here too, once the protocol stabilizes.
 
-mod crash;
 mod driver;
+mod hooks;
 mod storage;
 
-pub use crash::{CrashSeam, NoCrash, Seam};
 pub use driver::{
     Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
-    EV_GAP_FILLED, EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
-    EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
-    Paros, Perturbations, Propose, ProposeAck, Read, ReadAck, WLTOKEN_PAROS, is_seam_crash,
-    parse_addr, run_node,
+    EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE,
+    EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_RECOVERED,
+    EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED, EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck,
+    WLTOKEN_PAROS, is_seam_crash, parse_addr, run_node,
 };
+pub use hooks::{DriverHooks, NoHooks, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{

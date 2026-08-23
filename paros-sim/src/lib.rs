@@ -28,8 +28,8 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
-    LinearizabilityOracle, NoGapsOracle, PerturbationOracle, ProgressOracle, ProtocolData,
+    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle, GapFillOracle,
+    LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData,
     ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
     SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
@@ -124,8 +124,9 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 ///   tokio's FIFO task scheduling with seeded-random scheduling, shifting the
 ///   exact interleaving every seed drives;
 /// - #81 removed the message-class nemesis and replaced its one non-redundant
-///   capability with the driver's [`paros::Perturbations`], drawn per seed from a
-///   different point in the RNG stream (see [`crate::node`]);
+///   capability with driver-level skip/resign hooks, moving the RNG stream;
+/// - the direct `DriverHooks` BUGGIFY refactor later moved those draws again by
+///   evaluating each independent location only when its action can matter;
 /// - #56 added the quiet workload mode, whose draw sits *ahead* of the
 ///   sequential/pipelined coin on the config stream, so which script a seed runs
 ///   (and at what pipeline depth) moved again.
@@ -139,20 +140,11 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// snapshot and read paths. Any other arc's red→green witness has to be re-hunted
 /// against the current tree (#80's seed 1364 included).
 ///
-/// **Seed 6156 is the exception: it is live, and it is the one #81 re-derived.**
-/// It is the [`oracle::GapFillOracle`] wedge reproduced under the *replacement*
-/// for the slot-starvation nemesis — the driver's
-/// [`Perturbations`](paros::Perturbations), i.e. a leader that skips its `Accept`
-/// re-sends and then resigns, both of which are decisions the core has always
-/// allowed. Revert the `Control::Noop` gap fill in `try_become_leader` and this
-/// seed goes red (`a quiesced cluster holds no chosen slot above its applied
-/// prefix`, on essentially every check of the settle tail); restore it and the
-/// seed is clean. It was found by replaying seeds against a gap-fill-reverted
-/// build: one witness in the ~6 000 seeds swept at these magnitudes, which is the
-/// honest rarity of this interleaving — and exactly why the sweep needs the
-/// perturbations to reach it at all. It survived the quiet-mode config-stream
-/// shift #56 introduced: re-checked against a gap-fill-reverted build afterwards,
-/// it still comes back red on 13 734 of 13 736 checks.
+/// Seed 6156 was the live witness #81 re-derived for the
+/// [`oracle::GapFillOracle`] wedge under a leader that skipped pending `Accept`
+/// re-sends and then resigned. The direct `DriverHooks` refactor moved those
+/// BUGGIFY draws, so it is now retained as a historical regression seed until a
+/// witness is re-hunted against the current hook locations.
 ///
 /// **Seed 283 is live, and it is #56's witness.** Restore the sentinel — make
 /// `Message::Heartbeat.commit` a bare `Slot` again, `chosen_index.unwrap_or(Slot(0))`
@@ -249,7 +241,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
-        .invariant(PerturbationOracle)
+        .invariant(DriverHookOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -313,7 +305,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         .invariant(GapFillOracle)
         .invariant(TruncationOracle)
         .invariant(SnapshotOracle)
-        .invariant(PerturbationOracle)
+        .invariant(DriverHookOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)

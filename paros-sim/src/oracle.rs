@@ -11,12 +11,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_GAP_FILLED,
-    EV_LEADER, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
-    EV_PREPARE_BELOW_FLOOR, EV_RECOVERED, EV_SNAPSHOT_INSTALLED, EV_SYNCED,
+    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
+    EV_SYNCED,
 };
 use serde::Serialize;
-
-use crate::node::EV_PERTURBED;
 
 /// Standard transport-client observability events (same names as moonpool's
 /// transport workloads, so tooling is workload-agnostic).
@@ -1691,24 +1690,28 @@ impl Invariant for SnapshotOracle {
 ///
 /// It asserts no new safety property; every consequence either of them can have
 /// is already covered (prefix agreement, no gaps, convergence, the gap fill). All
-/// it proves is that the *knob is still connected*: perturbations that stopped
-/// being drawn would leave the sweep looking green while quietly testing less,
+/// it proves is that the hooks are still connected: perturbations that stopped
+/// firing would leave the sweep looking green while quietly testing less,
 /// which is precisely how #54 stayed invisible for 1500 seeds before it.
-pub(crate) struct PerturbationOracle;
+pub(crate) struct DriverHookOracle;
 
-impl Invariant for PerturbationOracle {
+impl Invariant for DriverHookOracle {
     fn name(&self) -> &'static str {
-        "driver_perturbations"
+        "driver_hooks"
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
-        let perturbed = !q.snapshot(EV_PERTURBED).is_empty();
+        let skipped = !q.snapshot(EV_RESEND_SKIPPED).is_empty();
+        let resigned = !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty();
         assert_sometimes!(
-            perturbed,
-            "a node's driver runs with non-default perturbations"
+            skipped || resigned,
+            "the driver takes a rare-but-valid policy decision"
         );
-        if perturbed {
-            assert_reachable!("a driver skips accept re-sends or resigns leadership");
+        if skipped {
+            assert_reachable!("the driver skips a pending accept re-send");
+        }
+        if resigned {
+            assert_reachable!("the driver voluntarily resigns leadership");
         }
     }
 }
