@@ -89,7 +89,8 @@ pub const EV_BOOTED: &str = "booted";
 /// (a `buggify`-injected [`Seam`] crash). Carries `node` and `seam`
 /// (`"before_sync"` — the whole un-synced batch is lost — or
 /// `"after_sync_before_send"` — the writes are durable but the batch's messages
-/// never left). Provider-generic but inert in production, where
+/// never left). After-sync events also carry `snapshot_offers`, the number of
+/// snapshot transfers dropped with the batch. Provider-generic but inert in production, where
 /// [`NoHooks`](crate::NoHooks) never fires. Purely observational; the crash
 /// animation reads it to mark the persist/send seam a node died on.
 pub const EV_CRASHED: &str = "crashed";
@@ -156,6 +157,12 @@ pub const EV_COMPACTED: &str = "compacted";
 /// snapshot oracle reads it to confirm a below-floor node recovered, and the
 /// no-gaps oracle reads it to admit the applied-index jump the install performs.
 pub const EV_SNAPSHOT_INSTALLED: &str = "snapshot_installed";
+
+/// Tracing event: the driver materialized one or more opaque snapshot offers as
+/// outbound protocol messages. Carries `node` and `snapshot_offers`. Emitted
+/// before the after-sync-before-send seam, so the driver-hook oracle can prove
+/// snapshot transfers use the common outbound path.
+pub const EV_SNAPSHOT_OFFERED: &str = "snapshot_offered";
 
 /// Tracing event: this node, on winning an election, filled at least one undecided
 /// hole in the recovered suffix with a [`Control::Noop`]. Carries `node`, `round`
@@ -512,7 +519,7 @@ where
     let ready = node.ready();
     let writes: Vec<WriteOp> = ready.writes().to_vec();
     let must_sync = ready.must_sync();
-    let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
+    let mut messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
@@ -524,12 +531,45 @@ where
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks)?;
 
+    // Snapshot offers are outbound protocol messages too. Materialize them
+    // before the after-sync seam so a crash can drop an offer-only batch just as
+    // it can any other outbound batch. Keeping one transmit path also prevents
+    // snapshot recovery from quietly bypassing future send-side policy.
+    let snapshot_offer_count = snapshot_offers.len();
+    messages.extend(
+        snapshot_offers
+            .into_iter()
+            .map(|(to, chosen_index, ballot)| {
+                (
+                    to,
+                    Message::InstallSnapshot {
+                        from: NodeId(self_id),
+                        ballot,
+                        chosen_index,
+                        snapshot: Value(storage.snapshot()),
+                    },
+                )
+            }),
+    );
+    if snapshot_offer_count > 0 {
+        tracing::info!(
+            node = self_id,
+            snapshot_offers = snapshot_offer_count as u64,
+            "snapshot_offered"
+        );
+    }
+
     // Crash seam: after the batch is durable but before its messages leave. The
     // durable writes survive; the batch's messages are dropped (never sent), so a
     // recovered node must re-derive them. Only meaningful when there is durable
     // work or a message to lose.
     if (!writes.is_empty() || !messages.is_empty()) && hooks.crash_at(Seam::AfterSyncBeforeSend) {
-        tracing::info!(node = self_id, seam = "after_sync_before_send", "crashed");
+        tracing::info!(
+            node = self_id,
+            seam = "after_sync_before_send",
+            snapshot_offers = snapshot_offer_count as u64,
+            "crashed"
+        );
         return Err(seam_crash());
     }
 
@@ -537,20 +577,6 @@ where
     //    the driver maps NodeId → address and fires (fire-and-forget).
     for (to, msg) in messages {
         out.transmit(to, &msg);
-    }
-
-    // 2b. Serve snapshot offers: the core decided a peer needs a snapshot (it
-    //     asked for a prefix below our floor). Attach the opaque application bytes
-    //     from storage and send the InstallSnapshot — the driver holds the state
-    //     the core does not.
-    for (to, chosen_index, ballot) in &snapshot_offers {
-        let msg = Message::InstallSnapshot {
-            from: NodeId(self_id),
-            ballot: *ballot,
-            chosen_index: *chosen_index,
-            snapshot: Value(storage.snapshot()),
-        };
-        out.transmit(*to, &msg);
     }
 
     // 3. Apply newly chosen entries (already durable, in contiguous order) —

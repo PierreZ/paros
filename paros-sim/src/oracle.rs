@@ -13,7 +13,7 @@ use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_GAP_FILLED,
     EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
     EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
-    EV_SYNCED,
+    EV_SNAPSHOT_OFFERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -1684,15 +1684,14 @@ impl Invariant for SnapshotOracle {
     }
 }
 
-/// Perturbation oracle (coverage only): the driver's rare-but-valid decisions —
-/// skipping a beat's `Accept` re-send, and a leader resigning — are actually
-/// taken on some seeds.
+/// Driver-hook oracle (coverage only): the driver's durability seams and
+/// rare-but-valid policy decisions are actually taken on some seeds.
 ///
-/// It asserts no new safety property; every consequence either of them can have
-/// is already covered (prefix agreement, no gaps, convergence, the gap fill). All
-/// it proves is that the hooks are still connected: perturbations that stopped
-/// firing would leave the sweep looking green while quietly testing less,
-/// which is precisely how #54 stayed invisible for 1500 seeds before it.
+/// It asserts no new safety property; the consequences are already covered by
+/// prefix agreement, no gaps, convergence, snapshot recovery, and gap fill. It
+/// proves the hooks are still connected: perturbations that stopped firing would
+/// leave the sweep looking green while quietly testing less, which is precisely
+/// how #54 stayed invisible for 1500 seeds before it.
 pub(crate) struct DriverHookOracle;
 
 impl Invariant for DriverHookOracle {
@@ -1701,8 +1700,27 @@ impl Invariant for DriverHookOracle {
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let crashes = q.snapshot(EV_CRASHED);
+        let after_sync_crashed = crashes
+            .iter()
+            .any(|event| event.str("seam") == Some("after_sync_before_send"));
+        let snapshot_offered = !q.snapshot(EV_SNAPSHOT_OFFERED).is_empty();
         let skipped = !q.snapshot(EV_RESEND_SKIPPED).is_empty();
         let resigned = !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty();
+        assert_sometimes!(
+            after_sync_crashed,
+            "the driver crashes after sync and before sending a batch"
+        );
+        assert_sometimes!(
+            snapshot_offered,
+            "a snapshot offer enters the driver's common outbound path"
+        );
+        if after_sync_crashed {
+            assert_reachable!("the driver crashes after sync and before sending a batch");
+        }
+        if snapshot_offered {
+            assert_reachable!("the driver queues a snapshot offer before the send seam");
+        }
         assert_sometimes!(
             skipped || resigned,
             "the driver takes a rare-but-valid policy decision"
