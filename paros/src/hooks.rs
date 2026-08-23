@@ -2,10 +2,10 @@
 //!
 //! `drain_ready` runs synchronously (no `.await`), so process-granularity chaos
 //! (moonpool's attrition) can only crash a node *between* batches — never at the
-//! persist/send seam within one. [`DriverHooks`] also exposes the driver's two
-//! optional policy decisions: delaying an `Accept` re-send and resigning
-//! leadership. Production passes [`NoHooks`], whose defaults never perturb the
-//! driver.
+//! persist/send seam within one. [`DriverHooks`] also exposes the driver's
+//! optional policy decisions: delaying an `Accept` re-send, resigning
+//! leadership, and choosing the shortest valid election timeout. Production
+//! passes [`NoHooks`], whose defaults never perturb the driver.
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +25,8 @@ pub enum Seam {
 ///
 /// Each method corresponds to one independent `BUGGIFY` location in simulation.
 /// The default implementation is production behavior: never crash, always
-/// re-send pending accepts, and retain leadership.
+/// re-send pending accepts, retain leadership, and use normal randomized
+/// election timeouts.
 pub trait DriverHooks {
     /// Whether to simulate a crash at `seam` right now.
     fn crash_at(&self, _seam: Seam) -> bool {
@@ -39,6 +40,11 @@ pub trait DriverHooks {
 
     /// Whether the current leader should voluntarily step down.
     fn resign_leadership(&self) -> bool {
+        false
+    }
+
+    /// Whether the next election timeout should use the shortest valid value.
+    fn shortest_election_timeout(&self) -> bool {
         false
     }
 }

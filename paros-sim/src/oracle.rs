@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED, EV_GAP_FILLED,
-    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
-    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_OFFERED, EV_SYNCED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
+    EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
+    EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
+    EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_OFFERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -351,6 +351,8 @@ pub(crate) struct ProtocolData {
     chosen: Vec<ChosenShot>,
     leaders: Vec<LeaderShot>,
     applied: Vec<AppliedShot>,
+    cluster: HashSet<u64>,
+    snapshots: Vec<(u64, u64, u64)>,
 }
 
 /// Pull the ballot-carrying message legs named `name`. `self_field` names the
@@ -576,6 +578,40 @@ impl Invariant for ProtocolRecorder {
         d.chosen = collect_chosen(q);
         d.leaders = collect_leaders(q);
         d.applied = collect_applied(q);
+        d.cluster = q
+            .snapshot(EV_BOOTED)
+            .iter()
+            .filter_map(|event| event.u64("node"))
+            .collect();
+        d.snapshots = collect_snapshots(q);
+    }
+}
+
+/// Assert convergence from the completed deterministic run, when no future
+/// leader change can invalidate a provisional quiescence decision.
+pub(crate) fn assert_final_convergence(data: &ProtocolData) {
+    let mut prefixes: HashMap<u64, u64> = HashMap::new();
+    for applied in &data.applied {
+        prefixes
+            .entry(applied.node)
+            .and_modify(|prefix| *prefix = (*prefix).max(applied.slot))
+            .or_insert(applied.slot);
+    }
+    for &(_, node, chosen_index) in &data.snapshots {
+        prefixes
+            .entry(node)
+            .and_modify(|prefix| *prefix = (*prefix).max(chosen_index))
+            .or_insert(chosen_index);
+    }
+    let Some(cluster_max) = prefixes.values().copied().max() else {
+        return;
+    };
+    for node in &data.cluster {
+        assert_eq!(
+            prefixes.get(node).copied(),
+            Some(cluster_max),
+            "every node converges to the cluster's chosen prefix at the end of the settle tail"
+        );
     }
 }
 
@@ -1395,13 +1431,11 @@ fn cluster_applied_max(q: &dyn TraceQuery) -> Option<(u64, u64)> {
 /// (`paros_core`) closes that hole; this oracle is what makes the closure
 /// observable — red on the unfixed code, green once catch-up lands.
 ///
-/// Convergence is a *liveness* property ("eventually all caught up"), but there is
-/// no end-of-run hook and no `assert_eventually`. So it is expressed as a
-/// **quiescence-gated** `assert_always`: only require convergence once the run has
-/// settled — past the chaos window, and with the cluster prefix stable for
-/// [`CONVERGENCE_GRACE_MS`] (no new slots being chosen). Before that gate,
-/// follower lag is legitimate and unasserted. The client's `SETTLE_MS` tail is
-/// what keeps the cluster ticking long enough for this gate to be reached.
+/// During the run this oracle records coverage for lag and the hard below-floor
+/// snapshot path. The actual liveness assertion runs after the deterministic
+/// simulation completes in [`assert_final_convergence`]. A mid-run
+/// `assert_always!` cannot express eventual convergence: it permanently records
+/// a transient failure even if a later leader change immediately heals the node.
 ///
 /// It reads the **empty** prefix as its own state (`None`, not `Some(0)`), which
 /// is what lets it see the #56 boundary at all: a node that has applied nothing
@@ -1565,14 +1599,6 @@ impl Invariant for ConvergenceOracle {
                     "a node fell below every peer's compaction floor (recovers via snapshot transfer)"
                 );
             }
-            assert_always!(
-                prefix.is_some(),
-                "a stable live node's chosen prefix is never empty once the cluster has chosen a slot"
-            );
-            assert_always!(
-                prefix == Some(cluster_max),
-                "every stable live node converges to the cluster's chosen prefix (via catch-up or snapshot)"
-            );
         }
     }
 }
@@ -1705,6 +1731,7 @@ impl Invariant for DriverHookOracle {
             .iter()
             .any(|event| event.str("seam") == Some("after_sync_before_send"));
         let snapshot_offered = !q.snapshot(EV_SNAPSHOT_OFFERED).is_empty();
+        let shortest_timeout = !q.snapshot(EV_ELECTION_TIMEOUT_EXTREME).is_empty();
         let skipped = !q.snapshot(EV_RESEND_SKIPPED).is_empty();
         let resigned = !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty();
         assert_sometimes!(
@@ -1715,11 +1742,18 @@ impl Invariant for DriverHookOracle {
             snapshot_offered,
             "a snapshot offer enters the driver's common outbound path"
         );
+        assert_sometimes!(
+            shortest_timeout,
+            "the driver selects the shortest valid election timeout"
+        );
         if after_sync_crashed {
             assert_reachable!("the driver crashes after sync and before sending a batch");
         }
         if snapshot_offered {
             assert_reachable!("the driver queues a snapshot offer before the send seam");
+        }
+        if shortest_timeout {
+            assert_reachable!("the driver selects the shortest valid election timeout");
         }
         assert_sometimes!(
             skipped || resigned,
