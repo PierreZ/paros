@@ -45,6 +45,7 @@
             openssl
             cargo-nextest
             cargo-edit
+            protobuf
 
             # wasm demo: generate JS/TS bindings for the cdylib. Its version (from
             # nixpkgs) MUST match the `wasm-bindgen` crate pin in

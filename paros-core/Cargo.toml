@@ -16,7 +16,7 @@ categories.workspace = true
 [features]
 # Derive Serialize/Deserialize on the public protocol types so a driver can put
 # the *same* `Message` on the wire (no duplicate DTO). Off by default; enabled by
-# paros-sim. serde is itself wasm-safe, so the portability guarantee holds.
+# paros. serde is itself wasm-safe, so the portability guarantee holds.
 serde = ["dep:serde"]
 
 [dependencies]

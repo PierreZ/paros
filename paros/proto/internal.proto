@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package paros.internal.v1;
+
+// Cluster-internal consensus traffic. This surface is not part of the public
+// journal API and may evolve with the replication protocol.
+service ParosInternal {
+  rpc Deliver(.paros.internal.v1.Deliver) returns (.paros.internal.v1.DeliverAck);
+}
+
+// The Paxos core message stays an opaque domain value at the RPC boundary.
+// gRPC/protobuf frames its stable serde encoding without coupling paros-core
+// to prost or generated DTOs.
+message Deliver {
+  repeated bytes messages = 1;
+}
+
+message DeliverAck {}

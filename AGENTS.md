@@ -170,7 +170,7 @@ Cargo workspace (mirrors moonpool). Dependency stack: `paros-core` ← `paros` �
 - `paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
-  `paros-core`, `moonpool-core` + `moonpool-transport` (`default-features = false` → wasm-safe). No
+  `paros-core`, `moonpool-core` + `moonpool-hyper` and runtime-free tonic (wasm-safe). No
   dedicated storage crate — the Stage-4+ faulty fake lands here or in the harness.
 - `paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, workloads,
   oracles (wasm-safe, `default-features = false`). Depends on `paros` + `moonpool-sim`.

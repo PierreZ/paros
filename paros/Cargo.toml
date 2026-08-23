@@ -16,27 +16,33 @@ readme = "../README.md"
 # `paros_core::Message` on the wire (no DTO).
 paros-core = { path = "../paros-core", version = "0.2.0", features = ["serde"] }
 
-# The driver is generic over moonpool's `Providers` abstraction + transport, so
+# The driver is generic over moonpool's `Providers` abstraction + gRPC, so
 # the SAME code runs in production (TokioProviders) and simulation (SimProviders).
-# Both come in without their production (tokio net/fs) features so `paros` stays
-# wasm-safe; a future `native` feature + `parosd` binary layer tokio back on.
+# Both Moonpool crates come in without production providers so `paros` stays
+# wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
 # release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "f7a6d529cf60f9b1b1bb3ee863d1488fca5bee0d", default-features = false }
-moonpool-transport = { git = "https://github.com/PierreZ/moonpool", rev = "f7a6d529cf60f9b1b1bb3ee863d1488fca5bee0d", default-features = false }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "186245bb970b2e5e96ccd00c3c53f9412c4afaee", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "186245bb970b2e5e96ccd00c3c53f9412c4afaee" }
 
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Required by the `#[service]` macro's generated handler trait.
-async-trait = "0.1"
+# Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
+# tonic's tokio-bound `transport` feature remains disabled.
+http = "1"
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router"] }
+tonic-prost = "0.14"
 # The driver emits standard observability events (node_tick, peer_message_received).
 tracing = "0.1"
-# `macros` for `tokio::select!` in the driver loop; the runtime is supplied by
-# whichever `Providers` the caller passes.
-tokio = { version = "1", features = ["macros"] }
+# Runtime-neutral request queues between tonic handlers and the single-owner
+# driver loop. The runtime itself is supplied by the Moonpool providers.
+tokio = { version = "1", features = ["sync"] }
 # `CancellationToken` is the driver's shutdown signal (what `ctx.shutdown()`
 # hands back in sim; production constructs its own).
 tokio-util = "0.7"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
 
 [lints]
 workspace = true

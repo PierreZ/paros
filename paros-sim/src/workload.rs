@@ -6,14 +6,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
 use moonpool_sim::sim::config_random_bool;
 use moonpool_sim::{
-    SimContext, SimulationError, SimulationResult, TimeProvider, Workload, assert_always,
-    assert_sometimes,
+    SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider, Workload,
+    assert_always, assert_sometimes,
 };
-use moonpool_transport::NetTransportBuilder;
 
-use paros::{Compact, Paros, Propose, Read, WLTOKEN_PAROS, parse_addr};
+use paros::{Compact, ParosClient, Propose, Read, parse_addr};
 
 use crate::{CHAOS_DURATION_MS, GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
@@ -109,23 +109,17 @@ impl Workload for ProposeClient {
             return Ok(());
         }
 
-        let my_addr = parse_addr(ctx.my_ip())?;
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(my_addr)
-            .build_listening()
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("client transport: {e}")))?;
-
-        // A typed client per node (addressed by address + well-known token, no
-        // discovery), so proposals can round-robin across proposers.
+        // A generated tonic client per node. Each owns a reconnecting h2 channel
+        // over the same simulated provider network the nodes use.
         let clients = servers
             .iter()
             .map(|ip| {
-                Ok(Paros::client_well_known(
-                    parse_addr(ip)?,
-                    WLTOKEN_PAROS,
-                    &transport,
-                ))
+                let addr = parse_addr(ip)?;
+                let origin = http::Uri::try_from(format!("http://{addr}"))
+                    .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+                let channel =
+                    ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+                Ok(ParosClient::with_origin(channel, origin))
             })
             .collect::<SimulationResult<Vec<_>>>()?;
 
@@ -186,7 +180,9 @@ impl Workload for ProposeClient {
                             seq,
                             command: seq.to_le_bytes().to_vec(),
                         };
-                        if let Ok(ack) = clients[target].propose.get_reply(proposal).await {
+                        let mut client = clients[target].clone();
+                        if let Ok(response) = client.propose(proposal).await {
+                            let ack = response.into_inner();
                             assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
                             if ack.committed {
                                 break (ack.leader, ack.slot);
@@ -222,7 +218,9 @@ impl Workload for ProposeClient {
                             client: client_id,
                             seq,
                         };
-                        if let Ok(ack) = clients[target].read.get_reply(request).await {
+                        let mut client = clients[target].clone();
+                        if let Ok(response) = client.read(request).await {
+                            let ack = response.into_inner();
                             assert_always!(
                                 ack.seq == seq,
                                 "read ack echoes the request it answered"
@@ -281,7 +279,12 @@ impl Workload for ProposeClient {
                 if let (true, Some(up_to), Some(leader_id)) = (ping_compaction, max_slot, leader) {
                     let idx = usize::try_from(leader_id).unwrap_or(0);
                     if idx < n {
-                        let _ = clients[idx].compact.send(Compact { up_to });
+                        let mut client = clients[idx].clone();
+                        ctx.task()
+                            .spawn_task("paros-grpc-compact", async move {
+                                let _ = client.compact(Compact { up_to }).await;
+                            })
+                            .detach();
                     }
                 }
             } else {
