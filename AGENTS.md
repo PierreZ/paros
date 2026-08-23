@@ -154,10 +154,11 @@ unreproducible claim.
 Cargo workspace (mirrors moonpool). Dependency stack: `paros-core` ← `paros` ← `paros-sim` ←
 {runner, wasm-demo}. `paros-core` has no deps; everything ultimately points into it.
 
-- `paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (an
-  optional `serde` feature adds derives only; an optional `buggify` feature arms the BUGGIFY sites
-  and is the only thing that pulls a dependency in — see above). Sancov crate-under-test; exempt
-  from the global `#[instrument]`-on-pub-fns rule (must stay zero-dep by default).
+- `paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
+  optional `serde` feature adds derives only, and it is the crate's *only* feature — see the
+  turbulence doctrine above: the core is never buggified and gains no simulation-only conditional
+  compilation). Sancov crate-under-test; exempt from the global `#[instrument]`-on-pub-fns rule
+  (must stay zero-dep by default).
 - `paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
