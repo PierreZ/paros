@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify, buggify_knob,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_knob,
     buggify_with_prob,
 };
 use paros::{
@@ -40,33 +40,47 @@ pub(crate) const EV_PERTURBED: &str = "perturbations";
 /// Draw this node's driver perturbations for this seed.
 ///
 /// Both magnitudes are **buggified config**, not constants: each sits behind its
-/// own `buggify!()` call site, so moonpool activates the two independently once
-/// per run and then fires per node. Most nodes on most seeds therefore run
-/// [`Perturbations::NONE`] — production behaviour — and the interesting seeds are
-/// the ones where a node's driver starts skipping re-sends, or resigning, or
-/// both. The magnitude itself goes through `buggify_knob!`, so a seed
-/// occasionally spikes it to an extreme inside the range instead of the default.
+/// own `buggify_with_prob!` call site, so moonpool activates the two
+/// independently once per run. On the seeds where neither is active every node
+/// runs [`Perturbations::NONE`] — production behaviour, unchanged.
+/// [`buggify_knob!`] then picks the magnitude, so a seed occasionally spikes it
+/// to an extreme inside the range instead of taking the default.
+///
+/// The firing probability is `1.0` on purpose: buggify's *activation* phase
+/// already decides per seed, so `1.0` means "armed on the seeds where this
+/// location is active" — a **per-run, cluster-wide** switch rather than a
+/// per-node coin flip. That granularity is load-bearing. Only the leader ever
+/// acts on either perturbation, and with a per-node flip the leader is usually
+/// one of the *un*-perturbed nodes: a first pass with per-node arming reached the
+/// #54 wedge on 0 of ~1800 seeds. Arming the whole cluster costs nothing (a
+/// follower's draws are no-ops) and puts the perturbation where it can matter.
 ///
 /// The per-beat firing happens in the driver, off its own seeded
 /// `RandomProvider`. Activation-per-seed here × firing-per-beat there is
 /// `FoundationDB`'s two-level BUGGIFY model, split across the layer boundary that
 /// keeps `paros-core` pure.
 ///
-/// Magnitudes are deliberately asymmetric. Skipping a re-send costs nothing but
-/// a delay, so it is generous (default 0.6, up to 0.9): a leader that skips most
-/// beats leaves a pending slot un-offered long enough for something else to
-/// happen to it. Resigning is disruptive — at one beat per 50 ms even a small
-/// probability is several leadership changes per run — so it is small (default
-/// 0.004, at most 0.02), enough to reach the "the holder walked away" state
-/// without turning every run into a leaderless storm the liveness oracles could
-/// not tell from a real regression.
+/// Magnitudes are deliberately asymmetric, and the skip one is deliberately
+/// *near one*. What a skip has to buy is time: a slot left un-offered has to stay
+/// that way long enough for something else to happen to it — a crash, an
+/// election, a resignation — and at one beat per 50 ms against a 4 s chaos
+/// window, a skip probability of 0.6 puts the re-send two beats away (100 ms),
+/// which never coincides with anything. 0.95 is ~1 s, and the top of the range is
+/// "this run does not re-send at all", which is the granularity the removed
+/// slot-starvation nemesis had — reached here by a leader that is merely
+/// unhelpful rather than by a fake packet drop. It costs nothing but delay, so
+/// being generous is free. Resigning is the opposite: it is disruptive, and even
+/// a small per-beat probability is several leadership changes per run, so it
+/// stays small (default 0.004, at most 0.02) — enough to reach "the holder walked
+/// away" without a leaderless storm the liveness oracles could not tell from a
+/// real regression.
 fn draw_perturbations() -> Perturbations {
-    let skip_resend = if buggify!() {
-        buggify_knob!(0.6_f64, 0.3..0.9)
+    let skip_resend = if buggify_with_prob!(1.0) {
+        buggify_knob!(0.95_f64, 0.8..0.999)
     } else {
         0.0
     };
-    let step_down = if buggify!() {
+    let step_down = if buggify_with_prob!(1.0) {
         buggify_knob!(0.004_f64, 0.002..0.02)
     } else {
         0.0
@@ -132,7 +146,7 @@ impl Process for NodeProcess {
         // How often this node's driver takes the rare-but-valid alternative to
         // its helpful default: skip a beat's `Accept` re-send, or resign. Drawn
         // once per incarnation; `Perturbations::NONE` (production behaviour) on
-        // most nodes of most seeds.
+        // the seeds where neither buggify location is active.
         let perturbations = draw_perturbations();
         if perturbations != Perturbations::NONE {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

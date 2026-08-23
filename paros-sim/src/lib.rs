@@ -95,12 +95,12 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// returned a watermark below a write the client had already seen acknowledged —
 /// a stale leader belief served as a committed read — until the read-index
 /// protocol (heartbeat-ack quorum round + the fresh-leader read floor) landed.
-/// Seed 53 is where the [`oracle::GapFillOracle`] first went red: under a
-/// `crate::nemesis` slot starvation a slot reached the leader alone below a later
-/// slot that reached the promise quorum, the leader lost it to a crash, and the
-/// election that followed stepped clean over it — freezing every node's chosen
-/// prefix one below the hole for the rest of the run, with reads fenced above it,
-/// until the `Control::Noop` gap fill landed. Seed 11 is where the
+/// Seed 53 is where the [`oracle::GapFillOracle`] first went red: a slot reached
+/// the leader alone below a later slot that reached the promise quorum, the
+/// leader lost it to a crash, and the election that followed stepped clean over
+/// it — freezing every node's chosen prefix one below the hole for the rest of
+/// the run, with reads fenced above it, until the `Control::Noop` gap fill
+/// landed. Seed 11 is where the
 /// [`oracle::AppliedAckOracle`] first went red: a slot chosen above the applied
 /// prefix (the leader streams slots concurrently, so a later slot's accept quorum
 /// completes first) marked its command *applied* the moment it was learned
@@ -109,14 +109,24 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// `applied_seq`/`inflight` hand-off moved into the contiguous walk. Each
 /// replays clean via [`run_seed`].
 ///
-/// Every seed above *except seed 11* predates the moonpool deterministic-executor
-/// bump (rev `f7a6d52`, #65): that change replaced tokio's FIFO task scheduling
-/// with seeded-random scheduling, so a seed's *meaning* (the exact task
-/// interleaving it drives) shifted. Those seeds still replay clean (no safety
-/// oracle trips), but they no longer reproduce the original bug interleavings
-/// described above — they are historical markers of what each seed once caught,
-/// not live reproductions of it. Seed 11 was found *after* the bump, so it is a
-/// live reproduction: revert the hand-off and it goes red again.
+/// **Every seed above is a historical marker, not a live reproduction.** Two
+/// changes moved what a seed *means*, and neither is reversible:
+///
+/// - the moonpool deterministic-executor bump (rev `f7a6d52`, #65) replaced
+///   tokio's FIFO task scheduling with seeded-random scheduling, shifting the
+///   exact interleaving every seed drives;
+/// - #81 removed the message-class nemesis and replaced its one non-redundant
+///   capability with the driver's [`paros::Perturbations`], drawn per seed from a
+///   different point in the RNG stream (see [`crate::node`]).
+///
+/// Seed 53 was farmed under the nemesis's slot starvation, which no longer
+/// exists. Seed 11 was found after the executor bump and was a live reproduction
+/// until #81; it no longer is — replaying it against a build with the
+/// `applied_seq`/`inflight` hand-off reverted comes back **clean**. So every seed
+/// here is kept for what it once caught and as a cheap always-green replay corpus
+/// across the storage, recovery, catch-up, truncation, snapshot and read paths;
+/// none of them is a red→green witness any more. Fresh red seeds for a specific
+/// arc have to be re-hunted against the current tree (#80's seed 1364 included).
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
