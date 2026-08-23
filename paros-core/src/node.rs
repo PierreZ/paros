@@ -230,12 +230,6 @@ pub struct RawNode {
     read_floor: Option<Slot>,
     /// In-flight read-index rounds, in creation order (leader only).
     read_rounds: Vec<ReadRound>,
-    /// Monotone count of read-index rounds discarded by the TTL sweep in
-    /// [`RawNode::tick`] (never by a step-down, which abandons rounds for a
-    /// different reason). Purely observational: the driver diffs it to surface a
-    /// `read_round_expired` event, so the simulation can prove the TTL path — the
-    /// one a `HeartbeatAck`-starved leader falls into — is actually reached.
-    read_rounds_expired: u64,
 
     // ---- proposer (multi-decree) ----
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
@@ -348,7 +342,6 @@ impl RawNode {
             heartbeat_seq: 0,
             read_floor: None,
             read_rounds: Vec::new(),
-            read_rounds_expired: 0,
             proposer: BTreeMap::new(),
             election: None,
             next_slot,
@@ -529,6 +522,10 @@ impl RawNode {
 
     /// Advance logical time by one tick, synthesizing `CheckLeader`/`Heartbeat`
     /// self-events when the election / heartbeat counters cross their thresholds.
+    ///
+    /// Re-sending a leader's still-pending `Accept`s is deliberately *not* part of
+    /// this: it is a separate decision on the same cadence, so the driver can skip
+    /// it (see [`RawNode::resend_pending`]).
     pub fn tick(&mut self) {
         self.tick_count += 1;
         let me = self.config.id;
@@ -549,11 +546,8 @@ impl RawNode {
             // leader tick already broadcasts a fresh, higher-seq beat whose acks
             // confirm all older pending rounds.
             let now = self.tick_count;
-            let before = self.read_rounds.len();
             self.read_rounds
                 .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
-            let expired = u64::try_from(before - self.read_rounds.len()).unwrap_or(0);
-            self.read_rounds_expired = self.read_rounds_expired.saturating_add(expired);
         } else {
             self.election_elapsed += 1;
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
@@ -562,6 +556,75 @@ impl RawNode {
                 self.step(Message::CheckLeader { from: me });
             }
         }
+    }
+
+    /// Re-broadcast the `Accept` for every Phase-2 round this leader still has in
+    /// flight. A no-op on a node that is not the leader, and on a leader with
+    /// nothing pending.
+    ///
+    /// **The driver is expected to call this on each heartbeat beat**, right after
+    /// [`RawNode::tick`] — that is what lets a peer that lost the original
+    /// `Accept` (or was down when it went out) catch up without waiting for an
+    /// election.
+    ///
+    /// **Skipping a call is always safe.** Re-sending is pure optimization:
+    /// nothing in Paxos safety depends on it, because the round's first broadcast
+    /// already went out and a round that never gathers a quorum is simply
+    /// *undecided*, which is a state the protocol is built to survive. A skipped
+    /// round stalls until a later call re-sends it, or until an election recovers
+    /// it. That is precisely why this is a *method* rather than something `tick`
+    /// does implicitly: the decision to skip is the one whose rare omission makes
+    /// the #54 election hole reachable — an undecided slot sitting *below* a
+    /// decided one, which no environmental fault can produce on its own (a
+    /// partition takes slots away in contiguous runs, never one here and one
+    /// there) and which the `Control::Noop` gap fill exists to close. The
+    /// deterministic simulation drives exactly that by skipping calls; production
+    /// never skips.
+    pub fn resend_pending(&mut self) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        let me = self.config.id;
+        let pending: Vec<(Slot, Ballot, Command)> = self
+            .proposer
+            .iter()
+            .map(|(s, p)| (*s, p.ballot, p.command.clone()))
+            .collect();
+        for (slot, ballot, command) in pending {
+            self.broadcast(&Message::Accept {
+                from: me,
+                ballot,
+                slot,
+                command,
+            });
+        }
+    }
+
+    /// Voluntarily resign the leadership: Leader → Follower, keeping every
+    /// durable commitment (the promised ballot and the accepted log are
+    /// untouched) and dropping only the volatile leadership state — the in-flight
+    /// Phase-2 `proposer` map and any unconfirmed read-index rounds. A no-op on a
+    /// node that is not the leader.
+    ///
+    /// A legitimate operational primitive: a node may want to hand leadership on
+    /// before a planned restart or a rebalance (etcd-raft exposes the same idea as
+    /// leadership transfer), and stepping down is always sound — Paxos never
+    /// requires a leader to *stay* one. The slots the resigning leader was still
+    /// re-proposing are simply undecided; the next leader recovers them from its
+    /// promise quorum, or fills the ones the quorum never saw with a
+    /// [`Control::Noop`].
+    ///
+    /// In the deterministic simulation this is the decision that makes an
+    /// undecided slot **permanent**: the hole a skipped
+    /// [`resend_pending`](RawNode::resend_pending) leaves behind heals for as long
+    /// as its holder keeps re-proposing it, and stops healing the moment that node
+    /// stops being leader (#54) — and the leadership churn it creates is what
+    /// #67's arc needs.
+    pub fn step_down(&mut self) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        self.become_follower(None);
     }
 
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
@@ -918,22 +981,10 @@ impl RawNode {
     fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot, seq: u64) {
         let me = self.config.id;
         if from == me {
-            // Leader self-trigger: broadcast the beat and re-send un-acked
-            // `Accept`s so lagging peers catch up.
+            // Leader self-trigger: broadcast the beat. Re-sending the un-acked
+            // `Accept`s is a *separate* decision the driver makes on the same
+            // cadence — see [`RawNode::resend_pending`].
             self.broadcast_heartbeat();
-            let pending: Vec<(Slot, Ballot, Command)> = self
-                .proposer
-                .iter()
-                .map(|(s, p)| (*s, p.ballot, p.command.clone()))
-                .collect();
-            for (slot, ballot, command) in pending {
-                self.broadcast(&Message::Accept {
-                    from: me,
-                    ballot,
-                    slot,
-                    command,
-                });
-            }
             return;
         }
         // Follower receiving the leader's beat: adopt its ballot / leadership only
@@ -1470,9 +1521,9 @@ impl RawNode {
 
     /// How many undecided holes this node filled with a [`Control::Noop`] when it
     /// won its current leadership — 0 on a node that has never led, and re-set at
-    /// each election it wins. A read-only observability counter (the same shape as
-    /// [`RawNode::read_rounds_expired`]): the driver reads it on the transition to
-    /// Leader so a simulation can prove the gap-fill path is genuinely reached.
+    /// each election it wins. A read-only observability counter: the driver reads
+    /// it on the transition to Leader so a simulation can prove the gap-fill path
+    /// is genuinely reached.
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
         self.election_gap_fills
@@ -1483,8 +1534,7 @@ impl RawNode {
     /// is the highest slot above it this node already knows is chosen. `None` when
     /// nothing is chosen past the prefix — the healthy steady state.
     ///
-    /// A read-only observability accessor (the same shape as
-    /// [`RawNode::read_rounds_expired`]): the core cannot trace, and the gap is
+    /// A read-only observability accessor: the core cannot trace, and the gap is
     /// invisible from outside because [`Ready::committed`](crate::Ready::committed)
     /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
     /// (pipelining, a follower that missed one `Commit`); a gap that **survives
@@ -1497,17 +1547,6 @@ impl RawNode {
         // every `mark_chosen`, so anything at or above it is strictly above.
         let highest = *self.chosen.range(hole..).next_back()?.0;
         Some((hole, highest))
-    }
-
-    /// Monotone count of in-flight read-index rounds this node has discarded
-    /// because they outlived their TTL (lost `HeartbeatAck`s, an unreachable
-    /// quorum). A read-only observability counter: the driver diffs it across a
-    /// [`RawNode::tick`] and surfaces the delta so a simulation can assert the
-    /// TTL sweep is genuinely reachable. Rounds abandoned on a step-down are
-    /// *not* counted — that is a different path.
-    #[must_use]
-    pub fn read_rounds_expired(&self) -> u64 {
-        self.read_rounds_expired
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

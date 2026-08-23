@@ -46,23 +46,42 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
-**Driver fault hooks.** The same rule binds *fault injection*: a fault the simulation needs at a
-point only the driver can see must be a provider-generic **hook on `run_node`**, with an inert
-production impl — never a forked sim-only driver. There are two, both following the same shape
-(trait + no-op production type, injected by reference):
+**Where each kind of turbulence lives.** Three layers, and nothing crosses them (this is the FDB
+separation; #81 removed the message-class nemesis, which mixed them):
 
-- `CrashSeam` (`NoCrash` in production) — crash *inside* a `Ready` batch, at the persist/send
-  seams process-level attrition cannot reach.
-- `SendFilter` (`SendAll` in production) — the per-message send hook in `drain_ready`, where the
-  `Message` is still typed. Returning `Drop`/`Duplicate`/`Defer` instead of `Send` lets the sim
-  target a whole **message class** in one direction (`paros_sim::nemesis`), which is how the
-  mechanism-specific starvations are reached: only `Commit` toward one follower leaves catch-up as
-  its sole cure, only `HeartbeatAck` toward the leader reaches the read-round TTL sweep, and
-  `Defer` reorders one class against all others. A plan may also carry a per-slot **stride**,
-  narrowing `Accept` to one slot in every N cluster-wide: the starved slots stay accepted on the
-  leader alone while their neighbours decide, which is the only way to get an undecided slot
-  *below* a decided one — the election hole `Control::Noop` gap fill exists for. An IP-level
-  partition expresses none of these.
+- **Environmental faults belong to moonpool.** Drop, delay, duplicate, reorder, directional
+  partitions (`AsymmetricSend`/`AsymmetricRecv`), random close, bit-flip, buggified delay,
+  crash/restart attrition, seeded-random scheduling — all swarm-masked per seed. paros never
+  re-implements one of these at the protocol layer.
+- **`paros-core` is never buggified.** No cargo feature, no conditional compilation, no RNG, no
+  knob: the sans-IO core stays unconditionally pure, and it is perturbed **only through its public
+  API** — the methods its caller chooses to call, and the data it is handed. Where a rare-but-valid
+  decision needs to become reachable, the core's job is to *expose that decision as a method with an
+  honest contract* (`RawNode::resend_pending` — "the driver is expected to call this each beat;
+  skipping is always safe, re-send is pure optimization"; `RawNode::step_down` — "a leader may
+  resign") and nothing more. Removing every perturbation must leave the shipped program unchanged,
+  which here is trivially true: the perturbation is a caller that stops calling.
+- **BUGGIFY, prong 1 — the driver draws the rare-but-valid decisions.** Perturbations of *timing and
+  policy the driver owns* (skip a beat's re-send, resign leadership, and future ones like
+  timeout-jitter extremes) are draws in `run_node` off the driver's existing `RandomProvider` — the
+  same seeded stream that already draws election timeouts, so no new dependency and a seed still
+  replays bit-identically. Their magnitudes arrive as a plain `Perturbations` struct parameter whose
+  production value is `Perturbations::NONE`: with it the driver re-sends every beat and never
+  resigns, i.e. **production semantics are byte-for-byte what they were**, and the draws are skipped
+  entirely rather than merely coming up false. `paros-sim` buggifies the *magnitudes* per seed with
+  moonpool's `buggify!`/`buggify_knob!` at two distinct call sites, which restores the FDB two-level
+  model across the layer boundary: per-seed activation in the harness × per-beat firing in the
+  driver.
+- **BUGGIFY, prong 2 — tunables are workload-buggified config.** Anything that *shapes* a run — the
+  perturbation magnitudes above, cluster size, request counts, timing windows, attrition knobs (the
+  #61 swarm surface) — belongs in plain config data that the **workload/harness layer** randomizes
+  per seed, FDB knob style (`if buggify → an extreme value, else the default`). New tunables should
+  be **born that way**, as data a workload can buggify, not as a constant buried in core or driver
+  code, so per-seed swarm variation composes without either layer knowing about it.
+
+The one fault the *driver* still owns as a hook is a provider-generic **trait on `run_node`** with an
+inert production impl (never a forked sim-only driver): `CrashSeam` (`NoCrash` in production) crashes
+*inside* a `Ready` batch, at the persist/send seams process-level attrition cannot reach.
 
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
@@ -135,9 +154,11 @@ unreproducible claim.
 Cargo workspace (mirrors moonpool). Dependency stack: `paros-core` ← `paros` ← `paros-sim` ←
 {runner, wasm-demo}. `paros-core` has no deps; everything ultimately points into it.
 
-- `paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (an
-  optional `serde` feature adds derives only). Sancov crate-under-test; exempt from the global
-  `#[instrument]`-on-pub-fns rule (must stay zero-dep by default).
+- `paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
+  optional `serde` feature adds derives only, and it is the crate's *only* feature — see the
+  turbulence doctrine above: the core is never buggified and gains no simulation-only conditional
+  compilation). Sancov crate-under-test; exempt from the global `#[instrument]`-on-pub-fns rule
+  (must stay zero-dep by default).
 - `paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
