@@ -599,6 +599,14 @@ impl RawNode {
         }
     }
 
+    /// Whether this leader has Phase-2 rounds whose `Accept`s can be re-sent.
+    /// Drivers use this to avoid consulting optional policy hooks when skipping
+    /// a re-send would have no observable effect.
+    #[must_use]
+    pub fn has_pending_accepts(&self) -> bool {
+        self.role == NodeRole::Leader && !self.proposer.is_empty()
+    }
+
     /// Voluntarily resign the leadership: Leader → Follower, keeping every
     /// durable commitment (the promised ballot and the accepted log are
     /// untouched) and dropping only the volatile leadership state — the in-flight

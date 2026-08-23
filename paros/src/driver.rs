@@ -28,7 +28,7 @@ use paros_core::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::crash::{CrashSeam, Seam};
+use crate::hooks::{DriverHooks, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 /// Well-known RPC token the paros node service is registered at. Every node
@@ -90,9 +90,16 @@ pub const EV_BOOTED: &str = "booted";
 /// (`"before_sync"` — the whole un-synced batch is lost — or
 /// `"after_sync_before_send"` — the writes are durable but the batch's messages
 /// never left). Provider-generic but inert in production, where
-/// [`NoCrash`](crate::NoCrash) never fires. Purely observational; the crash
+/// [`NoHooks`](crate::NoHooks) never fires. Purely observational; the crash
 /// animation reads it to mark the persist/send seam a node died on.
 pub const EV_CRASHED: &str = "crashed";
+
+/// Tracing event: the driver deliberately skipped re-sending one or more
+/// pending `Accept`s on this beat.
+pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
+
+/// Tracing event: the driver deliberately asked the current leader to resign.
+pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
 
 /// Tracing event: this node flushed a `Ready` batch's durable writes. Carries
 /// `node`, `sync` (whether the batch required an fsync-before-send —
@@ -181,76 +188,6 @@ pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 /// ack that does not come out of the apply loop, so the sweep needs evidence it
 /// is genuinely reached (and the ack oracle needs it named, not hidden).
 pub const EV_PROPOSE_DEDUP_ACK: &str = "propose_dedup_ack";
-
-/// How often the driver takes the **rare-but-valid decisions** the core exposes
-/// as methods, instead of the helpful default.
-///
-/// Neither knob is a fault: both name a choice a Paxos leader is always free to
-/// make, and the core is correct whichever way each goes (see
-/// [`RawNode::resend_pending`] and [`RawNode::step_down`]). What they buy is
-/// *reachability* — with the helpful default taken every single beat, the states
-/// those choices lead to (an undecided slot below a decided one, and a leader
-/// that walks away from it) are essentially unreachable, which is what left #54
-/// invisible to the sweep for 1500 seeds.
-///
-/// **Production passes [`Perturbations::NONE`]**, and with it the driver behaves
-/// exactly as it did before this existed: it re-sends on every beat and never
-/// resigns. The random draws are skipped entirely in that case, so production
-/// does not even consume RNG values and a seeded replay is unaffected.
-///
-/// The deterministic simulation is where non-zero values come from, and it does
-/// **not** hard-code them: `paros-sim` draws each magnitude per seed with
-/// moonpool's `buggify!`, so activation-per-seed in the harness × firing-per-beat
-/// here reproduces `FoundationDB`'s two-level BUGGIFY model across the layer
-/// boundary.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Perturbations {
-    /// Probability, per beat, of *skipping*
-    /// [`RawNode::resend_pending`](paros_core::RawNode::resend_pending) — the
-    /// leader lets its pending `Accept`s wait another beat. `0.0` re-sends every
-    /// beat (production).
-    pub skip_resend: f64,
-    /// Probability, per beat, that a leader calls
-    /// [`RawNode::step_down`](paros_core::RawNode::step_down) and resigns. `0.0`
-    /// never resigns (production). Keep it small: at one beat per
-    /// [`TICK_INTERVAL`] a generous value is a leaderless storm, and progress
-    /// stops being observable.
-    pub step_down: f64,
-}
-
-impl Perturbations {
-    /// The production setting: re-send every beat, never resign. Behaviourally
-    /// identical to a driver with no perturbation code at all.
-    pub const NONE: Self = Self {
-        skip_resend: 0.0,
-        step_down: 0.0,
-    };
-
-    /// Whether this is [`Perturbations::NONE`] — the fast path that draws nothing.
-    fn is_none(self) -> bool {
-        self.skip_resend <= 0.0 && self.step_down <= 0.0
-    }
-}
-
-/// Apply one beat's worth of [`Perturbations`] to the core, right after
-/// [`RawNode::tick`].
-///
-/// Order matters and is the honest one: the beat's re-send (if it happens) goes
-/// out *before* a resignation, so a step-down never silently swallows work the
-/// driver already decided to do.
-fn perturb<P: Providers>(node: &mut RawNode, providers: &P, p: Perturbations) {
-    if p.is_none() {
-        node.resend_pending();
-        return;
-    }
-    let rng = providers.random();
-    if !rng.random_bool(p.skip_resend) {
-        node.resend_pending();
-    }
-    if rng.random_bool(p.step_down) {
-        node.step_down();
-    }
-}
 
 /// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,17 +492,17 @@ impl<P: Providers> Outbound<'_, P> {
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<P, S, C>(
+fn drain_ready<P, S, H>(
     node: &mut RawNode,
     storage: &mut S,
     out: &Outbound<'_, P>,
     waiters: &mut ClientWaiters,
-    crash: &C,
+    hooks: &H,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
-    C: CrashSeam,
+    H: DriverHooks,
 {
     let self_id = out.self_id;
     // Copy the batch out of the borrow guard, advance to release the gate, then
@@ -585,13 +522,13 @@ where
     //    surface the persisted state for the safety + recovery oracles. The
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, crash)?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, hooks)?;
 
     // Crash seam: after the batch is durable but before its messages leave. The
     // durable writes survive; the batch's messages are dropped (never sent), so a
     // recovered node must re-derive them. Only meaningful when there is durable
     // work or a message to lose.
-    if (!writes.is_empty() || !messages.is_empty()) && crash.crash_at(Seam::AfterSyncBeforeSend) {
+    if (!writes.is_empty() || !messages.is_empty()) && hooks.crash_at(Seam::AfterSyncBeforeSend) {
         tracing::info!(node = self_id, seam = "after_sync_before_send", "crashed");
         return Err(seam_crash());
     }
@@ -678,13 +615,13 @@ where
 /// claim a write the `BeforeSync` crash seam then discards: a crash before the
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
-fn persist_writes<S: NodeStorage, C: CrashSeam>(
+fn persist_writes<S: NodeStorage, H: DriverHooks>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
     promised: Ballot,
     self_id: u64,
-    crash: &C,
+    hooks: &H,
 ) -> SimulationResult<()> {
     let mut promise_changed = false;
     for op in writes {
@@ -728,7 +665,7 @@ fn persist_writes<S: NodeStorage, C: CrashSeam>(
     // whole un-synced batch (and no message has been sent), so surface nothing but
     // the crash marker itself. Only meaningful when the batch actually staged
     // something.
-    if !writes.is_empty() && crash.crash_at(Seam::BeforeSync) {
+    if !writes.is_empty() && hooks.crash_at(Seam::BeforeSync) {
         tracing::info!(node = self_id, seam = "before_sync", "crashed");
         return Err(seam_crash());
     }
@@ -963,35 +900,33 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 /// driver resolves it here. It must be consistent across the cluster and agree
 /// with the `Config` the node read from `storage`.
 ///
-/// `perturbations` decides how often the driver takes the rare-but-valid
-/// alternatives to its helpful defaults (see [`Perturbations`]). Production
-/// passes [`Perturbations::NONE`], which re-sends every beat, never resigns, and
-/// consumes no randomness.
+/// `hooks` controls the driver-level crash seams and rare-but-valid policy
+/// alternatives. Production passes [`NoHooks`](crate::NoHooks), whose default
+/// methods are inert.
 ///
 /// # Errors
 ///
 /// Returns an error if the transport fails to bind or listen on `local_addr`. May
-/// also return a simulated crash marker ([`is_seam_crash`]) if `crash` fires at a
+/// also return a simulated crash marker ([`is_seam_crash`]) if `hooks` fires at a
 /// durability seam — the caller recovers by re-running `run_node` with fresh
-/// storage. Production passes [`NoCrash`](crate::NoCrash), which never fires.
+/// storage.
 #[tracing::instrument(skip_all)]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state.
 #[allow(clippy::too_many_lines)]
-pub async fn run_node<P, S, C>(
+pub async fn run_node<P, S, H>(
     providers: P,
     mut storage: S,
     local_addr: NetworkAddress,
     members: Vec<(NodeId, NetworkAddress)>,
     shutdown: CancellationToken,
-    crash: &C,
-    perturbations: Perturbations,
+    hooks: &H,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
-    C: CrashSeam,
+    H: DriverHooks,
 {
     let transport = NetTransportBuilder::new(providers.clone())
         .local_address(local_addr)
@@ -1055,7 +990,7 @@ where
                         reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((req, reply)) = svc.read.recv() => {
@@ -1075,7 +1010,7 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
             }
             Some((msg, reply)) = svc.deliver.recv() => {
@@ -1120,7 +1055,7 @@ where
                     );
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(());
             }
@@ -1142,17 +1077,26 @@ where
                         first_slot: node.first_slot().0,
                     },
                 };
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
-                // The beat's two discretionary decisions: re-send the leader's
-                // still-pending `Accept`s, and (far more rarely) resign. With
-                // `Perturbations::NONE` — production — this is exactly "re-send
-                // every beat", with no draw taken.
-                perturb(&mut node, &providers, perturbations);
+                // Consult each hook only when its decision can have an effect.
+                // Production's hooks are false; simulation gives each decision
+                // an independent BUGGIFY location.
+                if node.has_pending_accepts() {
+                    if hooks.skip_accept_resend() {
+                        tracing::info!(node = self_id, "accept_resend_skipped");
+                    } else {
+                        node.resend_pending();
+                    }
+                }
+                if node.role() == NodeRole::Leader && hooks.resign_leadership() {
+                    tracing::info!(node = self_id, "leadership_resigned");
+                    node.step_down();
+                }
                 ticks += 1;
                 // Expire parked reads whose confirmation is overdue (lost acks, a
                 // minority-partitioned leader that never steps down): answer a
@@ -1168,7 +1112,7 @@ where
                         waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, crash)?;
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so

@@ -405,6 +405,10 @@ fn wedge_after_election() -> [RawNode; 3] {
     deliver_filtered(&mut nodes, q, |_, msg| {
         !matches!(msg, Message::Accept { .. })
     });
+    assert!(
+        nodes[0].has_pending_accepts(),
+        "the driver can see that a re-send would do useful work"
+    );
 
     // Slot 2: the `Accept` reaches node 1 only — enough for the {0,1} quorum, so
     // slot 2 *is* chosen and both followers learn it from the `Commit`.
@@ -1995,6 +1999,10 @@ fn a_round_the_driver_never_re_sends_stalls_until_one_call_heals_it() {
         nodes[0].hard_state().chosen_index,
         Some(Slot(1)),
         "the prefix walks past it"
+    );
+    assert!(
+        !nodes[0].has_pending_accepts(),
+        "the hook is no longer consulted once the round decides"
     );
 }
 

@@ -16,80 +16,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_knob,
-    buggify_with_prob,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_with_prob,
 };
 use paros::{
-    Ballot, Command, Config, CrashSeam, HardState, MemStorage, MustSync, NodeId, NodeStorage,
-    Perturbations, Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
+    Ballot, Command, Config, DriverHooks, HardState, MemStorage, MustSync, NodeId, NodeStorage,
+    Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
-
-/// Tracing event: this node's driver is running with non-default
-/// [`Perturbations`]. Carries `node`, `skip_resend` and `step_down` (the two
-/// per-beat probabilities, as parts per thousand so the flat tracing fields stay
-/// integers). Emitted once per incarnation, and only when something is actually
-/// perturbed. Purely diagnostic — it is what makes a seed's behaviour readable
-/// after the fact, and what the one coverage gate in
-/// [`crate::oracle::PerturbationOracle`] reads.
-pub(crate) const EV_PERTURBED: &str = "perturbations";
-
-/// Draw this node's driver perturbations for this seed.
-///
-/// Both magnitudes are **buggified config**, not constants: each sits behind its
-/// own `buggify_with_prob!` call site, so moonpool activates the two
-/// independently once per run. On the seeds where neither is active every node
-/// runs [`Perturbations::NONE`] — production behaviour, unchanged.
-/// [`buggify_knob!`] then picks the magnitude, so a seed occasionally spikes it
-/// to an extreme inside the range instead of taking the default.
-///
-/// The firing probability is `1.0` on purpose: buggify's *activation* phase
-/// already decides per seed, so `1.0` means "armed on the seeds where this
-/// location is active" — a **per-run, cluster-wide** switch rather than a
-/// per-node coin flip. That granularity is load-bearing. Only the leader ever
-/// acts on either perturbation, and with a per-node flip the leader is usually
-/// one of the *un*-perturbed nodes: a first pass with per-node arming reached the
-/// #54 wedge on 0 of ~1800 seeds. Arming the whole cluster costs nothing (a
-/// follower's draws are no-ops) and puts the perturbation where it can matter.
-///
-/// The per-beat firing happens in the driver, off its own seeded
-/// `RandomProvider`. Activation-per-seed here × firing-per-beat there is
-/// `FoundationDB`'s two-level BUGGIFY model, split across the layer boundary that
-/// keeps `paros-core` pure.
-///
-/// Magnitudes are deliberately asymmetric, and the skip one is deliberately
-/// *near one*. What a skip has to buy is time: a slot left un-offered has to stay
-/// that way long enough for something else to happen to it — a crash, an
-/// election, a resignation — and at one beat per 50 ms against a 4 s chaos
-/// window, a skip probability of 0.6 puts the re-send two beats away (100 ms),
-/// which never coincides with anything. 0.95 is ~1 s, and the top of the range is
-/// "this run does not re-send at all", which is the granularity the removed
-/// slot-starvation nemesis had — reached here by a leader that is merely
-/// unhelpful rather than by a fake packet drop. It costs nothing but delay, so
-/// being generous is free. Resigning is the opposite: it is disruptive, and even
-/// a small per-beat probability is several leadership changes per run, so it
-/// stays small (default 0.004, at most 0.02) — enough to reach "the holder walked
-/// away" without a leaderless storm the liveness oracles could not tell from a
-/// real regression.
-fn draw_perturbations() -> Perturbations {
-    let skip_resend = if buggify_with_prob!(1.0) {
-        buggify_knob!(0.95_f64, 0.8..0.999)
-    } else {
-        0.0
-    };
-    let step_down = if buggify_with_prob!(1.0) {
-        buggify_knob!(0.004_f64, 0.002..0.02)
-    } else {
-        0.0
-    };
-    Perturbations {
-        skip_resend,
-        step_down,
-    }
-}
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
@@ -139,25 +75,10 @@ impl Process for NodeProcess {
         // but stable across a process's reboots). Each node reaches it through a
         // `Weak` handle upgraded per op.
         let world = storage_world(ctx.state());
-        let crash = SeamCrasher {
+        let hooks = BuggifyHooks {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
         };
-        // How often this node's driver takes the rare-but-valid alternative to
-        // its helpful default: skip a beat's `Accept` re-send, or resign. Drawn
-        // once per incarnation; `Perturbations::NONE` (production behaviour) on
-        // the seeds where neither buggify location is active.
-        let perturbations = draw_perturbations();
-        if perturbations != Perturbations::NONE {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let per_mille = |p: f64| (p * 1000.0) as u64;
-            tracing::info!(
-                node = self_rank.0,
-                skip_resend = per_mille(perturbations.skip_resend),
-                step_down = per_mille(perturbations.step_down),
-                "perturbations"
-            );
-        }
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
@@ -173,8 +94,7 @@ impl Process for NodeProcess {
                 parse_addr(&my_ip)?,
                 members.clone(),
                 ctx.shutdown().clone(),
-                &crash,
-                perturbations,
+                &hooks,
             )
             .await
             {
@@ -391,27 +311,35 @@ impl Storage for DurableStorage {
     }
 }
 
-/// The simulation's [`CrashSeam`]: crash the node at a durability seam with a
-/// small `buggify` probability. Buggify is two-phase — activated per seed, then
-/// firing probabilistically — so only some seeds exercise seam crashes at all,
-/// and deterministically so (a failing seed replays bit-identically). This is the
-/// repo's first real `buggify!()` use: attrition crashes a node only *between*
-/// Ready batches; this reaches the persist/send seam *within* one.
-///
-/// Seam crashes are gated to the chaos window (like attrition, which the harness
-/// already bounds by `chaos_duration`): they fire only while `time.now()` is
-/// within [`crate::CHAOS_DURATION_MS`]. The client's post-chaos settle tail must be
-/// genuinely quiet so a lagging node can run commit-replay catch-up to completion
-/// and *durably* converge — a seam crash that keeps discarding the relaxed
-/// chosen-index write in that tail would make convergence unreachable (the
-/// [`crate::oracle::ConvergenceOracle`] asserts over exactly that tail).
-struct SeamCrasher<T> {
+/// Simulation hooks for driver decisions that process-level attrition cannot
+/// reach. Every behavior has its own `BUGGIFY` location, so activation is
+/// independent and replayable. All hooks turn off with the chaos window, leaving
+/// the settle tail genuinely quiet for convergence.
+struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
 }
 
-impl<T: TimeProvider> CrashSeam for SeamCrasher<T> {
-    fn crash_at(&self, _seam: Seam) -> bool {
-        self.time.now() < self.cutoff && buggify_with_prob!(0.03)
+impl<T: TimeProvider> BuggifyHooks<T> {
+    fn active(&self) -> bool {
+        self.time.now() < self.cutoff
+    }
+}
+
+impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
+    fn crash_at(&self, seam: Seam) -> bool {
+        self.active()
+            && match seam {
+                Seam::BeforeSync => buggify_with_prob!(0.03),
+                Seam::AfterSyncBeforeSend => buggify_with_prob!(0.03),
+            }
+    }
+
+    fn skip_accept_resend(&self) -> bool {
+        self.active() && buggify_with_prob!(0.95)
+    }
+
+    fn resign_leadership(&self) -> bool {
+        self.active() && buggify_with_prob!(0.004)
     }
 }

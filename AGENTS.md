@@ -61,27 +61,26 @@ separation; #81 removed the message-class nemesis, which mixed them):
   skipping is always safe, re-send is pure optimization"; `RawNode::step_down` — "a leader may
   resign") and nothing more. Removing every perturbation must leave the shipped program unchanged,
   which here is trivially true: the perturbation is a caller that stops calling.
-- **BUGGIFY, prong 1 — the driver draws the rare-but-valid decisions.** Perturbations of *timing and
-  policy the driver owns* (skip a beat's re-send, resign leadership, and future ones like
-  timeout-jitter extremes) are draws in `run_node` off the driver's existing `RandomProvider` — the
-  same seeded stream that already draws election timeouts, so no new dependency and a seed still
-  replays bit-identically. Their magnitudes arrive as a plain `Perturbations` struct parameter whose
-  production value is `Perturbations::NONE`: with it the driver re-sends every beat and never
-  resigns, i.e. **production semantics are byte-for-byte what they were**, and the draws are skipped
-  entirely rather than merely coming up false. `paros-sim` buggifies the *magnitudes* per seed with
-  moonpool's `buggify!`/`buggify_knob!` at two distinct call sites, which restores the FDB two-level
-  model across the layer boundary: per-seed activation in the harness × per-beat firing in the
-  driver.
+- **BUGGIFY, prong 1 — hook the driver's rare-but-valid decisions.** Timing and policy choices the
+  driver owns (skip a pending `Accept` re-send, resign leadership, and future choices such as
+  timeout-jitter extremes) are methods on the provider-generic `DriverHooks` trait. Production
+  passes `NoHooks`, whose default methods are all false. `paros-sim` implements each behavior with
+  its own `buggify_with_prob!` call site, preserving BUGGIFY's per-seed activation × per-call firing
+  model without putting simulation dependencies in `paros` or `paros-core`. Consult a hook only
+  when the choice can have an observable effect (for example, only ask to skip when accepts are
+  pending), trace the action that actually happened, and disable disruptive hooks after the chaos
+  window so recovery gets a quiet tail.
 - **BUGGIFY, prong 2 — tunables are workload-buggified config.** Anything that *shapes* a run — the
-  perturbation magnitudes above, cluster size, request counts, timing windows, attrition knobs (the
-  #61 swarm surface) — belongs in plain config data that the **workload/harness layer** randomizes
+  cluster size, request counts, timing windows, attrition knobs (the #61 swarm surface) — belongs in
+  plain config data that the **workload/harness layer** randomizes
   per seed, FDB knob style (`if buggify → an extreme value, else the default`). New tunables should
   be **born that way**, as data a workload can buggify, not as a constant buried in core or driver
   code, so per-seed swarm variation composes without either layer knowing about it.
 
-The one fault the *driver* still owns as a hook is a provider-generic **trait on `run_node`** with an
-inert production impl (never a forked sim-only driver): `CrashSeam` (`NoCrash` in production) crashes
-*inside* a `Ready` batch, at the persist/send seams process-level attrition cannot reach.
+The driver's provider-generic `DriverHooks` also exposes the two durability seams process-level
+attrition cannot reach: before fsync and after fsync/before send. Give each seam its own BUGGIFY
+location; treating both as one location prevents the sweep from independently selecting the two
+distinct failure modes.
 
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
@@ -148,6 +147,15 @@ A regression unit test may *pin* the bug afterward, but it never replaces step 4
 the simulation cannot reproduce is treated as **unproven** (it is probably not a real bug: safety is
 often preserved by an invariant you missed). Do not add speculative defensive code for an
 unreproducible claim.
+
+## Simulation references
+
+- [BUGGIFY](https://transactional.blog/simulation/buggify) — place high-level fault injection at
+  optional-work, error-handling, concurrency, and tuning-knob boundaries; activate locations per
+  run, fire them only sometimes, and stop disruptive injection when the test needs to recover.
+- [Designing Rust FDB Workloads That Actually Find Bugs](https://pierrezemb.fr/posts/writing-rust-fdb-workloads-that-find-bugs/)
+  — design deterministic operation alphabets and invariants, use seeded randomness exclusively,
+  and bias simulation toward adversarial and rare-but-valid states.
 
 ## Layout
 
