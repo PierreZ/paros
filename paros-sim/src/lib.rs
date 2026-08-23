@@ -28,8 +28,8 @@ use moonpool_sim::{
 };
 
 use crate::oracle::{
-    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, GapFillOracle, LeadershipOracle,
-    DriverHookOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData,
+    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle, GapFillOracle,
+    LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData,
     ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
     SnapshotOracle, TimelineRecorder, TruncationOracle, build_result,
 };
