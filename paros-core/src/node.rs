@@ -533,11 +533,10 @@ impl RawNode {
             self.heartbeat_elapsed += 1;
             if self.heartbeat_elapsed >= self.heartbeat_timeout {
                 self.heartbeat_elapsed = 0;
-                let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
                 self.step(Message::Heartbeat {
                     from: me,
                     ballot: self.ballot,
-                    commit,
+                    commit: self.hard_state.chosen_index,
                     seq: 0,
                 });
             }
@@ -967,18 +966,17 @@ impl RawNode {
     /// carries a seq an ack can be matched against.
     fn broadcast_heartbeat(&mut self) {
         self.heartbeat_seq += 1;
-        let commit = self.hard_state.chosen_index.unwrap_or(Slot(0));
         self.broadcast(&Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,
-            commit,
+            commit: self.hard_state.chosen_index,
             seq: self.heartbeat_seq,
         });
     }
 
     /// Leader self-beat or a follower receiving a peer beat. The self event's
     /// `seq` is ignored (the real seq is assigned at broadcast).
-    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Slot, seq: u64) {
+    fn on_heartbeat(&mut self, from: NodeId, ballot: Ballot, commit: Option<Slot>, seq: u64) {
         let me = self.config.id;
         if from == me {
             // Leader self-trigger: broadcast the beat. Re-sending the un-acked
@@ -1021,29 +1019,35 @@ impl RawNode {
         // decided is quorum-committed and safe to learn. The per-beat cadence
         // rate-limits (and self-heals a lost message); it stops once the prefixes
         // agree.
-        match self.hard_state.chosen_index {
+        //
+        // Both sides are `Option<Slot>` and compare directly: `None` (nothing
+        // chosen) orders below `Some(Slot(0))` (slot 0 chosen), which is the whole
+        // point — those two states are genuinely different, and a wire encoding
+        // that folded them together left a follower missing exactly slot 0 with no
+        // way to notice (#56).
+        let ci = self.hard_state.chosen_index;
+        if commit > ci {
             // We are behind: a `Commit` (and its `Accept`) for a decided slot never
             // reached us — the leader only re-sends `Accept`s for still-*pending*
             // slots, so that hole would be permanent. Pull the decided range from
             // our first unchosen slot.
-            _ if self.lags_behind(commit) => {
-                let from_slot = self.first_unchosen();
-                self.pending_messages.push((
-                    from,
-                    Message::CatchUpRequest {
-                        from: me,
-                        from_slot,
-                    },
-                ));
-            }
+            let from_slot = self.first_unchosen();
+            self.pending_messages.push((
+                from,
+                Message::CatchUpRequest {
+                    from: me,
+                    from_slot,
+                },
+            ));
+        } else if commit < ci {
             // We are ahead of the sender: push what it is missing. This is what
             // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a
             // crash — it beats a stale low `commit`, so no follower would ever pull;
             // a follower that *does* know the slot is decided replays it to the
             // leader, which then advertises the true prefix and the genuinely-behind
-            // nodes pull.
-            Some(ci) if commit < ci => self.serve_catchup(from, commit),
-            _ => {}
+            // nodes pull. A sender with nothing chosen needs the replay from the
+            // very first slot.
+            self.serve_catchup(from, commit.unwrap_or(Slot(0)));
         }
     }
 
@@ -1086,17 +1090,6 @@ impl RawNode {
                 ctx: round.ctx,
                 index: round.index,
             });
-        }
-    }
-
-    /// Whether the leader's advertised contiguous chosen prefix (`commit`) names a
-    /// slot we have not yet chosen contiguously. `commit` defaults to `Slot(0)` on
-    /// a leader that has chosen nothing, so a bare `Slot(0)` from a follower that
-    /// also has nothing is (correctly) not treated as lagging.
-    fn lags_behind(&self, commit: Slot) -> bool {
-        match self.hard_state.chosen_index {
-            Some(ci) => commit > ci,
-            None => commit > Slot(0),
         }
     }
 

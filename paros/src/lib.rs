@@ -114,8 +114,17 @@ mod tests {
             Message::Heartbeat {
                 from: NodeId(0),
                 ballot,
-                commit: Slot(2),
+                commit: Some(Slot(2)),
                 seq: 9,
+            },
+            // The empty watermark is its own variant of the beat, and the one the
+            // wire encoding used to be unable to say (#56): a leader that has
+            // chosen nothing is not a leader that has chosen slot 0.
+            Message::Heartbeat {
+                from: NodeId(0),
+                ballot,
+                commit: None,
+                seq: 10,
             },
             Message::HeartbeatAck {
                 from: NodeId(1),
