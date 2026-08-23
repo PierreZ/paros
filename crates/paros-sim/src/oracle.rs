@@ -5,7 +5,7 @@
 //! - [`ClientLivenessOracle`] wires the `assert_*` contract macros off the same
 //!   event stream — a worked example of moonpool's oracle harness.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
@@ -351,7 +351,7 @@ pub(crate) struct ProtocolData {
     chosen: Vec<ChosenShot>,
     leaders: Vec<LeaderShot>,
     applied: Vec<AppliedShot>,
-    cluster: HashSet<u64>,
+    cluster: BTreeSet<u64>,
     snapshots: Vec<(u64, u64, u64)>,
 }
 
@@ -466,7 +466,7 @@ fn collect_crashes(q: &dyn TraceQuery) -> Vec<CrashShot> {
 /// its initial start, so only the second and later boots are restarts. Both
 /// streams arrive in capture (time) order, so a per-node "seen once" set suffices.
 fn collect_restarts(q: &dyn TraceQuery) -> Vec<RestartShot> {
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
     q.snapshot(EV_BOOTED)
         .into_iter()
         .filter_map(|e| {
@@ -590,7 +590,7 @@ impl Invariant for ProtocolRecorder {
 /// Assert convergence from the completed deterministic run, when no future
 /// leader change can invalidate a provisional quiescence decision.
 pub(crate) fn assert_final_convergence(data: &ProtocolData) {
-    let mut prefixes: HashMap<u64, u64> = HashMap::new();
+    let mut prefixes: BTreeMap<u64, u64> = BTreeMap::new();
     for applied in &data.applied {
         prefixes
             .entry(applied.node)
@@ -926,7 +926,7 @@ impl Invariant for AppliedAckOracle {
         // Earliest time each slot entered each node's applied prefix. First
         // wins: a restart replays `log_applied` for the recovered prefix, and
         // the original apply is the moment that matters.
-        let mut applied_at: HashMap<(u64, u64), u64> = HashMap::new();
+        let mut applied_at: BTreeMap<(u64, u64), u64> = BTreeMap::new();
         for e in q.snapshot(EV_APPLIED) {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
                 continue;
@@ -979,7 +979,7 @@ impl Invariant for SafetyOracle {
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         // Invariant 1 (the crown jewel): at most one value is ever chosen per
         // slot — across the whole cluster.
-        let mut chosen_value: HashMap<u64, u64> = HashMap::new();
+        let mut chosen_value: BTreeMap<u64, u64> = BTreeMap::new();
         let mut any_chosen = false;
         for e in q.snapshot(EV_CHOSEN) {
             let (Some(slot), Some(vhash)) = (e.u64("slot"), e.u64("vhash")) else {
@@ -999,7 +999,7 @@ impl Invariant for SafetyOracle {
         // Invariant 2 (per-node, in capture/time order): a node's promised ballot
         // is monotonic — it never decreases, including across a restart (the boot
         // re-emits the recovered promise as a `node_state`).
-        let mut last_promised: HashMap<u64, (u64, u64)> = HashMap::new();
+        let mut last_promised: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
         for e in q.snapshot(EV_NODE_STATE) {
             let Some(node) = e.u64("node") else { continue };
             let (Some(pr), Some(pn)) = (e.u64("pround"), e.u64("pbnode")) else {
@@ -1042,7 +1042,7 @@ impl Invariant for SafetyOracle {
         // double-allocation an acceptor quorum happens to reject leaves no trace at
         // all in Invariants 1-3. Reading `msg_sent` rather than `msg_received` is
         // deliberate — it indicts the *proposer*, not the network.
-        let mut proposed: HashMap<(u64, u64, u64), u64> = HashMap::new();
+        let mut proposed: BTreeMap<(u64, u64, u64), u64> = BTreeMap::new();
         for e in q.snapshot(EV_MSG_SENT) {
             if e.str("kind") != Some("accept") {
                 continue;
@@ -1081,7 +1081,7 @@ impl Invariant for SafetyOracle {
         // different ones would mean an acceptor quorum had ratified a
         // double-allocation, which is Invariant 4's failure carried all the way to
         // disk.
-        let mut accepted: HashMap<(u64, u64, u64), u64> = HashMap::new();
+        let mut accepted: BTreeMap<(u64, u64, u64), u64> = BTreeMap::new();
         for e in q.snapshot(EV_PERSIST) {
             let (Some(slot), Some(ar), Some(an), Some(vhash)) = (
                 e.u64("slot"),
@@ -1149,7 +1149,7 @@ impl Invariant for RecoveryOracle {
         // life; the rebooted life's first persist is strictly later).
         let persists = q.snapshot(EV_PERSIST);
         let recovers = q.snapshot(EV_RECOVERED);
-        let mut persisted: HashMap<(u64, u64), u64> = HashMap::new();
+        let mut persisted: BTreeMap<(u64, u64), u64> = BTreeMap::new();
         let mut pi = 0;
         for r in &recovers {
             let (Some(node), Some(slot), Some(vhash)) =
@@ -1204,13 +1204,13 @@ impl Invariant for NoGapsOracle {
         let snapshots = collect_snapshots(q);
         let mut ci = 0;
         let mut si = 0;
-        let mut floor: HashMap<u64, u64> = HashMap::new();
+        let mut floor: BTreeMap<u64, u64> = BTreeMap::new();
         // Every slot a node jumped to via a snapshot install; a forward jump to any
         // of them is legal (the folded prefix is in that snapshot). A node can
         // install more than one snapshot in a single drain (two peers each serve
         // it), so this is a set, not just the latest landing.
-        let mut snap_landings: HashMap<u64, HashSet<u64>> = HashMap::new();
-        let mut frontier: HashMap<u64, u64> = HashMap::new();
+        let mut snap_landings: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+        let mut frontier: BTreeMap<u64, u64> = BTreeMap::new();
         let mut max_applied = 0_u64;
         for e in q.snapshot(EV_APPLIED) {
             let (Some(node), Some(idx)) = (e.u64("node"), e.u64("applied_index")) else {
@@ -1290,7 +1290,7 @@ impl Invariant for LeadershipOracle {
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
-        let mut last_round: HashMap<u64, u64> = HashMap::new();
+        let mut last_round: BTreeMap<u64, u64> = BTreeMap::new();
         let mut any = false;
         let mut checked = 0_usize;
         for e in q.snapshot(EV_LEADER) {
@@ -1352,7 +1352,7 @@ impl Invariant for ProgressOracle {
             .filter_map(|e| e.u64("applied_index"))
             .max()
             .unwrap_or(0);
-        let rounds: HashSet<u64> = q
+        let rounds: BTreeSet<u64> = q
             .snapshot(EV_LEADER)
             .into_iter()
             .filter_map(|e| e.u64("round"))
@@ -1466,10 +1466,10 @@ impl Invariant for ConvergenceOracle {
         // the wire — the leader's heartbeat watermark encoded "nothing chosen" as
         // `Slot(0)`, indistinguishable from "slot 0 chosen" — and an oracle that
         // shares it can never go red on it.
-        let mut per_node_max: HashMap<u64, u64> = HashMap::new();
+        let mut per_node_max: BTreeMap<u64, u64> = BTreeMap::new();
         let mut cluster_max: Option<u64> = None;
         let mut cluster_max_time = 0_u64;
-        let mut lagged: HashSet<u64> = HashSet::new();
+        let mut lagged: BTreeSet<u64> = BTreeSet::new();
         let applied = q.snapshot(EV_APPLIED);
         if applied.is_empty() {
             return;
@@ -1518,7 +1518,7 @@ impl Invariant for ConvergenceOracle {
         // of nodes that are up and have been stable for the grace window, so a
         // node crashed or just-rebooted in the settle tail is not falsely flagged
         // (its prefix is re-established from durable storage on boot).
-        let mut last_life: HashMap<u64, (u64, bool)> = HashMap::new();
+        let mut last_life: BTreeMap<u64, (u64, bool)> = BTreeMap::new();
         for (name, is_boot) in [(EV_BOOTED, true), (EV_CRASHED, false)] {
             for e in q.snapshot(name) {
                 if let Some(node) = e.u64("node") {
@@ -1553,7 +1553,7 @@ impl Invariant for ConvergenceOracle {
         // demanded of every stable live node; the below-floor case is kept as a
         // reachability gate (proof the hard path was actually exercised) rather
         // than an escape hatch.
-        let mut final_floor: HashMap<u64, u64> = HashMap::new();
+        let mut final_floor: BTreeMap<u64, u64> = BTreeMap::new();
         for (_t, node, first) in collect_compactions(q) {
             let f = final_floor.entry(node).or_insert(0);
             *f = (*f).max(first);
@@ -1562,7 +1562,7 @@ impl Invariant for ConvergenceOracle {
         // Every node this run ever brought up, not just the ones that applied
         // something: a node whose prefix is still empty is exactly the case the
         // applied stream cannot show, because it emits no event to be seen in.
-        let mut cluster: HashSet<u64> = q
+        let mut cluster: BTreeSet<u64> = q
             .snapshot(EV_BOOTED)
             .iter()
             .filter_map(|e| e.u64("node"))
@@ -1797,7 +1797,7 @@ impl TruncationOracle {
         msg: &'static str,
     ) {
         let mut ci = 0;
-        let mut floor: HashMap<u64, u64> = HashMap::new();
+        let mut floor: BTreeMap<u64, u64> = BTreeMap::new();
         for e in q.snapshot(event) {
             let (Some(node), Some(slot)) = (e.u64("node"), e.u64("slot")) else {
                 continue;
@@ -1884,8 +1884,8 @@ pub(crate) fn build_result(
         };
     }
 
-    let ack: HashMap<u64, u64> = data.acked.iter().copied().collect();
-    let fail: HashMap<u64, u64> = data.failed.iter().copied().collect();
+    let ack: BTreeMap<u64, u64> = data.acked.iter().copied().collect();
+    let fail: BTreeMap<u64, u64> = data.failed.iter().copied().collect();
     let mut issued = data.issued.clone();
     issued.sort_by_key(|&(_, t)| t);
 
