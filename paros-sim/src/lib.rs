@@ -106,8 +106,16 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// completes first) marked its command *applied* the moment it was learned
 /// chosen, so a client retry took the `propose` dedup fast path and was told
 /// `committed: true` for a write no node had applied yet — until the
-/// `applied_seq`/`inflight` hand-off moved into the contiguous walk. Each
-/// replays clean via [`run_seed`].
+/// `applied_seq`/`inflight` hand-off moved into the contiguous walk. Seed 283 is
+/// where the [`oracle::ConvergenceOracle`]'s empty-prefix arm first went red: a
+/// quiet-mode run (see [`crate::workload`]) decided exactly one slot — slot 0 — and
+/// then went silent, leaving one follower that had learned nothing at all. The
+/// leader's beat advertised a bare `Slot(0)` a follower could not tell from "the
+/// leader has chosen nothing", so it read its own empty prefix as caught up and
+/// never pulled, and every other repair path is shut in that state; the oracle
+/// reported it on all 2 039 checks of the settle tail, until
+/// `Message::Heartbeat.commit` became `Option<Slot>`. Each replays clean via
+/// [`run_seed`].
 ///
 /// **Every seed above is a historical marker, not a live reproduction.** Two
 /// changes moved what a seed *means*, and neither is reversible:
@@ -117,7 +125,10 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 ///   exact interleaving every seed drives;
 /// - #81 removed the message-class nemesis and replaced its one non-redundant
 ///   capability with the driver's [`paros::Perturbations`], drawn per seed from a
-///   different point in the RNG stream (see [`crate::node`]).
+///   different point in the RNG stream (see [`crate::node`]);
+/// - #56 added the quiet workload mode, whose draw sits *ahead* of the
+///   sequential/pipelined coin on the config stream, so which script a seed runs
+///   (and at what pipeline depth) moved again.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -139,7 +150,20 @@ pub const COVERAGE_ITERATIONS: usize = 64;
 /// seed is clean. It was found by replaying seeds against a gap-fill-reverted
 /// build: one witness in the ~6 000 seeds swept at these magnitudes, which is the
 /// honest rarity of this interleaving — and exactly why the sweep needs the
-/// perturbations to reach it at all.
+/// perturbations to reach it at all. It survived the quiet-mode config-stream
+/// shift #56 introduced: re-checked against a gap-fill-reverted build afterwards,
+/// it still comes back red on 13 734 of 13 736 checks.
+///
+/// **Seed 283 is live, and it is #56's witness.** Restore the sentinel — make
+/// `Message::Heartbeat.commit` a bare `Slot` again, `chosen_index.unwrap_or(Slot(0))`
+/// at the two producers, with `lags_behind`'s `None => commit > Slot(0)` arm — and
+/// this seed goes red (`a stable live node's chosen prefix is never empty once the
+/// cluster has chosen a slot`, on every one of 2 039 checks); restore the
+/// `Option<Slot>` and it is clean. Seeds 180 and 550 are the same shape, kept
+/// unpinned: 283 is the one that fails on *every* check rather than on the last
+/// one or two, which is what makes it a witness rather than a near-miss. All three
+/// were the only quiet-mode failures in the 1 200 seeds swept, and all three went
+/// green on the fix.
 pub const REGRESSION_SEEDS: &[u64] = &[
     99,
     42,
@@ -152,6 +176,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     53,
     11,
     6_156,
+    283,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
@@ -269,7 +294,11 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
         // safety invariant: under the harshest interleavings a lagging node can take
         // many seconds to converge (slow leader-election stabilization after a crash
         // reverts a relaxed chosen-index), longer than any bounded settle window. As
-        // an `assert_always` over random seeds that reads as a flaky failure. The
+        // an `assert_always` over random seeds that reads as a flaky failure — the
+        // #56 hunt measured the rate: replaying 1 200 arbitrary seeds through
+        // [`run_seed`] leaves ~20 of them (1.7%) reporting a still-lagging node at
+        // quiescence, every one of them a full twelve-proposal run, none of them a
+        // real wedge. That is the noise floor this oracle would add to the sweep. The
         // oracle instead runs on the *deterministic* [`run_seed`] path (the pinned
         // `REGRESSION_SEEDS`, incl. the seed on which it first went red), where the
         // red→green result is reproducible; the deterministic core unit test
