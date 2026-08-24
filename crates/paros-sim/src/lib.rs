@@ -39,6 +39,26 @@ use crate::oracle::{
 };
 use crate::workload::ProposeClient;
 
+/// Client-side gRPC channel config for the sim workloads. Mirrors the driver's
+/// peer channels: h2 PING keep-alive so a connection left half-open by a node
+/// restart is detected and replaced deterministically instead of swallowing
+/// requests forever. Without it, a workload probe channel established before an
+/// attrition restart can stay dead for the entire recovery tail (the seed
+/// 6442591786636745658 convergence false-negative: every node had applied and
+/// agreed by t=12.7s, and the probe to one restarted node then timed out for 74
+/// simulated seconds).
+pub(crate) fn client_channel_config() -> moonpool_hyper::ChannelConfig {
+    moonpool_hyper::ChannelConfig {
+        connection_timeout: Duration::from_secs(1),
+        keep_alive: Some(moonpool_hyper::KeepAlive {
+            interval: Duration::from_secs(2),
+            timeout: Duration::from_secs(1),
+            while_idle: false,
+        }),
+        ..moonpool_hyper::ChannelConfig::default()
+    }
+}
+
 #[cfg(feature = "native")]
 use moonpool_sim::ExplorationConfig;
 
@@ -218,7 +238,19 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     283,
 ];
 /// Chain-workload witnesses discovered by the application-state oracle.
-pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[9_708_989_754_240_691_684, 11_811_656_051_295_404_958];
+pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
+    9_708_989_754_240_691_684,
+    11_811_656_051_295_404_958,
+    // The half-open probe-channel witness (2026-08-25 swarm, round 11 of 15):
+    // every node had applied and agreed by t=12.7s, then the workload's
+    // convergence probe to one attrition-restarted node timed out for 74
+    // simulated seconds — the probe channel predated the restart and had no
+    // keep-alive to detect the dead connection. Red on `ChannelConfig::default`
+    // for the workload clients; green with [`client_channel_config`]'s h2 PING
+    // keep-alive. Likely the root cause of the #93-era bounded-recovery
+    // false positive that widening `recovery_budget_ms` papered over.
+    6_442_591_786_636_745_658,
+];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the

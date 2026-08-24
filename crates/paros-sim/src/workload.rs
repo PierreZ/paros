@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
+use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::sim::config_random_bool;
 use moonpool_sim::{
     SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider, Workload,
@@ -174,7 +174,7 @@ impl Workload for ProposeClient {
             .into_iter()
             .map(|(addr, origin)| {
                 let channel =
-                    ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+                    ReconnectingChannel::new(ctx.providers(), addr, crate::client_channel_config());
                 let client = ParosClient::with_origin(channel.clone(), origin);
                 (client, channel)
             })

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
+use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
     Workload, assert_always, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
@@ -183,7 +183,8 @@ impl Workload for ChainWorkload {
         let mut internal_clients = Vec::with_capacity(endpoints.len());
         let mut channels = Vec::with_capacity(endpoints.len());
         for (addr, origin) in endpoints {
-            let channel = ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+            let channel =
+                ReconnectingChannel::new(ctx.providers(), addr, crate::client_channel_config());
             public_clients.push(ParosClient::with_origin(channel.clone(), origin.clone()));
             internal_clients.push(ParosInternalClient::with_origin(channel.clone(), origin));
             channels.push(channel);
@@ -666,6 +667,7 @@ impl Workload for ChainWorkload {
         self.issued_count = next_seq;
 
         let mut converged = false;
+        let mut last_probe: Vec<Option<ChainState>> = Vec::new();
         while time.now() < recovery_deadline && !shutdown.is_cancelled() {
             let mut observed = Vec::with_capacity(server_count);
             for client in &internal_clients {
@@ -683,6 +685,9 @@ impl Workload for ChainWorkload {
                     break;
                 }
             }
+            last_probe = (0..server_count)
+                .map(|i| observed.get(i).copied())
+                .collect();
             if observed.len() == server_count
                 && observed
                     .first()
@@ -696,6 +701,42 @@ impl Workload for ChainWorkload {
             time.sleep(Duration::from_millis(50)).await.ok();
         }
 
+        if !converged {
+            // Failure diagnostic (fires only on the red path): which node is
+            // stuck, and where. `None` = the node did not answer the inspect
+            // probe inside its timeout.
+            let q = ctx.observability();
+            let last_applied: BTreeMap<u64, u64> = q
+                .snapshot(EV_APPLIED)
+                .iter()
+                .filter_map(|e| Some((e.u64("node")?, e.time_ms)))
+                .fold(BTreeMap::new(), |mut m, (n, t)| {
+                    let entry = m.entry(n).or_insert(0);
+                    *entry = (*entry).max(t);
+                    m
+                });
+            let count_by_node = |name: &str| -> BTreeMap<u64, usize> {
+                q.snapshot(name).iter().filter_map(|e| e.u64("node")).fold(
+                    BTreeMap::new(),
+                    |mut m, n| {
+                        *m.entry(n).or_insert(0) += 1;
+                        m
+                    },
+                )
+            };
+            eprintln!(
+                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): \
+                 per-node states = {:?}; last command_applied per node = {:?}; \
+                 boots per node = {:?}; seam crashes per node = {:?}",
+                time.now().as_millis(),
+                recovery_deadline.as_millis(),
+                pre_tail_count,
+                last_probe,
+                last_applied,
+                count_by_node("booted"),
+                count_by_node("crashed"),
+            );
+        }
         assert_always!(
             recovery_acked > 0 && converged,
             "chain: cluster converged after chaos"
