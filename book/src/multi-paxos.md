@@ -55,7 +55,7 @@ This maps directly onto the core: `RawNode::on_check_leader` broadcasts the sing
 `Prepare{from_slot}`, `try_become_leader` adopts the recovered suffix on takeover,
 and `start_accept_round` streams one `Accept` per slot. The demo reads it back from
 `leader_elected` / `value_chosen` / `log_applied` events, surfaced as `LeaderShot`,
-`ChosenShot`, and `AppliedShot` in `paros-sim/src/oracle.rs`.
+`ChosenShot`, and `AppliedShot` in `crates/paros-sim/src/oracle.rs`.
 
 ## Run it
 

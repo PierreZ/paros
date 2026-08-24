@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 echo "building paros-wasm-demo for wasm32…"
 cargo build --release --target wasm32-unknown-unknown -p paros-wasm-demo --lib
-wasm-bindgen --target web --out-dir paros-wasm-demo/web/pkg \
+wasm-bindgen --target web --out-dir crates/paros-wasm-demo/web/pkg \
   target/wasm32-unknown-unknown/release/paros_wasm_demo.wasm
 
 # Best-effort: stage the IBM Plex Sans/Mono woff2 the design system asks for, so
@@ -19,7 +19,7 @@ wasm-bindgen --target web --out-dir paros-wasm-demo/web/pkg \
 # only, so each face is converted with woff2_compress (nixpkgs#woff2).
 FONTS_OK=1
 stage_fonts() {
-  local out="paros-wasm-demo/web/app/fonts"
+  local out="crates/paros-wasm-demo/web/app/fonts"
   mkdir -p "$out"
   local src="${PLEX_WOFF2_DIR:-}"
   if [ -z "$src" ] && command -v nix >/dev/null 2>&1; then
@@ -55,9 +55,9 @@ stage_fonts
 echo "staging assets in book/src/wasm-demo/…"
 rm -rf book/src/wasm-demo
 mkdir -p book/src/wasm-demo
-cp paros-wasm-demo/web/index.html book/src/wasm-demo/index.html
-cp -r paros-wasm-demo/web/app book/src/wasm-demo/app
-cp -r paros-wasm-demo/web/pkg book/src/wasm-demo/pkg
+cp crates/paros-wasm-demo/web/index.html book/src/wasm-demo/index.html
+cp -r crates/paros-wasm-demo/web/app book/src/wasm-demo/app
+cp -r crates/paros-wasm-demo/web/pkg book/src/wasm-demo/pkg
 if [ "$FONTS_OK" != 1 ]; then
   # no fonts staged: drop the @font-face block so the book page loads without 404s
   sed -i '/plex-fonts-begin/,/plex-fonts-end/d' book/src/wasm-demo/index.html

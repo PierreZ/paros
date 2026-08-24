@@ -6,14 +6,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
 use moonpool_sim::sim::config_random_bool;
 use moonpool_sim::{
-    SimContext, SimulationError, SimulationResult, TimeProvider, Workload, assert_always,
-    assert_sometimes,
+    SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider, Workload,
+    assert_always, assert_sometimes,
 };
-use moonpool_transport::NetTransportBuilder;
 
-use paros::{Compact, Paros, Propose, Read, WLTOKEN_PAROS, parse_addr};
+use paros::{Compact, ParosClient, Propose, Read, parse_addr};
 
 use crate::{CHAOS_DURATION_MS, GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
@@ -32,6 +32,27 @@ const QUIET_PROB: f64 = 0.125;
 /// the single decision can fall anywhere chaos is firing, not at one fixed
 /// instant chaos would have to coincide with.
 const QUIET_DELAY_STEP_MS: u64 = CHAOS_DURATION_MS / 16;
+
+/// Run one synchronous cleanup action on every exit path from its scope.
+struct OnDrop<F: FnOnce()> {
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> OnDrop<F> {
+    fn new(action: F) -> Self {
+        Self {
+            action: Some(action),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(action) = self.action.take() {
+            action();
+        }
+    }
+}
 
 /// Per-run client workload mode, drawn once from the (uncounted) config RNG —
 /// the same stream `swarm_for_seed` draws from — so the modes rotate across
@@ -109,25 +130,35 @@ impl Workload for ProposeClient {
             return Ok(());
         }
 
-        let my_addr = parse_addr(ctx.my_ip())?;
-        let transport = NetTransportBuilder::new(ctx.providers().clone())
-            .local_address(my_addr)
-            .build_listening()
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("client transport: {e}")))?;
-
-        // A typed client per node (addressed by address + well-known token, no
-        // discovery), so proposals can round-robin across proposers.
-        let clients = servers
+        // Validate every endpoint before starting reconnecting-channel tasks.
+        let endpoints = servers
             .iter()
             .map(|ip| {
-                Ok(Paros::client_well_known(
-                    parse_addr(ip)?,
-                    WLTOKEN_PAROS,
-                    &transport,
-                ))
+                let addr = parse_addr(ip)?;
+                let origin = http::Uri::try_from(format!("http://{addr}"))
+                    .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+                Ok((addr, origin))
             })
             .collect::<SimulationResult<Vec<_>>>()?;
+
+        // A generated tonic client per node. Each multiplexes over a
+        // reconnecting h2 channel on the same simulated provider network the
+        // nodes use. Keep one channel clone so the workload can terminate all
+        // background connect/backoff/keepalive work when it exits.
+        let (clients, channels): (Vec<_>, Vec<_>) = endpoints
+            .into_iter()
+            .map(|(addr, origin)| {
+                let channel =
+                    ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+                let client = ParosClient::with_origin(channel.clone(), origin);
+                (client, channel)
+            })
+            .unzip();
+        let _channel_guard = OnDrop::new(move || {
+            for channel in channels {
+                channel.close();
+            }
+        });
 
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -186,7 +217,9 @@ impl Workload for ProposeClient {
                             seq,
                             command: seq.to_le_bytes().to_vec(),
                         };
-                        if let Ok(ack) = clients[target].propose.get_reply(proposal).await {
+                        let mut client = clients[target].clone();
+                        if let Ok(response) = client.propose(proposal).await {
+                            let ack = response.into_inner();
                             assert_always!(ack.seq == seq, "ack echoes the proposal it answered");
                             if ack.committed {
                                 break (ack.leader, ack.slot);
@@ -222,7 +255,9 @@ impl Workload for ProposeClient {
                             client: client_id,
                             seq,
                         };
-                        if let Ok(ack) = clients[target].read.get_reply(request).await {
+                        let mut client = clients[target].clone();
+                        if let Ok(response) = client.read(request).await {
+                            let ack = response.into_inner();
                             assert_always!(
                                 ack.seq == seq,
                                 "read ack echoes the request it answered"
@@ -281,7 +316,12 @@ impl Workload for ProposeClient {
                 if let (true, Some(up_to), Some(leader_id)) = (ping_compaction, max_slot, leader) {
                     let idx = usize::try_from(leader_id).unwrap_or(0);
                     if idx < n {
-                        let _ = clients[idx].compact.send(Compact { up_to });
+                        let mut client = clients[idx].clone();
+                        ctx.task()
+                            .spawn_task("paros-grpc-compact", async move {
+                                let _ = client.compact(Compact { up_to }).await;
+                            })
+                            .detach();
                     }
                 }
             } else {

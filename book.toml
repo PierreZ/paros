@@ -16,4 +16,8 @@ command = "mdbook-mermaid"
 
 [output.html]
 default-theme = "rust"
-additional-js = ["mermaid.min.js", "mermaid-init.js", "iframe-autosize.js"]
+additional-js = [
+    "book/theme/mermaid.min.js",
+    "book/theme/mermaid-init.js",
+    "book/theme/iframe-autosize.js",
+]

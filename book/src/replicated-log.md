@@ -100,7 +100,7 @@ walk until it is filled.
 
 The simulation pins this with the `NoGapsOracle`, which asserts that each node's
 applied prefix **"advances one slot at a time (no gaps)"** and **"starts at slot
-0"** (`paros-sim/src/oracle.rs`). A node can never reveal a value it skipped a
+0"** (`crates/paros-sim/src/oracle.rs`). A node can never reveal a value it skipped a
 slot to reach.
 
 ## Five roles, collapsed into one node

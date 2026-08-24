@@ -159,24 +159,25 @@ unreproducible claim.
 
 ## Layout
 
-Cargo workspace (mirrors moonpool). Dependency stack: `paros-core` ← `paros` ← `paros-sim` ←
-{runner, wasm-demo}. `paros-core` has no deps; everything ultimately points into it.
+Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
+Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-demo}.
+`paros-core` has no deps; everything ultimately points into it.
 
-- `paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
+- `crates/paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
   optional `serde` feature adds derives only, and it is the crate's *only* feature — see the
   turbulence doctrine above: the core is never buggified and gains no simulation-only conditional
   compilation). Sancov crate-under-test; exempt from the global `#[instrument]`-on-pub-fns rule
   (must stay zero-dep by default).
-- `paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
+- `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
-  `paros-core`, `moonpool-core` + `moonpool-transport` (`default-features = false` → wasm-safe). No
+  `paros-core`, `moonpool-core` + `moonpool-hyper` and runtime-free tonic (wasm-safe). No
   dedicated storage crate — the Stage-4+ faulty fake lands here or in the harness.
-- `paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, workloads,
+- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, workloads,
   oracles (wasm-safe, `default-features = false`). Depends on `paros` + `moonpool-sim`.
-- `paros-sim-runner/` — native sim runner binary (`publish = false`).
-- `paros-wasm-demo/` — browser/wasm demo, `cdylib` + `rlib` (`publish = false`).
-- `xtask/` — build automation (the sancov sim runner).
+- `crates/paros-sim-runner/` — native sim runner binary (`publish = false`).
+- `crates/paros-wasm-demo/` — browser/wasm demo, `cdylib` + `rlib` (`publish = false`).
+- `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
 - `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos).
 

@@ -14,30 +14,86 @@
 //! (ack-on-commit), redirecting non-leader proposals.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{
-    NetworkAddress, Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider,
+    Detach, NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult,
+    TaskProvider, TcpListenerTrait, TimeProvider,
 };
-use moonpool_transport::{NetTransport, NetTransportBuilder, ReplyPromise, RpcError, service};
+use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
     RawNode, ReadIndexResult, ReadState, Slot, Value, WriteOp,
 };
-use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::grpc::{
+    CompactAck, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck, ReadAck,
+    ReplySender, RpcInbox, internal, rpc_channel,
+};
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
-/// Well-known RPC token the paros node service is registered at. Every node
-/// serves [`Paros`] here, and clients address it by `(node address, this token)`
-/// — no service discovery. Must be `> WELL_KNOWN_RESERVED_COUNT` (3).
-pub const WLTOKEN_PAROS: u32 = 4;
-
 /// How often a node advances its logical clock.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// h2 liveness detection for peer streams. Both values use provider time, so a
+/// half-open connection is replaced deterministically during the settle tail.
+const GRPC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const GRPC_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(1);
+const GRPC_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this is
+/// deliberately bounded and lossy: the consensus driver never waits for
+/// network I/O, and current heartbeats/resends repair anything dropped here.
+const GRPC_PEER_QUEUE_CAPACITY: usize = 4096;
+/// Snapshot offers use an independent h2 request lane so their opaque bytes
+/// cannot sit in front of heartbeats and normal replication.
+const GRPC_SNAPSHOT_QUEUE_CAPACITY: usize = 4;
+/// Leave headroom below tonic's default 4 MiB decoded-message limit for the
+/// protobuf envelope. The retired transport capped a complete payload at 1 MiB;
+/// this preserves that per-message envelope while allowing compact batches.
+const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
+/// Maximum Paxos messages packed into one protobuf/gRPC request. This keeps
+/// a chatty heartbeat/catch-up round from creating one h2 frame per message.
+const GRPC_DELIVERY_BATCH: usize = 64;
+
+/// Run one synchronous cleanup action on every exit path from its scope.
+struct OnDrop<F: FnOnce()> {
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> OnDrop<F> {
+    fn new(action: F) -> Self {
+        Self {
+            action: Some(action),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(action) = self.action.take() {
+            action();
+        }
+    }
+}
+
+fn grpc_keep_alive() -> KeepAlive {
+    KeepAlive {
+        interval: GRPC_KEEP_ALIVE_INTERVAL,
+        timeout: GRPC_KEEP_ALIVE_TIMEOUT,
+        while_idle: false,
+    }
+}
+
+fn grpc_channel_config() -> ChannelConfig {
+    ChannelConfig {
+        connection_timeout: GRPC_DELIVERY_TIMEOUT,
+        keep_alive: Some(grpc_keep_alive()),
+        ..ChannelConfig::default()
+    }
+}
 
 /// Ticks a parked read reply may wait for its read-index confirmation before
 /// the driver answers a retry redirect (500 ms — well inside the sim client's
@@ -201,126 +257,21 @@ pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 /// is genuinely reached (and the ack oracle needs it named, not hidden).
 pub const EV_PROPOSE_DEDUP_ACK: &str = "propose_dedup_ack";
 
-/// A client proposal, deduplicated by `(client, seq)` for at-most-once execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Propose {
-    /// Client identity.
-    pub client: u64,
-    /// Per-client request sequence number (the `ClientSeq`).
-    pub seq: u64,
-    /// Opaque command bytes.
-    pub command: Vec<u8>,
-}
-
-/// The node's acknowledgement of a [`Propose`]. The node acks on commit: a
-/// `committed` ack is only sent once the command is durably chosen; otherwise it
-/// is a redirect to `leader`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProposeAck {
-    /// Echoed request sequence number.
-    pub seq: u64,
-    /// The node to (re)try: `Some(self)` when this node admitted or had already
-    /// chosen the request; `Some(other)` to redirect; `None` when the leader is
-    /// unknown.
-    pub leader: Option<u64>,
-    /// Whether the command is durably chosen. `false` is a redirect: retry
-    /// `leader`.
-    pub committed: bool,
-    /// The slot the command committed at, when `committed` is `true`. `None` for a
-    /// redirect. Lets the application track the chosen prefix so it can drive
-    /// compaction (see [`Compact`]).
-    pub slot: Option<u64>,
-}
-
-/// A client read request. Reads are idempotent, so there is no dedup; `seq` is
-/// echoed for client-side matching only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Read {
-    /// Client identity.
-    pub client: u64,
-    /// Per-client request sequence number.
-    pub seq: u64,
-}
-
-/// The node's acknowledgement of a [`Read`]. A `committed` ack observes the
-/// node's applied log prefix: `read_index` is the highest contiguously applied
-/// slot (`None` when the prefix is empty — entries are opaque, so the watermark
-/// *is* the local state a read serves). Otherwise it is a redirect to `leader`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadAck {
-    /// Echoed request sequence number.
-    pub seq: u64,
-    /// The node to (re)try: `Some(self)` when this node served the read,
-    /// `Some(other)` to redirect, `None` when the leader is unknown.
-    pub leader: Option<u64>,
-    /// Whether the read was served. `false` is a redirect: retry `leader`.
-    pub committed: bool,
-    /// The applied watermark observed, when `committed` is `true`: the highest
-    /// contiguously applied slot, `None` for an empty prefix.
-    pub read_index: Option<u64>,
-}
-
-/// An application request to truncate the log: drop every slot at or below
-/// `up_to` across the cluster. The application owns compaction of its own state
-/// and tells the **leader** how far the log may be truncated; the leader decides
-/// a [`paros_core::Control::Truncate`] control command into the log, and every
-/// node truncates lazily when it applies that slot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Compact {
-    /// The last slot the application permits dropping (inclusive). Each node
-    /// clamps to its own chosen prefix, so nothing undecided is ever dropped.
-    pub up_to: u64,
-}
-
-/// The node's acknowledgement of a [`Compact`]. Because truncation is now decided
-/// through Paxos and applied lazily, the ack reports admission (did the leader
-/// propose the control command?) plus the node's current floor — not a
-/// synchronously-updated floor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactAck {
-    /// The node to (re)try: `Some(self)` when the leader admitted the request,
-    /// `Some(other)` to redirect, `None` when leadership is unknown.
-    pub leader: Option<u64>,
-    /// Whether the leader admitted the truncate (proposed the control command).
-    /// `false` is a redirect: retry `leader`.
-    pub accepted: bool,
-    /// The node's current durable compaction floor (best-effort; the decided
-    /// truncation reaches this node's floor once it applies the control command).
-    pub first_slot: u64,
-}
-
-/// The paros node RPC interface. The `#[service]` macro renames this trait to
-/// `ParosHandler` and generates a [`Paros`] struct that works in both server
-/// (`Paros::well_known`) and client (`Paros::client_well_known`) modes — replacing
-/// hand-rolled `register_handler_at` calls and magic interface/method ids.
-#[service]
-pub trait Paros {
-    /// A client proposes a command; the node acknowledges it.
-    async fn propose(&self, req: Propose) -> Result<ProposeAck, RpcError>;
-    /// A client reads the applied log prefix; the node acknowledges with the
-    /// observed watermark or redirects to the leader.
-    async fn read(&self, req: Read) -> Result<ReadAck, RpcError>;
-    /// A peer delivers a Paxos protocol message into this node's `step()` inbox.
-    /// One-way: the reply is empty (peers use fire-and-forget `send`).
-    async fn deliver(&self, msg: Message) -> Result<(), RpcError>;
-    /// The application asks the node to truncate its log prefix; the node replies
-    /// with the new durable compaction floor.
-    async fn compact(&self, req: Compact) -> Result<CompactAck, RpcError>;
-}
-
-/// Parse an IP (which may lack a port) into a [`NetworkAddress`], defaulting to
+/// Parse an IP (which may lack a port) into a socket-address string, defaulting to
 /// port 4500 (the moonpool sim convention; production supplies a full address).
 ///
 /// # Errors
 ///
 /// Returns an error if `ip` is not a parseable network address.
-pub fn parse_addr(ip: &str) -> SimulationResult<NetworkAddress> {
+pub fn parse_addr(ip: &str) -> SimulationResult<String> {
     let addr_str = if ip.contains(':') {
         ip.to_string()
     } else {
         format!("{ip}:4500")
     };
-    NetworkAddress::parse(&addr_str)
+    addr_str
+        .parse::<SocketAddr>()
+        .map(|addr| addr.to_string())
         .map_err(|e| SimulationError::InvalidState(format!("bad addr: {e}")))
 }
 
@@ -428,24 +379,29 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
 /// core's `ctx` token.
 #[derive(Default)]
 struct ClientWaiters {
-    pending: BTreeMap<Slot, Vec<(u64, ReplyPromise<ProposeAck>)>>,
-    pending_reads: BTreeMap<u64, (u64, u64, ReplyPromise<ReadAck>)>,
+    pending: BTreeMap<Slot, Vec<(u64, ReplySender<ProposeAck>)>>,
+    pending_reads: BTreeMap<u64, (u64, u64, ReplySender<ReadAck>)>,
 }
 
 /// The driver's outbound side: everything needed to put one message on the wire —
-/// the transport, the membership map, and this node's id for the observability
+/// the gRPC clients, the task provider, and this node's id for observability
 /// events. Bundled so `drain_ready` takes one parameter instead of three.
-struct Outbound<'a, P: Providers> {
-    transport: &'a Arc<NetTransport<P>>,
-    addrs: &'a BTreeMap<NodeId, NetworkAddress>,
+struct PeerQueues {
+    regular: tokio::sync::mpsc::Sender<Vec<u8>>,
+    snapshot: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+struct Outbound {
+    peer_queues: BTreeMap<NodeId, PeerQueues>,
     /// This node's id, for the observability events.
     self_id: u64,
 }
 
-impl<P: Providers> Outbound<'_, P> {
-    /// Put `msg` on the wire (fire-and-forget) and surface the send. `msg_sent`
-    /// records what genuinely left the node, so a `msg_sent` with no matching
-    /// `msg_received` means exactly "the network lost it".
+impl Outbound {
+    /// Hand `msg` to the lossy per-peer transport and surface the protocol send.
+    /// `msg_sent` deliberately records the core's outbound decision even when
+    /// the bounded mailbox or network later drops it; safety oracles inspect the
+    /// messages a proposer attempted, independently of delivery.
     fn transmit(&self, to: NodeId, msg: &Message) {
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
@@ -494,25 +450,115 @@ impl<P: Providers> Outbound<'_, P> {
                 None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
             },
         }
-        if let Some(addr) = self.addrs.get(&to) {
-            let client = Paros::client_well_known(addr.clone(), WLTOKEN_PAROS, self.transport);
-            let _ = client.deliver.send(msg.clone());
+        if let Some(queues) = self.peer_queues.get(&to) {
+            let Ok(message) = serde_json::to_vec(msg) else {
+                tracing::warn!(
+                    node = self.self_id,
+                    to = to.0,
+                    "failed to encode Paxos message"
+                );
+                return;
+            };
+            let queue = if matches!(msg, Message::InstallSnapshot { .. }) {
+                &queues.snapshot
+            } else {
+                &queues.regular
+            };
+            if queue.try_send(message).is_err() {
+                tracing::debug!(
+                    node = self.self_id,
+                    to = to.0,
+                    "dropped Paxos message because peer gRPC mailbox is unavailable"
+                );
+            }
         }
     }
+}
+
+/// Feed bounded unary batches over one reconnecting h2 channel per peer. While
+/// a batch is in flight, new protocol messages accumulate for the next batch;
+/// on failure Paxos heartbeats/resends repair anything lost with that RPC.
+async fn run_peer_delivery<P: Providers>(
+    client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
+    time: P::Time,
+    shutdown: CancellationToken,
+    mut messages: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let mut carried = None;
+    loop {
+        let first = if let Some(message) = carried.take() {
+            message
+        } else {
+            moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                message = messages.recv() => {
+                    let Some(message) = message else {
+                        return;
+                    };
+                    message
+                }
+            }
+        };
+        let mut attempt_client = client.clone();
+        let (batch, next) = delivery_batch(first, &mut messages);
+        carried = next;
+        let outcome = moonpool_core::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            result = time.timeout(GRPC_DELIVERY_TIMEOUT, attempt_client.deliver(batch)) => result,
+        };
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => tracing::debug!(%status, "peer gRPC delivery failed"),
+            Err(_) => tracing::debug!("peer gRPC delivery timed out"),
+        }
+    }
+}
+
+fn delivery_batch(
+    mut first: Vec<u8>,
+    messages: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> (internal::Deliver, Option<Vec<u8>>) {
+    // Do not spend the eventual-synchrony tail replaying a bounded but stale
+    // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
+    // protocol's current heartbeat, Accept resend, and catch-up paths repair
+    // them. Keep the newest batch so recovery signals can overtake old ballots.
+    while messages.len() >= GRPC_DELIVERY_BATCH {
+        let Ok(newer) = messages.try_recv() else {
+            break;
+        };
+        first = newer;
+    }
+    let mut batch = Vec::with_capacity(GRPC_DELIVERY_BATCH);
+    let mut batch_bytes = first.len();
+    batch.push(first);
+    let mut carried = None;
+    while batch.len() < GRPC_DELIVERY_BATCH {
+        let Ok(message) = messages.try_recv() else {
+            break;
+        };
+        if batch_bytes.saturating_add(message.len()) > GRPC_DELIVERY_BATCH_BYTES {
+            carried = Some(message);
+            break;
+        }
+        batch_bytes += message.len();
+        batch.push(message);
+    }
+    (internal::Deliver { messages: batch }, carried)
 }
 
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<P, S, H>(
+fn drain_ready<S, H>(
     node: &mut RawNode,
     storage: &mut S,
-    out: &Outbound<'_, P>,
+    out: &Outbound,
     waiters: &mut ClientWaiters,
     hooks: &H,
 ) -> SimulationResult<()>
 where
-    P: Providers,
     S: NodeStorage,
     H: DriverHooks,
 {
@@ -608,7 +654,7 @@ where
         }
         if let Some(replies) = waiters.pending.remove(slot) {
             for (seq, w) in replies {
-                w.send(ProposeAck {
+                let _ = w.send(ProposeAck {
                     seq,
                     leader: Some(self_id),
                     committed: true,
@@ -624,7 +670,7 @@ where
     //     index): that is the local state actually served.
     for state in &read_states {
         if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
-            waiter.send(ReadAck {
+            let _ = waiter.send(ReadAck {
                 seq,
                 leader: Some(self_id),
                 committed: true,
@@ -869,7 +915,7 @@ fn maintain<P: Providers, H: DriverHooks>(
         // than burning its deadline (writes time out instead, on purpose —
         // their slot may still commit under the new leader).
         for (_, (seq, _, waiter)) in std::mem::take(&mut waiters.pending_reads) {
-            waiter.send(ReadAck {
+            let _ = waiter.send(ReadAck {
                 seq,
                 leader: node.leader().map(|n| n.0),
                 committed: false,
@@ -936,7 +982,7 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
 /// differ) and `S: NodeStorage` (the injected durable storage). The loop owns a
-/// [`RawNode`], serves the [`Paros`] RPC interface, feeds client proposals and
+/// [`RawNode`], serves the Paros gRPC interface, feeds client proposals and
 /// peer messages into the core, sends the core's outbound messages to the peers
 /// named in `members`, and ticks until `shutdown` fires.
 ///
@@ -951,7 +997,7 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 ///
 /// # Errors
 ///
-/// Returns an error if the transport fails to bind or listen on `local_addr`. May
+/// Returns an error if the gRPC server fails to bind or listen on `local_addr`. May
 /// also return a simulated crash marker ([`is_seam_crash`]) if `hooks` fires at a
 /// durability seam — the caller recovers by re-running `run_node` with fresh
 /// storage.
@@ -963,8 +1009,8 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
 pub async fn run_node<P, S, H>(
     providers: P,
     mut storage: S,
-    local_addr: NetworkAddress,
-    members: Vec<(NodeId, NetworkAddress)>,
+    local_addr: String,
+    members: Vec<(NodeId, String)>,
     shutdown: CancellationToken,
     hooks: &H,
 ) -> SimulationResult<()>
@@ -973,15 +1019,28 @@ where
     S: NodeStorage,
     H: DriverHooks,
 {
-    let transport = NetTransportBuilder::new(providers.clone())
-        .local_address(local_addr)
-        .build_listening()
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("node transport: {e}")))?;
+    // Every task spawned by this incarnation must stop when `run_node` exits,
+    // including a durability-seam error that immediately starts a replacement
+    // incarnation. This drop guard covers every `?` and return path.
+    let incarnation_shutdown = CancellationToken::new();
+    let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    // Serve the Paros interface at the well-known token. `svc.propose` /
-    // `svc.deliver` are typed receive streams the loop selects over.
-    let svc = Paros::well_known(&transport, WLTOKEN_PAROS);
+    let listener = providers
+        .network()
+        .bind(&local_addr)
+        .await
+        .map_err(|e| SimulationError::InvalidState(format!("node gRPC listener: {e}")))?;
+
+    // Tonic handlers run as h2 request tasks and forward into these typed
+    // queues. The loop remains the sole owner of RawNode.
+    let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel();
+    let grpc_service = tonic::service::Routes::new(ParosServer::new(rpc_service.clone()))
+        .add_service(ParosInternalServer::new(rpc_service))
+        .prepare();
+    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
+        keep_alive: Some(grpc_keep_alive()),
+        vectored_writes: true,
+    });
 
     // The sans-IO core, bootstrapped from durable storage.
     let mut node = RawNode::new(&storage);
@@ -989,13 +1048,75 @@ where
 
     replay_boot_state(&node, self_id);
 
-    let addrs: BTreeMap<NodeId, NetworkAddress> = members.into_iter().collect();
+    // Validate every origin before starting reconnecting-channel tasks. Once
+    // channels exist, there are no fallible setup steps before their drop guard
+    // is installed.
+    let peers = members
+        .into_iter()
+        .map(|(id, addr)| {
+            let origin = http::Uri::try_from(format!("http://{addr}"))
+                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+            Ok((id, addr, origin))
+        })
+        .collect::<SimulationResult<Vec<_>>>()?;
 
-    // The outbound side: transport + membership. Every message this incarnation
-    // sends goes through it.
+    let mut peer_channels = Vec::with_capacity(peers.len());
+    let peer_queues = peers
+        .into_iter()
+        .map(|(id, addr, origin)| {
+            let channel = ReconnectingChannel::new(&providers, addr, grpc_channel_config());
+            peer_channels.push(channel.clone());
+            let client = ParosInternalClient::with_origin(channel, origin);
+            let (regular_tx, regular_rx) = tokio::sync::mpsc::channel(GRPC_PEER_QUEUE_CAPACITY);
+            let (snapshot_tx, snapshot_rx) =
+                tokio::sync::mpsc::channel(GRPC_SNAPSHOT_QUEUE_CAPACITY);
+            providers
+                .task()
+                .spawn_task(
+                    "paros-grpc-peer-delivery",
+                    run_peer_delivery(
+                        client.clone(),
+                        providers.time().clone(),
+                        incarnation_shutdown.clone(),
+                        regular_rx,
+                    ),
+                )
+                .detach();
+            providers
+                .task()
+                .spawn_task(
+                    "paros-grpc-snapshot-delivery",
+                    run_peer_delivery(
+                        client,
+                        providers.time().clone(),
+                        incarnation_shutdown.clone(),
+                        snapshot_rx,
+                    ),
+                )
+                .detach();
+            (
+                id,
+                PeerQueues {
+                    regular: regular_tx,
+                    snapshot: snapshot_tx,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    // `close` is terminal and shared by every clone held by tonic clients. It
+    // cancels connect/backoff/keepalive work immediately when this incarnation
+    // exits, including simulated durability crashes that return via `?`.
+    let _peer_channel_guard = OnDrop::new(move || {
+        for channel in peer_channels {
+            channel.close();
+        }
+    });
+
+    // One reconnecting h2 channel per peer; cloned generated clients multiplex
+    // concurrent RPCs over that shared connection.
     let out = Outbound {
-        transport: &transport,
-        addrs: &addrs,
+        peer_queues,
         self_id,
     };
 
@@ -1012,14 +1133,28 @@ where
 
     loop {
         moonpool_core::select! {
-            Some((req, reply)) = svc.propose.recv() => {
+            accepted = listener.accept() => {
+                let (stream, addr) = accepted
+                    .map_err(|e| SimulationError::InvalidState(format!("gRPC accept: {e}")))?;
+                let connection = grpc_server.serve_connection_with_shutdown(
+                    stream,
+                    grpc_service.clone(),
+                    incarnation_shutdown.clone().cancelled_owned(),
+                );
+                providers.task().spawn_task("paros-grpc-server", async move {
+                    if let Err(error) = connection.await {
+                        tracing::warn!(%addr, %error, "gRPC connection ended");
+                    }
+                }).detach();
+            }
+            Some((req, reply)) = rpc.propose.recv() => {
                 // A client value → the leader (deduplicated by (client, seq)). The
                 // reply is held until the slot commits (ack-on-commit); a non-leader
                 // redirects immediately.
                 let seq = req.seq;
                 match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
                     ProposeResult::NotLeader(hint) => {
-                        reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
+                        let _ = reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
                         waiters.pending.entry(slot).or_default().push((seq, reply));
@@ -1032,13 +1167,13 @@ where
                         // told "applied" with no way for an oracle to check the
                         // claim against the applied prefix.
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
-                        reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
+                        let _ = reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
             }
-            Some((req, reply)) = svc.read.recv() => {
+            Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
                 // watermark, confirms it is still leader with a heartbeat-ack
                 // quorum round (no log write), and the reply is parked until the
@@ -1048,7 +1183,7 @@ where
                 let seq = req.seq;
                 match node.read_index(next_read_ctx) {
                     ReadIndexResult::NotLeader(hint) => {
-                        reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
+                        let _ = reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
                     }
                     ReadIndexResult::Pending => {
                         waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
@@ -1058,7 +1193,7 @@ where
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
             }
-            Some((msg, reply)) = svc.deliver.recv() => {
+            Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
                 // `paros_core::Message` is sent and received (no DTO). Surface the
                 // arrival (mirror of `msg_sent`) so the demo can pair sends with
@@ -1102,9 +1237,9 @@ where
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
-                reply.send(());
+                let _ = reply.send(());
             }
-            Some((req, reply)) = svc.compact.recv() => {
+            Some((req, reply)) = rpc.compact.recv() => {
                 // The application permits dropping the log prefix up to `up_to`.
                 // Only the leader admits it: it proposes a `Truncate` control
                 // command into the next slot, decided by ordinary Paxos and
@@ -1124,7 +1259,7 @@ where
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
-                reply.send(ack);
+                let _ = reply.send(ack);
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();
@@ -1154,7 +1289,7 @@ where
                     .collect();
                 for ctx in overdue {
                     if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
-                        waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
+                        let _ = waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;

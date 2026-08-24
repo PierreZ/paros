@@ -6,7 +6,7 @@
 //! non-instrumented build. `SIM_BINARIES` lists the deterministic-simulation
 //! binaries to drive under coverage.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::process::{self, Command};
 use std::time::Instant;
 
@@ -180,7 +180,7 @@ fn ensure_instrumentation_fresh(sancov_crates: &str) {
 
     // Crate names use underscores in `SANCOV_CRATES`; cargo package specs use the
     // hyphenated package name. Normalize before diffing/cleaning.
-    let to_pkgs = |s: &str| -> HashSet<String> {
+    let to_pkgs = |s: &str| -> BTreeSet<String> {
         s.split(',')
             .map(str::trim)
             .filter(|c| !c.is_empty())

@@ -95,7 +95,7 @@ sequenceDiagram
 ```
 
 In paros the piggybacked values are the `accepted` map inside `Message::Promise`
-(`paros-core/src/message.rs`), which `on_prepare` fills with every entry the
+(`crates/paros-core/src/message.rs`), which `on_prepare` fills with every entry the
 acceptor has accepted. The same trick is how a proposer or learner that *missed* a
 decision catches up: it proposes, the already-chosen value is piggybacked back to
 it, and it is forced to adopt that value, learning the consensus in the act of
@@ -126,7 +126,7 @@ stateDiagram-v2
 ```
 
 In paros the promise lives in `max_promised_ballot` and the accepted value in the
-per-slot `accepted` map (`paros-core/src/state.rs`). The promise rule is
+per-slot `accepted` map (`crates/paros-core/src/state.rs`). The promise rule is
 `ballot > max_promised_ballot` (`on_prepare`); the vote rule is
 `ballot >= max_promised_ballot` (`on_accept`). Everything else in the protocol
 exists only to feed these two acceptors' rules a safe value.

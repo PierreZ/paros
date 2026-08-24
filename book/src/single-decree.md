@@ -2,7 +2,7 @@
 
 The rest of this book explains with diagrams. This page is the real thing. The
 whole paros simulation, the node driver, the client workload, the oracles,
-moonpool's transport stack, and the simulated network, compiles to WebAssembly and
+the tonic gRPC stack over moonpool-hyper, and the simulated network, compiles to WebAssembly and
 runs **entirely in your browser tab**. Nothing talks to a server: logical time is
 driven by the simulation's event queue, so a seed plays out here exactly as it does
 in CI.

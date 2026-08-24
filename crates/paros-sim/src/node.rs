@@ -9,7 +9,7 @@
 //! crash+restart: `run_node` unwinds, the volatile `RawNode` is dropped, and the
 //! next iteration rebuilds it from the durable [`StorageWorld`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -137,7 +137,7 @@ struct NodeDisk {
 /// a cluster-wide budget.
 #[derive(Default)]
 struct StorageWorld {
-    disks: HashMap<String, NodeDisk>,
+    disks: BTreeMap<String, NodeDisk>,
 }
 
 /// A [`NodeStorage`] handle onto one node's slice of the shared [`StorageWorld`].

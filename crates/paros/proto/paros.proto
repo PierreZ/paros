@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package paros.v1;
+
+// Client-facing journal API. A future proxy can expose this contract while the
+// nodes keep their consensus protocol on the separate internal service.
+service Paros {
+  rpc Propose(.paros.v1.Propose) returns (.paros.v1.ProposeAck);
+  rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
+  rpc Compact(.paros.v1.Compact) returns (.paros.v1.CompactAck);
+}
+
+message Propose {
+  uint64 client = 1;
+  uint64 seq = 2;
+  bytes command = 3;
+}
+
+message ProposeAck {
+  uint64 seq = 1;
+  optional uint64 leader = 2;
+  bool committed = 3;
+  optional uint64 slot = 4;
+}
+
+message Read {
+  uint64 client = 1;
+  uint64 seq = 2;
+}
+
+message ReadAck {
+  uint64 seq = 1;
+  optional uint64 leader = 2;
+  bool committed = 3;
+  optional uint64 read_index = 4;
+}
+
+message Compact {
+  uint64 up_to = 1;
+}
+
+message CompactAck {
+  optional uint64 leader = 1;
+  bool accepted = 2;
+  uint64 first_slot = 3;
+}

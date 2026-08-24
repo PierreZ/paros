@@ -11,17 +11,18 @@
 //! and a `parosd` binary land here too, once the protocol stabilizes.
 
 mod driver;
+mod grpc;
 mod hooks;
 mod storage;
 
 pub use driver::{
-    Compact, CompactAck, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
+    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
     EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
     EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
     EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_OFFERED, EV_SYNCED, Paros, Propose, ProposeAck, Read, ReadAck, WLTOKEN_PAROS,
-    is_seam_crash, parse_addr, run_node,
+    EV_SNAPSHOT_OFFERED, EV_SYNCED, is_seam_crash, parse_addr, run_node,
 };
+pub use grpc::{Compact, CompactAck, ParosClient, Propose, ProposeAck, Read, ReadAck};
 pub use hooks::{DriverHooks, NoHooks, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
@@ -135,8 +136,8 @@ mod tests {
         ]
     }
 
-    /// The driver puts `paros_core::Message` on the wire directly (no DTO): every
-    /// variant must serde round-trip losslessly.
+    /// The gRPC `Deliver` envelope keeps the core message opaque, so every
+    /// variant must round-trip through its stable serde payload losslessly.
     #[test]
     fn message_serde_round_trips() {
         for msg in every_variant() {

@@ -16,7 +16,7 @@ on. Two islands, one parliament.
 
 ## What it is
 
-The design is **sans-IO**: [`paros-core`](paros-core) is a pure synchronous state machine
+The design is **sans-IO**: [`paros-core`](crates/paros-core) is a pure synchronous state machine
 (`step` / `tick` in, one `Ready` out, an `advance()` handshake) with no I/O, no clock, and no
 randomness. An async driver built on [moonpool](https://github.com/PierreZ/moonpool) wraps it
 and performs all side effects, honoring the persist-before-send rule at the heart of Paxos
@@ -33,10 +33,10 @@ simulation that runs in CI also runs in your browser.
 
 | Crate | Role |
 |-------|------|
-| [`paros-core`](paros-core) | sans-IO Multi-Paxos state machine: zero deps, std-only, wasm-safe |
-| [`paros`](paros) | the provider-generic node driver, default storage, and RPC contract |
-| [`paros-sim`](paros-sim) | the deterministic-simulation harness: workloads and oracles |
-| [`paros-wasm-demo`](paros-wasm-demo) | the browser visualization (GitHub Pages) |
+| [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: zero deps, std-only, wasm-safe |
+| [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
+| [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: workloads and oracles |
+| [`paros-wasm-demo`](crates/paros-wasm-demo) | the browser visualization (GitHub Pages) |
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.

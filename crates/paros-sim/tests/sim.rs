@@ -3,7 +3,7 @@
 //! safety-and-progress sweep under arbitrary network faults (prefix agreement, no
 //! gaps, monotonic leadership, and progress under eventual synchrony).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use paros_sim::{REGRESSION_SEEDS, SMOKE_ITERATIONS, explore, run_seed, run_seed_json};
 
@@ -62,7 +62,7 @@ fn chaotic_run_is_well_formed() {
     // Prefix agreement spot-check at the data level: any slot two nodes both
     // chose carries the same value hash (a readable failure complementing the
     // oracle).
-    let mut by_slot: HashMap<u64, u64> = HashMap::new();
+    let mut by_slot: BTreeMap<u64, u64> = BTreeMap::new();
     for c in &r.chosen {
         if let Some(prev) = by_slot.insert(c.slot, c.vhash) {
             assert_eq!(
