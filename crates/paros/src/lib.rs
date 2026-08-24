@@ -22,7 +22,10 @@ pub use driver::{
     EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_OFFERED, EV_SYNCED, is_seam_crash, parse_addr, run_node,
 };
-pub use grpc::{Compact, CompactAck, ParosClient, Propose, ProposeAck, Read, ReadAck};
+pub use grpc::{
+    Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
+    ProposeAck, Read, ReadAck,
+};
 pub use hooks::{DriverHooks, NoHooks, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
@@ -39,6 +42,7 @@ mod tests {
     use paros_core::{
         Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
     };
+    use prost::Message as ProstMessage;
 
     /// One representative of every `Message` variant.
     fn every_variant() -> Vec<Message> {
@@ -52,12 +56,13 @@ mod tests {
             value: Value(vec![1, 2, 3]),
         };
         let command = Command::User(entry.clone());
-        // A control command in the accepted suffix exercises `Command::Control`
-        // serde alongside the client-entry case.
+        // Control commands in the accepted suffix exercise both protobuf
+        // control variants alongside the client-entry case.
         let control = Command::Control(Control::Truncate { up_to: Slot(3) });
         let mut accepted = BTreeMap::new();
         accepted.insert(Slot(5), (ballot, command.clone()));
         accepted.insert(Slot(6), (ballot, control));
+        accepted.insert(Slot(7), (ballot, Command::Control(Control::Noop)));
         let mut catchup = BTreeMap::new();
         catchup.insert(Slot(4), (ballot, command.clone()));
         vec![
@@ -136,14 +141,20 @@ mod tests {
         ]
     }
 
-    /// The gRPC `Deliver` envelope keeps the core message opaque, so every
-    /// variant must round-trip through its stable serde payload losslessly.
+    /// Every domain variant must round-trip through the typed protobuf contract
+    /// losslessly before the driver is allowed to put it on the wire.
     #[test]
-    fn message_serde_round_trips() {
+    fn message_protobuf_round_trips() {
         for msg in every_variant() {
-            let json = serde_json::to_string(&msg).expect("serialize");
-            let back: Message = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(msg, back, "serde round-trip must be lossless for {msg:?}");
+            let wire = crate::grpc::message_to_proto(&msg).expect("encode protobuf DTO");
+            let bytes = wire.encode_to_vec();
+            let decoded = crate::grpc::internal::ConsensusMessage::decode(bytes.as_slice())
+                .expect("decode protobuf bytes");
+            let back = crate::grpc::message_from_proto(decoded).expect("decode protobuf DTO");
+            assert_eq!(
+                msg, back,
+                "protobuf round-trip must be lossless for {msg:?}"
+            );
         }
     }
 }

@@ -1,9 +1,11 @@
-//! Native smoke runner: `cargo run -p paros-sim-runner [seed]` first drives the
-//! `UntilCoverageStable` safety sweep (swarm network chaos + the three Paxos
-//! safety invariants), then runs one seed and prints its message timeline. The
-//! browser calls the exact same [`paros_sim::run_seed`] under the hood.
+//! Native Chain-of-Blocks campaign runner. `cargo xtask sim run paros-chain`
+//! drives the coverage-guided + frontier-exploration gate, then prints one legacy
+//! visualization timeline for the browser contract.
 
-use paros_sim::{COVERAGE_ITERATIONS, Outcome, explore, run_seed, run_seed_json};
+use paros_sim::{
+    AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome, SimulationReport,
+    explore, explore_network_safety, run_seed, run_seed_json,
+};
 
 fn main() {
     let seed = std::env::args()
@@ -18,7 +20,7 @@ fn main() {
         .unwrap_or(COVERAGE_ITERATIONS);
 
     // 1. The DST bug-finding sweep: many seeds of swarm chaos, asserting safety.
-    println!("--- safety sweep (UntilCoverageStable, swarm network chaos) ---");
+    println!("--- Chain-of-Blocks campaign (coverage + exploration) ---");
     let report = explore(iterations);
     let stop = if report.convergence_timeout {
         "hit the iteration cap (did NOT saturate)"
@@ -40,6 +42,19 @@ fn main() {
             s.plateau_seeds,
         );
     }
+    if let Some(exploration) = &report.exploration {
+        println!(
+            "  exploration: {} timelines, {} expansions, {} discoveries, {} bugs",
+            exploration.total_timelines,
+            exploration.expansions,
+            exploration.discoveries,
+            exploration.bugs_found,
+        );
+        for recipe in &exploration.bug_recipes {
+            println!("  bug recipe seed={} {:?}", recipe.seed, recipe.recipe);
+        }
+    }
+    print_guidance(&report);
     // Name the `sometimes`/`reachable` gates that never fired. Saturation is the
     // sweep's real exit criterion, and "did not saturate" is useless without
     // knowing *which* gate is starving — that is the knob to tune.
@@ -49,20 +64,28 @@ fn main() {
             println!("    - {gate}");
         }
     }
-    if report.assertion_violations.is_empty() && report.failed_runs == 0 {
-        println!("  no safety violations — single-decree Paxos chose at most one value");
+    if report.assertion_violations.is_empty()
+        && report.failed_runs == 0
+        && report.coverage_violations.is_empty()
+        && !report.convergence_timeout
+    {
+        println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", report.coverage_violations);
+        println!("  CONVERGENCE TIMEOUT: {}", report.convergence_timeout);
         println!(
             "  FAILING SEEDS (replay with run_seed): {:?}",
             report.seeds_failing
         );
         // This runner is the coverage-guided sweep gate (`cargo xtask sim`): a
-        // safety violation or a failed run must fail the process so CI catches it.
+        // Any correctness, coverage, or saturation defect must fail CI.
         std::process::exit(1);
     }
 
-    // 2. A single seed, with its full message timeline for eyeballing.
+    run_network_axis();
+
+    // 3. A single seed, with its full message timeline for eyeballing.
     println!("\n--- single seed timeline ---");
     let result = run_seed(seed);
 
@@ -93,4 +116,63 @@ fn main() {
     // Print the JSON the browser would receive, so the wire format is eyeballable.
     println!("\n--- JSON (what runSeed returns to the browser) ---");
     println!("{}", run_seed_json(seed));
+}
+
+fn print_guidance(report: &SimulationReport) {
+    for detail in &report.assertion_details {
+        match detail.kind {
+            AssertKind::NumericSometimes | AssertKind::NumericAlways => println!(
+                "  guidance {:?}: best watermark {}",
+                detail.msg, detail.watermark,
+            ),
+            AssertKind::BooleanSometimesAll => println!(
+                "  guidance {:?}: frontier {}/{}, {} combinations",
+                detail.msg, detail.frontier, detail.frontier_target, detail.combinations_seen,
+            ),
+            _ => {}
+        }
+    }
+    for bucket in &report.bucket_summaries {
+        println!(
+            "  buckets {:?}: {} discovered, {} hits",
+            bucket.msg, bucket.buckets_discovered, bucket.total_hits,
+        );
+    }
+}
+
+/// Network faults persist past Moonpool's cutoff in the pinned revision, so
+/// this is a safety axis rather than a false quiet-tail liveness claim.
+fn run_network_axis() {
+    println!("\n--- Chain network-swarm safety axis ---");
+    let network = explore_network_safety(NETWORK_COVERAGE_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed; convergence_timeout={}",
+        network.iterations,
+        network.successful_runs,
+        network.failed_runs,
+        network.convergence_timeout,
+    );
+    if let Some(s) = &network.saturation {
+        println!(
+            "  signal {:?}: {}/{} reachability fired, plateau {}",
+            s.signal, s.sometimes_hit, s.sometimes_total, s.plateau_seeds,
+        );
+    }
+    if !network.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &network.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !network.assertion_violations.is_empty()
+        || network.failed_runs > 0
+        || !network.coverage_violations.is_empty()
+        || network.convergence_timeout
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", network.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", network.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", network.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Network-swarm Chain safety gate is green");
 }
