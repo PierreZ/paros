@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
@@ -35,6 +36,7 @@ struct ChainConfig {
     request_timeout_ms: u64,
     pause_ms: u64,
     compact_every: u64,
+    pipeline_depth: usize,
     recovery_budget_ms: u64,
 }
 
@@ -47,7 +49,8 @@ impl ChainConfig {
             request_timeout_ms: buggify_knob!(1500_u64, 350_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
-            recovery_budget_ms: buggify_knob!(12_000_u64, 8_000_u64..20_001_u64),
+            pipeline_depth: buggify_knob!(8_usize, 4_usize..17_usize),
+            recovery_budget_ms: buggify_knob!(30_000_u64, 20_000_u64..45_001_u64),
         }
     }
 }
@@ -101,9 +104,17 @@ pub(crate) struct ChainWorkload {
     submitted: BTreeSet<u64>,
     final_state: Option<ChainState>,
     issued_count: u64,
+    safety_only: bool,
 }
 
 impl ChainWorkload {
+    pub(crate) fn network_safety() -> Self {
+        Self {
+            safety_only: true,
+            ..Self::default()
+        }
+    }
+
     fn enabled_operations() -> Vec<u8> {
         let enabled: Vec<u8> = (0..OP_COUNT).filter(|op| swarm_op_enabled(*op)).collect();
         if enabled.is_empty() {
@@ -231,8 +242,102 @@ impl Workload for ChainWorkload {
                 }
             }
         };
+        let compact_once = |target: usize, up_to: u64| {
+            let mut client = public_clients[target].clone();
+            let time = time.clone();
+            async move {
+                moonpool_sim::select! {
+                    response = client.compact(Compact { up_to }) => response
+                        .ok()
+                        .is_some_and(|response| response.into_inner().accepted),
+                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => false,
+                }
+            }
+        };
 
-        for _step in 0..config.steps {
+        // Start with a small concurrent batch when proposals are enabled. This
+        // is honest client pipelining: it lets Phase-2 rounds overlap a driver
+        // beat, making the optional re-send decision and a later election gap
+        // observable without fabricating or filtering protocol messages.
+        if operations.contains(&PROPOSE) {
+            let mut primer = Vec::with_capacity(config.pipeline_depth);
+            for offset in 0..config.pipeline_depth {
+                let seq = next_seq;
+                next_seq = next_seq.saturating_add(1);
+                let raw = ctx.random().random::<u64>();
+                let payload = Self::payload(
+                    u64::try_from(offset).unwrap_or(0).saturating_add(1),
+                    config.command_bytes,
+                    config.large_command_bytes,
+                    raw,
+                );
+                let cmd_hash = user_command_hash(&payload);
+                self.submitted.insert(cmd_hash);
+                tracing::info!(
+                    cmd = %hash_text(cmd_hash),
+                    seq,
+                    bytes = payload.len() as u64,
+                    "chain_command_submitted"
+                );
+                primer.push((seq, payload, cmd_hash, offset % server_count));
+            }
+            let results = join_all(primer.iter().map(|(seq, payload, _, target)| {
+                let attempt = propose_once(*target, *seq, payload.clone(), false);
+                let time = time.clone();
+                async move {
+                    moonpool_sim::select! {
+                        result = attempt => result,
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
+                    }
+                }
+            }))
+            .await;
+            for ((seq, _, cmd_hash, _), result) in primer.into_iter().zip(results) {
+                match result {
+                    ProposalResult::Acked { leader, slot } => {
+                        leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                        max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
+                        self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                        tracing::info!(
+                            cmd = %hash_text(cmd_hash),
+                            seq,
+                            slot,
+                            "chain_command_acked"
+                        );
+                        if let Some(node) = leader {
+                            tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                        }
+                    }
+                    ProposalResult::Rejected { leader } => {
+                        leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                        self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
+                        tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
+                    }
+                    ProposalResult::Ambiguous => {
+                        self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                        tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
+                    }
+                }
+            }
+            if let Some(up_to) = max_acked_slot {
+                let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
+                tracing::info!(
+                    cmd = %hash_text(command_hash(&control)),
+                    up_to,
+                    "chain_control_submitted"
+                );
+                if compact_once(leader_hint.unwrap_or(0), up_to).await {
+                    tracing::info!(up_to, "chain_compact_accepted");
+                }
+            }
+        }
+
+        let steps = if self.safety_only {
+            config.steps.min(16)
+        } else {
+            config.steps
+        };
+        for _step in 0..steps {
             if shutdown.is_cancelled() {
                 break;
             }
@@ -348,6 +453,18 @@ impl Workload for ChainWorkload {
                             if let Some(node) = leader {
                                 tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
                             }
+                            if seq.is_multiple_of(config.compact_every) {
+                                let control =
+                                    Command::Control(Control::Truncate { up_to: Slot(slot) });
+                                tracing::info!(
+                                    cmd = %hash_text(command_hash(&control)),
+                                    up_to = slot,
+                                    "chain_control_submitted"
+                                );
+                                if compact_once(leader_hint.unwrap_or(chosen_target), slot).await {
+                                    tracing::info!(up_to = slot, "chain_compact_accepted");
+                                }
+                            }
                         }
                         ProposalResult::Rejected { leader } => {
                             leader_hint = leader.and_then(|id| usize::try_from(id).ok());
@@ -371,14 +488,7 @@ impl Workload for ChainWorkload {
                             "chain_control_submitted"
                         );
                         let target = leader_hint.unwrap_or(target);
-                        let mut client = public_clients[target].clone();
-                        let accepted = moonpool_sim::select! {
-                            response = client.compact(Compact { up_to }) => response
-                                .ok()
-                                .is_some_and(|response| response.into_inner().accepted),
-                            _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => false,
-                            () = shutdown.cancelled() => false,
-                        };
+                        let accepted = compact_once(target, up_to).await;
                         if accepted {
                             tracing::info!(up_to, "chain_compact_accepted");
                         }
@@ -420,6 +530,32 @@ impl Workload for ChainWorkload {
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
         );
+
+        if self.safety_only {
+            let observation_end =
+                Duration::from_millis(CHAOS_DURATION_MS).saturating_add(Duration::from_secs(8));
+            if time.now() < observation_end {
+                time.sleep(observation_end.saturating_sub(time.now()))
+                    .await
+                    .ok();
+            }
+            self.issued_count = next_seq;
+            let applied_hashes: BTreeSet<String> = ctx
+                .observability()
+                .snapshot(EV_APPLIED)
+                .iter()
+                .filter_map(|event| event.str("cmd").map(str::to_owned))
+                .collect();
+            for (cmd_hash, outcome) in &self.outcomes {
+                if matches!(outcome, Outcome::Acked { .. }) {
+                    assert_always!(
+                        applied_hashes.contains(&hash_text(*cmd_hash)),
+                        "chain: every acknowledged command was applied"
+                    );
+                }
+            }
+            return Ok(());
+        }
 
         // Driver perturbations and attrition stop at the cutoff. Provider-level
         // turbulence may continue, so recovery is retry-based rather than a claim
@@ -566,16 +702,18 @@ impl Workload for ChainWorkload {
                 .all(|outcome| outcome.seq() < self.issued_count),
             "chain: retained outcome model is internally valid"
         );
-        assert_always!(
-            self.final_state
-                .is_some_and(|state| self.outcomes.values().all(|outcome| {
-                    match outcome {
-                        Outcome::Acked { slot, .. } => *slot < state.applied_count,
-                        Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
-                    }
-                })),
-            "chain: retained acknowledged slots are valid"
-        );
+        if !self.safety_only {
+            assert_always!(
+                self.final_state
+                    .is_some_and(|state| self.outcomes.values().all(|outcome| {
+                        match outcome {
+                            Outcome::Acked { slot, .. } => *slot < state.applied_count,
+                            Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
+                        }
+                    })),
+                "chain: retained acknowledged slots are valid"
+            );
+        }
         Ok(())
     }
 }

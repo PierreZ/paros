@@ -167,6 +167,7 @@ fn log_grows_under_a_stable_leader() {
 #[test]
 fn safety_holds_under_chaos_smoke() {
     let report = chain_smoke(SMOKE_ITERATIONS);
+    report.eprint();
 
     assert!(
         report.assertion_violations.is_empty(),

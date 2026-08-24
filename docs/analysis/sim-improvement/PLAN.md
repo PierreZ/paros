@@ -10,7 +10,7 @@ this workspace. References written as `/workspace/...` in the session brief are 
 
 | Question | Paros/Moonpool representation and decision |
 |---|---|
-| What is restarted when a server crashes? | Moonpool kills and recreates a `NodeProcess` from its process factory. The recreated adapter invokes the same provider-generic `paros::run_node` as production. The `RawNode`, driver loop, queues, connections, waiters, role, timers, and hook object are volatile. |
+| What is restarted when a server crashes? | Moonpool kills and recreates a `NodeProcess` from its process factory. The recreated adapter invokes the same provider-generic `paros::run_node` as production. The `RawNode`, driver loop, queues, connections, waiters, role, timers, and hook object are volatile. Clean-crash recovery is delayed 1.2–2.5 simulated seconds so a regional-latency pipeline can commit and truncate past the absent replica. |
 | What persists across a reboot? | Only state in the iteration's `StorageWorld`: durable `HardState`, accepted records, compaction floor, opaque application snapshot, and the Chain application state. Staged but unsynced consensus writes do not survive. Process fields are never recovery state. `prob_wipe` remains `0`; promise amnesia is out of scope. |
 | What drives client operations? | A factory-created `ChainWorkload`, fresh for every timeline, using only `SimContext` providers. Its stable operation alphabet is `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, and `PAUSE=4`. `.swarm_operations()` filters that alphabet without changing its IDs. |
 | What is the independent expected result? | A small `BTreeMap<cmd_hash, Outcome>` with `Acked`, `Rejected`, or `Ambiguous`, plus the attempted `(client, seq)` and observed slot where known. It records submitted command hashes and terminal observations; it does not reimplement Paxos or predict leader/election state. Chain agreement is computed independently from application facts emitted by every replica. |
@@ -33,15 +33,15 @@ persists it in `StorageWorld`; protocol behavior does not move into `paros-sim`.
 The Chain state is:
 
 ```text
-(applied_slot, applied_count, chain_hash)
+(applied_count, chain_hash)
 chain_hash[n + 1] = FNV1a64(chain_hash[n].to_le_bytes || encode(command[n + 1]))
 ```
 
 The encoding has a variant tag and includes all user bytes, or the `Truncate.up_to` slot, or the
 `Noop` tag. `command_hash` is FNV-1a over that command encoding. Fixed-width little-endian fields
 make the representation deterministic and dependency-free. The application snapshot has a version
-byte followed by the three fixed-width fields. The extra `applied_slot` is recovery metadata; the
-checked application value remains `(applied_count, chain_hash)`.
+byte followed by the two fixed-width fields. The applied slot is derived as `applied_count - 1`,
+so no redundant recovery field can disagree with the checked application value.
 
 The sim storage makes apply idempotent by slot. A reboot starts with the stored application
 snapshot/state, then replays retained chosen records from `applied_slot + 1` through the durable
@@ -215,9 +215,12 @@ instance workload, `before_iteration`, or custom fault injector. Implementation 
 verify the same seed produces the same trace/report twice, all ordering decisions use ordered
 collections, and no simulated path uses Tokio/std time or OS randomness.
 
-The registered campaign will use `enable_exploration(ExplorationConfig { workers: 0, ... })` and
-`until_coverage_stable(plateau, cap)`. `workers > 0` remains disabled because the standalone fork
-boundary has not been audited. The oracle proof sequence is:
+The registered campaign uses `enable_exploration(ExplorationConfig { workers: 0,
+max_runs_per_seed: 8, ... })` and `until_coverage_stable(plateau, cap)`. Eight is a ceiling, not a
+quota: it allows real branch continuation but keeps the sancov gate suitable for CI; roots with no
+new frontier stop after one timeline. An initial ceiling of 64 was rejected after the full gate ran
+for roughly fifteen minutes without completing. `workers > 0` remains disabled because the
+standalone fork boundary has not been audited. The oracle proof sequence is:
 
 1. Temporarily plant a one-node Chain transition divergence.
 2. Run a one-seed/small sweep and record a red seed for `ChainAgreement`.
@@ -232,11 +235,13 @@ boundary has not been audited. The oracle proof sequence is:
 
 | Claim | Seed/recipe/result |
 |---|---|
-| Deliberately planted divergence is caught | Pending Phase 3. |
-| Fresh-builder recipe replay reproduces it | Pending Phase 5. |
-| Same seed produces the same trace twice | Pending Phase 5. |
-| Real bugs found and fixed | None yet. |
-| Final Chain campaign is green and saturated | Pending final validation. |
+| Deliberately planted divergence is caught | Seed `42`: temporarily XORing replica 0's Chain hash at application index 4 produced 14 failures of `chain: one state per applied index` out of 51 application comparisons. The plant was removed; the oracle remains. |
+| Fresh-builder recipe replay reproduces it | Root seed `1`, 16 in-process timelines, 11 planted failures. First non-empty recipe: `[(6820, 10903003804631517020)]`. `replay_chain` constructed a fresh builder and reproduced exactly one `chain: one state per applied index` failure. The temporary BUGGIFY-gated plant and validation-only test were then removed. |
+| Same seed produces the same trace twice | `same_seed_replays_identically` runs seeds `1`, `42`, and `12345` twice through independent builders and compares the serialized timelines byte-for-byte. It passed on the final Moonpool `3a0b2cb2` pin. |
+| Real bugs found and fixed | Seed `9708989754240691684`: a provider bit flip changed a parseable JSON `Commit` payload after the proposer-side `Accept` trace. Node 0 applied an unsubmitted hash at Chain index 9; the existing chosen/accepted agreement oracles also went red. Root cause: `internal.v1.Deliver` carried opaque bytes without end-to-end integrity. Fix: each internal message now carries an FNV-1a checksum, verified before JSON decode/dispatch; corruption becomes a dropped RPC repaired by Paxos. Exact seed replays green and is pinned in `CHAIN_REGRESSION_SEEDS`. |
+| Recovery timing witness | Seed `11811656051295404958`: every pre-cutoff Ready batch crashed after sync/before send, then the three-region cluster needed 26.1 simulated seconds to elect and converge. The 8–20 s buggified recovery budget produced a liveness false positive; widening the born-buggifiable budget to 20–45 s made the exact seed green. It is pinned in `CHAIN_REGRESSION_SEEDS`. |
+| Guidance and bucket depth | Final-pin 50-root smoke: applied-index watermark `34`; failover frontier `3/3` with six truth combinations; 18 identity buckets across three sites, including 14 Chain state-frontier buckets. It observed two snapshot installs and reconciled three ambiguous proposals as committed. |
+| Final Chain campaign is green and saturated | `cargo xtask sim run paros-chain` on Moonpool `3a0b2cb2`: main axis saturated after 56/56 green roots with 33/33 reachability contracts, 5,361/15,746 LLVM edges, an eight-root plateau, 119 explored timelines, 15 expansions, and 83 discoveries. The masked Network Swarm safety axis saturated after 152/152 green roots with 6/6 contracts and a 32-root plateau. Zero failed roots, assertion violations, coverage violations, exploration bugs, or convergence timeouts; total 9m13s. |
 
 ## Source/documentation discrepancies and decisions
 
@@ -251,10 +256,40 @@ boundary has not been audited. The oracle proof sequence is:
 - Adaptive saturation observes boolean contracts and selected code coverage; numeric/bucket
   guidance is valuable but does not close the gate. The runner must inspect coverage violations and
   convergence timeout explicitly.
+- The sancov plateau is eight consecutive roots, slightly below Moonpool's ten-root default because
+  every Chain root may also execute up to eight frontier continuations. A 96-root hard cap provides
+  ample headroom. Trial runs with a 64-root quiet window hit both 64- and 96-root caps despite all
+  34 reachability contracts firing and 96/96 roots remaining safety-green; that window measured
+  long-tail edge novelty, but made the mandatory CI gate take 17 minutes without establishing a
+  practical stopping point.
 - The initial Chain campaign remains a three-node cluster. Selecting exactly 3-or-5 members is a
   builder-level decision made before timeline BUGGIFY is initialized; pretending it is a workload
   knob would be dishonest. A separate five-node factory/campaign can be added after the three-node
   campaign saturates, without changing protocol code or operation identities.
+- Explicit `Network(Random)` and `Network(Swarm)` were both validated against seed `42` and shown
+  to make the required post-cutoff liveness contract unsound with the current Moonpool semantics:
+  the provider configuration continued producing election churn through the entire recovery
+  budget, with no value chosen. The main liveness/exploration campaign therefore uses Moonpool's
+  healthy three-region link latency plus bounded attrition, driver BUGGIFY, operation swarm, and
+  knob chaos. Explicit Random/Swarm network configurations are safety-only axes until Moonpool can
+  restore provider configuration at `chaos_duration`; they are not falsely reported as a quiet-tail
+  liveness proof.
+- Moonpool's pinned network surface has TCP write clogs, interval partitions, corruption, partial
+  I/O, and connection close, but no independent message drop or reorder. TCP ordering means those
+  faults remove contiguous traffic intervals rather than the isolated earlier `Accept` needed for
+  a later slot to decide above a hole. A dedicated network-swarm Chain safety axis ran 256 green
+  roots (45,099,438 promise-monotonicity checks; 1,757,073 chosen-agreement checks) and still
+  applied zero `Noop`s, even with an eight-entry pipeline, an eight-second observation tail, and a
+  temporarily increased 2% resignation firing probability. The required Noop `assert_sometimes!`
+  is therefore blocked on a Moonpool per-message loss/reorder capability; it is retained as an
+  opportunistic `assert_reachable!` and the existing `GapFillOracle` remains an always-safety gate.
+- Moonpool issue [#174](https://github.com/PierreZ/moonpool/issues/174) exposed that the old pin had
+  no exploration-compatible per-family network override. Moonpool
+  [PR #175](https://github.com/PierreZ/moonpool/pull/175) added a deterministic
+  `NetworkFaultMask`; paros now pins merge commit `3a0b2cb2` and removes `NetworkFault::BitFlip`
+  from both Chain builders and the legacy timeline builder while retaining every other selected
+  fault family. The internal RPC checksum remains defense in depth, but the campaign no longer
+  relies on corrupting application payloads to model ordinary network turbulence.
 
 ## Validation ledger
 

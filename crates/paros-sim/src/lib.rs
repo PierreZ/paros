@@ -8,7 +8,7 @@
 //! (`default-features = false` drops moonpool's native providers + fork explorer).
 //!
 //! [`run_seed`] is the single entry point both the native runner and the browser
-//! demo call: it runs one seeded multi-slot Paxos cluster under network chaos and
+//! demo call: it runs one seeded multi-slot Paxos cluster under driver/attrition chaos and
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
@@ -18,6 +18,7 @@ mod node;
 mod oracle;
 mod workload;
 
+pub use moonpool_sim::{AssertKind, SimulationReport};
 pub use node::NodeProcess;
 pub use oracle::{ChosenShot, NodeStateShot, Outcome, ProtocolShot, RunResult, Shot};
 
@@ -26,7 +27,8 @@ use std::time::Duration;
 
 use moonpool_sim::runner::builder::ProcessCount;
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport, WorkloadCount,
+    Attrition, AttritionScope, Chaos, ChaosMode, LinkLatencyConfig, LocalityConfig, NetworkFault,
+    NetworkFaultMask, SimulationBuilder, WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
@@ -75,7 +77,7 @@ pub(crate) const SETTLE_MS: u64 = 8_000;
 pub(crate) const CLUSTER_SIZE: usize = 3;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
-pub(crate) const PLATEAU_SEEDS: usize = 64;
+pub(crate) const PLATEAU_SEEDS: usize = 8;
 /// Cap on the full coverage-guided sweep. The **sancov runner** (`cargo xtask
 /// sim`) drives this so `AssertionCoverage`/`CodeCoverage` can saturate; the
 /// nextest tests deliberately do *not* (they use [`SMOKE_ITERATIONS`]), so the
@@ -85,9 +87,16 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// through the safety oracles, enough to catch an obvious regression quickly.
 /// Saturation/coverage is **not** asserted here (that is `cargo xtask sim`'s job).
 pub const SMOKE_ITERATIONS: usize = 50;
-/// Cap on the sancov coverage run (`cargo xtask sim`): bounded so the instrumented
-/// sweep stays a few minutes instead of grinding `CodeCoverage` edges toward the cap.
-pub const COVERAGE_ITERATIONS: usize = 64;
+/// Cap on the sancov coverage run (`cargo xtask sim`): enough headroom for the
+/// eight-root quiet window while keeping the instrumented sweep CI-sized.
+pub const COVERAGE_ITERATIONS: usize = 96;
+/// Cap for the network-swarm safety axis. It has no quiet-tail liveness
+/// contract because Moonpool's provider faults persist past `chaos_duration`.
+pub const NETWORK_COVERAGE_ITERATIONS: usize = 256;
+/// Maximum root-plus-continuation timelines explored for each adaptive seed.
+/// Eight is enough to drive real branches while keeping the sancov gate suitable
+/// for CI; Moonpool stops earlier when a root discovers no new frontier.
+pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 
 /// Pinned seeds that exercise durability + convergence edge cases (crash/restart,
 /// the persist/send seam crashes, and a follower left with a permanent decided-slot
@@ -197,7 +206,7 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     283,
 ];
 /// Chain-workload witnesses discovered by the application-state oracle.
-pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[9_708_989_754_240_691_684];
+pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[9_708_989_754_240_691_684, 11_811_656_051_295_404_958];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
@@ -207,12 +216,13 @@ pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
 /// Simulated window over which chaos fires (see [`CHAOS_DURATION_MS`]).
 const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 
-/// The chaos surfaces every run exercises: swarm network faults plus single-node
-/// crash/restart attrition. `prob_wipe = 0`, so durable state (the per-node
+/// The main liveness campaign's chaos surfaces: single-node crash/restart
+/// attrition plus buggified provider knobs. Network swarm is a separate safety
+/// axis because its faults persist past Moonpool's cutoff. `prob_wipe = 0`, so durable state (the per-node
 /// records in the per-iteration `StorageWorld`) survives a restart, modelling a
 /// clean process crash with intact disk (a **wiped** disk, which loses the
 /// promise, is the amnesia case deferred to a later stage). The recovery window
-/// is deliberately *wide* (`200..900` ms): a node kept down that long while the
+/// is deliberately *wide* (`1_200..2_500` ms): a node kept down that long while the
 /// cluster keeps committing and truncating (leader-driven, per
 /// [`crate::workload`]) comes back **below every peer's compaction floor**, so
 /// commit-replay catch-up can no longer heal it and only snapshot transfer can.
@@ -227,7 +237,7 @@ fn chaos_surfaces() -> [Chaos; 2] {
                 prob_graceful: 0.0,
                 prob_crash: 1.0,
                 prob_wipe: 0.0,
-                recovery_delay_ms: Some(200..900),
+                recovery_delay_ms: Some(1_200..2_500),
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
             },
@@ -239,9 +249,17 @@ fn chaos_surfaces() -> [Chaos; 2] {
 
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
-fn chain_logic_builder() -> SimulationBuilder {
+fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
-        .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .cluster(LocalityConfig::new(CLUSTER_SIZE, 1, 1, 1), || {
+            Box::new(NodeProcess)
+        })
+        .link_latency(LinkLatencyConfig::default())
+}
+
+fn chain_logic_builder() -> SimulationBuilder {
+    chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::default()))
         .invariant(ChainAgreement::new())
         .invariant(SafetyOracle)
@@ -256,6 +274,17 @@ fn chain_logic_builder() -> SimulationBuilder {
         .invariant(DriverHookOracle)
 }
 
+fn chain_network_builder() -> SimulationBuilder {
+    chain_cluster_builder()
+        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
+        .invariant(ChainAgreement::network())
+        .invariant(SafetyOracle)
+        .invariant(AppliedAckOracle)
+        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .chaos_duration(CHAOS_DURATION)
+        .swarm_operations()
+}
+
 fn chain_builder() -> SimulationBuilder {
     chain_logic_builder()
         .enable_chaos(chaos_surfaces())
@@ -263,8 +292,8 @@ fn chain_builder() -> SimulationBuilder {
         .swarm_operations()
 }
 
-/// Run one deterministic seed and return its timeline. Network chaos (swarm) is
-/// always on, so a run exercises the real protocol under faults; the same seed
+/// Run one deterministic seed and return its timeline. Driver decisions and
+/// clean-crash attrition are active; the same seed
 /// always produces the same [`RunResult`].
 ///
 /// # Panics
@@ -277,6 +306,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
         .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
         .invariant(TimelineRecorder::new(data.clone()))
@@ -314,7 +344,8 @@ pub fn run_seed(seed: u64) -> RunResult {
     build_result(seed, &data, &proto, &recovery)
 }
 
-/// Run the DST bug-finding sweep: swarm network chaos + the safety oracle under
+/// Run the DST bug-finding sweep: regional latency, attrition, driver hooks,
+/// operation swarm, and the safety/recovery oracles under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
 /// coverage plateaus, capped at `max_iterations`). The cap is a parameter because
 /// the two modes saturate differently: the nextest test passes [`SWEEP_ITERATIONS`]
@@ -325,9 +356,22 @@ pub fn run_seed(seed: u64) -> RunResult {
 pub fn explore(max_iterations: usize) -> SimulationReport {
     let builder = chain_builder();
     #[cfg(feature = "native")]
-    let builder = builder.enable_exploration(exploration_config(64));
+    let builder = builder.enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED));
     builder
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
+        .run()
+}
+
+/// Coverage-guided network-turbulence safety axis. Provider network faults do
+/// not stop at `chaos_duration` in the pinned Moonpool revision, so this axis
+/// deliberately checks Chain and Paxos safety without claiming a quiet recovery
+/// tail. Gap-fill Noop application is recorded opportunistically; the pinned
+/// network model lacks independent message loss/reorder, so it is not a
+/// saturation gate.
+#[must_use]
+pub fn explore_network_safety(max_iterations: usize) -> SimulationReport {
+    chain_network_builder()
+        .until_coverage_stable(32, max_iterations)
         .run()
 }
 

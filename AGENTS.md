@@ -18,8 +18,8 @@ target). Clippy pedantic is on (`[workspace.lints]` in `Cargo.toml`).
 - `cargo check --target wasm32-unknown-unknown -p paros-core` — portability gate; `paros-core`
   must stay buildable for wasm (CI enforces it).
 - `cargo xtask sim …` — sancov-instrumented simulation runner (`scripts/sancov-rustc.sh` is the
-  `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). Registry is empty
-  until Stage 1.
+  `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered main
+  campaign is `cargo xtask sim run paros-chain`.
 
 **Sim sweep vs. sim smoke — where each lives.** The heavy, coverage-guided sweep (the one that
 must *saturate* `AssertionCoverage`/`CodeCoverage`) always runs via `cargo xtask sim` so the
@@ -29,6 +29,25 @@ a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safet
 pinned `REGRESSION_SEEDS`; they do **not** assert coverage saturation. So: to prove a new red→green
 oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
+
+**Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
+operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`.
+Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
+chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
+that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
+application, and proposal validity. Keep its messages stable. Client timeouts and deliberately
+abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
+bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
+recipes replay from a fresh builder. The shared assertion tables allow at most 128 sites and 256
+`sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
+
+**Upstream Moonpool improvements.** When paros work exposes a limitation that is properly reusable
+Moonpool infrastructure—not a paros protocol or harness bug—open a focused issue in
+`PierreZ/moonpool` instead of silently accepting or locally reimplementing it. Include the concrete
+downstream evidence, the smallest requested API/behavior, deterministic replay constraints, and
+testable acceptance criteria; then link the issue from the relevant paros plan and PR. Keep safe
+paros-side defense in depth while the issue is pending, and advance the Moonpool pin once the
+upstream fix lands and its compatibility gates pass.
 
 ## Architecture
 

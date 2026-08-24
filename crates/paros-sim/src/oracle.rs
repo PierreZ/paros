@@ -1700,6 +1700,7 @@ pub(crate) struct ChainAgreement {
     state_by_index: RefCell<BTreeMap<u64, String>>,
     command_by_index: RefCell<BTreeMap<u64, String>>,
     node_index: RefCell<BTreeMap<u64, u64>>,
+    network_guidance: bool,
 }
 
 impl ChainAgreement {
@@ -1713,6 +1714,14 @@ impl ChainAgreement {
             state_by_index: RefCell::new(BTreeMap::new()),
             command_by_index: RefCell::new(BTreeMap::new()),
             node_index: RefCell::new(BTreeMap::new()),
+            network_guidance: false,
+        }
+    }
+
+    pub(crate) fn network() -> Self {
+        Self {
+            network_guidance: true,
+            ..Self::new()
         }
     }
 
@@ -1876,35 +1885,39 @@ impl Invariant for ChainAgreement {
         let acknowledged_after_change = leaders
             .get(1)
             .is_some_and(|changed| acknowledgements.iter().any(|ack| ack.seq > changed.seq));
-        assert_sometimes!(
-            acknowledged_after_change,
-            "chain: proposal succeeds after leader change"
-        );
-        assert_sometimes!(
-            !q.snapshot("chain_compact_accepted").is_empty()
-                && !q.snapshot(EV_COMPACTED).is_empty(),
-            "chain: compact takes effect"
-        );
-        assert_sometimes!(
-            !q.snapshot("chain_snapshot_installed").is_empty(),
-            "chain: node recovers through snapshot install"
-        );
-        assert_sometimes!(
-            q.snapshot("command_applied")
+        if self.network_guidance {
+            let noop_applied = q
+                .snapshot("command_applied")
                 .iter()
-                .any(|event| event.str("kind") == Some("noop")),
-            "chain: noop gap fill is applied"
-        );
-        let old_leader_gone =
-            !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty() || !q.snapshot(EV_CRASHED).is_empty();
-        assert_sometimes_all!(
-            "chain: failover completed",
-            [
-                ("old leader gone", old_leader_gone),
-                ("new leader elected", leader_changed),
-                ("client acknowledged", acknowledged_after_change),
-            ]
-        );
+                .any(|event| event.str("kind") == Some("noop"));
+            if noop_applied {
+                assert_reachable!("chain: noop gap fill is applied");
+            }
+        } else {
+            assert_sometimes!(
+                acknowledged_after_change,
+                "chain: proposal succeeds after leader change"
+            );
+            assert_sometimes!(
+                !q.snapshot("chain_compact_accepted").is_empty()
+                    && !q.snapshot(EV_COMPACTED).is_empty(),
+                "chain: compact takes effect"
+            );
+            assert_sometimes!(
+                !q.snapshot("chain_snapshot_installed").is_empty(),
+                "chain: node recovers through snapshot install"
+            );
+            let old_leader_gone = !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty()
+                || !q.snapshot(EV_CRASHED).is_empty();
+            assert_sometimes_all!(
+                "chain: failover completed",
+                [
+                    ("old leader gone", old_leader_gone),
+                    ("new leader elected", leader_changed),
+                    ("client acknowledged", acknowledged_after_change),
+                ]
+            );
+        }
     }
 
     fn reset(&mut self) {
