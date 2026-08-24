@@ -11,20 +11,146 @@ service ParosInternal {
   rpc Inspect(.paros.internal.v1.InspectRequest) returns (.paros.internal.v1.InspectReply);
 }
 
-// The Paxos core message stays an opaque domain value at the RPC boundary.
-// gRPC/protobuf frames its stable serde encoding without coupling paros-core
-// to prost or generated DTOs.
 message Deliver {
   repeated WireMessage messages = 1;
 }
 
 message DeliverAck {}
 
-// Integrity envelope for one opaque JSON-encoded Paxos message. Corruption is
-// fail-stop (drop the RPC/message), never converted into a different command.
+// Integrity envelope for one typed protobuf Paxos message. The checksum covers
+// the encoded ConsensusMessage so accidental corruption is fail-stop, never
+// converted into a different command.
 message WireMessage {
-  bytes payload = 1;
+  ConsensusMessage message = 1;
   fixed64 checksum = 2;
+}
+
+message ConsensusMessage {
+  oneof kind {
+    Prepare prepare = 1;
+    Promise promise = 2;
+    Accept accept = 3;
+    Accepted accepted = 4;
+    Nack nack = 5;
+    Commit commit = 6;
+    CatchUpRequest catch_up_request = 7;
+    CatchUpResponse catch_up_response = 8;
+    InstallSnapshot install_snapshot = 9;
+    CheckLeader check_leader = 10;
+    Heartbeat heartbeat = 11;
+    HeartbeatAck heartbeat_ack = 12;
+  }
+}
+
+message Ballot {
+  uint64 round = 1;
+  uint64 node = 2;
+}
+
+message UserEntry {
+  uint64 client = 1;
+  uint64 seq = 2;
+  bytes value = 3;
+}
+
+message Truncate {
+  uint64 up_to = 1;
+}
+
+message Noop {}
+
+message ControlCommand {
+  oneof kind {
+    Truncate truncate = 1;
+    Noop noop = 2;
+  }
+}
+
+message Command {
+  oneof kind {
+    UserEntry user = 1;
+    ControlCommand control = 2;
+  }
+}
+
+message SlotCommand {
+  uint64 slot = 1;
+  Ballot ballot = 2;
+  Command command = 3;
+}
+
+message Prepare {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 from_slot = 3;
+}
+
+message Promise {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 from_slot = 3;
+  repeated SlotCommand accepted = 4;
+}
+
+message Accept {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 slot = 3;
+  Command command = 4;
+}
+
+message Accepted {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 slot = 3;
+}
+
+message Nack {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  Ballot promised = 3;
+  uint64 slot = 4;
+}
+
+message Commit {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 slot = 3;
+  Command command = 4;
+}
+
+message CatchUpRequest {
+  uint64 from = 1;
+  uint64 from_slot = 2;
+}
+
+message CatchUpResponse {
+  uint64 from = 1;
+  repeated SlotCommand entries = 2;
+}
+
+message InstallSnapshot {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 chosen_index = 3;
+  bytes snapshot = 4;
+}
+
+message CheckLeader {
+  uint64 from = 1;
+}
+
+message Heartbeat {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  optional uint64 commit = 3;
+  uint64 seq = 4;
+}
+
+message HeartbeatAck {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  uint64 seq = 3;
 }
 
 message InspectRequest {}

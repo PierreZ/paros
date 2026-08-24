@@ -26,11 +26,12 @@ use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
     RawNode, ReadIndexResult, ReadState, Slot, Value, WriteOp,
 };
+use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
-    ReadAck, ReplySender, RpcInbox, internal, rpc_channel, wire_checksum,
+    ReadAck, ReplySender, RpcInbox, internal, message_to_proto, rpc_channel, wire_checksum,
 };
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::{NodeStorage, StorageError};
@@ -387,8 +388,8 @@ struct ClientWaiters {
 /// the gRPC clients, the task provider, and this node's id for observability
 /// events. Bundled so `drain_ready` takes one parameter instead of three.
 struct PeerQueues {
-    regular: tokio::sync::mpsc::Sender<Vec<u8>>,
-    snapshot: tokio::sync::mpsc::Sender<Vec<u8>>,
+    regular: tokio::sync::mpsc::Sender<internal::ConsensusMessage>,
+    snapshot: tokio::sync::mpsc::Sender<internal::ConsensusMessage>,
 }
 
 struct Outbound {
@@ -451,7 +452,7 @@ impl Outbound {
             },
         }
         if let Some(queues) = self.peer_queues.get(&to) {
-            let Ok(message) = serde_json::to_vec(msg) else {
+            let Ok(message) = message_to_proto(msg) else {
                 tracing::warn!(
                     node = self.self_id,
                     to = to.0,
@@ -482,7 +483,7 @@ async fn run_peer_delivery<P: Providers>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
-    mut messages: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut messages: tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
 ) {
     let mut carried = None;
     loop {
@@ -517,9 +518,9 @@ async fn run_peer_delivery<P: Providers>(
 }
 
 fn delivery_batch(
-    mut first: Vec<u8>,
-    messages: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> (internal::Deliver, Option<Vec<u8>>) {
+    mut first: internal::ConsensusMessage,
+    messages: &mut tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+) -> (internal::Deliver, Option<internal::ConsensusMessage>) {
     // Do not spend the eventual-synchrony tail replaying a bounded but stale
     // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
     // protocol's current heartbeat, Accept resend, and catch-up paths repair
@@ -531,27 +532,29 @@ fn delivery_batch(
         first = newer;
     }
     let mut batch = Vec::with_capacity(GRPC_DELIVERY_BATCH);
-    let mut batch_bytes = first.len();
-    batch.push(internal::WireMessage {
-        checksum: wire_checksum(&first),
-        payload: first,
-    });
+    let mut batch_bytes = first.encoded_len();
+    batch.push(wire_message(first));
     let mut carried = None;
     while batch.len() < GRPC_DELIVERY_BATCH {
         let Ok(message) = messages.try_recv() else {
             break;
         };
-        if batch_bytes.saturating_add(message.len()) > GRPC_DELIVERY_BATCH_BYTES {
+        if batch_bytes.saturating_add(message.encoded_len()) > GRPC_DELIVERY_BATCH_BYTES {
             carried = Some(message);
             break;
         }
-        batch_bytes += message.len();
-        batch.push(internal::WireMessage {
-            checksum: wire_checksum(&message),
-            payload: message,
-        });
+        batch_bytes += message.encoded_len();
+        batch.push(wire_message(message));
     }
     (internal::Deliver { messages: batch }, carried)
+}
+
+fn wire_message(message: internal::ConsensusMessage) -> internal::WireMessage {
+    let checksum = wire_checksum(&message.encode_to_vec());
+    internal::WireMessage {
+        message: Some(message),
+        checksum,
+    }
 }
 
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:

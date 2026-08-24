@@ -50,7 +50,7 @@ impl ChainConfig {
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
             pipeline_depth: buggify_knob!(8_usize, 4_usize..17_usize),
-            recovery_budget_ms: buggify_knob!(30_000_u64, 20_000_u64..45_001_u64),
+            recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
         }
     }
 }

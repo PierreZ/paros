@@ -12,9 +12,7 @@ documentation = "https://docs.rs/paros"
 readme = "../../README.md"
 
 [dependencies]
-# The `serde` feature lets the provider-generic driver put the same
-# `paros_core::Message` on the wire (no DTO).
-paros-core = { path = "../paros-core", version = "0.2.0", features = ["serde"] }
+paros-core = { path = "../paros-core", version = "0.2.0" }
 
 # The driver is generic over moonpool's `Providers` abstraction + gRPC, so
 # the SAME code runs in production (TokioProviders) and simulation (SimProviders).
@@ -25,7 +23,6 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["serde"] }
 moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "3a0b2cb2746f6d262bb63fcfbc1964c70cb5718d", default-features = false, features = ["select"] }
 moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "3a0b2cb2746f6d262bb63fcfbc1964c70cb5718d" }
 
-serde_json = "1"
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
 # tonic's tokio-bound `transport` feature remains disabled.
 http = "1"

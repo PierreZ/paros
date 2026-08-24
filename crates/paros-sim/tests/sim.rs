@@ -11,6 +11,23 @@ use paros_sim::{
 };
 
 #[test]
+fn protobuf_exploration_recipe_recovers() {
+    let report = paros_sim::replay_chain(
+        6_871_908_205_527_803_561,
+        vec![
+            (554, 1_355_743_804_900_694_044),
+            (3_045, 4_290_232_578_606_980_615),
+        ],
+    );
+    assert_eq!(report.failed_runs, 0);
+    assert!(
+        report.assertion_violations.is_empty(),
+        "protobuf recovery recipe: {:?}",
+        report.assertion_violations
+    );
+}
+
+#[test]
 fn chain_single_seed_converges() {
     let report = run_chain_seed(42);
     report.eprint();
