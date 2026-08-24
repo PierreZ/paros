@@ -33,6 +33,27 @@ const QUIET_PROB: f64 = 0.125;
 /// instant chaos would have to coincide with.
 const QUIET_DELAY_STEP_MS: u64 = CHAOS_DURATION_MS / 16;
 
+/// Run one synchronous cleanup action on every exit path from its scope.
+struct OnDrop<F: FnOnce()> {
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> OnDrop<F> {
+    fn new(action: F) -> Self {
+        Self {
+            action: Some(action),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(action) = self.action.take() {
+            action();
+        }
+    }
+}
+
 /// Per-run client workload mode, drawn once from the (uncounted) config RNG —
 /// the same stream `swarm_for_seed` draws from — so the modes rotate across
 /// the seed sweep without a config knob, and drawing any of them never
@@ -109,19 +130,35 @@ impl Workload for ProposeClient {
             return Ok(());
         }
 
-        // A generated tonic client per node. Each owns a reconnecting h2 channel
-        // over the same simulated provider network the nodes use.
-        let clients = servers
+        // Validate every endpoint before starting reconnecting-channel tasks.
+        let endpoints = servers
             .iter()
             .map(|ip| {
                 let addr = parse_addr(ip)?;
                 let origin = http::Uri::try_from(format!("http://{addr}"))
                     .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-                let channel =
-                    ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
-                Ok(ParosClient::with_origin(channel, origin))
+                Ok((addr, origin))
             })
             .collect::<SimulationResult<Vec<_>>>()?;
+
+        // A generated tonic client per node. Each multiplexes over a
+        // reconnecting h2 channel on the same simulated provider network the
+        // nodes use. Keep one channel clone so the workload can terminate all
+        // background connect/backoff/keepalive work when it exits.
+        let (clients, channels): (Vec<_>, Vec<_>) = endpoints
+            .into_iter()
+            .map(|(addr, origin)| {
+                let channel =
+                    ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+                let client = ParosClient::with_origin(channel.clone(), origin);
+                (client, channel)
+            })
+            .unzip();
+        let _channel_guard = OnDrop::new(move || {
+            for channel in channels {
+                channel.close();
+            }
+        });
 
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();

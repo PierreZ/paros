@@ -22,8 +22,8 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["serde"] }
 # wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
 # release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "186245bb970b2e5e96ccd00c3c53f9412c4afaee", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "186245bb970b2e5e96ccd00c3c53f9412c4afaee" }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "d7cfbd5686d7800d0573f93ef0eaba9fe6733da4", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "d7cfbd5686d7800d0573f93ef0eaba9fe6733da4" }
 
 serde_json = "1"
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;

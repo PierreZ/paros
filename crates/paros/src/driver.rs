@@ -58,6 +58,27 @@ const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
 /// a chatty heartbeat/catch-up round from creating one h2 frame per message.
 const GRPC_DELIVERY_BATCH: usize = 64;
 
+/// Run one synchronous cleanup action on every exit path from its scope.
+struct OnDrop<F: FnOnce()> {
+    action: Option<F>,
+}
+
+impl<F: FnOnce()> OnDrop<F> {
+    fn new(action: F) -> Self {
+        Self {
+            action: Some(action),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(action) = self.action.take() {
+            action();
+        }
+    }
+}
+
 fn grpc_keep_alive() -> KeepAlive {
     KeepAlive {
         interval: GRPC_KEEP_ALIVE_INTERVAL,
@@ -1027,12 +1048,24 @@ where
 
     replay_boot_state(&node, self_id);
 
-    let peer_queues = members
+    // Validate every origin before starting reconnecting-channel tasks. Once
+    // channels exist, there are no fallible setup steps before their drop guard
+    // is installed.
+    let peers = members
         .into_iter()
         .map(|(id, addr)| {
             let origin = http::Uri::try_from(format!("http://{addr}"))
                 .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+            Ok((id, addr, origin))
+        })
+        .collect::<SimulationResult<Vec<_>>>()?;
+
+    let mut peer_channels = Vec::with_capacity(peers.len());
+    let peer_queues = peers
+        .into_iter()
+        .map(|(id, addr, origin)| {
             let channel = ReconnectingChannel::new(&providers, addr, grpc_channel_config());
+            peer_channels.push(channel.clone());
             let client = ParosInternalClient::with_origin(channel, origin);
             let (regular_tx, regular_rx) = tokio::sync::mpsc::channel(GRPC_PEER_QUEUE_CAPACITY);
             let (snapshot_tx, snapshot_rx) =
@@ -1061,15 +1094,24 @@ where
                     ),
                 )
                 .detach();
-            Ok((
+            (
                 id,
                 PeerQueues {
                     regular: regular_tx,
                     snapshot: snapshot_tx,
                 },
-            ))
+            )
         })
-        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+        .collect::<BTreeMap<_, _>>();
+
+    // `close` is terminal and shared by every clone held by tonic clients. It
+    // cancels connect/backoff/keepalive work immediately when this incarnation
+    // exits, including simulated durability crashes that return via `?`.
+    let _peer_channel_guard = OnDrop::new(move || {
+        for channel in peer_channels {
+            channel.close();
+        }
+    });
 
     // One reconnecting h2 channel per peer; cloned generated clients multiplex
     // concurrent RPCs over that shared connection.
