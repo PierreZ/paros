@@ -191,8 +191,11 @@ impl Workload for ProposeClient {
         let n = clients.len();
         let mut acknowledged: u32 = 0;
         let mut reads_acked: u32 = 0;
-        // The client's own operation history, checked in `check()`.
-        let mut history = std::mem::take(&mut self.history);
+        // The client's own operation history, checked in `check()`. Recorded
+        // through a field borrow — never moved out — so an early return can
+        // not silently discard what was already observed (moonpool still runs
+        // `check()` after an errored `run()`).
+        let history = &mut self.history;
         history.set_client(client_id);
         // Highest slot this client has seen committed, the compaction watermark it
         // hands to every node (playing the application that owns compaction).
@@ -429,12 +432,12 @@ impl Workload for ProposeClient {
                     if shutdown.is_cancelled() {
                         break;
                     }
-                    mark_write(&mut history, seq);
+                    mark_write(history, seq);
                     let outcome = write_one(seq).await;
-                    handle_write(&mut history, seq, outcome, true);
-                    mark_read(&mut history, seq);
+                    handle_write(history, seq, outcome, true);
+                    mark_read(history, seq);
                     let read_outcome = read_one(seq).await;
-                    handle_read(&mut history, seq, read_outcome);
+                    handle_read(history, seq, read_outcome);
                     // A small gap so node ticks interleave and the timeline
                     // spreads out.
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
@@ -452,7 +455,7 @@ impl Workload for ProposeClient {
                     }
                     let end = (seq + depth).min(u64::from(REQUESTS));
                     for s in seq..end {
-                        mark_write(&mut history, s);
+                        mark_write(history, s);
                     }
                     let outcomes = join_all((seq..end).map(write_one)).await;
                     let mut last_committed = None;
@@ -460,12 +463,12 @@ impl Workload for ProposeClient {
                         if outcome.is_some() {
                             last_committed = Some(s);
                         }
-                        handle_write(&mut history, s, outcome, true);
+                        handle_write(history, s, outcome, true);
                     }
                     if let Some(read_seq) = last_committed {
-                        mark_read(&mut history, read_seq);
+                        mark_read(history, read_seq);
                         let read_outcome = read_one(read_seq).await;
-                        handle_read(&mut history, read_seq, read_outcome);
+                        handle_read(history, read_seq, read_outcome);
                     }
                     seq = end;
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
@@ -480,9 +483,9 @@ impl Workload for ProposeClient {
                     () = shutdown.cancelled() => {}
                 }
                 if !shutdown.is_cancelled() {
-                    mark_write(&mut history, 0);
+                    mark_write(history, 0);
                     let outcome = write_one(0).await;
-                    handle_write(&mut history, 0, outcome, false);
+                    handle_write(history, 0, outcome, false);
                 }
                 // Sleep out the remainder of the chaos window before falling into
                 // the shared settle tail below. Both are needed: the tail is what
@@ -497,8 +500,6 @@ impl Workload for ProposeClient {
                 }
             }
         }
-
-        self.history = history;
 
         // Under eventual synchrony a stable leader commits proposals; this also
         // wires the `assert_sometimes!` contract into the harness.

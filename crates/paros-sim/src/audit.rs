@@ -133,7 +133,7 @@ impl AuditWorld {
     /// invalidate a provisional quiescence decision: every node this run brought
     /// up ends on the cluster's chosen prefix.
     pub(crate) fn check_final_convergence(&self) {
-        let st = self.lock();
+        let mut st = self.lock();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             return;
         };
@@ -144,14 +144,28 @@ impl AuditWorld {
             .chain(st.applied_max.keys().copied())
             .collect();
         for node in cluster {
+            let prefix = st.applied_max.get(&node).copied();
             assert_always!(
-                st.applied_max.get(&node).copied() == Some(cluster_max),
-                "every node converges to the cluster's chosen prefix at the end of the settle tail"
+                prefix == Some(cluster_max),
+                "every node converges to the cluster's chosen prefix at the end of the settle tail",
+                {
+                    "node" => node,
+                    "prefix" => prefix.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
+                    "cluster_max" => cluster_max
+                }
             );
         }
-        // Proof the catch-up path healed a hole rather than nothing having
-        // broken. Recorded here, with the client-visible gates, because only a
-        // campaign with a genuinely quiet tail makes it meaningful.
+        // Proof the catch-up path actually healed a hole (not merely that
+        // nothing ever broke) — judged against the FINAL cluster maximum, so a
+        // transient mid-run match cannot satisfy it.
+        let healed = st
+            .lagged
+            .iter()
+            .any(|n| st.applied_max.get(n).copied() == Some(cluster_max))
+            && cluster_max > 0;
+        if healed {
+            reach_once!(st.caught_up, "a lagging node converges via catch-up");
+        }
         assert_sometimes!(
             st.caught_up,
             "a lagging node catches up to the cluster's chosen prefix"
@@ -167,6 +181,10 @@ impl AuditWorld {
 /// it would be a false positive. Keeping the pre-raise value is how an
 /// incremental fold reproduces the "compactions strictly before this event"
 /// window the trace-scanning oracle used.
+///
+/// Load-bearing assumption: [`Floor::strictly_before`] queries arrive in
+/// non-decreasing `now_ms` (the sim clock is monotone and every caller stamps
+/// its own instant); a query for a *past* instant would see too new a floor.
 #[derive(Clone, Copy, Default)]
 struct Floor {
     now: u64,
@@ -258,6 +276,12 @@ struct AuditState {
     snapshot_mid_election: bool,
     caught_up: bool,
     below_all_floors: bool,
+    /// The most recent `chosen_gap` report, `(hole, sim ms)`. The wedge assert
+    /// evaluates the *previous* report on the next one — one beat of lookahead,
+    /// so a slot applied later in the same millisecond as a gap report cannot
+    /// produce a spurious red (the trace-scanning oracle had the same lookahead
+    /// through its 500 ms window).
+    pending_gap: Option<(u64, u64)>,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -378,18 +402,15 @@ impl AuditState {
         }
         let prefix = self.applied_max.entry(node).or_insert(0);
         *prefix = (*prefix).max(idx);
-        let reached = Some(*prefix) == self.cluster_applied_max;
         for (&n, &nm) in &self.applied_max {
             if Some(nm) < self.cluster_applied_max {
                 self.lagged.insert(n);
             }
         }
-        // Proof the catch-up path actually healed a hole (not merely that
-        // nothing ever broke).
-        if reached && self.cluster_applied_max > Some(0) && self.lagged.contains(&node) {
-            reach_once!(self.caught_up, "a lagging node converges via catch-up");
-        }
-        self.check_below_all_floors();
+        // `caught_up` is judged in `check_final_convergence` against the FINAL
+        // cluster maximum: a node that transiently matched a max the cluster
+        // immediately moved past is not evidence the catch-up path healed it.
+        self.check_below_all_floors(now_ms);
     }
 
     /// A node's applied (contiguous chosen) prefix advances one slot at a time.
@@ -419,22 +440,35 @@ impl AuditState {
     /// truncated on *every* peer, so commit-replay catch-up can no longer serve
     /// it and only snapshot transfer can. A reachability gate, not an escape
     /// hatch — convergence is still demanded of it.
-    fn check_below_all_floors(&mut self) {
+    fn check_below_all_floors(&mut self, now_ms: u64) {
         if self.below_all_floors {
+            return;
+        }
+        // Gated on quiescence like the trace-scanning oracle was: firing on a
+        // transient mid-chaos lag would satisfy the gate without the settled
+        // below-floor state it exists to witness.
+        if !self.quiesced(now_ms) {
             return;
         }
         let Some(cluster_max) = self.cluster_applied_max else {
             return;
         };
-        let peers: Vec<u64> = self.applied_max.keys().copied().collect();
-        for &node in &peers {
+        // Candidates include booted nodes with an *empty* applied prefix
+        // (`next_needed = 0`) — the node most likely to sit below every floor.
+        let cluster: BTreeSet<u64> = self
+            .booted
+            .iter()
+            .copied()
+            .chain(self.applied_max.keys().copied())
+            .collect();
+        for &node in &cluster {
             let prefix = self.applied_max.get(&node).copied();
             if prefix == Some(cluster_max) {
                 continue;
             }
             let next_needed = prefix.map_or(0, |m| m + 1);
-            let below = peers.iter().any(|&p| p != node)
-                && peers
+            let below = cluster.iter().any(|&p| p != node)
+                && cluster
                     .iter()
                     .filter(|&&p| p != node)
                     .all(|p| next_needed < self.floor.get(p).map_or(0, |f| f.now));
@@ -552,7 +586,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a node truncates its log prefix behind the chosen index"
             );
         }
-        st.check_below_all_floors();
+        st.check_below_all_floors(now);
     }
 
     fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, _ballot: Ballot) {
@@ -678,7 +712,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn chosen_gap(&self, _node: NodeId, hole: Slot, _above: Slot) {
         let now = self.now_ms();
-        let st = self.state();
+        let mut st = self.state();
         if !st.liveness {
             return;
         }
@@ -689,16 +723,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // slot exists on some peer and catch-up can serve it (a lagging node);
         // above it every node is frozen at the same place and nobody has the
         // slot to give, which is the election wedge.
-        let Some(cluster_max) = st.cluster_applied_max else {
-            return;
-        };
-        if !st.quiesced(now) {
-            return;
+        if let Some((prev_hole, prev_ms)) = st.pending_gap
+            && now > prev_ms
+            && st.quiesced(now)
+            && let Some(cluster_max) = st.cluster_applied_max
+        {
+            assert_always!(
+                prev_hole <= cluster_max,
+                "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)"
+            );
         }
-        assert_always!(
-            hole.0 <= cluster_max,
-            "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)"
-        );
+        st.pending_gap = Some((hole.0, now));
     }
 
     fn client_acked(
@@ -729,6 +764,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         st.booted.insert(node.0);
         st.observe_promise(node.0, promised);
+        let boot_floor = st
+            .floor
+            .get(&node.0)
+            .copied()
+            .unwrap_or_default()
+            .strictly_before(now);
         for &(slot, _ballot, vhash) in accepted {
             // A synced accept is never lost or altered by a crash.
             if let Some(&prev) = st.persisted.get(&(node.0, slot.0)) {
@@ -737,9 +778,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "a restart never changes a pre-crash accepted value for a slot"
                 );
             }
-            let floor = st.floor.get(&node.0).copied().unwrap_or_default();
             assert_always!(
-                slot.0 >= floor.strictly_before(now),
+                slot.0 >= boot_floor,
                 "a truncated record is never recovered on boot (the log stays bounded)"
             );
         }
