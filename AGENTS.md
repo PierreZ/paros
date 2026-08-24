@@ -189,8 +189,12 @@ test. Reproduce it as a **failing simulation**:
    `Chaos::Attrition`, storage faults) and use `buggify!()` / `buggify_knob!()` to make the rare
    interleaving likely. If the harness lacks a capability (e.g. persistent storage across restart),
    **build that capability**, do not downgrade to a unit test.
-3. Add or strengthen an oracle (an `Invariant` using `assert_always!`) so the violation surfaces as
-   a `SimulationReport.assertion_violation`.
+3. Add or strengthen a check so the violation surfaces as a
+   `SimulationReport.assertion_violation`. Put it where the fact arrives: a driver-observable
+   transition goes in `paros_sim::audit` (adding an `Audit` callback if the driver does not report
+   it yet), a client-observable one in the workload's own history + `check()`. Only reach for a
+   trace-scanning `Invariant` when the fact exists nowhere else (application state, simulator
+   faults) — and then read it through a cursor, never a re-scan.
 4. Run the sweep, confirm it goes **red** on the unfixed code, and record the failing seed.
 5. Fix `paros-core`.
 6. Run the sweep, confirm it goes **green** and saturates.
