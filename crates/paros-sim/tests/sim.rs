@@ -98,8 +98,8 @@ fn chaotic_run_is_well_formed() {
     let r = run_seed(42);
 
     assert!(
-        r.requests >= 12 && r.requests.is_multiple_of(12),
-        "every client's 12 proposals are observed (client count is a per-seed draw), got {}",
+        r.requests >= 4,
+        "every client's proposals are observed (client count and request count are per-seed draws), got {}",
         r.requests
     );
     assert_eq!(

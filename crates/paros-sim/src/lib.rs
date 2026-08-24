@@ -250,6 +250,17 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     // keep-alive. Likely the root cause of the #93-era bounded-recovery
     // false positive that widening `recovery_budget_ms` papered over.
     6_442_591_786_636_745_658,
+    // The time-dilation false-positive witness (2026-08-25, first sweep with the
+    // widened BUGGIFY surface): moonpool's buggified sleep delay — enabled by
+    // the per-seed network chaos config and NOT gated on the chaos window —
+    // stretched every node's 50ms tick sleep through the tail, collapsing the
+    // cluster to ~2 ticks/second. No elections could fire for 4.5 wall-sim
+    // seconds, the wall-time quiescence heuristic called that "settled", and
+    // the gap assert flagged a chosen slot that healed the instant a stretched
+    // election timer finally fired. Red on the wall-time wedge gate; green with
+    // the GAP_WEDGE_TICKS streak (the wedge claim now counts the protocol's
+    // own tick clock, immune to time dilation).
+    8_057_455_177_754_870_256,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol

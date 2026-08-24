@@ -10,7 +10,7 @@ use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::sim::config_random_bool;
 use moonpool_sim::{
     SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider, Workload,
-    assert_always, assert_sometimes,
+    assert_always, assert_sometimes, buggify_knob,
 };
 
 use paros::{Compact, ParosClient, Propose, Read, parse_addr};
@@ -118,6 +118,30 @@ enum WorkloadMode {
 /// `check()` phase (see [`ClientHistory`]). The client is the only party that
 /// knows its own program order, so linearizability is checked where that order
 /// lives rather than reconstructed from an event stream.
+/// Per-timeline client shape, workload-buggified (AGENTS.md prong 2, FDB knob
+/// style): the defaults are today's constants, and an activated seed draws an
+/// extreme. `timeout_ms` at the low end sits *below* the election timeout, so
+/// every leader change turns into an ambiguous client outcome (saturating the
+/// retry/dedup surface); `gap_ms = 0` is back-to-back pipelining pressure for
+/// the multi-client linearizability checker. `SETTLE_MS` is deliberately NOT a
+/// knob — it is the convergence budget the end-of-run assertion depends on.
+#[derive(Clone, Copy)]
+struct ProposeConfig {
+    requests: u32,
+    timeout_ms: u64,
+    gap_ms: u64,
+}
+
+impl ProposeConfig {
+    fn for_timeline() -> Self {
+        Self {
+            requests: buggify_knob!(REQUESTS, 4_u32..33_u32),
+            timeout_ms: buggify_knob!(TIMEOUT_MS, 250_u64..3_001_u64),
+            gap_ms: buggify_knob!(GAP_MS, 0_u64..201_u64),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ProposeClient {
     history: ClientHistory,
@@ -188,6 +212,7 @@ impl Workload for ProposeClient {
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+        let config = ProposeConfig::for_timeline();
         let n = clients.len();
         let mut acknowledged: u32 = 0;
         let mut reads_acked: u32 = 0;
@@ -260,13 +285,13 @@ impl Workload for ProposeClient {
                             }
                         }
                         target = (target + 1) % n;
-                        time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                        time.sleep(Duration::from_millis(config.gap_ms)).await.ok();
                     }
                 };
                 let outcome: Option<(Option<u64>, Option<u64>)> = moonpool_sim::select! {
                     v = attempt => Some(v),
                     () = shutdown.cancelled() => None,
-                    _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
+                    _ = time.sleep(Duration::from_millis(config.timeout_ms)) => None,
                 };
                 outcome
             }
@@ -301,13 +326,13 @@ impl Workload for ProposeClient {
                             }
                         }
                         target = (target + 1) % n;
-                        time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                        time.sleep(Duration::from_millis(config.gap_ms)).await.ok();
                     }
                 };
                 let outcome: Option<(Option<u64>, u64)> = moonpool_sim::select! {
                     v = attempt => Some(v),
                     () = shutdown.cancelled() => None,
-                    _ = time.sleep(Duration::from_millis(TIMEOUT_MS)) => None,
+                    _ = time.sleep(Duration::from_millis(config.timeout_ms)) => None,
                 };
                 outcome
             }
@@ -428,7 +453,7 @@ impl Workload for ProposeClient {
                 // Read `seq`, after write `seq`'s terminal event (program
                 // order: the oracle derives real-time precedence from this
                 // alternation).
-                for seq in 0..u64::from(REQUESTS) {
+                for seq in 0..u64::from(config.requests) {
                     if shutdown.is_cancelled() {
                         break;
                     }
@@ -440,7 +465,7 @@ impl Workload for ProposeClient {
                     handle_read(history, seq, read_outcome);
                     // A small gap so node ticks interleave and the timeline
                     // spreads out.
-                    time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                    time.sleep(Duration::from_millis(config.gap_ms)).await.ok();
                 }
             }
             WorkloadMode::Pipelined { depth } => {
@@ -449,11 +474,11 @@ impl Workload for ProposeClient {
                 // highest committed seq.
                 let depth = u64::from(depth);
                 let mut seq = 0u64;
-                while seq < u64::from(REQUESTS) {
+                while seq < u64::from(config.requests) {
                     if shutdown.is_cancelled() {
                         break;
                     }
-                    let end = (seq + depth).min(u64::from(REQUESTS));
+                    let end = (seq + depth).min(u64::from(config.requests));
                     for s in seq..end {
                         mark_write(history, s);
                     }
@@ -471,7 +496,7 @@ impl Workload for ProposeClient {
                         handle_read(history, read_seq, read_outcome);
                     }
                     seq = end;
-                    time.sleep(Duration::from_millis(GAP_MS)).await.ok();
+                    time.sleep(Duration::from_millis(config.gap_ms)).await.ok();
                 }
             }
             WorkloadMode::Quiet { delay_ms } => {

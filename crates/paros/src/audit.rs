@@ -69,7 +69,18 @@ pub trait Audit {
 
     /// This node answered a client proposal with a *committed* ack naming
     /// `slot`; `applied` is the node's own applied prefix at that instant.
-    fn client_acked(&self, node: NodeId, client: u64, seq: u64, slot: Slot, applied: Option<Slot>) {
+    /// `dedup` marks the fast-path ack of a retry whose request was already
+    /// chosen (`ProposeResult::Chosen`), as opposed to the ack-on-commit path.
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn client_acked(
+        &self,
+        node: NodeId,
+        client: u64,
+        seq: u64,
+        slot: Slot,
+        applied: Option<Slot>,
+        dedup: bool,
+    ) {
     }
 
     /// This node answered a client read with a confirmed watermark (`None` is
@@ -87,6 +98,14 @@ pub trait Audit {
     /// This node dropped one outbound message at the send seam (hook-decided
     /// per-message loss, indistinguishable from network loss to the peers).
     fn dropped_at_send(&self, node: NodeId, to: NodeId, msg: &Message) {}
+
+    /// The driver deliberately sent this one outbound message twice
+    /// ([`DriverHooks::duplicate_outgoing`](crate::DriverHooks)).
+    fn duplicated_at_send(&self, node: NodeId, to: NodeId, msg: &Message) {}
+
+    /// The driver deliberately dropped this one client-facing reply after the
+    /// server state advanced ([`DriverHooks::drop_client_reply`](crate::DriverHooks)).
+    fn client_reply_dropped(&self, node: NodeId, reply: crate::hooks::Reply) {}
 
     /// A snapshot install persisted while this node was a live Candidate — the
     /// #88 window (`on_install_snapshot` deliberately does not touch the

@@ -36,6 +36,12 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// Grace (ms) after chaos ends — and after the cluster's chosen prefix last
 /// grew, and after leadership last changed hands — before a still-open chosen
 /// gap is a real liveness failure rather than an ordinary transient.
+/// Consecutive same-hole `chosen_gap` reports (one per node tick) a quiesced
+/// cluster may show before the hole counts as a wedge. Forty ticks is several
+/// election timeouts' worth of real healing opportunities on the protocol's
+/// own clock, immune to wall-time dilation from buggified sleep delays.
+const GAP_WEDGE_TICKS: u64 = 40;
+
 const CONVERGENCE_GRACE_MS: u64 = 3_000;
 
 /// Cap on the committed-operation history the interval checker walks pairwise.
@@ -276,12 +282,15 @@ struct AuditState {
     snapshot_mid_election: bool,
     caught_up: bool,
     below_all_floors: bool,
-    /// The most recent `chosen_gap` report, `(hole, sim ms)`. The wedge assert
-    /// evaluates the *previous* report on the next one — one beat of lookahead,
-    /// so a slot applied later in the same millisecond as a gap report cannot
-    /// produce a spurious red (the trace-scanning oracle had the same lookahead
-    /// through its 500 ms window).
-    pending_gap: Option<(u64, u64)>,
+    /// Per-node `(hole, consecutive quiesced-tick reports)`. The driver emits
+    /// `chosen_gap` once per *node tick* while a gap lasts, so the streak counts
+    /// the protocol's own clock: under moonpool's buggified sleep delay (which
+    /// persists past the chaos window and can stretch every tick), wall sim
+    /// time dilates but a tick is still one real opportunity for an election
+    /// timeout / re-send to heal the hole. A wedge is a hole that survives
+    /// [`GAP_WEDGE_TICKS`] such opportunities after quiescence; a merely
+    /// slowed cluster never accumulates the streak (seed 8057455177754870256).
+    gap_streaks: BTreeMap<u64, (u64, u64)>,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -292,6 +301,12 @@ struct AuditState {
     shortest_timeout: bool,
     dropped_accept: bool,
     dropped_election: bool,
+    crashed_after_apply: bool,
+    duplicated_any: bool,
+    duplicated_quorum_kind: bool,
+    reply_dropped: bool,
+    propose_reply_dropped: bool,
+    dedup_after_dropped_reply: bool,
 }
 
 impl AuditState {
@@ -369,6 +384,26 @@ impl AuditState {
         assert_sometimes!(
             self.dropped_election,
             "the driver drops an election message at the send seam"
+        );
+        assert_sometimes!(
+            self.crashed_after_apply,
+            "the driver crashes after applying a batch and before its application fsync"
+        );
+        assert_sometimes!(
+            self.duplicated_any,
+            "the driver duplicates a message at the send seam"
+        );
+        assert_sometimes!(
+            self.duplicated_quorum_kind,
+            "the driver duplicates a quorum-counting message at the send seam"
+        );
+        assert_sometimes!(
+            self.reply_dropped,
+            "a committed client reply is dropped at the reply seam"
+        );
+        assert_sometimes!(
+            self.dedup_after_dropped_reply,
+            "a committed proposal ack is lost and the retry takes the dedup path"
         );
     }
 
@@ -710,7 +745,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(st.resigned, "the driver voluntarily resigns leadership");
     }
 
-    fn chosen_gap(&self, _node: NodeId, hole: Slot, _above: Slot) {
+    fn chosen_gap(&self, node: NodeId, hole: Slot, above: Slot) {
         let now = self.now_ms();
         let mut st = self.state();
         if !st.liveness {
@@ -718,22 +753,40 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
         // A gap is perfectly ordinary — pipelining leaves several slots
         // undecided, and a follower that missed one `Commit` holds one until
-        // catch-up runs. So the assertion is gated twice: on quiescence, and on
-        // the hole sitting *above* the cluster's applied maximum. Below it the
-        // slot exists on some peer and catch-up can serve it (a lagging node);
-        // above it every node is frozen at the same place and nobody has the
-        // slot to give, which is the election wedge.
-        if let Some((prev_hole, prev_ms)) = st.pending_gap
-            && now > prev_ms
-            && st.quiesced(now)
-            && let Some(cluster_max) = st.cluster_applied_max
-        {
-            assert_always!(
-                prev_hole <= cluster_max,
-                "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)"
-            );
-        }
-        st.pending_gap = Some((hole.0, now));
+        // catch-up runs. The wedge claim therefore requires all of:
+        //  - quiescence (chaos over, prefix and leadership stable),
+        //  - the hole sitting *above* the cluster's applied maximum (below it
+        //    the slot exists on some peer and catch-up can serve it),
+        //  - and the same hole persisting for GAP_WEDGE_TICKS consecutive
+        //    reports of the same node — the drift-immune part: the driver
+        //    emits this once per node tick, so the streak counts genuine
+        //    election-timeout/re-send opportunities even when moonpool's
+        //    buggified sleep delay stretches every tick in wall sim time.
+        let wedged = st.quiesced(now)
+            && st
+                .cluster_applied_max
+                .is_some_and(|cluster_max| hole.0 > cluster_max);
+        let streak = {
+            let entry = st.gap_streaks.entry(node.0).or_insert((hole.0, 0));
+            if entry.0 == hole.0 && wedged {
+                entry.1 += 1;
+            } else {
+                *entry = (hole.0, u64::from(wedged));
+            }
+            entry.1
+        };
+        assert_always!(
+            streak < GAP_WEDGE_TICKS,
+            "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)",
+            {
+                "node" => node.0,
+                "hole" => hole.0,
+                "above" => above.0,
+                "cluster_max" => st.cluster_applied_max.unwrap_or(0),
+                "streak_ticks" => streak,
+                "now_ms" => now
+            }
+        );
     }
 
     fn client_acked(
@@ -743,12 +796,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _seq: u64,
         slot: Slot,
         applied: Option<Slot>,
+        dedup: bool,
     ) {
         let mut st = self.state();
         reach_once!(
             st.any_ack_checked,
             "a committed write ack is checked against the acking node's applied prefix"
         );
+        // The dedup-window edge the reply-drop location exists for: a reply
+        // was dropped after commit, and a retry then took the dedup path.
+        if dedup && st.propose_reply_dropped {
+            reach_once!(
+                st.dedup_after_dropped_reply,
+                "a committed proposal ack is lost and the retry takes the dedup path"
+            );
+        }
         // `committed = true` is the promise that the write is in the register
         // this project defines — the *applied* log prefix — so an ack that
         // outruns the acking node's own apply is a client-visible
@@ -795,6 +857,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after sync and before sending a batch"
                 );
             }
+            Seam::AfterApplyBeforeSync => {
+                reach_once!(
+                    st.crashed_after_apply,
+                    "the driver crashes after applying a batch and before its application fsync"
+                );
+            }
         }
     }
 
@@ -817,6 +885,35 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn duplicated_at_send(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+        let mut st = self.state();
+        reach_once!(
+            st.duplicated_any,
+            "the driver duplicates a message at the send seam"
+        );
+        // The quorum-counting kinds are the point of the location: a
+        // duplicate of one of these must never fabricate a quorum.
+        if matches!(
+            msg,
+            Message::Promise { .. } | Message::Accepted { .. } | Message::HeartbeatAck { .. }
+        ) {
+            reach_once!(
+                st.duplicated_quorum_kind,
+                "the driver duplicates a quorum-counting message at the send seam"
+            );
+        }
+    }
+
+    fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
+        let mut st = self.state();
+        reach_once!(
+            st.reply_dropped,
+            "a committed client reply is dropped at the reply seam"
+        );
+        if matches!(reply, paros::Reply::Propose | paros::Reply::ProposeDedup) {
+            st.propose_reply_dropped = true;
+        }
+    }
     fn snapshot_offered(&self, _node: NodeId, _offers: u64) {
         let mut st = self.state();
         reach_once!(
