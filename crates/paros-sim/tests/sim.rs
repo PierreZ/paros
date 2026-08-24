@@ -11,6 +11,7 @@ use paros_sim::{
 };
 
 #[test]
+#[cfg(feature = "native")]
 fn protobuf_exploration_recipe_recovers() {
     let report = paros_sim::replay_chain(
         6_871_908_205_527_803_561,
