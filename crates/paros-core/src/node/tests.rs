@@ -2117,41 +2117,33 @@ fn read_after_compaction_confirms_normally() {
     );
 }
 
-// ---- #67: the stale-ballot election ------------------------------------------
+// ---- #67/#88: the stale-ballot election --------------------------------------
 //
-// Three **characterization** tests. They do not pin behaviour the core promises;
-// they pin behaviour it currently *has*, because #67 asked whether a Candidate
-// that learns a higher ballot can go on to win at its now-stale ballot, and the
-// answer turned out to be yes. Writing that down is the point: the anomaly is
-// real, and what keeps the first route from becoming a safety violation is not
-// the election bookkeeping (which does nothing) but plain quorum intersection,
-// one layer further out. The tests fail the day either half of that changes —
-// which is exactly when someone should have to read this comment.
-//
-// Every promise-raising path *except two* drops the campaign: `on_prepare` and
-// `on_accept` call `become_follower`. `mark_chosen` does not — it raises
-// `max_promised_ballot` to the ballot a value was chosen at and leaves role,
-// ballot and `election` untouched. Neither does `on_install_snapshot`. And
-// nothing in `on_promise` or `try_become_leader` re-checks the promise before
-// declaring victory, so a `Promise(b)` already in flight when the higher ballot
-// landed still counts.
+// Two **guard** tests (plus the acceptor-side containment below). #67 asked
+// whether a Candidate that learns a higher ballot mid-campaign can go on to win
+// at its now-stale ballot; the answer used to be yes, through the two
+// promise-raising paths that deliberately leave the campaign open: `mark_chosen`
+// (a learned `Commit`/`CatchUpResponse`) and `on_install_snapshot` (a snapshot
+// whose serving peer minted its promise with no quorum behind it — the #88
+// route, uncontained by quorum intersection at n >= 5). `try_become_leader` now
+// refuses any win whose election ballot sits below the node's own
+// `max_promised_ballot`, restoring "a leader's ballot >= its own promise".
+// These tests pin the refusal, the self-heal (the next campaign ratchets past
+// the learned promise), and the healthy re-propose the stale win used to break.
 
-/// #67, route 1 (`mark_chosen`, via `on_commit` / `on_catchup_response`): the
-/// mechanism.
+/// #67/#88, route 1 (`mark_chosen`, via `on_commit` / `on_catchup_response`):
+/// a candidate that learns a higher-ballot commit mid-campaign refuses the
+/// stale win, and the next campaign recovers the reported slot properly.
 ///
-/// The damage is downstream of the win. `start_accept_round`'s "never lower our
-/// promise" guard skips the self-accept for every slot the election recovered,
-/// so those slots never enter `accepted` — and `try_become_leader` derives
-/// `next_slot` from `accepted`. `next_slot` therefore lands *below* slots the
-/// leader already has in flight, and the next `propose` re-allocates one of them:
-/// two different commands broadcast for one `(ballot, slot)`, which is precisely
-/// what a new leader's highest-ballot-per-slot value selection has no rule to
-/// resolve.
-///
-/// `paros_sim::oracle::SafetyOracle`'s "one ballot proposes at most one command
-/// for a slot" reads that off the wire.
+/// Pre-guard, the win went through and the damage was downstream:
+/// `start_accept_round`'s "never lower our promise" guard skipped the
+/// self-accept for every recovered slot, so those never entered `accepted`;
+/// `next_slot` — derived from `accepted` — landed *below* an in-flight slot,
+/// and the next `propose` re-broadcast a second command for one
+/// `(ballot, slot)` (`SafetyOracle`'s "one ballot proposes at most one command
+/// for a slot" reads that off the wire).
 #[test]
-fn a_candidate_that_learns_a_higher_ballot_commit_can_still_win_at_its_stale_ballot() {
+fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut x = node(0, &[0, 1, 2]);
     let b = ballot(1, 0);
     let b_prime = ballot(1, 2);
@@ -2161,11 +2153,11 @@ fn a_candidate_that_learns_a_higher_ballot_commit_can_still_win_at_its_stale_bal
     x.step(Message::CheckLeader { from: NodeId(0) });
     assert_eq!(x.role, NodeRole::Candidate);
     assert_eq!(x.ballot, b);
-    assert_eq!(x.hard_state.max_promised_ballot, b);
     let _ = drain(&mut x);
 
     // A `Commit` at `b'` arrives: some other proposer won `b'` with a quorum X
-    // was not part of, and decided slot 0. X learns it as a *learner*.
+    // was not part of, and decided slot 0. X learns it as a *learner*; the
+    // campaign stays open, but the promise is now above the campaign's ballot.
     x.step(Message::Commit {
         from: NodeId(2),
         ballot: b_prime,
@@ -2174,15 +2166,13 @@ fn a_candidate_that_learns_a_higher_ballot_commit_can_still_win_at_its_stale_bal
     });
     let _ = drain(&mut x);
     assert_eq!(x.role, NodeRole::Candidate, "the campaign is untouched");
-    assert!(x.election.is_some(), "and its Phase-1 state is still live");
     assert_eq!(
         x.hard_state.max_promised_ballot, b_prime,
         "`mark_chosen` raised the promise to the choosing ballot"
     );
-    assert_eq!(x.ballot, b, "but the campaign still runs at the stale `b`");
 
-    // A `Promise(b)` sent before that node re-promised `b'` finally lands. It is
-    // a perfectly well-formed promise for a ballot X has since promised away.
+    // The delayed `Promise(b)` lands: a perfectly well-formed promise for a
+    // ballot X has since promised away. The quorum is there — the win is not.
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
@@ -2191,57 +2181,50 @@ fn a_candidate_that_learns_a_higher_ballot_commit_can_still_win_at_its_stale_bal
         from_slot: Slot(0),
         accepted: reported,
     });
-    assert_eq!(x.role, NodeRole::Leader, "it wins at the stale ballot");
+    assert_eq!(x.role, NodeRole::Candidate, "the stale win is refused");
+    assert!(x.election.is_some(), "the refused campaign stays open");
     assert!(
-        x.hard_state.max_promised_ballot > x.ballot,
-        "a leader whose own promise sits above its own ballot"
-    );
-
-    // The self-accept was skipped, so the recovered slot never reached
-    // `accepted`, and `next_slot` was derived from `accepted`.
-    assert!(x.proposer.contains_key(&Slot(3)), "slot 3 is in flight");
-    assert!(
-        !x.accepted.contains_key(&Slot(3)),
-        "yet nothing was recorded for it"
-    );
-    assert_eq!(
-        x.next_slot,
-        Slot(1),
-        "so the allocator sits *below* an in-flight slot"
+        x.proposer.is_empty(),
+        "nothing is proposed at the stale ballot"
     );
     let _ = drain(&mut x);
 
-    // Three fresh proposals walk the allocator straight into slot 3, which
-    // already carries a different command at this same ballot.
-    assert_eq!(
-        x.propose(ClientId(1), ClientSeq(0), val(1)),
-        ProposeResult::Accepted(Slot(1))
+    // Self-heal: the next campaign ratchets past the promise that refused the
+    // win, and the same reported slot is recovered *properly* this time.
+    x.step(Message::CheckLeader { from: NodeId(0) });
+    let b2 = x.ballot;
+    assert!(
+        b2 > b_prime,
+        "the fresh campaign sits above the learned promise"
+    );
+    let _ = drain(&mut x);
+    let mut reported = BTreeMap::new();
+    reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
+    x.step(Message::Promise {
+        from: NodeId(1),
+        ballot: b2,
+        // The fresh campaign solicits from `first_unchosen()` — slot 0 was
+        // chosen by the learned commit, so the probe starts at slot 1.
+        from_slot: Slot(1),
+        accepted: reported,
+    });
+    assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
+    assert!(
+        x.ballot >= x.hard_state.max_promised_ballot,
+        "a leader's ballot covers its own promise"
+    );
+    assert!(
+        x.proposer.contains_key(&Slot(3)),
+        "slot 3 is re-proposed (P2c)"
+    );
+    assert!(
+        x.accepted.contains_key(&Slot(3)),
+        "and its self-accept was recorded"
     );
     assert_eq!(
-        x.propose(ClientId(1), ClientSeq(1), val(2)),
-        ProposeResult::Accepted(Slot(2))
-    );
-    assert_eq!(
-        x.propose(ClientId(1), ClientSeq(2), val(3)),
-        ProposeResult::Accepted(Slot(3))
-    );
-    let second: Vec<Command> = drain(&mut x)
-        .into_iter()
-        .filter_map(|(to, m)| match m {
-            Message::Accept {
-                slot,
-                ballot: mb,
-                command,
-                ..
-            } if slot == Slot(3) && to == NodeId(1) && mb == b => Some(command),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(second.len(), 1);
-    assert_ne!(
-        second[0],
-        ucmd(9, 9, 0xA0),
-        "two different commands went out for slot 3 under one ballot"
+        x.next_slot,
+        Slot(4),
+        "the allocator sits above the recovered slot"
     );
 }
 
@@ -2308,37 +2291,28 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     );
 }
 
-/// #67, route 2 (`on_install_snapshot`): the same stale win, but the containment
-/// argument above **does not apply** — and a read confirms behind the fence.
+/// #88, route 2 (`on_install_snapshot`): a snapshot-minted promise blocks the
+/// stale election win outright.
 ///
-/// The difference is where the raised promise comes from. `mark_chosen` adopts a
-/// *choosing* ballot, which by definition had a Phase-1 quorum behind it; that
-/// quorum is what starves the stale leader. A snapshot offer instead carries the
-/// **serving node's own promised ballot** (`serve_catchup` pushes
+/// The route quorum intersection does **not** contain: a snapshot offer
+/// carries the **serving node's own promised ballot** (`serve_catchup` pushes
 /// `(to, ci, self.hard_state.max_promised_ballot)`), and a promise needs no
-/// quorum at all — one node campaigning is enough to mint it. So exactly one peer
-/// is pinned above `b`, and at `n = 3` that leaves the other peer free to promise
-/// `b`, accept at `b`, and ack a beat at `b`.
+/// quorum — one campaigning node mints it. Pre-guard, X won at `b` with
+/// `max_promised = m > b`: the self-accept skip left the recovered suffix out
+/// of `accepted`, `next_slot` and the fresh-leader read fence dropped below
+/// the suffix, and a committed read confirmed under a slot the promise quorum
+/// had reported accepted. The guard refuses the win; the next campaign covers
+/// `m`, and the fence lands on the recovered suffix where it belongs.
 ///
-/// The configuration below is an ordinary dueling-candidate race, not an
-/// exotic one: node 0 and node 2 both time out at round 5 (node 2's ballot wins
-/// the node-id tiebreak), node 1 is still at round 4, and node 0 — far enough
-/// behind that its `from_slot` is under node 2's compaction floor — gets a
-/// snapshot instead of a `Promise`.
-///
-/// What then breaks is the **fresh-leader read fence**. `try_become_leader` sets
-/// `read_floor = next_slot - 1` on the documented ground that "nothing decided
-/// under an earlier ballot can sit above `next_slot - 1` (the prepare quorum
-/// reported it all)". That holds only because the self-accept normally walks every
-/// recovered slot into `accepted`, which `next_slot` is derived from. With the
-/// self-accept skipped, the fence drops below the recovered suffix, and the read
-/// confirms at a watermark that does not cover a slot the promise quorum reported
-/// accepted — the very slot the fence exists to wait for.
+/// The configuration is an ordinary dueling-candidate race: node 0 and node 2
+/// both time out at round 5 (node 2's ballot wins the node-id tiebreak),
+/// node 1 is still at round 4, and node 0 — far enough behind that its
+/// `from_slot` is under node 2's compaction floor — gets a snapshot instead of
+/// a `Promise`.
 #[test]
-fn a_snapshot_raised_promise_leaves_the_fresh_leader_read_fence_below_the_recovered_suffix() {
-    // Node 0 boots at round 4 (whatever the cluster last pushed onto it) with an
-    // empty chosen prefix: far behind, which is what makes a snapshot the only
-    // way it can be healed.
+fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
+    // Node 0 boots at round 4 with an empty chosen prefix: far behind, which
+    // is what makes a snapshot the only way it can be healed.
     let mut storage = TestStorage::new(0, &[0, 1, 2]);
     storage.hard_state.max_promised_ballot = ballot(4, 1);
     let mut x = RawNode::new(&storage);
@@ -2351,8 +2325,8 @@ fn a_snapshot_raised_promise_leaves_the_fresh_leader_read_fence_below_the_recove
     assert_eq!(x.ballot, b, "one round past what it had promised");
     let _ = drain(&mut x);
 
-    // Node 2 answers the campaign's below-floor `CatchUpRequest` with a snapshot
-    // offer. The ballot on it is node 2's *promise* — which node 2 minted by
+    // Node 2 answers the campaign's below-floor `CatchUpRequest` with a
+    // snapshot offer. The ballot on it is node 2's *promise* — minted by
     // campaigning at round 5 itself, with no quorum behind it.
     x.step(Message::InstallSnapshot {
         from: NodeId(2),
@@ -2365,9 +2339,9 @@ fn a_snapshot_raised_promise_leaves_the_fresh_leader_read_fence_below_the_recove
     assert_eq!(x.hard_state.chosen_index, Some(Slot(5)));
     assert_eq!(x.first_slot, Slot(6), "the log below the snapshot is gone");
     assert_eq!(x.role, NodeRole::Candidate, "the campaign is untouched");
-    assert!(x.election.is_some());
 
-    // Node 1, still at round 4, promises `b` and reports slot 8 accepted.
+    // Node 1, still at round 4, promises `b` and reports slot 8 accepted: a
+    // quorum for `b` — but `b < m`, and the win is refused.
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
@@ -2376,37 +2350,43 @@ fn a_snapshot_raised_promise_leaves_the_fresh_leader_read_fence_below_the_recove
         from_slot: Slot(0),
         accepted: reported,
     });
-    assert_eq!(x.role, NodeRole::Leader, "it wins at the stale ballot");
-    assert!(x.proposer.contains_key(&Slot(8)), "slot 8 is in flight");
-    assert!(
-        !x.accepted.contains_key(&Slot(8)),
-        "self-accept skipped, so it never reached the log"
-    );
-    assert_eq!(x.next_slot, Slot(6), "the allocator sits below slot 8");
     assert_eq!(
-        x.read_floor,
-        Some(Slot(5)),
-        "and so does the fresh-leader read fence"
+        x.role,
+        NodeRole::Candidate,
+        "no stale win below the minted promise"
     );
+    assert!(x.proposer.is_empty(), "no accept round opens at `b`");
+    assert_eq!(x.read_floor, None, "no fresh-leader read fence is set");
     let _ = drain(&mut x);
 
-    // The read round reaches a quorum: node 0 counts itself, and node 1 — whose
-    // promise is exactly `b` — acks a beat at `b`. Nothing here is pinned above
-    // `b` except the snapshot server, and one node is not a quorum.
-    assert_eq!(x.read_index(7), ReadIndexResult::Pending);
+    // The next campaign covers `m`. Winning there records a real self-accept
+    // for the recovered slot, so the allocator and the read fence both sit on
+    // the recovered suffix.
+    x.step(Message::CheckLeader { from: NodeId(0) });
+    let b2 = x.ballot;
+    assert!(b2 > m, "the fresh campaign sits above the minted promise");
     let _ = drain(&mut x);
-    x.step(Message::HeartbeatAck {
+    let mut reported = BTreeMap::new();
+    reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
+    x.step(Message::Promise {
         from: NodeId(1),
-        ballot: b,
-        seq: 1,
+        ballot: b2,
+        from_slot: x.first_slot,
+        accepted: reported,
     });
+    assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
+    assert!(
+        x.ballot >= x.hard_state.max_promised_ballot,
+        "a leader's ballot covers its own promise"
+    );
+    assert!(
+        x.accepted.contains_key(&Slot(8)),
+        "the recovered slot reached the log"
+    );
+    assert_eq!(x.next_slot, Slot(9), "the allocator covers the suffix");
     assert_eq!(
-        x.pending_read_states,
-        vec![ReadState {
-            ctx: 7,
-            index: Some(Slot(5)),
-        }],
-        "the read confirmed at slot 5, below the slot 8 its own promise quorum \
-         reported accepted — the fence it was supposed to wait for"
+        x.read_floor,
+        Some(Slot(8)),
+        "the read fence sits on the recovered suffix"
     );
 }

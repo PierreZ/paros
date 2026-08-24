@@ -735,13 +735,28 @@ impl RawNode {
 
     /// Candidate -> Leader once a promise quorum holds: re-propose every
     /// recovered in-flight slot under the new ballot (gap fill), then stream.
+    ///
+    /// A campaign whose ballot has fallen **below the node's own promise** is
+    /// refused even with a quorum behind it (#67/#88). Mid-election, two paths
+    /// raise `max_promised_ballot` without closing the campaign: `mark_chosen`
+    /// on a learned `Commit`/`CatchUpResponse`, and `on_install_snapshot` on a
+    /// snapshot whose serving peer minted its promise with no quorum at all.
+    /// Winning below the own promise breaks "a leader's ballot >= its own
+    /// promise": every self-accept is skipped (`start_accept_round`'s
+    /// `ballot >= max_promised_ballot` check), so recovered slots reach
+    /// `proposer` but never `accepted`, `next_slot` — derived from `accepted` —
+    /// lands *below* an in-flight slot, and a later `propose` re-proposes a
+    /// different command under the same `(slot, ballot)`: two values can then
+    /// assemble accept quorums for one slot at n >= 5. Refusal is a plain
+    /// non-win: the election stays open and self-heals — the next election
+    /// timeout campaigns at `max(max_promised_ballot.round, ..) + 1`
+    /// (`on_check_leader`), above the promise that caused the refusal.
     fn try_become_leader(&mut self) {
         let quorum = self.quorum();
         let won = self.role == NodeRole::Candidate
-            && self
-                .election
-                .as_ref()
-                .is_some_and(|e| e.promised_by.len() >= quorum);
+            && self.election.as_ref().is_some_and(|e| {
+                e.promised_by.len() >= quorum && e.ballot >= self.hard_state.max_promised_ballot
+            });
         if !won {
             return;
         }
