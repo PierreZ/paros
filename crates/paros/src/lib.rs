@@ -20,7 +20,7 @@ pub use driver::{
     EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
     EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
     EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_OFFERED, EV_SYNCED, is_seam_crash, parse_addr, run_node,
+    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_SYNCED, is_seam_crash, parse_addr, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,

@@ -17,7 +17,8 @@ use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
     EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
     EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
-    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_OFFERED, EV_SYNCED,
+    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_MID_ELECTION,
+    EV_SNAPSHOT_OFFERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -2159,44 +2160,17 @@ impl Invariant for SnapshotOracle {
             assert_reachable!("a snapshot was installed to recover a below-floor node");
         }
 
-        // #88 reachability: a snapshot lands during a live election. The exact
-        // shape is pinned by ballots — node X broadcasts a `Prepare` at round
-        // `r`, installs a snapshot *while that campaign is open*, and then wins
-        // at round `r`. This is the window in which `on_install_snapshot` can
-        // raise the candidate's promise past the ballot it is campaigning at
-        // (the stale-ballot route the `try_become_leader` guard closes); the
-        // gate stays reachable after the fix because a snapshot carrying a
-        // ballot at or below the campaign's does not trip the guard.
-        let prepares: Vec<(u64, u64, u64)> = q
-            .snapshot(EV_MSG_SENT)
-            .iter()
-            .filter(|e| e.str("kind") == Some("prepare"))
-            .filter_map(|e| Some((e.time_ms, e.u64("node")?, e.u64("bround")?)))
-            .collect();
-        let mid_election = q.snapshot(EV_LEADER).iter().any(|win| {
-            let (Some(node), Some(round)) = (win.u64("node"), win.u64("round")) else {
-                return false;
-            };
-            let Some(campaign_start) = prepares
-                .iter()
-                .filter(|&&(t, n, r)| n == node && r == round && t <= win.time_ms)
-                .map(|&(t, _, _)| t)
-                .min()
-            else {
-                return false;
-            };
-            snapshots
-                .iter()
-                .any(|&(t, n, _)| n == node && t >= campaign_start && t <= win.time_ms)
-        });
-        assert_sometimes!(
-            mid_election,
-            "a snapshot lands during a live election the receiver goes on to win"
-        );
+        // #88 reachability: a snapshot lands during a live election — the
+        // window in which `on_install_snapshot` can raise a candidate's
+        // promise past the ballot it is campaigning at (the stale-ballot route
+        // the `try_become_leader` guard closes). The driver detects the exact
+        // condition (`role == Candidate` while an `InstallSnapshot` write
+        // persists) and traces [`EV_SNAPSHOT_MID_ELECTION`]; the win-at-a-
+        // stale-ballot *bug* itself is what [`LeadershipOracle`] detects.
+        let mid_election = !q.snapshot(EV_SNAPSHOT_MID_ELECTION).is_empty();
+        assert_sometimes!(mid_election, "a snapshot lands during a live election");
         if mid_election {
-            assert_reachable!(
-                "a snapshot lands during a live election the receiver goes on to win"
-            );
+            assert_reachable!("a snapshot lands during a live election");
         }
     }
 }

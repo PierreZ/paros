@@ -159,6 +159,13 @@ pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
 /// Tracing event: the driver deliberately asked the current leader to resign.
 pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
 
+/// Tracing event: a snapshot install persisted while this node was a live
+/// Candidate (`role == Candidate`, election open). This is the #88 window —
+/// `on_install_snapshot` may raise the candidate's promise above the ballot it
+/// is campaigning at — surfaced so the sweep can prove the interleaving is
+/// actually visited. Carries `node`.
+pub const EV_SNAPSHOT_MID_ELECTION: &str = "snapshot_mid_election";
+
 /// Tracing event: the driver deliberately dropped one outbound protocol message
 /// at the send seam (after durability, before the transport). Carries `node`,
 /// `to`, `kind`, and for an `Accept` the `slot`. Indistinguishable from network
@@ -648,6 +655,17 @@ where
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks)?;
+
+    // A snapshot install that lands while this node's own campaign is open is
+    // the #88 window (`on_install_snapshot` deliberately does not touch the
+    // election); surface it so the sweep can prove the interleaving is visited.
+    if node.role() == paros_core::NodeRole::Candidate
+        && writes
+            .iter()
+            .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
+    {
+        tracing::info!(node = self_id, "snapshot_mid_election");
+    }
 
     // Snapshot offers are outbound protocol messages too. Count them before the
     // after-sync seam so a crash can drop an offer-only batch just as it can any

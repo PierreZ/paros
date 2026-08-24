@@ -470,6 +470,11 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             Message::Accept { .. } => buggify_with_prob!(0.05),
             Message::Prepare { .. } | Message::Promise { .. } => buggify_with_prob!(0.10),
             Message::Nack { .. } => buggify_with_prob!(0.25),
+            // A dropped `Commit` delays a follower's floor-raise (truncation
+            // applies lazily at its Truncate slot), widening the mixed-floor
+            // window the #88 mid-election snapshot needs — and leaves the
+            // follower hole commit-replay catch-up must heal (#80's terrain).
+            Message::Commit { .. } => buggify_with_prob!(0.05),
             _ => false,
         }
     }
