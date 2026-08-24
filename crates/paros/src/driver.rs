@@ -633,6 +633,25 @@ fn trace_send_drop<A: Audit>(audit: &A, self_id: u64, to: NodeId, msg: &Message)
     }
 }
 
+/// Surface the #88 window: a snapshot install persisted while this node's own
+/// campaign is open (`on_install_snapshot` deliberately does not touch the
+/// election), so the sweep can prove the interleaving is visited.
+fn note_mid_election_snapshot<A: Audit>(
+    node: &RawNode,
+    writes: &[WriteOp],
+    self_id: u64,
+    audit: &A,
+) {
+    if node.role() == NodeRole::Candidate
+        && writes
+            .iter()
+            .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
+    {
+        audit.snapshot_mid_election(NodeId(self_id));
+        tracing::info!(node = self_id, "snapshot_mid_election");
+    }
+}
+
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
@@ -669,17 +688,7 @@ where
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit)?;
 
-    // A snapshot install that lands while this node's own campaign is open is
-    // the #88 window (`on_install_snapshot` deliberately does not touch the
-    // election); surface it so the sweep can prove the interleaving is visited.
-    if node.role() == paros_core::NodeRole::Candidate
-        && writes
-            .iter()
-            .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
-    {
-        audit.snapshot_mid_election(NodeId(self_id));
-        tracing::info!(node = self_id, "snapshot_mid_election");
-    }
+    note_mid_election_snapshot(node, &writes, self_id, audit);
 
     // Snapshot offers are outbound protocol messages too. Count them before the
     // after-sync seam so a crash can drop an offer-only batch just as it can any

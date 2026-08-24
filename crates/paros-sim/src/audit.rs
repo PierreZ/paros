@@ -593,38 +593,36 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn sent(&self, _node: NodeId, _to: NodeId, msg: &Message) {
-        match msg {
-            // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
-            // own proposer, so exactly one node ever sends `Accept`s at it, and
-            // two different commands under one `(ballot, slot)` mean the
-            // proposer allocated a slot it already had in flight. Reading the
-            // send rather than the receive is deliberate — it indicts the
-            // proposer, not the network — and it is the only place the anomaly
-            // is visible: an accept quorum may reject it, leaving no durable
-            // trace at all.
-            Message::Accept {
-                ballot,
-                slot,
-                command,
-                ..
-            } => {
-                let vhash = command_hash(command);
-                let mut st = self.state();
-                reach_once!(
-                    st.any_proposal_checked,
-                    "a proposed command is checked against its ballot's other proposals"
+        // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
+        // own proposer, so exactly one node ever sends `Accept`s at it, and
+        // two different commands under one `(ballot, slot)` mean the
+        // proposer allocated a slot it already had in flight. Reading the
+        // send rather than the receive is deliberate — it indicts the
+        // proposer, not the network — and it is the only place the anomaly
+        // is visible: an accept quorum may reject it, leaving no durable
+        // trace at all.
+        if let Message::Accept {
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        {
+            let vhash = command_hash(command);
+            let mut st = self.state();
+            reach_once!(
+                st.any_proposal_checked,
+                "a proposed command is checked against its ballot's other proposals"
+            );
+            if let Some(prev) = st
+                .proposed
+                .insert((ballot.round, ballot.node.0, slot.0), vhash)
+            {
+                assert_always!(
+                    prev == vhash,
+                    "one ballot proposes at most one command for a slot"
                 );
-                if let Some(prev) = st
-                    .proposed
-                    .insert((ballot.round, ballot.node.0, slot.0), vhash)
-                {
-                    assert_always!(
-                        prev == vhash,
-                        "one ballot proposes at most one command for a slot"
-                    );
-                }
             }
-            _ => {}
         }
     }
 
