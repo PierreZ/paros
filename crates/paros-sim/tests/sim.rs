@@ -5,7 +5,35 @@
 
 use std::collections::BTreeMap;
 
-use paros_sim::{REGRESSION_SEEDS, SMOKE_ITERATIONS, explore, run_seed, run_seed_json};
+use paros_sim::{
+    CHAIN_REGRESSION_SEEDS, REGRESSION_SEEDS, SMOKE_ITERATIONS, chain_smoke, run_chain_seed,
+    run_seed, run_seed_json,
+};
+
+#[test]
+fn chain_single_seed_converges() {
+    let report = run_chain_seed(42);
+    report.eprint();
+    assert_eq!(report.failed_runs, 0, "chain workload completes");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "chain safety holds: {:?}",
+        report.assertion_violations
+    );
+}
+
+#[test]
+fn chain_regression_seeds_replay_clean() {
+    for seed in CHAIN_REGRESSION_SEEDS {
+        let report = run_chain_seed(*seed);
+        assert_eq!(report.failed_runs, 0, "Chain regression seed {seed}");
+        assert!(
+            report.assertion_violations.is_empty(),
+            "Chain regression seed {seed}: {:?}",
+            report.assertion_violations
+        );
+    }
+}
 
 /// The pinned-seed regression corpus: replay every recorded durability seed and
 /// assert it stays clean. `run_seed` panics on any `always`-assertion violation,
@@ -138,7 +166,7 @@ fn log_grows_under_a_stable_leader() {
 /// selection; keeping it out of nextest keeps the test suite quick.
 #[test]
 fn safety_holds_under_chaos_smoke() {
-    let report = explore(SMOKE_ITERATIONS);
+    let report = chain_smoke(SMOKE_ITERATIONS);
 
     assert!(
         report.assertion_violations.is_empty(),

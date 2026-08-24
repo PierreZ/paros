@@ -104,6 +104,29 @@ pub trait NodeStorage: Storage {
         ballot: Ballot,
         snapshot: Vec<u8>,
     ) -> Result<(), StorageError>;
+
+    /// Stage one newly chosen command for durable application. Implementations
+    /// must be idempotent by `slot`: a reboot may replay retained chosen records
+    /// after the consensus chosen index reached disk but application effects did
+    /// not. The driver flushes the staged application batch before acknowledging
+    /// clients.
+    ///
+    /// `chosen_index` is the core's contiguous chosen prefix for the batch and is
+    /// supplied so an application adapter can assert it never applies ahead of
+    /// consensus.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the application transition cannot be staged.
+    fn apply(
+        &mut self,
+        chosen_index: Slot,
+        slot: Slot,
+        command: &Command,
+    ) -> Result<(), StorageError>;
+
+    /// Highest slot durably reflected in the application snapshot, if the
+    /// application tracks one. Used only to make reboot replay idempotent.
+    fn applied_slot(&self) -> Option<Slot>;
 }
 
 /// The library's default in-memory storage: enough to *construct* a
@@ -190,6 +213,19 @@ impl NodeStorage for MemStorage {
         self.first = self.first.max(first);
         self.accepted.retain(|slot, _| *slot >= self.first);
         Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        _chosen_index: Slot,
+        _slot: Slot,
+        _command: &Command,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn applied_slot(&self) -> Option<Slot> {
+        self.hard_state.chosen_index
     }
 }
 

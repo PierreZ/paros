@@ -6,13 +6,31 @@ package paros.internal.v1;
 // journal API and may evolve with the replication protocol.
 service ParosInternal {
   rpc Deliver(.paros.internal.v1.Deliver) returns (.paros.internal.v1.DeliverAck);
+  // Private replica inspection used by deterministic workloads and future
+  // operational tooling. The application bytes remain opaque to paros.
+  rpc Inspect(.paros.internal.v1.InspectRequest) returns (.paros.internal.v1.InspectReply);
 }
 
 // The Paxos core message stays an opaque domain value at the RPC boundary.
 // gRPC/protobuf frames its stable serde encoding without coupling paros-core
 // to prost or generated DTOs.
 message Deliver {
-  repeated bytes messages = 1;
+  repeated WireMessage messages = 1;
 }
 
 message DeliverAck {}
+
+// Integrity envelope for one opaque JSON-encoded Paxos message. Corruption is
+// fail-stop (drop the RPC/message), never converted into a different command.
+message WireMessage {
+  bytes payload = 1;
+  fixed64 checksum = 2;
+}
+
+message InspectRequest {}
+
+message InspectReply {
+  optional uint64 chosen_index = 1;
+  uint64 first_slot = 2;
+  bytes snapshot = 3;
+}

@@ -12,6 +12,8 @@
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
+mod chain;
+mod chain_workload;
 mod node;
 mod oracle;
 mod workload;
@@ -27,13 +29,29 @@ use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, SimulationBuilder, SimulationReport, WorkloadCount,
 };
 
+use crate::chain_workload::ChainWorkload;
 use crate::oracle::{
-    AppliedAckOracle, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle, GapFillOracle,
-    LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle, ProtocolData,
-    ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder, SafetyOracle,
-    SnapshotOracle, TimelineRecorder, TruncationOracle, assert_final_convergence, build_result,
+    AppliedAckOracle, ChainAgreement, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle,
+    GapFillOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle,
+    ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
+    SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle, assert_final_convergence,
+    build_result,
 };
 use crate::workload::ProposeClient;
+
+#[cfg(feature = "native")]
+use moonpool_sim::ExplorationConfig;
+
+#[cfg(feature = "native")]
+fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {
+    ExplorationConfig {
+        workers: 0,
+        max_runs_per_seed,
+        branching_factor: 4,
+        max_frontier: 256,
+        max_recipe_len: 64,
+    }
+}
 
 // --- Tuning knobs ------------------------------------------------------------
 
@@ -178,6 +196,8 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     6_156,
     283,
 ];
+/// Chain-workload witnesses discovered by the application-state oracle.
+pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[9_708_989_754_240_691_684];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
@@ -201,7 +221,6 @@ const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 /// identically.
 fn chaos_surfaces() -> [Chaos; 2] {
     [
-        Chaos::Network(ChaosMode::Swarm),
         Chaos::Attrition {
             config: Attrition {
                 max_dead: 1,
@@ -214,7 +233,34 @@ fn chaos_surfaces() -> [Chaos; 2] {
             },
             mode: ChaosMode::Swarm,
         },
+        Chaos::BuggifyKnobs,
     ]
+}
+
+/// Fresh main-campaign builder. Keeping all state behind process/workload
+/// factories is what makes fork-free exploration and recipe replay trustworthy.
+fn chain_logic_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
+        .workload_factory(|| Box::new(ChainWorkload::default()))
+        .invariant(ChainAgreement::new())
+        .invariant(SafetyOracle)
+        .invariant(AppliedAckOracle)
+        .invariant(RecoveryOracle)
+        .invariant(NoGapsOracle)
+        .invariant(LeadershipOracle)
+        .invariant(ProgressOracle)
+        .invariant(GapFillOracle)
+        .invariant(TruncationOracle)
+        .invariant(SnapshotOracle)
+        .invariant(DriverHookOracle)
+}
+
+fn chain_builder() -> SimulationBuilder {
+    chain_logic_builder()
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+        .swarm_operations()
 }
 
 /// Run one deterministic seed and return its timeline. Network chaos (swarm) is
@@ -277,40 +323,57 @@ pub fn run_seed(seed: u64) -> RunResult {
 /// `assertion_violations` and inspect progress.
 #[must_use]
 pub fn explore(max_iterations: usize) -> SimulationReport {
-    SimulationBuilder::new()
-        .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
-        .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
-        .invariant(ClientLivenessOracle)
-        .invariant(SafetyOracle)
-        .invariant(LinearizabilityOracle)
-        .invariant(AppliedAckOracle)
-        .invariant(RecoveryOracle)
-        .invariant(NoGapsOracle)
-        .invariant(LeadershipOracle)
-        .invariant(ProgressOracle)
-        // `ConvergenceOracle` is deliberately *not* in the adaptive sweep because
-        // moonpool has no end-of-run invariant hook. Issue #86 proved that a
-        // quiescence-gated mid-run `assert_always!` is still unsound: buggified
-        // seed 0 recorded 467 failures, then a later leader change healed the
-        // follower before shutdown. [`run_seed`] instead records the final state
-        // and calls [`oracle::assert_final_convergence`] after the simulation can
-        // no longer change it. The adaptive runner cannot yet make that final
-        // assertion, so it keeps the convergence oracle out rather than report a
-        // transient as a permanent failure.
-        //
-        // [`oracle::GapFillOracle`] *is* in the sweep, despite being liveness-shaped
-        // too, because the failure it names has no slow-but-eventual version: a slot
-        // no leader will ever propose is not a node taking its time, it is a hole
-        // nothing can fill, and it stays reported for the whole settle tail. Keeping
-        // it in the adaptive sweep is what makes the election-hole bug findable
-        // across the seed space rather than only on a pinned seed.
-        .invariant(GapFillOracle)
-        .invariant(TruncationOracle)
-        .invariant(SnapshotOracle)
-        .invariant(DriverHookOracle)
-        .enable_chaos(chaos_surfaces())
-        .chaos_duration(CHAOS_DURATION)
+    let builder = chain_builder();
+    #[cfg(feature = "native")]
+    let builder = builder.enable_exploration(exploration_config(64));
+    builder
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
+        .run()
+}
+
+/// Run one fresh Chain timeline without requiring coverage saturation. Used for
+/// smoke, planted-oracle proof, and deterministic seed replay.
+#[must_use]
+pub fn run_chain_seed(seed: u64) -> SimulationReport {
+    chain_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// One no-chaos timeline for validating the workload/application boundary before
+/// fault axes are layered on.
+#[must_use]
+pub fn run_chain_baseline_seed(seed: u64) -> SimulationReport {
+    chain_logic_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Fast random-seed Chain smoke with no adaptive saturation or branch
+/// exploration. This is the only Chain sweep used by nextest.
+#[must_use]
+pub fn chain_smoke(iterations: usize) -> SimulationReport {
+    chain_builder().set_iterations(iterations).run()
+}
+
+/// Replay an exploration recipe from a newly constructed campaign builder.
+#[cfg(feature = "native")]
+#[must_use]
+pub fn replay_chain(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
+    chain_builder().replay_timeline(seed, recipe).run()
+}
+
+/// Explore one known root seed. This is the focused recipe-discovery command;
+/// the registered campaign still explores every adaptive root seed.
+#[cfg(feature = "native")]
+#[must_use]
+pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
+    chain_builder()
+        .set_debug_seeds(vec![seed])
+        .enable_exploration(exploration_config(max_runs))
+        .until_coverage_stable(1, 1)
         .run()
 }
 

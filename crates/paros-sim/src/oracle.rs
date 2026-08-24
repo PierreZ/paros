@@ -5,10 +5,14 @@
 //! - [`ClientLivenessOracle`] wires the `assert_*` contract macros off the same
 //!   event stream — a worked example of moonpool's oracle harness.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use moonpool_sim::{Invariant, TraceQuery, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    Invariant, SIM_FAULT_EVENT_NAME, TraceQuery, assert_always, assert_reachable, assert_sometimes,
+    assert_sometimes_all, assert_sometimes_each,
+};
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
     EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
@@ -1685,6 +1689,236 @@ impl Invariant for GapFillOracle {
     }
 }
 
+/// Cursor-based Chain-of-Blocks state-machine oracle. It observes only public
+/// application facts; it does not share the state transition implementation.
+pub(crate) struct ChainAgreement {
+    submitted_cursor: Cell<usize>,
+    control_cursor: Cell<usize>,
+    snapshot_cursor: Cell<usize>,
+    applied_cursor: Cell<usize>,
+    submitted: RefCell<BTreeMap<String, u64>>,
+    state_by_index: RefCell<BTreeMap<u64, String>>,
+    command_by_index: RefCell<BTreeMap<u64, String>>,
+    node_index: RefCell<BTreeMap<u64, u64>>,
+}
+
+impl ChainAgreement {
+    pub(crate) fn new() -> Self {
+        Self {
+            submitted_cursor: Cell::new(0),
+            control_cursor: Cell::new(0),
+            snapshot_cursor: Cell::new(0),
+            applied_cursor: Cell::new(0),
+            submitted: RefCell::new(BTreeMap::new()),
+            state_by_index: RefCell::new(BTreeMap::new()),
+            command_by_index: RefCell::new(BTreeMap::new()),
+            node_index: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn fault_regime(q: &dyn TraceQuery, before_seq: u64) -> i64 {
+        q.snapshot(SIM_FAULT_EVENT_NAME)
+            .iter()
+            .filter(|event| event.seq < before_seq)
+            .filter_map(|event| event.str("kind"))
+            .map(|kind| {
+                if kind.contains("storage") {
+                    2
+                } else if kind.contains("process") {
+                    3
+                } else {
+                    1
+                }
+            })
+            .next_back()
+            .unwrap_or(0)
+    }
+}
+
+impl Default for ChainAgreement {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Invariant for ChainAgreement {
+    fn name(&self) -> &'static str {
+        "chain_agreement"
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut submitted = self.submitted.borrow_mut();
+        for event in q.since("chain_command_submitted", &self.submitted_cursor) {
+            if let Some(command) = event.str("cmd") {
+                submitted.entry(command.to_owned()).or_insert(event.seq);
+            }
+        }
+        for event in q.since("chain_control_submitted", &self.control_cursor) {
+            if let Some(command) = event.str("cmd") {
+                submitted.entry(command.to_owned()).or_insert(event.seq);
+            }
+        }
+
+        // Snapshot and ordinary apply streams must be merged by global trace
+        // sequence; separate cursors alone would lose their causal ordering.
+        let mut transitions = q
+            .since("chain_snapshot_installed", &self.snapshot_cursor)
+            .into_iter()
+            .map(|event| (event.seq, true, event))
+            .chain(
+                q.since("command_applied", &self.applied_cursor)
+                    .into_iter()
+                    .map(|event| (event.seq, false, event)),
+            )
+            .collect::<Vec<_>>();
+        transitions.sort_by_key(|(seq, _, _)| *seq);
+
+        let mut states = self.state_by_index.borrow_mut();
+        let mut commands = self.command_by_index.borrow_mut();
+        let mut per_node = self.node_index.borrow_mut();
+        for (_, snapshot, event) in transitions {
+            let (Some(node), Some(index), Some(state)) =
+                (event.u64("node"), event.u64("index"), event.str("state"))
+            else {
+                continue;
+            };
+            if snapshot {
+                let monotone = per_node
+                    .get(&node)
+                    .is_none_or(|previous| index >= *previous);
+                assert_always!(monotone, "chain: applies are contiguous per node");
+                per_node.insert(node, index);
+                let prior = states.entry(index).or_insert_with(|| state.to_owned());
+                assert_always!(
+                    prior == state,
+                    "chain: one state per applied index",
+                    {
+                        "node" => node,
+                        "index" => index,
+                        "expected_state" => prior,
+                        "observed_state" => state,
+                    }
+                );
+                continue;
+            }
+
+            let expected = per_node.get(&node).copied().unwrap_or(0).saturating_add(1);
+            assert_always!(index == expected, "chain: applies are contiguous per node");
+            per_node.insert(node, index);
+
+            let Some(command) = event.str("cmd") else {
+                continue;
+            };
+            let prior_command = commands.entry(index).or_insert_with(|| command.to_owned());
+            let prior_state = states.entry(index).or_insert_with(|| state.to_owned());
+            assert_always!(
+                prior_command == command && prior_state == state,
+                "chain: one state per applied index",
+                {
+                    "node" => node,
+                    "index" => index,
+                    "expected_command" => prior_command,
+                    "observed_command" => command,
+                    "expected_state" => prior_state,
+                    "observed_state" => state,
+                }
+            );
+
+            let kind = event.str("kind").unwrap_or("unknown");
+            let proposed = kind == "noop"
+                || submitted
+                    .get(command)
+                    .is_some_and(|submitted_seq| *submitted_seq < event.seq);
+            assert_always!(
+                proposed,
+                "chain: applied command was proposed",
+                {
+                    "node" => node,
+                    "index" => index,
+                    "kind" => kind,
+                    "command" => command,
+                }
+            );
+
+            let latest_leader = q
+                .snapshot(EV_LEADER)
+                .into_iter()
+                .rfind(|leader| leader.seq < event.seq)
+                .and_then(|leader| leader.u64("node"));
+            let role = i64::from(latest_leader == Some(node));
+            let fault = Self::fault_regime(q, event.seq);
+            let floor = q
+                .snapshot(EV_COMPACTED)
+                .into_iter()
+                .filter(|compact| compact.seq < event.seq && compact.u64("node") == Some(node))
+                .filter_map(|compact| compact.u64("first"))
+                .max();
+            let floor_relation = match (floor, event.u64("slot")) {
+                (Some(first), Some(slot)) if slot >= first => 1,
+                (Some(_), Some(_)) => 2,
+                (None, _) | (Some(_), None) => 0,
+            };
+            assert_sometimes_each!(
+                "chain: state frontier",
+                [("role", role), ("fault", fault), ("floor", floor_relation)],
+                [("applied_count", index)]
+            );
+        }
+        drop(per_node);
+        drop(commands);
+        drop(states);
+        drop(submitted);
+
+        let leaders = q.snapshot(EV_LEADER);
+        let acknowledgements = q.snapshot("chain_command_acked");
+        let leader_changed = leaders.len() >= 2;
+        let acknowledged_after_change = leaders
+            .get(1)
+            .is_some_and(|changed| acknowledgements.iter().any(|ack| ack.seq > changed.seq));
+        assert_sometimes!(
+            acknowledged_after_change,
+            "chain: proposal succeeds after leader change"
+        );
+        assert_sometimes!(
+            !q.snapshot("chain_compact_accepted").is_empty()
+                && !q.snapshot(EV_COMPACTED).is_empty(),
+            "chain: compact takes effect"
+        );
+        assert_sometimes!(
+            !q.snapshot("chain_snapshot_installed").is_empty(),
+            "chain: node recovers through snapshot install"
+        );
+        assert_sometimes!(
+            q.snapshot("command_applied")
+                .iter()
+                .any(|event| event.str("kind") == Some("noop")),
+            "chain: noop gap fill is applied"
+        );
+        let old_leader_gone =
+            !q.snapshot(EV_LEADERSHIP_RESIGNED).is_empty() || !q.snapshot(EV_CRASHED).is_empty();
+        assert_sometimes_all!(
+            "chain: failover completed",
+            [
+                ("old leader gone", old_leader_gone),
+                ("new leader elected", leader_changed),
+                ("client acknowledged", acknowledged_after_change),
+            ]
+        );
+    }
+
+    fn reset(&mut self) {
+        self.submitted_cursor.set(0);
+        self.control_cursor.set(0);
+        self.snapshot_cursor.set(0);
+        self.applied_cursor.set(0);
+        self.submitted.get_mut().clear();
+        self.state_by_index.get_mut().clear();
+        self.command_by_index.get_mut().clear();
+        self.node_index.get_mut().clear();
+    }
+}
+
 /// Snapshot oracle (coverage): the below-floor recovery *mechanism* is actually
 /// exercised. The [`ConvergenceOracle`] demands the liveness (a below-floor node
 /// reaches the cluster prefix); this proves the path that heals it — an opaque
@@ -1730,6 +1964,9 @@ impl Invariant for DriverHookOracle {
         let after_sync_crashed = crashes
             .iter()
             .any(|event| event.str("seam") == Some("after_sync_before_send"));
+        let before_sync_crashed = crashes
+            .iter()
+            .any(|event| event.str("seam") == Some("before_sync"));
         let snapshot_offered = !q.snapshot(EV_SNAPSHOT_OFFERED).is_empty();
         let shortest_timeout = !q.snapshot(EV_ELECTION_TIMEOUT_EXTREME).is_empty();
         let skipped = !q.snapshot(EV_RESEND_SKIPPED).is_empty();
@@ -1737,6 +1974,10 @@ impl Invariant for DriverHookOracle {
         assert_sometimes!(
             after_sync_crashed,
             "the driver crashes after sync and before sending a batch"
+        );
+        assert_sometimes!(
+            before_sync_crashed,
+            "the driver crashes before syncing a staged batch"
         );
         assert_sometimes!(
             snapshot_offered,
@@ -1755,10 +1996,8 @@ impl Invariant for DriverHookOracle {
         if shortest_timeout {
             assert_reachable!("the driver selects the shortest valid election timeout");
         }
-        assert_sometimes!(
-            skipped || resigned,
-            "the driver takes a rare-but-valid policy decision"
-        );
+        assert_sometimes!(skipped, "the driver skips a pending accept re-send");
+        assert_sometimes!(resigned, "the driver voluntarily resigns leadership");
         if skipped {
             assert_reachable!("the driver skips a pending accept re-send");
         }

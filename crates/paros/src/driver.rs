@@ -29,8 +29,8 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::grpc::{
-    CompactAck, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck, ReadAck,
-    ReplySender, RpcInbox, internal, rpc_channel,
+    CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
+    ReadAck, ReplySender, RpcInbox, internal, rpc_channel, wire_checksum,
 };
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::{NodeStorage, StorageError};
@@ -532,7 +532,10 @@ fn delivery_batch(
     }
     let mut batch = Vec::with_capacity(GRPC_DELIVERY_BATCH);
     let mut batch_bytes = first.len();
-    batch.push(first);
+    batch.push(internal::WireMessage {
+        checksum: wire_checksum(&first),
+        payload: first,
+    });
     let mut carried = None;
     while batch.len() < GRPC_DELIVERY_BATCH {
         let Ok(message) = messages.try_recv() else {
@@ -543,7 +546,10 @@ fn delivery_batch(
             break;
         }
         batch_bytes += message.len();
-        batch.push(message);
+        batch.push(internal::WireMessage {
+            checksum: wire_checksum(&message),
+            payload: message,
+        });
     }
     (internal::Deliver { messages: batch }, carried)
 }
@@ -570,7 +576,7 @@ where
     let ready = node.ready();
     let writes: Vec<WriteOp> = ready.writes().to_vec();
     let must_sync = ready.must_sync();
-    let mut messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
+    let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
@@ -582,26 +588,11 @@ where
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks)?;
 
-    // Snapshot offers are outbound protocol messages too. Materialize them
-    // before the after-sync seam so a crash can drop an offer-only batch just as
-    // it can any other outbound batch. Keeping one transmit path also prevents
-    // snapshot recovery from quietly bypassing future send-side policy.
+    // Snapshot offers are outbound protocol messages too. Count them before the
+    // after-sync seam so a crash can drop an offer-only batch just as it can any
+    // other outbound batch. Their bytes are materialized after application below:
+    // an application snapshot must cover exactly the boundary it advertises.
     let snapshot_offer_count = snapshot_offers.len();
-    messages.extend(
-        snapshot_offers
-            .into_iter()
-            .map(|(to, chosen_index, ballot)| {
-                (
-                    to,
-                    Message::InstallSnapshot {
-                        from: NodeId(self_id),
-                        ballot,
-                        chosen_index,
-                        snapshot: Value(storage.snapshot()),
-                    },
-                )
-            }),
-    );
     if snapshot_offer_count > 0 {
         tracing::info!(
             node = self_id,
@@ -614,7 +605,9 @@ where
     // durable writes survive; the batch's messages are dropped (never sent), so a
     // recovered node must re-derive them. Only meaningful when there is durable
     // work or a message to lose.
-    if (!writes.is_empty() || !messages.is_empty()) && hooks.crash_at(Seam::AfterSyncBeforeSend) {
+    if (!writes.is_empty() || !messages.is_empty() || snapshot_offer_count > 0)
+        && hooks.crash_at(Seam::AfterSyncBeforeSend)
+    {
         tracing::info!(
             node = self_id,
             seam = "after_sync_before_send",
@@ -633,7 +626,14 @@ where
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
+    let chosen_index = node.hard_state().chosen_index;
     for (slot, command) in &committed {
+        let chosen_index = chosen_index.ok_or_else(|| {
+            SimulationError::InvalidState("committed command without chosen prefix".into())
+        })?;
+        storage
+            .apply(chosen_index, *slot, command)
+            .map_err(|e| storage_err(&e))?;
         tracing::info!(
             node = self_id,
             slot = slot.0,
@@ -646,15 +646,45 @@ where
             applied_index = slot.0,
             "log_applied"
         );
-        // A control command carries no client waiter (a `Truncate`'s effect is the
-        // durable floor the core's `WriteOp::Truncate` already persisted this
-        // batch); only a client entry acks a proposer.
+    }
+
+    // Application state is part of the durable replica contract. Flush all
+    // staged transitions before an acknowledgement can escape this batch. This
+    // also makes a chosen-index-only Ready durable before its application effect,
+    // so reboot replay can never observe an application prefix ahead of consensus.
+    if !committed.is_empty() {
+        storage
+            .sync(paros_core::MustSync::Sync)
+            .map_err(|e| storage_err(&e))?;
+    }
+
+    // An offered snapshot must describe exactly the application prefix named by
+    // the protocol message. Materialize and send it only after this batch's
+    // committed entries have been durably applied.
+    for (to, offered_index, ballot) in snapshot_offers {
+        if storage.applied_slot() != Some(offered_index) {
+            return Err(SimulationError::InvalidState(
+                "application snapshot does not match offered chosen index".into(),
+            ));
+        }
+        let message = Message::InstallSnapshot {
+            from: NodeId(self_id),
+            ballot,
+            chosen_index: offered_index,
+            snapshot: Value(storage.snapshot()),
+        };
+        out.transmit(to, &message);
+    }
+
+    // Only now can a client learn success: both the chosen index and the
+    // application transition are durable. Controls have no proposal waiter.
+    for (slot, command) in &committed {
         if matches!(command, Command::Control(_)) {
             continue;
         }
         if let Some(replies) = waiters.pending.remove(slot) {
-            for (seq, w) in replies {
-                let _ = w.send(ProposeAck {
+            for (seq, waiter) in replies {
+                let _ = waiter.send(ProposeAck {
                     seq,
                     leader: Some(self_id),
                     committed: true,
@@ -938,7 +968,11 @@ fn maintain<P: Providers, H: DriverHooks>(
 /// accepted log starts at its floor, so the replay naturally covers only the
 /// retained prefix. A clean first boot has empty scalars/log, so this is a near
 /// no-op.
-fn replay_boot_state(node: &RawNode, self_id: u64) {
+fn replay_boot_state<S: NodeStorage>(
+    node: &RawNode,
+    storage: &mut S,
+    self_id: u64,
+) -> SimulationResult<()> {
     // Mark this incarnation coming up. The recovery recorder turns every `booted`
     // after a node's first into a *restart* event for the animation.
     tracing::info!(node = self_id, "booted");
@@ -960,8 +994,16 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
             "recovered"
         );
     }
+    let mut replayed_application = false;
     if let Some(ci) = node.hard_state().chosen_index {
+        let applied_slot = storage.applied_slot();
         for (slot, (_b, command)) in node.accepted().range(..=ci) {
+            if applied_slot.is_none_or(|applied| *slot > applied) {
+                storage
+                    .apply(ci, *slot, command)
+                    .map_err(|e| storage_err(&e))?;
+                replayed_application = true;
+            }
             tracing::info!(
                 node = self_id,
                 slot = slot.0,
@@ -976,6 +1018,12 @@ fn replay_boot_state(node: &RawNode, self_id: u64) {
             );
         }
     }
+    if replayed_application {
+        storage
+            .sync(paros_core::MustSync::Sync)
+            .map_err(|e| storage_err(&e))?;
+    }
+    Ok(())
 }
 
 /// Drive a paros node to completion over the given providers.
@@ -1046,7 +1094,7 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&node, self_id);
+    replay_boot_state(&node, &mut storage, self_id)?;
 
     // Validate every origin before starting reconnecting-channel tasks. Once
     // channels exist, there are no fallible setup steps before their drop guard
@@ -1260,6 +1308,13 @@ where
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
                 maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
                 let _ = reply.send(ack);
+            }
+            Some((_req, reply)) = rpc.inspect.recv() => {
+                let _ = reply.send(InspectReply {
+                    chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
+                    first_slot: node.first_slot().0,
+                    snapshot: storage.snapshot(),
+                });
             }
             _ = time.sleep(TICK_INTERVAL) => {
                 node.tick();

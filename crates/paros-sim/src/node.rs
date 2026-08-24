@@ -16,8 +16,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, buggify_with_prob,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, assert_always,
+    buggify_with_prob,
 };
+
+use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, Command, Config, DriverHooks, HardState, MemStorage, MustSync, NodeId, NodeStorage,
     Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
@@ -86,8 +89,12 @@ impl Process for NodeProcess {
         // handled by the harness; this covers the seams *inside* a Ready batch
         // that attrition cannot reach.
         loop {
-            let storage =
-                DurableStorage::restore(config.clone(), Arc::downgrade(&world), my_ip.clone());
+            let storage = DurableStorage::restore(
+                config.clone(),
+                Arc::downgrade(&world),
+                my_ip.clone(),
+                self_rank.0,
+            );
             match run_node(
                 ctx.providers().clone(),
                 storage,
@@ -127,6 +134,8 @@ struct NodeDisk {
     accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// The first slot still retained. Everything below it has been truncated.
     first_slot: Slot,
+    /// Application-produced snapshot state, durable across clean reboot.
+    chain: ChainState,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -160,21 +169,40 @@ struct DurableStorage {
     world: Weak<Mutex<StorageWorld>>,
     /// This node's IP — its key into the world.
     key: String,
+    /// Stable numeric identity used only on application trace facts.
+    node_id: u64,
+    /// This incarnation's application state, including transitions staged for
+    /// the next durability flush.
+    application: ChainState,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
     staged_chosen: Option<Slot>,
     staged_floor: Option<Slot>,
+    staged_snapshot: Option<ChainState>,
+    staged_applies: Vec<PendingApply>,
+}
+
+struct PendingApply {
+    slot: Slot,
+    transition: AppliedTransition,
 }
 
 impl DurableStorage {
     /// Build storage for `config`, seeding the read view from any durable records
     /// a prior boot of this node (same IP, same iteration) left in the world.
-    fn restore(config: Config, world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
+    fn restore(
+        config: Config,
+        world: Weak<Mutex<StorageWorld>>,
+        key: String,
+        node_id: u64,
+    ) -> Self {
         let mut boot = MemStorage::new(config);
+        let mut application = ChainState::default();
         if let Some(strong) = world.upgrade() {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(disk) = guard.disks.get(&key) {
+                application = disk.chain;
                 // Seed the read view through the semantic ops (records, not a blob).
                 // Set the floor first so first_slot() reads it back on boot.
                 let _ = boot.truncate(disk.first_slot);
@@ -192,10 +220,14 @@ impl DurableStorage {
             boot,
             world,
             key,
+            node_id,
+            application,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
             staged_floor: None,
+            staged_snapshot: None,
+            staged_applies: Vec::new(),
         }
     }
 
@@ -242,6 +274,8 @@ impl NodeStorage for DurableStorage {
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
         let floor = self.staged_floor.take();
+        let snapshot = self.staged_snapshot.take();
+        let applies = std::mem::take(&mut self.staged_applies);
         self.with_disk(|d| {
             if let Some(b) = ballot {
                 // The promise is monotonic: never let a flush lower it. A
@@ -262,7 +296,36 @@ impl NodeStorage for DurableStorage {
                 d.first_slot = d.first_slot.max(f);
                 d.accepted.retain(|s, _| *s >= d.first_slot);
             }
-        })
+            if let Some(installed) = snapshot {
+                d.chain = installed;
+            }
+            if let Some(last) = applies.last() {
+                d.chain = last.transition.next;
+            }
+        })?;
+
+        if let Some(installed) = snapshot {
+            tracing::info!(
+                node = self.node_id,
+                index = installed.applied_count,
+                state = %hash_text(installed.chain_hash),
+                "chain_snapshot_installed"
+            );
+        }
+        for pending in applies {
+            let next = pending.transition.next;
+            tracing::info!(
+                target: "chain",
+                node = self.node_id,
+                slot = pending.slot.0,
+                index = next.applied_count,
+                cmd = %hash_text(pending.transition.cmd_hash),
+                state = %hash_text(next.chain_hash),
+                kind = pending.transition.kind,
+                "command_applied"
+            );
+        }
+        Ok(())
     }
 
     fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
@@ -273,16 +336,14 @@ impl NodeStorage for DurableStorage {
     }
 
     fn snapshot(&self) -> Vec<u8> {
-        // Opaque marker of the chosen prefix (the sim has no application state
-        // machine); the boot read view carries this node's durable chosen index.
-        self.boot.snapshot()
+        self.application.encode()
     }
 
     fn install_snapshot(
         &mut self,
         chosen_index: Slot,
         ballot: Ballot,
-        _snapshot: Vec<u8>,
+        snapshot: Vec<u8>,
     ) -> Result<(), StorageError> {
         // Stage the install like every other write (InstallSnapshot is
         // MustSync::Sync): the chosen index, the adopted ballot, and the floor
@@ -292,7 +353,53 @@ impl NodeStorage for DurableStorage {
         self.staged_ballot = Some(ballot);
         let first = Slot(chosen_index.0 + 1);
         self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        let installed = ChainState::decode(&snapshot).map_err(StorageError::Corruption)?;
+        assert_always!(
+            installed.applied_slot() == Some(chosen_index),
+            "chain: snapshot state matches its boundary"
+        );
+        assert_always!(
+            installed.applied_count >= self.application.applied_count,
+            "chain: snapshot install does not regress state"
+        );
+        self.application = installed;
+        self.staged_snapshot = Some(installed);
         Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        chosen_index: Slot,
+        slot: Slot,
+        command: &Command,
+    ) -> Result<(), StorageError> {
+        assert_always!(
+            slot <= chosen_index,
+            "chain: apply does not outrun chosen prefix"
+        );
+        if self
+            .application
+            .applied_slot()
+            .is_some_and(|applied| slot <= applied)
+        {
+            return Ok(());
+        }
+        let expected = self
+            .application
+            .applied_slot()
+            .map_or(Slot(0), |applied| Slot(applied.0.saturating_add(1)));
+        assert_always!(
+            slot == expected,
+            "chain: local application transition is contiguous"
+        );
+        let transition = self.application.apply(command);
+        self.application = transition.next;
+        self.staged_applies.push(PendingApply { slot, transition });
+        Ok(())
+    }
+
+    fn applied_slot(&self) -> Option<Slot> {
+        self.application.applied_slot()
     }
 }
 

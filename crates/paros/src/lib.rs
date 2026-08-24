@@ -22,7 +22,10 @@ pub use driver::{
     EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_OFFERED, EV_SYNCED, is_seam_crash, parse_addr, run_node,
 };
-pub use grpc::{Compact, CompactAck, ParosClient, Propose, ProposeAck, Read, ReadAck};
+pub use grpc::{
+    Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
+    ProposeAck, Read, ReadAck,
+};
 pub use hooks::{DriverHooks, NoHooks, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
