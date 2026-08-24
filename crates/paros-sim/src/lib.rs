@@ -73,8 +73,17 @@ pub(crate) const GAP_MS: u64 = 20;
 /// a delayed leadership turnover made the final follower catch up 6.05 seconds
 /// into the tail.
 pub(crate) const SETTLE_MS: u64 = 8_000;
-/// Number of paros nodes in the cluster.
-pub(crate) const CLUSTER_SIZE: usize = 3;
+/// Per-seed cluster-size draw (inclusive), AGENTS.md prong 2: the cluster size
+/// is workload-buggified config, resolved from the seeded RNG at topology-build
+/// time so every seed replays its own shape. `3..=5` puts a third of the sweep
+/// on n=5 (quorum 3), the shape issue #88's stale-ballot scenario needs — at
+/// n=3 the two nodes pinned above the stale ballot always intersect the accept
+/// quorum, so only n>=5 leaves a full quorum below the minted promise.
+pub(crate) const CLUSTER_SIZE_RANGE: std::ops::RangeInclusive<usize> = 3..=5;
+/// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
+/// are what give the real linearizability checker (#60) conflicting concurrent
+/// histories to reject; single-client runs keep the cheap sequential fast path.
+pub(crate) const CLIENT_COUNT_RANGE: std::ops::Range<usize> = 1..4;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
 pub(crate) const PLATEAU_SEEDS: usize = 8;
@@ -157,7 +166,12 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 ///   evaluating each independent location only when its action can matter;
 /// - #56 added the quiet workload mode, whose draw sits *ahead* of the
 ///   sequential/pipelined coin on the config stream, so which script a seed runs
-///   (and at what pipeline depth) moved again.
+///   (and at what pipeline depth) moved again;
+/// - the #88/#61 swarm arc made cluster size (`3..=5`) and client count (`1..4`)
+///   per-seed draws resolved at topology-build time — *before* every BUGGIFY
+///   activation and workload draw on the counted stream — and added the
+///   send-seam drop locations, so every seed's script moved once more. The
+///   whole corpus was re-verified green against the shifted stream.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -252,7 +266,7 @@ fn chaos_surfaces() -> [Chaos; 2] {
 fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .cluster(LocalityConfig::new(CLUSTER_SIZE, 1, 1, 1), || {
+        .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess)
         })
         .link_latency(LinkLatencyConfig::default())
@@ -307,8 +321,12 @@ pub fn run_seed(seed: u64) -> RunResult {
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
-        .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
+        .processes(ProcessCount::Range(CLUSTER_SIZE_RANGE), || {
+            Box::new(NodeProcess)
+        })
+        .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), |_| {
+            Box::new(ProposeClient)
+        })
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(RecoveryRecorder::new(recovery.clone()))

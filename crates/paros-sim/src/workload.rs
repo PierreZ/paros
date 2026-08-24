@@ -180,7 +180,7 @@ impl Workload for ProposeClient {
                 bits = (bits << 1) | u64::from(config_random_bool(0.5));
             }
             let delay_ms = bits * QUIET_DELAY_STEP_MS;
-            tracing::info!(mode = "quiet", delay_ms, "client_workload_mode");
+            tracing::info!(client_id, mode = "quiet", delay_ms, "client_workload_mode");
             WorkloadMode::Quiet { delay_ms }
         } else if config_random_bool(0.5) {
             let mut bits: u32 = 0;
@@ -188,10 +188,10 @@ impl Workload for ProposeClient {
                 bits = (bits << 1) | u32::from(config_random_bool(0.5));
             }
             let depth = 2 + bits % 7;
-            tracing::info!(mode = "pipelined", depth, "client_workload_mode");
+            tracing::info!(client_id, mode = "pipelined", depth, "client_workload_mode");
             WorkloadMode::Pipelined { depth }
         } else {
-            tracing::info!(mode = "sequential", "client_workload_mode");
+            tracing::info!(client_id, mode = "sequential", "client_workload_mode");
             WorkloadMode::Sequential
         };
 
@@ -208,7 +208,7 @@ impl Workload for ProposeClient {
             let time = &time;
             let shutdown = &shutdown;
             async move {
-                tracing::info!(seq_id = seq, "client_issued");
+                tracing::info!(client_id, seq_id = seq, "client_issued");
                 let attempt = async {
                     let mut target = usize::try_from(seq).unwrap_or(0) % n;
                     loop {
@@ -245,7 +245,7 @@ impl Workload for ProposeClient {
             let time = &time;
             let shutdown = &shutdown;
             async move {
-                tracing::info!(seq_id = seq, "client_read_issued");
+                tracing::info!(client_id, seq_id = seq, "client_read_issued");
                 let attempt = async {
                     let mut target = usize::try_from(seq).unwrap_or(0) % n;
                     let mut attempts: u64 = 0;
@@ -303,12 +303,18 @@ impl Workload for ProposeClient {
                 acknowledged += 1;
                 match (slot, leader) {
                     (Some(s), Some(node)) => {
-                        tracing::info!(seq_id = seq, slot = s, node, "client_acknowledged");
+                        tracing::info!(
+                            client_id,
+                            seq_id = seq,
+                            slot = s,
+                            node,
+                            "client_acknowledged"
+                        );
                     }
                     (Some(s), None) => {
-                        tracing::info!(seq_id = seq, slot = s, "client_acknowledged");
+                        tracing::info!(client_id, seq_id = seq, slot = s, "client_acknowledged");
                     }
-                    (None, _) => tracing::info!(seq_id = seq, "client_acknowledged"),
+                    (None, _) => tracing::info!(client_id, seq_id = seq, "client_acknowledged"),
                 }
                 if let Some(s) = slot {
                     max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
@@ -325,7 +331,7 @@ impl Workload for ProposeClient {
                     }
                 }
             } else {
-                tracing::info!(seq_id = seq, "client_failed");
+                tracing::info!(client_id, seq_id = seq, "client_failed");
             }
         };
 
@@ -337,6 +343,7 @@ impl Workload for ProposeClient {
             Some((Some(read_index), attempts)) => {
                 reads_acked += 1;
                 tracing::info!(
+                    client_id,
                     seq_id = seq,
                     read_index,
                     attempts,
@@ -345,10 +352,15 @@ impl Workload for ProposeClient {
             }
             Some((None, attempts)) => {
                 reads_acked += 1;
-                tracing::info!(seq_id = seq, attempts, "client_read_acknowledged");
+                tracing::info!(
+                    client_id,
+                    seq_id = seq,
+                    attempts,
+                    "client_read_acknowledged"
+                );
             }
             None => {
-                tracing::info!(seq_id = seq, "client_read_failed");
+                tracing::info!(client_id, seq_id = seq, "client_read_failed");
             }
         };
 

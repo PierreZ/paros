@@ -10,14 +10,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{
-    Invariant, SIM_FAULT_EVENT_NAME, TraceQuery, assert_always, assert_reachable, assert_sometimes,
-    assert_sometimes_all, assert_sometimes_each,
+    Invariant, SIM_FAULT_EVENT_NAME, TraceEvent, TraceQuery, assert_always, assert_reachable,
+    assert_sometimes, assert_sometimes_all, assert_sometimes_each,
 };
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_COMPACTED, EV_CRASHED,
     EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV,
     EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_RECOVERED,
-    EV_RESEND_SKIPPED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_OFFERED, EV_SYNCED,
+    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_OFFERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -57,7 +57,9 @@ pub enum Outcome {
 /// One message leg crossing the simulated network.
 #[derive(Debug, Clone, Serialize)]
 pub struct Shot {
-    /// Request sequence number this leg belongs to.
+    /// Workload client this leg belongs to (0 when a single client runs).
+    pub client: u64,
+    /// Request sequence number this leg belongs to (unique per client only).
     pub seq: u64,
     /// Node that sent this message (0 = A/client, 1 = B/node).
     pub from: u8,
@@ -222,6 +224,8 @@ pub struct RecoveredShot {
 pub struct RunResult {
     /// The seed this run used.
     pub seed: u64,
+    /// Number of paros nodes this seed drew (cluster size is per-seed config).
+    pub nodes: usize,
     /// Number of proposals observed.
     pub requests: u32,
     /// Every message leg exchanged, in time order.
@@ -262,6 +266,7 @@ impl RunResult {
     fn empty(seed: u64) -> Self {
         Self {
             seed,
+            nodes: 0,
             requests: 0,
             shots: Vec::new(),
             protocol: Vec::new(),
@@ -285,21 +290,27 @@ impl RunResult {
 /// Raw timeline the recorder accumulates from the trace.
 #[derive(Default)]
 pub(crate) struct RecorderData {
-    /// `(seq_id, sim_time_ms)` for each issued proposal.
-    issued: Vec<(u64, u64)>,
-    /// `(seq_id, sim_time_ms)` for each acknowledged proposal.
-    acked: Vec<(u64, u64)>,
-    /// `(seq_id, sim_time_ms)` for each failed proposal.
-    failed: Vec<(u64, u64)>,
+    /// `((client_id, seq_id), sim_time_ms)` for each issued proposal.
+    issued: Vec<((u64, u64), u64)>,
+    /// `((client_id, seq_id), sim_time_ms)` for each acknowledged proposal.
+    acked: Vec<((u64, u64), u64)>,
+    /// `((client_id, seq_id), sim_time_ms)` for each failed proposal.
+    failed: Vec<((u64, u64), u64)>,
     /// Number of logical-clock ticks observed.
     ticks: u64,
 }
 
-/// Pull `(seq_id, time_ms)` pairs for every event named `name`.
-fn collect_seq(q: &dyn TraceQuery, name: &str) -> Vec<(u64, u64)> {
+/// Pull `((client_id, seq_id), time_ms)` pairs for every event named `name`.
+/// `client_id` defaults to 0 for events predating the multi-client workload.
+fn collect_seq(q: &dyn TraceQuery, name: &str) -> Vec<((u64, u64), u64)> {
     q.snapshot(name)
         .into_iter()
-        .filter_map(|e| Some((e.u64("seq_id")?, e.time_ms)))
+        .filter_map(|e| {
+            Some((
+                (e.u64("client_id").unwrap_or(0), e.u64("seq_id")?),
+                e.time_ms,
+            ))
+        })
         .collect()
 }
 
@@ -710,17 +721,21 @@ impl Invariant for ClientLivenessOracle {
     }
 }
 
-/// This run's workload mode (`paros_sim::workload::ProposeClient` draws it
-/// once, from the sim config RNG). Sometimes-gated here so the sweep proves
-/// every mode rotates. Returns whether this run drew `Pipelined`.
-fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
+/// This run's per-client workload modes (`paros_sim::workload::ProposeClient`
+/// draws one per client instance, from the sim config RNG). Sometimes-gated
+/// here so the sweep proves every mode rotates. Returns the set of clients
+/// that drew `Pipelined` (no per-client program order to linearize against).
+fn observe_workload_mode(q: &dyn TraceQuery) -> BTreeSet<u64> {
     let mode_events = q.snapshot(EV_WORKLOAD_MODE);
     let sequential = mode_events
         .iter()
         .any(|e| e.str("mode") == Some("sequential"));
-    let pipelined = mode_events
+    let pipelined_clients: BTreeSet<u64> = mode_events
         .iter()
-        .any(|e| e.str("mode") == Some("pipelined"));
+        .filter(|e| e.str("mode") == Some("pipelined"))
+        .map(|e| e.u64("client_id").unwrap_or(0))
+        .collect();
+    let pipelined = !pipelined_clients.is_empty();
     assert_sometimes!(sequential, "a run uses the sequential client workload mode");
     if sequential {
         assert_reachable!("a run uses the sequential client workload mode");
@@ -737,33 +752,258 @@ fn observe_workload_mode(q: &dyn TraceQuery) -> bool {
     if quiet {
         assert_reachable!("a cluster decides one slot and then idles");
     }
-    pipelined
+    pipelined_clients
+}
+
+/// One committed operation's real-time span: first issue to first committed
+/// ack, in simulated milliseconds. Two spans sharing a boundary millisecond are
+/// treated as *concurrent* (no precedence edge), which can only drop — never
+/// fabricate — a real-time constraint, so the checker stays sound at trace
+/// granularity.
+#[derive(Clone, Copy)]
+struct OpSpan {
+    inv: u64,
+    resp: u64,
+}
+
+impl OpSpan {
+    fn before(self, other: OpSpan) -> bool {
+        self.resp < other.inv
+    }
+}
+
+/// Cap on the committed-operation history the interval checker walks pairwise.
+/// The current workloads stay far below it (a few dozen operations per run);
+/// the cap only bounds the `O(n^2)` walk if a future workload explodes.
+const LIN_HISTORY_CAP: usize = 512;
+
+/// The committed client history, keyed by `(client_id, seq_id)`. A watermark is
+/// `Option<u64>`: an absent `read_index` field is the empty applied prefix, and
+/// `None < Some(0)` is exactly the watermark order.
+struct LinHistory {
+    /// Acked writes with a known slot (program order within one client).
+    write_slot: BTreeMap<(u64, u64), u64>,
+    /// Committed reads and their observed watermark.
+    read_wm: BTreeMap<(u64, u64), Option<u64>>,
+    /// Committed writes as real-time spans with their slot (`None` for a
+    /// defensive slotless ack, which still forbids the empty prefix later).
+    writes: Vec<(OpSpan, Option<u64>)>,
+    /// Committed reads as real-time spans with their watermark.
+    reads: Vec<(OpSpan, Option<u64>)>,
+}
+
+/// Fold the client trace into a [`LinHistory`]. First issue and first
+/// committed ack win when an event repeats.
+fn collect_lin_history(q: &dyn TraceQuery) -> LinHistory {
+    let keyed = |e: &TraceEvent| Some((e.u64("client_id").unwrap_or(0), e.u64("seq_id")?));
+    let mut write_slot: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    let mut write_resp: BTreeMap<(u64, u64), (u64, Option<u64>)> = BTreeMap::new();
+    for e in q.snapshot(EV_ACKED) {
+        let Some(key) = keyed(&e) else { continue };
+        write_resp.entry(key).or_insert((e.time_ms, e.u64("slot")));
+        if let Some(slot) = e.u64("slot") {
+            write_slot.entry(key).or_insert(slot);
+        }
+    }
+    let mut read_wm: BTreeMap<(u64, u64), Option<u64>> = BTreeMap::new();
+    let mut read_resp: BTreeMap<(u64, u64), (u64, Option<u64>)> = BTreeMap::new();
+    for e in q.snapshot(EV_READ_ACKED) {
+        let Some(key) = keyed(&e) else { continue };
+        read_wm.entry(key).or_insert(e.u64("read_index"));
+        read_resp
+            .entry(key)
+            .or_insert((e.time_ms, e.u64("read_index")));
+    }
+    let mut write_inv: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    for e in q.snapshot(EV_ISSUED) {
+        let Some(key) = keyed(&e) else { continue };
+        write_inv.entry(key).or_insert(e.time_ms);
+    }
+    let mut read_inv: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    for e in q.snapshot(EV_READ_ISSUED) {
+        let Some(key) = keyed(&e) else { continue };
+        read_inv.entry(key).or_insert(e.time_ms);
+    }
+    let writes = write_resp
+        .iter()
+        .filter_map(|(key, &(resp, slot))| {
+            let inv = *write_inv.get(key)?;
+            Some((OpSpan { inv, resp }, slot))
+        })
+        .collect();
+    let reads = read_resp
+        .iter()
+        .filter_map(|(key, &(resp, wm))| {
+            let inv = *read_inv.get(key)?;
+            Some((OpSpan { inv, resp }, wm))
+        })
+        .collect();
+    LinHistory {
+        write_slot,
+        read_wm,
+        writes,
+        reads,
+    }
+}
+
+/// The full checker: disclosed-order linearizability over real time. Committed
+/// writes pin to their slot, committed reads to their watermark; the induced
+/// order is a valid linearization iff it agrees with every real-time
+/// precedence edge. Four pairwise checks, complete for this register (see the
+/// [`LinearizabilityOracle`] doc), bounded by [`LIN_HISTORY_CAP`].
+fn check_disclosed_order(h: &LinHistory) {
+    if h.writes.len() + h.reads.len() > LIN_HISTORY_CAP {
+        return;
+    }
+    // L1 — the log order of two committed writes agrees with their real-time
+    // order.
+    for (i, &(w1, s1)) in h.writes.iter().enumerate() {
+        for &(w2, s2) in &h.writes[i + 1..] {
+            let (Some(s1), Some(s2)) = (s1, s2) else {
+                continue;
+            };
+            if w1.before(w2) {
+                assert_always!(
+                    s1 < s2,
+                    "two real-time-ordered committed writes land in log order"
+                );
+            } else if w2.before(w1) {
+                assert_always!(
+                    s2 < s1,
+                    "two real-time-ordered committed writes land in log order"
+                );
+            }
+        }
+    }
+    // L2 — a committed read observes every write that completed before it
+    // began (a slotless committed ack still forbids the empty prefix). L3 — a
+    // write invoked after a committed read lands above that read's watermark.
+    for &(r, wm) in &h.reads {
+        for &(w, slot) in &h.writes {
+            if w.before(r) {
+                let observed = match slot {
+                    Some(s) => wm >= Some(s),
+                    None => wm.is_some(),
+                };
+                assert_always!(
+                    observed,
+                    "a committed read observes every write completed before it began"
+                );
+            } else if r.before(w)
+                && let Some(s) = slot
+            {
+                assert_always!(
+                    Some(s) > wm,
+                    "a write invoked after a committed read lands above its watermark"
+                );
+            }
+        }
+    }
+    // L4 — watermarks of real-time-ordered committed reads never move
+    // backwards.
+    for (i, &(r1, wm1)) in h.reads.iter().enumerate() {
+        for &(r2, wm2) in &h.reads[i + 1..] {
+            if r1.before(r2) {
+                assert_always!(
+                    wm2 >= wm1,
+                    "real-time-ordered committed reads observe monotone watermarks"
+                );
+            } else if r2.before(r1) {
+                assert_always!(
+                    wm1 >= wm2,
+                    "real-time-ordered committed reads observe monotone watermarks"
+                );
+            }
+        }
+    }
+}
+
+/// The sequential fast path for one non-pipelined client: program order (seq)
+/// is real-time order within the client even where timestamps tie, so C1-C3
+/// are strictly stronger than the interval checks for its operations.
+fn check_sequential_client(client: u64, h: &LinHistory) {
+    let span = (client, 0)..=(client, u64::MAX);
+    // C1 — a committed read observes every write acked before it began: read
+    // `k` starts after write `j`'s ack for every `j <= k`, so its watermark
+    // covers the running max acked slot (two-pointer over seq).
+    let mut max_acked_slot: Option<u64> = None;
+    let mut writes = h.write_slot.range(span.clone()).peekable();
+    for (&(_, rk), &wm) in h.read_wm.range(span.clone()) {
+        while let Some(&(&(_, wj), &slot)) = writes.peek() {
+            if wj > rk {
+                break;
+            }
+            max_acked_slot = max_acked_slot.max(Some(slot));
+            writes.next();
+        }
+        assert_always!(
+            wm >= max_acked_slot,
+            "a committed read's watermark covers every write acked before it began"
+        );
+    }
+
+    // C2 — this client's reads do not overlap, so their watermarks never move
+    // backwards.
+    let mut prev: Option<u64> = None;
+    for (_, &wm) in h.read_wm.range(span.clone()) {
+        assert_always!(wm >= prev, "committed-read watermarks never move backwards");
+        prev = prev.max(wm);
+    }
+
+    // C3 — a write issued after a committed read must land above that read's
+    // watermark (a slot at or below it would place the write inside the prefix
+    // the read already observed). Guards against an inflated / speculative
+    // watermark.
+    let mut max_read_wm: Option<u64> = None;
+    let mut reads = h.read_wm.range(span.clone()).peekable();
+    for (&(_, wj), &slot) in h.write_slot.range(span) {
+        while let Some(&(&(_, rk), &wm)) = reads.peek() {
+            if rk >= wj {
+                break;
+            }
+            max_read_wm = max_read_wm.max(wm);
+            reads.next();
+        }
+        if let Some(i) = max_read_wm {
+            assert_always!(
+                slot > i,
+                "a write issued after a committed read lands above its watermark"
+            );
+        }
+    }
 }
 
 /// The linearizability oracle — the client-history checker (the king oracle:
 /// every later stage asserts client-observed correctness through it). The
 /// register under check is the **applied log prefix**: an acked write is a
 /// state transition at its committed `slot`, and a committed read observes the
-/// watermark `read_index`. Because the log totally orders writes and the single
-/// client is sequential (`W0 R0 W1 R1 …`, each op issued only after the
-/// previous op's terminal event), a full Wing & Gong search is unnecessary: the
-/// history is linearizable iff three seq-order conditions hold. Real-time
-/// precedence is derived from program order (seq numbers), never from
-/// `time_ms` — a write ack and the next read routinely share a millisecond.
-/// A future multi-client workload must add a client id to these events before
-/// this oracle can go multi-client.
+/// watermark `read_index`.
 ///
-/// The workload also rotates a `Pipelined` mode (`paros_sim::workload`) that
-/// fires several proposals concurrently — no single program order to
-/// linearize against, so C1-C3 below are gated off for it (via the
-/// `client_workload_mode` event) and degrade to the per-slot [`SafetyOracle`]
-/// checks only, until a multi-client checker lands.
+/// **The full checker (multi-client, pipelined included).** A Wing & Gong /
+/// Porcupine search backtracks over candidate linearization orders; here the
+/// consensus log *discloses* every linearization point — a committed write
+/// linearizes at its slot, a committed read at its watermark — so the search
+/// collapses to its verification half: the disclosed order is a valid
+/// linearization iff it is consistent with real-time. That is four pairwise
+/// interval checks over committed operations (see `observe`), valid for any
+/// number of concurrent clients and any per-client mode, bounded by
+/// [`LIN_HISTORY_CAP`]. Precedence across operations comes from event
+/// timestamps, with same-millisecond boundaries treated as concurrent.
+///
+/// **The sequential fast path.** A client in a non-pipelined mode issues each
+/// op only after the previous op's terminal event, so within that client
+/// program order (seq numbers) is real-time order even when the events share a
+/// millisecond. C1-C3 keep that stronger per-client check, now keyed by
+/// `client_id`.
 ///
 /// Failed / timed-out operations enter no constraint: a timed-out write may
-/// still commit later, so it is deliberately unconstrained. Every *committed*
-/// ack does enter C1-C3, the dedup fast path included: it used to ack with no
-/// slot and so fell outside `write_slot` entirely, and that exemption was the
-/// hole the early-ack bug lived in (see [`AppliedAckOracle`]).
+/// still commit later, so it is deliberately unconstrained (`Ambiguous`, never
+/// assumed aborted). Every *committed* ack does enter the checks, the dedup
+/// fast path included: it used to ack with no slot and so fell outside
+/// `write_slot` entirely, and that exemption was the hole the early-ack bug
+/// lived in (see [`AppliedAckOracle`]). A committed ack that (defensively)
+/// names no slot still constrains later reads: their watermark can no longer
+/// be the empty prefix.
 pub(crate) struct LinearizabilityOracle;
 
 impl Invariant for LinearizabilityOracle {
@@ -781,86 +1021,48 @@ impl Invariant for LinearizabilityOracle {
             "no read is acked/failed before it is issued"
         );
 
-        // Acked writes with a known slot, and committed reads with their
-        // observed watermark, both keyed by seq (= program order). A watermark
-        // is `Option<u64>`: an absent `read_index` field is the empty applied
-        // prefix, and `None < Some(0)` is exactly the watermark order.
-        let mut write_slot: BTreeMap<u64, u64> = BTreeMap::new();
-        for e in q.snapshot(EV_ACKED) {
-            let Some(seq) = e.u64("seq_id") else { continue };
-            if let Some(slot) = e.u64("slot") {
-                write_slot.entry(seq).or_insert(slot);
+        let h = collect_lin_history(q);
+        let pipelined_clients = observe_workload_mode(q);
+        check_disclosed_order(&h);
+        // --- The sequential fast path, per client: program order is real-time
+        // order within a non-pipelined client even where timestamps tie, so
+        // C1-C3 stay strictly stronger than L1-L4 for those clients.
+        let history_clients: BTreeSet<u64> = h
+            .write_slot
+            .keys()
+            .chain(h.read_wm.keys())
+            .map(|&(c, _)| c)
+            .collect();
+        for &client in &history_clients {
+            if !pipelined_clients.contains(&client) {
+                check_sequential_client(client, &h);
             }
         }
-        let read_acks = q.snapshot(EV_READ_ACKED);
-        let mut read_wm: BTreeMap<u64, Option<u64>> = BTreeMap::new();
-        for e in &read_acks {
-            let Some(seq) = e.u64("seq_id") else { continue };
-            read_wm.entry(seq).or_insert(e.u64("read_index"));
-        }
-
-        // C1-C3 below only hold for `Sequential`'s single-client program
-        // order (see the doc comment above), so they are skipped for
-        // `Pipelined`.
-        let pipelined = observe_workload_mode(q);
-
-        if !pipelined {
-            // C1 — a committed read observes every write acked before it began:
-            // read `k` starts after write `j`'s ack for every `j <= k`, so its
-            // watermark covers the running max acked slot (two-pointer over seq).
-            let mut max_acked_slot: Option<u64> = None;
-            let mut writes = write_slot.iter().peekable();
-            for (&rk, &wm) in &read_wm {
-                while let Some(&(&wj, &slot)) = writes.peek() {
-                    if wj > rk {
-                        break;
-                    }
-                    max_acked_slot = max_acked_slot.max(Some(slot));
-                    writes.next();
-                }
-                assert_always!(
-                    wm >= max_acked_slot,
-                    "a committed read's watermark covers every write acked before it began"
-                );
-            }
-
-            // C2 — reads do not overlap (the client is sequential), so their
-            // watermarks never move backwards.
-            let mut prev: Option<u64> = None;
-            for &wm in read_wm.values() {
-                assert_always!(wm >= prev, "committed-read watermarks never move backwards");
-                prev = prev.max(wm);
-            }
-
-            // C3 — a write issued after a committed read must land above that
-            // read's watermark (a slot at or below it would place the write inside
-            // the prefix the read already observed). Guards against an inflated /
-            // speculative watermark.
-            let mut max_read_wm: Option<u64> = None;
-            let mut reads = read_wm.iter().peekable();
-            for (&wj, &slot) in &write_slot {
-                while let Some(&(&rk, &wm)) = reads.peek() {
-                    if rk >= wj {
-                        break;
-                    }
-                    max_read_wm = max_read_wm.max(wm);
-                    reads.next();
-                }
-                if let Some(i) = max_read_wm {
-                    assert_always!(
-                        slot > i,
-                        "a write issued after a committed read lands above its watermark"
-                    );
-                }
-            }
-        }
-
         // Coverage gates (`UntilCoverageStable` only saturates once these fire).
-        assert_sometimes!(!read_wm.is_empty(), "a linearizable read commits");
-        if !read_wm.is_empty() {
+        let multi_client = history_clients.len() > 1;
+        assert_sometimes!(
+            multi_client,
+            "a run drives concurrent clients against one register"
+        );
+        if multi_client {
+            assert_reachable!("a run drives concurrent clients against one register");
+        }
+        let concurrent_read_write = h
+            .reads
+            .iter()
+            .any(|&(r, _)| h.writes.iter().any(|&(w, _)| !w.before(r) && !r.before(w)));
+        assert_sometimes!(
+            concurrent_read_write,
+            "a linearizable read commits concurrently with a conflicting write"
+        );
+        if concurrent_read_write {
+            assert_reachable!("a linearizable read commits concurrently with a conflicting write");
+        }
+        assert_sometimes!(!h.read_wm.is_empty(), "a linearizable read commits");
+        if !h.read_wm.is_empty() {
             assert_reachable!("a linearizable read commits");
         }
-        let multi_slot = read_wm.values().any(|wm| *wm >= Some(1));
+        let multi_slot = h.read_wm.values().any(|wm| *wm >= Some(1));
         assert_sometimes!(multi_slot, "a committed read observes a multi-slot prefix");
         if multi_slot {
             assert_reachable!("a committed read observes a multi-slot prefix");
@@ -883,13 +1085,14 @@ impl Invariant for LinearizabilityOracle {
                 Some(_) => {}
             }
         }
-        let read_after_change =
-            leader_change_ms.is_some_and(|t| read_acks.iter().any(|e| e.time_ms > t));
+        let read_after_change = leader_change_ms
+            .is_some_and(|t| q.snapshot(EV_READ_ACKED).iter().any(|e| e.time_ms > t));
         assert_sometimes!(read_after_change, "a read commits after a leader change");
         if read_after_change {
             assert_reachable!("a read commits after a leader change");
         }
-        let retried = read_acks
+        let retried = q
+            .snapshot(EV_READ_ACKED)
             .iter()
             .any(|e| e.u64("attempts").is_some_and(|a| a > 1));
         assert_sometimes!(retried, "a read is retried across nodes before committing");
@@ -1946,13 +2149,54 @@ impl Invariant for SnapshotOracle {
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
-        let installed = !collect_snapshots(q).is_empty();
+        let snapshots = collect_snapshots(q);
+        let installed = !snapshots.is_empty();
         assert_sometimes!(
             installed,
             "a below-floor node recovers via snapshot transfer"
         );
         if installed {
             assert_reachable!("a snapshot was installed to recover a below-floor node");
+        }
+
+        // #88 reachability: a snapshot lands during a live election. The exact
+        // shape is pinned by ballots — node X broadcasts a `Prepare` at round
+        // `r`, installs a snapshot *while that campaign is open*, and then wins
+        // at round `r`. This is the window in which `on_install_snapshot` can
+        // raise the candidate's promise past the ballot it is campaigning at
+        // (the stale-ballot route the `try_become_leader` guard closes); the
+        // gate stays reachable after the fix because a snapshot carrying a
+        // ballot at or below the campaign's does not trip the guard.
+        let prepares: Vec<(u64, u64, u64)> = q
+            .snapshot(EV_MSG_SENT)
+            .iter()
+            .filter(|e| e.str("kind") == Some("prepare"))
+            .filter_map(|e| Some((e.time_ms, e.u64("node")?, e.u64("bround")?)))
+            .collect();
+        let mid_election = q.snapshot(EV_LEADER).iter().any(|win| {
+            let (Some(node), Some(round)) = (win.u64("node"), win.u64("round")) else {
+                return false;
+            };
+            let Some(campaign_start) = prepares
+                .iter()
+                .filter(|&&(t, n, r)| n == node && r == round && t <= win.time_ms)
+                .map(|&(t, _, _)| t)
+                .min()
+            else {
+                return false;
+            };
+            snapshots
+                .iter()
+                .any(|&(t, n, _)| n == node && t >= campaign_start && t <= win.time_ms)
+        });
+        assert_sometimes!(
+            mid_election,
+            "a snapshot lands during a live election the receiver goes on to win"
+        );
+        if mid_election {
+            assert_reachable!(
+                "a snapshot lands during a live election the receiver goes on to win"
+            );
         }
     }
 }
@@ -2016,6 +2260,30 @@ impl Invariant for DriverHookOracle {
         }
         if resigned {
             assert_reachable!("the driver voluntarily resigns leadership");
+        }
+        // The send-seam per-message loss locations (#80/#88 reachability): an
+        // isolated `Accept` vanishing is the chosen-gap wedge ingredient; a
+        // lost `Prepare`/`Promise` stretches an election open.
+        let send_drops = q.snapshot(EV_SEND_DROPPED);
+        let dropped_accept = send_drops
+            .iter()
+            .any(|event| event.str("kind") == Some("accept"));
+        let dropped_election = send_drops
+            .iter()
+            .any(|event| matches!(event.str("kind"), Some("prepare" | "promise" | "nack")));
+        assert_sometimes!(
+            dropped_accept,
+            "the driver drops one isolated accept at the send seam"
+        );
+        if dropped_accept {
+            assert_reachable!("the driver drops one isolated accept at the send seam");
+        }
+        assert_sometimes!(
+            dropped_election,
+            "the driver drops an election message at the send seam"
+        );
+        if dropped_election {
+            assert_reachable!("the driver drops an election message at the send seam");
         }
     }
 }
@@ -2109,6 +2377,64 @@ impl Invariant for TruncationOracle {
 /// Turn the recorded timeline into the animation [`RunResult`]: match each issued
 /// proposal to its acknowledgement (delivered) or failure (dropped), and
 /// synthesize the legs of every round trip.
+/// Pair each issued proposal with its terminal event into the client-leg
+/// [`Shot`]s the demo animates, returning `(shots, delivered, dropped,
+/// longest_rtt_ms)`.
+fn build_shots(
+    issued: &[((u64, u64), u64)],
+    ack: &BTreeMap<(u64, u64), u64>,
+    fail: &BTreeMap<(u64, u64), u64>,
+) -> (Vec<Shot>, u32, u32, u64) {
+    let mut shots = Vec::new();
+    let mut delivered = 0_u32;
+    let mut dropped = 0_u32;
+    let mut longest_rtt_ms = 0_u64;
+
+    for ((client, seq), issue_ms) in issued.iter().copied() {
+        if let Some(&ack_ms) = ack.get(&(client, seq)) {
+            delivered += 1;
+            let rtt = ack_ms.saturating_sub(issue_ms);
+            longest_rtt_ms = longest_rtt_ms.max(rtt);
+            let mid_ms = issue_ms.saturating_add(rtt / 2);
+            shots.push(Shot {
+                client,
+                seq,
+                from: NODE_A,
+                to: NODE_B,
+                depart_ms: issue_ms,
+                arrive_ms: mid_ms,
+                latency_ms: mid_ms.saturating_sub(issue_ms),
+                outcome: Outcome::Delivered,
+            });
+            shots.push(Shot {
+                client,
+                seq,
+                from: NODE_B,
+                to: NODE_A,
+                depart_ms: mid_ms,
+                arrive_ms: ack_ms,
+                latency_ms: ack_ms.saturating_sub(mid_ms),
+                outcome: Outcome::Delivered,
+            });
+        } else {
+            dropped += 1;
+            let end_ms = fail.get(&(client, seq)).copied().unwrap_or(issue_ms);
+            let span = end_ms.saturating_sub(issue_ms).max(MIN_DROP_SPAN_MS);
+            shots.push(Shot {
+                client,
+                seq,
+                from: NODE_A,
+                to: NODE_B,
+                depart_ms: issue_ms,
+                arrive_ms: issue_ms.saturating_add(span),
+                latency_ms: span,
+                outcome: Outcome::Dropped,
+            });
+        }
+    }
+    (shots, delivered, dropped, longest_rtt_ms)
+}
+
 pub(crate) fn build_result(
     seed: u64,
     data: &RecorderData,
@@ -2116,6 +2442,11 @@ pub(crate) fn build_result(
     rec: &RecoveryData,
 ) -> RunResult {
     let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
+    let nodes = proto
+        .cluster
+        .iter()
+        .max()
+        .map_or(0, |&m| usize::try_from(m).unwrap_or(0) + 1);
     let crashes = rec.crashes.clone();
     let restarts = rec.restarts.clone();
     let syncs = rec.syncs.clone();
@@ -2123,6 +2454,7 @@ pub(crate) fn build_result(
 
     if data.issued.is_empty() {
         return RunResult {
+            nodes,
             protocol,
             node_states,
             chosen,
@@ -2136,55 +2468,11 @@ pub(crate) fn build_result(
         };
     }
 
-    let ack: BTreeMap<u64, u64> = data.acked.iter().copied().collect();
-    let fail: BTreeMap<u64, u64> = data.failed.iter().copied().collect();
+    let ack: BTreeMap<(u64, u64), u64> = data.acked.iter().copied().collect();
+    let fail: BTreeMap<(u64, u64), u64> = data.failed.iter().copied().collect();
     let mut issued = data.issued.clone();
     issued.sort_by_key(|&(_, t)| t);
-
-    let mut shots = Vec::new();
-    let mut delivered = 0_u32;
-    let mut dropped = 0_u32;
-    let mut longest_rtt_ms = 0_u64;
-
-    for (seq, issue_ms) in issued.iter().copied() {
-        if let Some(&ack_ms) = ack.get(&seq) {
-            delivered += 1;
-            let rtt = ack_ms.saturating_sub(issue_ms);
-            longest_rtt_ms = longest_rtt_ms.max(rtt);
-            let mid_ms = issue_ms.saturating_add(rtt / 2);
-            shots.push(Shot {
-                seq,
-                from: NODE_A,
-                to: NODE_B,
-                depart_ms: issue_ms,
-                arrive_ms: mid_ms,
-                latency_ms: mid_ms.saturating_sub(issue_ms),
-                outcome: Outcome::Delivered,
-            });
-            shots.push(Shot {
-                seq,
-                from: NODE_B,
-                to: NODE_A,
-                depart_ms: mid_ms,
-                arrive_ms: ack_ms,
-                latency_ms: ack_ms.saturating_sub(mid_ms),
-                outcome: Outcome::Delivered,
-            });
-        } else {
-            dropped += 1;
-            let end_ms = fail.get(&seq).copied().unwrap_or(issue_ms);
-            let span = end_ms.saturating_sub(issue_ms).max(MIN_DROP_SPAN_MS);
-            shots.push(Shot {
-                seq,
-                from: NODE_A,
-                to: NODE_B,
-                depart_ms: issue_ms,
-                arrive_ms: issue_ms.saturating_add(span),
-                latency_ms: span,
-                outcome: Outcome::Dropped,
-            });
-        }
-    }
+    let (shots, delivered, dropped, longest_rtt_ms) = build_shots(&issued, &ack, &fail);
 
     // The animation spans the latest of any observable event: a client leg, a
     // protocol leg, a node-state change, a chosen marker, or a crash/restart —
@@ -2205,6 +2493,7 @@ pub(crate) fn build_result(
 
     RunResult {
         seed,
+        nodes,
         requests: u32::try_from(issued.len()).unwrap_or(u32::MAX),
         shots,
         protocol,

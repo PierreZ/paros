@@ -305,7 +305,13 @@ impl Workload for ChainWorkload {
                             "chain_command_acked"
                         );
                         if let Some(node) = leader {
-                            tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                            tracing::info!(
+                                client_id,
+                                seq_id = seq,
+                                slot,
+                                node,
+                                "client_acknowledged"
+                            );
                         }
                     }
                     ProposalResult::Rejected { leader } => {
@@ -451,7 +457,13 @@ impl Workload for ChainWorkload {
                                 "chain_command_acked"
                             );
                             if let Some(node) = leader {
-                                tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                                tracing::info!(
+                                    client_id,
+                                    seq_id = seq,
+                                    slot,
+                                    node,
+                                    "client_acknowledged"
+                                );
                             }
                             if seq.is_multiple_of(config.compact_every) {
                                 let control =
@@ -616,7 +628,13 @@ impl Workload for ChainWorkload {
                             "chain_command_acked"
                         );
                         if let Some(node) = leader {
-                            tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                            tracing::info!(
+                                client_id,
+                                seq_id = seq,
+                                slot,
+                                node,
+                                "client_acknowledged"
+                            );
                             target = usize::try_from(node).unwrap_or(target) % server_count;
                         }
                         break;

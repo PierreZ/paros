@@ -97,7 +97,11 @@ fn distinct_seeds_are_independent() {
 fn chaotic_run_is_well_formed() {
     let r = run_seed(42);
 
-    assert_eq!(r.requests, 12, "every proposal is observed");
+    assert!(
+        r.requests >= 12 && r.requests.is_multiple_of(12),
+        "every client's 12 proposals are observed (client count is a per-seed draw), got {}",
+        r.requests
+    );
     assert_eq!(
         r.delivered + r.dropped,
         r.requests,
@@ -139,7 +143,7 @@ fn chaotic_run_is_well_formed() {
             "a protocol message arrived before it left"
         );
         assert!(
-            (shot.from as usize) < 3 && (shot.to as usize) < 3,
+            (shot.from as usize) < r.nodes && (shot.to as usize) < r.nodes,
             "protocol legs are between cluster nodes"
         );
     }

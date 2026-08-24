@@ -41,6 +41,10 @@ bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is 
 recipes replay from a fresh builder. The shared assertion tables allow at most 128 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
+**Moonpool questions.** For any question about moonpool's APIs or behavior, consult the
+LLM-oriented docs at <https://pierrez.github.io/moonpool/llms.html> before digging through its
+source.
+
 **Upstream Moonpool improvements.** When paros work exposes a limitation that is properly reusable
 Moonpool infrastructure—not a paros protocol or harness bug—open a focused issue in
 `PierreZ/moonpool` instead of silently accepting or locally reimplementing it. Include the concrete
@@ -64,6 +68,13 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
+
+**Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
+what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
+truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
+production we will later search for and adopt an existing high-level storage engine rather than
+building on moonpool's primitives. (Moonpool's *storage chaos* still applies in simulation — it
+perturbs the environment, not the abstraction we code against.)
 
 **Where each kind of turbulence lives.** Three layers, and nothing crosses them (this is the FDB
 separation; #81 removed the message-class nemesis, which mixed them):

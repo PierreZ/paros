@@ -159,6 +159,13 @@ pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
 /// Tracing event: the driver deliberately asked the current leader to resign.
 pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
 
+/// Tracing event: the driver deliberately dropped one outbound protocol message
+/// at the send seam (after durability, before the transport). Carries `node`,
+/// `to`, `kind`, and for an `Accept` the `slot`. Indistinguishable from network
+/// loss to the peers; emitted so the sweep can prove the per-message-loss
+/// BUGGIFY location is active and so a trace shows why a message never arrived.
+pub const EV_SEND_DROPPED: &str = "msg_dropped_at_send";
+
 /// Tracing event: the driver selected the shortest valid election timeout.
 /// Carries `node` and `ticks`. The driver-hook oracle uses it to prove the
 /// timeout-jitter BUGGIFY location is active.
@@ -557,6 +564,57 @@ fn wire_message(message: internal::ConsensusMessage) -> internal::WireMessage {
     }
 }
 
+/// Materialize and send this batch's snapshot offers. An offered snapshot must
+/// describe exactly the application prefix named by the protocol message, so
+/// this runs only after the batch's committed entries are durably applied.
+fn send_snapshot_offers<S, H>(
+    storage: &mut S,
+    out: &Outbound,
+    hooks: &H,
+    snapshot_offers: &[(NodeId, Slot, Ballot)],
+) -> SimulationResult<()>
+where
+    S: NodeStorage,
+    H: DriverHooks,
+{
+    for &(to, offered_index, ballot) in snapshot_offers {
+        if storage.applied_slot() != Some(offered_index) {
+            return Err(SimulationError::InvalidState(
+                "application snapshot does not match offered chosen index".into(),
+            ));
+        }
+        let message = Message::InstallSnapshot {
+            from: NodeId(out.self_id),
+            ballot,
+            chosen_index: offered_index,
+            snapshot: Value(storage.snapshot()),
+        };
+        if hooks.drop_outgoing(to, &message) {
+            trace_send_drop(out.self_id, to, &message);
+            continue;
+        }
+        out.transmit(to, &message);
+    }
+    Ok(())
+}
+
+/// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names
+/// its slot so a trace shows exactly which round the loss isolated.
+fn trace_send_drop(self_id: u64, to: NodeId, msg: &Message) {
+    let kind = message_kind(msg);
+    if let Message::Accept { slot, .. } = msg {
+        tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind,
+            slot = slot.0,
+            "msg_dropped_at_send"
+        );
+    } else {
+        tracing::info!(node = self_id, to = to.0, kind, "msg_dropped_at_send");
+    }
+}
+
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
@@ -621,8 +679,15 @@ where
     }
 
     // 2. Send messages — only after (1) is durable. The core addresses each one;
-    //    the driver maps NodeId → address and fires (fire-and-forget).
+    //    the driver maps NodeId → address and fires (fire-and-forget). Each
+    //    message may be dropped at this seam: per-message loss the network
+    //    layer cannot produce on its own (a TCP stream loses intervals, never
+    //    one isolated message), and `resend_pending` re-derives what matters.
     for (to, msg) in messages {
+        if hooks.drop_outgoing(to, &msg) {
+            trace_send_drop(self_id, to, &msg);
+            continue;
+        }
         out.transmit(to, &msg);
     }
 
@@ -661,23 +726,7 @@ where
             .map_err(|e| storage_err(&e))?;
     }
 
-    // An offered snapshot must describe exactly the application prefix named by
-    // the protocol message. Materialize and send it only after this batch's
-    // committed entries have been durably applied.
-    for (to, offered_index, ballot) in snapshot_offers {
-        if storage.applied_slot() != Some(offered_index) {
-            return Err(SimulationError::InvalidState(
-                "application snapshot does not match offered chosen index".into(),
-            ));
-        }
-        let message = Message::InstallSnapshot {
-            from: NodeId(self_id),
-            ballot,
-            chosen_index: offered_index,
-            snapshot: Value(storage.snapshot()),
-        };
-        out.transmit(to, &message);
-    }
+    send_snapshot_offers(storage, out, hooks, &snapshot_offers)?;
 
     // Only now can a client learn success: both the chosen index and the
     // application transition are durable. Controls have no proposal waiter.

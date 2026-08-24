@@ -22,8 +22,8 @@ use moonpool_sim::{
 
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, DriverHooks, HardState, MemStorage, MustSync, NodeId, NodeStorage,
-    Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
+    Ballot, Command, Config, DriverHooks, HardState, MemStorage, Message, MustSync, NodeId,
+    NodeStorage, Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -452,5 +452,25 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
 
     fn shortest_election_timeout(&self) -> bool {
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn drop_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Three locations, selected independently per seed: an isolated
+        // `Accept` loss is the interleaving behind a stranded chosen-gap wedge
+        // (#80) — one earlier slot's Accept vanishes while later slots land —
+        // while losing a `Promise`/`Prepare` stretches elections open, and a
+        // lost `Nack` keeps a below-floor candidate's campaign alive long
+        // enough for the answering snapshot to land mid-election (the
+        // truncated-quorum Nack otherwise steps the candidate down before the
+        // `CatchUpRequest`'s snapshot offer arrives — the #88 window).
+        match msg {
+            Message::Accept { .. } => buggify_with_prob!(0.05),
+            Message::Prepare { .. } | Message::Promise { .. } => buggify_with_prob!(0.10),
+            Message::Nack { .. } => buggify_with_prob!(0.25),
+            _ => false,
+        }
     }
 }
