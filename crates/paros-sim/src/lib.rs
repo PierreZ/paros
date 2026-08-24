@@ -12,6 +12,7 @@
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
+mod audit;
 mod chain;
 mod chain_workload;
 mod node;
@@ -33,11 +34,8 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::oracle::{
-    AppliedAckOracle, ChainAgreement, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle,
-    GapFillOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle,
-    ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
-    SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle, assert_final_convergence,
-    build_result,
+    ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
+    TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
 
@@ -276,24 +274,12 @@ fn chain_logic_builder() -> SimulationBuilder {
     chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::default()))
         .invariant(ChainAgreement::new())
-        .invariant(SafetyOracle)
-        .invariant(AppliedAckOracle)
-        .invariant(RecoveryOracle)
-        .invariant(NoGapsOracle)
-        .invariant(LeadershipOracle)
-        .invariant(ProgressOracle)
-        .invariant(GapFillOracle)
-        .invariant(TruncationOracle)
-        .invariant(SnapshotOracle)
-        .invariant(DriverHookOracle)
 }
 
 fn chain_network_builder() -> SimulationBuilder {
     chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::network_safety()))
         .invariant(ChainAgreement::network())
-        .invariant(SafetyOracle)
-        .invariant(AppliedAckOracle)
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
@@ -325,24 +311,11 @@ pub fn run_seed(seed: u64) -> RunResult {
             Box::new(NodeProcess)
         })
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), |_| {
-            Box::new(ProposeClient)
+            Box::new(ProposeClient::default())
         })
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(RecoveryRecorder::new(recovery.clone()))
-        .invariant(ClientLivenessOracle)
-        .invariant(SafetyOracle)
-        .invariant(LinearizabilityOracle)
-        .invariant(AppliedAckOracle)
-        .invariant(RecoveryOracle)
-        .invariant(NoGapsOracle)
-        .invariant(LeadershipOracle)
-        .invariant(ProgressOracle)
-        .invariant(ConvergenceOracle)
-        .invariant(GapFillOracle)
-        .invariant(TruncationOracle)
-        .invariant(SnapshotOracle)
-        .invariant(DriverHookOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -358,7 +331,6 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
     let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
-    assert_final_convergence(&proto);
     build_result(seed, &data, &proto, &recovery)
 }
 

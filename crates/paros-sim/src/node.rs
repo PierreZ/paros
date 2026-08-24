@@ -20,6 +20,7 @@ use moonpool_sim::{
     buggify_with_prob,
 };
 
+use crate::audit::{NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, Command, Config, DriverHooks, HardState, MemStorage, Message, MustSync, NodeId,
@@ -82,6 +83,10 @@ impl Process for NodeProcess {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
         };
+        // The per-iteration shared audit: pure observation, published beside the
+        // storage world so every node folds its transitions into one incremental
+        // checker. It never influences the driver — that is `hooks`' job.
+        let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
@@ -102,6 +107,7 @@ impl Process for NodeProcess {
                 members.clone(),
                 ctx.shutdown().clone(),
                 &hooks,
+                &audit,
             )
             .await
             {

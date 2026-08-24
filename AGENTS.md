@@ -112,6 +112,28 @@ attrition cannot reach: before fsync and after fsync/before send. Give each seam
 location; treating both as one location prevents the sweep from independently selecting the two
 distinct failure modes.
 
+**Audit doctrine — observation, never perturbation.** The mirror image of the `DriverHooks` rule.
+The driver also carries a provider-generic `Audit` port (`paros::Audit`, production passes
+`NoAudit`): it *reports* every externally meaningful transition — promise raised, accept persisted,
+slot applied, message sent or dropped at the send seam, leader elected, gap observed, client acked,
+node recovered — typed, once, at the instant it happens, right where the matching `tracing` event is
+emitted. Nothing an `Audit` implementation does may change the run: it returns nothing, it draws no
+randomness, it reads no wall clock, and deleting every audit call must leave the shipped program
+bit-identical. Hooks perturb; the audit only watches.
+
+**Correctness lives in the audit + workload `check()`, not in trace scanning.** `paros-sim`'s
+`audit::AuditWorld` is the per-iteration shared checker (published on the `StateHandle` beside the
+storage world, factory-created per seed): every callback folds one transition into O(1) incremental
+state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
+the **workload**, which records its own operation history and checks it in `check()`; the client is
+the only party that knows its own program order. Tracing stays for humans and the wasm demo, and
+`oracle.rs` keeps only the demo-data recorders plus `ChainAgreement` (the *application* state
+machine, whose transitions the storage layer emits as trace facts). Do not add a new
+`Invariant` that re-scans an event stream to check the protocol: the scan is O(trace²) across a
+run's observability pumps, and the audit callback for that transition already exists or is one
+method away. Preserve assertion **message strings** when moving a check — the assertion slot is the
+hash of its message, so a reworded message silently resets the sweep's saturation history.
+
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:
@@ -151,8 +173,8 @@ prefix would freeze one below it cluster-wide and forever, with reads fenced abo
 commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
 quorum intersection: a value already chosen there would have been reported by some Promise. The core
 surfaces the failure through `RawNode::chosen_gap()` (the `Ready` handshake only ever hands out the
-*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver traces each
-tick and `paros_sim::oracle::GapFillOracle` asserts against at quiescence.
+*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver reports
+each tick through `Audit::chosen_gap` and `paros_sim::audit` asserts against at quiescence.
 
 ## Simulation-driven development
 

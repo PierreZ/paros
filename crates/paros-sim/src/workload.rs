@@ -15,6 +15,7 @@ use moonpool_sim::{
 
 use paros::{Compact, ParosClient, Propose, Read, parse_addr};
 
+use crate::audit::{ClientHistory, ClientMode, GateScope, audit_world};
 use crate::{CHAOS_DURATION_MS, GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
 
 /// Probability a run draws [`WorkloadMode::Quiet`], FDB-knob style: the rare
@@ -111,12 +112,36 @@ enum WorkloadMode {
 /// sequential client); `Quiet` commits one proposal and then says nothing more,
 /// leaving a cluster whose entire chosen history is slot 0. This exercises the
 /// redirect path and, under chaos, leader loss and re-election on all three.
-pub struct ProposeClient;
+///
+/// It also **records its own history** — every issued/acked/failed write and
+/// read, with the committed slot or observed watermark — and checks it in the
+/// `check()` phase (see [`ClientHistory`]). The client is the only party that
+/// knows its own program order, so linearizability is checked where that order
+/// lives rather than reconstructed from an event stream.
+#[derive(Default)]
+pub struct ProposeClient {
+    history: ClientHistory,
+}
 
 #[async_trait]
 impl Workload for ProposeClient {
     fn name(&self) -> &'static str {
         "propose-client"
+    }
+
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // This campaign has a genuinely quiet settle tail, so the
+        // quiescence-gated liveness checks apply.
+        audit_world(ctx.state()).enable_liveness_checks();
+        Ok(())
+    }
+
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let world = audit_world(ctx.state());
+        world.check_client_history(&self.history);
+        world.check_gates(GateScope::Full);
+        world.check_final_convergence();
+        Ok(())
     }
 
     // One client script per mode: the write and read attempt loops are
@@ -166,6 +191,9 @@ impl Workload for ProposeClient {
         let n = clients.len();
         let mut acknowledged: u32 = 0;
         let mut reads_acked: u32 = 0;
+        // The client's own operation history, checked in `check()`.
+        let mut history = std::mem::take(&mut self.history);
+        history.set_client(client_id);
         // Highest slot this client has seen committed, the compaction watermark it
         // hands to every node (playing the application that owns compaction).
         let mut max_slot: Option<u64> = None;
@@ -180,6 +208,7 @@ impl Workload for ProposeClient {
                 bits = (bits << 1) | u64::from(config_random_bool(0.5));
             }
             let delay_ms = bits * QUIET_DELAY_STEP_MS;
+            history.set_mode(ClientMode::Quiet);
             tracing::info!(client_id, mode = "quiet", delay_ms, "client_workload_mode");
             WorkloadMode::Quiet { delay_ms }
         } else if config_random_bool(0.5) {
@@ -188,9 +217,11 @@ impl Workload for ProposeClient {
                 bits = (bits << 1) | u32::from(config_random_bool(0.5));
             }
             let depth = 2 + bits % 7;
+            history.set_mode(ClientMode::Pipelined);
             tracing::info!(client_id, mode = "pipelined", depth, "client_workload_mode");
             WorkloadMode::Pipelined { depth }
         } else {
+            history.set_mode(ClientMode::Sequential);
             tracing::info!(client_id, mode = "sequential", "client_workload_mode");
             WorkloadMode::Sequential
         };
@@ -296,11 +327,14 @@ impl Workload for ProposeClient {
         // modes — `ping_compaction` is what [`WorkloadMode::Quiet`] switches off,
         // because the truncate the ping decides would be a second chosen slot and
         // lift that mode's prefix off the boundary it exists to sit on.
-        let mut handle_write = |seq: u64,
+        let mut handle_write = |history: &mut ClientHistory,
+                                seq: u64,
                                 outcome: Option<(Option<u64>, Option<u64>)>,
                                 ping_compaction: bool| {
+            let now_ms = u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX);
             if let Some((leader, slot)) = outcome {
                 acknowledged += 1;
+                history.record_write_ack(seq, slot, now_ms);
                 match (slot, leader) {
                     (Some(s), Some(node)) => {
                         tracing::info!(
@@ -331,6 +365,7 @@ impl Workload for ProposeClient {
                     }
                 }
             } else {
+                history.record_write_failed();
                 tracing::info!(client_id, seq_id = seq, "client_failed");
             }
         };
@@ -339,29 +374,50 @@ impl Workload for ProposeClient {
         // observed watermark; an absent `read_index` field is the empty
         // applied prefix (`None`), which the oracle orders below `Some(0)`.
         // Only the modes that read use it.
-        let mut handle_read = |seq: u64, outcome: Option<(Option<u64>, u64)>| match outcome {
-            Some((Some(read_index), attempts)) => {
+        let mut handle_read =
+            |history: &mut ClientHistory, seq: u64, outcome: Option<(Option<u64>, u64)>| {
+                let now_ms = u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX);
+                let Some((watermark, attempts)) = outcome else {
+                    history.record_read_failed();
+                    tracing::info!(client_id, seq_id = seq, "client_read_failed");
+                    return;
+                };
                 reads_acked += 1;
-                tracing::info!(
-                    client_id,
-                    seq_id = seq,
-                    read_index,
-                    attempts,
-                    "client_read_acknowledged"
-                );
-            }
-            Some((None, attempts)) => {
-                reads_acked += 1;
-                tracing::info!(
-                    client_id,
-                    seq_id = seq,
-                    attempts,
-                    "client_read_acknowledged"
-                );
-            }
-            None => {
-                tracing::info!(client_id, seq_id = seq, "client_read_failed");
-            }
+                history.record_read_ack(seq, watermark, attempts, now_ms);
+                if let Some(read_index) = watermark {
+                    tracing::info!(
+                        client_id,
+                        seq_id = seq,
+                        read_index,
+                        attempts,
+                        "client_read_acknowledged"
+                    );
+                } else {
+                    tracing::info!(
+                        client_id,
+                        seq_id = seq,
+                        attempts,
+                        "client_read_acknowledged"
+                    );
+                }
+            };
+
+        // Record the invocation instant of each op just before it goes out —
+        // the same instant `write_one`/`read_one` emit their `client_issued` /
+        // `client_read_issued` events, since neither awaits before tracing. The
+        // real-time span `[inv, resp]` is what the interval checker orders
+        // operations by; program order (seq) covers the sequential fast path.
+        let mark_write = |history: &mut ClientHistory, seq: u64| {
+            history.record_write_issued(
+                seq,
+                u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX),
+            );
+        };
+        let mark_read = |history: &mut ClientHistory, seq: u64| {
+            history.record_read_issued(
+                seq,
+                u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX),
+            );
         };
 
         match mode {
@@ -373,10 +429,12 @@ impl Workload for ProposeClient {
                     if shutdown.is_cancelled() {
                         break;
                     }
+                    mark_write(&mut history, seq);
                     let outcome = write_one(seq).await;
-                    handle_write(seq, outcome, true);
+                    handle_write(&mut history, seq, outcome, true);
+                    mark_read(&mut history, seq);
                     let read_outcome = read_one(seq).await;
-                    handle_read(seq, read_outcome);
+                    handle_read(&mut history, seq, read_outcome);
                     // A small gap so node ticks interleave and the timeline
                     // spreads out.
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
@@ -393,17 +451,21 @@ impl Workload for ProposeClient {
                         break;
                     }
                     let end = (seq + depth).min(u64::from(REQUESTS));
+                    for s in seq..end {
+                        mark_write(&mut history, s);
+                    }
                     let outcomes = join_all((seq..end).map(write_one)).await;
                     let mut last_committed = None;
                     for (s, outcome) in (seq..end).zip(outcomes) {
                         if outcome.is_some() {
                             last_committed = Some(s);
                         }
-                        handle_write(s, outcome, true);
+                        handle_write(&mut history, s, outcome, true);
                     }
                     if let Some(read_seq) = last_committed {
+                        mark_read(&mut history, read_seq);
                         let read_outcome = read_one(read_seq).await;
-                        handle_read(read_seq, read_outcome);
+                        handle_read(&mut history, read_seq, read_outcome);
                     }
                     seq = end;
                     time.sleep(Duration::from_millis(GAP_MS)).await.ok();
@@ -418,8 +480,9 @@ impl Workload for ProposeClient {
                     () = shutdown.cancelled() => {}
                 }
                 if !shutdown.is_cancelled() {
+                    mark_write(&mut history, 0);
                     let outcome = write_one(0).await;
-                    handle_write(0, outcome, false);
+                    handle_write(&mut history, 0, outcome, false);
                 }
                 // Sleep out the remainder of the chaos window before falling into
                 // the shared settle tail below. Both are needed: the tail is what
@@ -434,6 +497,8 @@ impl Workload for ProposeClient {
                 }
             }
         }
+
+        self.history = history;
 
         // Under eventual synchrony a stable leader commits proposals; this also
         // wires the `assert_sometimes!` contract into the harness.

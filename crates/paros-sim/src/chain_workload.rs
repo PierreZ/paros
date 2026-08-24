@@ -17,6 +17,7 @@ use paros::{
 };
 
 use crate::CHAOS_DURATION_MS;
+use crate::audit::{GateScope, audit_world};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 
 const PROPOSE: u8 = 0;
@@ -148,6 +149,16 @@ impl ChainWorkload {
 impl Workload for ChainWorkload {
     fn name(&self) -> &'static str {
         "chain-client"
+    }
+
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The network-swarm safety axis has no quiet recovery tail — provider
+        // faults outlive `chaos_duration` in the pinned Moonpool revision — so
+        // it must never make the quiescence-gated liveness claim.
+        if !self.safety_only {
+            audit_world(ctx.state()).enable_liveness_checks();
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -713,7 +724,13 @@ impl Workload for ChainWorkload {
         Ok(())
     }
 
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let scope = if self.safety_only {
+            GateScope::SafetyOnly
+        } else {
+            GateScope::Full
+        };
+        audit_world(ctx.state()).check_gates(scope);
         assert_always!(
             self.outcomes
                 .values()
