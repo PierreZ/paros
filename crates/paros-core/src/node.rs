@@ -7,7 +7,9 @@ use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
+use crate::types::{
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
+};
 use crate::write::WriteOp;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
@@ -279,6 +281,23 @@ pub struct RawNode {
     /// `applied_seq` when its slot applies. Rebuilt from `HardState` on
     /// construction.
     inflight: BTreeMap<(ClientId, ClientSeq), Slot>,
+    /// Chosen slots whose `Command::User` identity had **already applied at a
+    /// lower slot** when the contiguous walk reached them — the double-apply
+    /// #94 makes reachable: correct Paxos can choose one `(client, seq)` at two
+    /// slots (a client retry across a partition lands on the majority while the
+    /// deposed leader's lone accept survives above the cluster prefix, and a
+    /// later election's mandatory P2c re-proposal decides it again). The apply
+    /// seam surfaces these slots as a [`Control::Noop`] instead of executing
+    /// the duplicate; membership is derived purely from the replicated ledger
+    /// (walk order + sealed sessions), so every node — and every restart
+    /// ([`RawNode::new`] re-derives this set) — makes the identical decision.
+    duplicate_slots: BTreeSet<Slot>,
+    /// Monotone count of duplicate suppressions performed by the contiguous
+    /// walk this incarnation (boot-rebuild detections excluded). Observability
+    /// only: the driver reads the delta after each batch and reports it through
+    /// its audit port, so the simulation can prove the at-most-once suppression
+    /// path is genuinely reached.
+    duplicates_suppressed: u64,
 }
 
 impl RawNode {
@@ -302,20 +321,41 @@ impl RawNode {
         }
 
         let mut chosen = BTreeMap::new();
+        // The at-most-once ledger starts from the durable **sealed** records —
+        // the `(client, seq) -> slot` facts whose log records truncation (or a
+        // snapshot install) already dropped — and the walk over the retained log
+        // below layers on top with first-slot-wins semantics. Sealed slots are
+        // always below the compaction floor, so the two sources never disagree;
+        // seeding sealed first is what keeps a restarted (or snapshot-recovered)
+        // node's duplicate-suppression decisions identical to a node that held
+        // the whole log in memory (#94).
         let mut applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> = BTreeMap::new();
+        for (client, seq, slot) in storage.sealed_sessions() {
+            applied_seq.entry(client).or_default().insert(seq, slot);
+        }
         let mut inflight = BTreeMap::new();
+        let mut duplicate_slots = BTreeSet::new();
         for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
             if is_chosen {
                 chosen.insert(*slot, command.clone());
                 // Only client entries carry a `(client, seq)` dedup key; a control
                 // command never dedups. Every executed seq is recorded, not just
-                // the latest per client (see the `applied_seq` field doc).
+                // the latest per client (see the `applied_seq` field doc) — and
+                // only at its **first** (lowest) slot: a second chosen slot for
+                // the same identity is the #94 duplicate, re-derived here exactly
+                // as the live walk derived it, so the boot replay suppresses the
+                // same slots the pre-restart apply did.
                 if let Command::User(entry) = command {
-                    applied_seq
-                        .entry(entry.client)
-                        .or_default()
-                        .insert(entry.seq, *slot);
+                    let seqs = applied_seq.entry(entry.client).or_default();
+                    match seqs.get(&entry.seq) {
+                        Some(&first) if first != *slot => {
+                            duplicate_slots.insert(*slot);
+                        }
+                        _ => {
+                            seqs.insert(entry.seq, *slot);
+                        }
+                    }
                 }
             } else if let Command::User(entry) = command {
                 inflight.insert((entry.client, entry.seq), *slot);
@@ -359,6 +399,8 @@ impl RawNode {
             chosen,
             applied_seq,
             inflight,
+            duplicate_slots,
+            duplicates_suppressed: 0,
         }
     }
 
@@ -403,8 +445,9 @@ impl RawNode {
                 ballot,
                 chosen_index,
                 snapshot,
+                sessions,
                 ..
-            } => self.on_install_snapshot(ballot, chosen_index, snapshot),
+            } => self.on_install_snapshot(ballot, chosen_index, snapshot, sessions),
             Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
@@ -425,11 +468,16 @@ impl RawNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        if let Some(&slot) = self.inflight.get(&(client, seq)) {
-            return ProposeResult::Duplicate(slot);
-        }
+        // The applied ledger outranks the in-flight table: once an identity has
+        // applied, the honest answer is `Chosen` at its first slot, even while a
+        // #94 duplicate of it sits chosen-but-unapplied at a later slot (that
+        // slot will suppress to a no-op at apply, so a reply parked on it would
+        // hang to the client's deadline).
         if let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq)) {
             return ProposeResult::Chosen(at);
+        }
+        if let Some(&slot) = self.inflight.get(&(client, seq)) {
+            return ProposeResult::Duplicate(slot);
         }
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
@@ -505,12 +553,15 @@ impl RawNode {
     /// or when the floor would not rise, it is a no-op that emits no
     /// [`WriteOp::Truncate`].
     ///
-    /// The application owns the risk that truncation shrinks the at-most-once
-    /// dedup window: `applied_seq`/`inflight` are rebuilt from the remaining log
-    /// on restart (see [`RawNode::new`]), so a client `(id, seq)` whose slot was
-    /// truncated is no longer recognized as a duplicate after a reboot. This is
-    /// consistent with the doctrine that the application owns compaction of its
-    /// own state.
+    /// Truncation does **not** shrink the at-most-once dedup window: the ledger
+    /// records whose slots this call drops are *sealed* — emitted on the
+    /// [`WriteOp::Truncate`] for durable persistence and read back through
+    /// [`Storage::sealed_sessions`] on the next boot — so a restart recognizes a
+    /// truncated `(client, seq)` exactly like a node that never restarted, and
+    /// the #94 duplicate-suppression decision stays cluster-consistent. (The
+    /// sealed ledger grows with distinct client identities for the lifetime of
+    /// the cluster; bounding it needs a client-session expiry policy, which is
+    /// out of scope here.)
     pub fn compact(&mut self, up_to: Slot) -> Slot {
         let Some(ci) = self.hard_state.chosen_index else {
             return self.first_slot;
@@ -520,11 +571,25 @@ impl RawNode {
         if first <= self.first_slot {
             return self.first_slot;
         }
+        // Seal from the *ledger*, not from the dropped `chosen` range: a
+        // duplicate slot's chosen command is a `User` entry whose ledger record
+        // points at its first slot, and sealing the duplicate's own slot would
+        // corrupt the ledger. Only the delta is sealed — records below the old
+        // floor were sealed by the truncation (or install) that dropped them.
+        let sealed: Vec<SessionEntry> = self
+            .applied_seq
+            .iter()
+            .flat_map(|(client, seqs)| {
+                seqs.iter()
+                    .filter(|entry| *entry.1 >= self.first_slot && *entry.1 < first)
+                    .map(|(&seq, &slot)| (*client, seq, slot))
+            })
+            .collect();
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
         self.proposer.retain(|slot, _| *slot >= first);
         self.first_slot = first;
-        self.pending_writes.push(WriteOp::Truncate { first });
+        self.pending_writes.push(WriteOp::Truncate { first, sealed });
         self.first_slot
     }
 
@@ -789,7 +854,13 @@ impl RawNode {
             if slot < self.first_slot || self.chosen.contains_key(&slot) {
                 continue;
             }
-            if let Command::User(entry) = &command {
+            if let Command::User(entry) = &command
+                && !self.applied_elsewhere(entry, slot)
+            {
+                // Same guard as `mark_chosen`: a recovered identity that already
+                // applied at another slot is still re-proposed (P2c is
+                // mandatory — it may already be chosen here), but a retry must
+                // find the applied fast path, not park on the doomed slot.
                 self.inflight.insert((entry.client, entry.seq), slot);
             }
             self.start_accept_round(slot, command);
@@ -1219,7 +1290,13 @@ impl RawNode {
     /// node from re-voting under a stale ballot), and fully compact the log up to
     /// the snapshot (its state is folded into the opaque bytes). A stale snapshot
     /// that would not advance us is ignored.
-    fn on_install_snapshot(&mut self, ballot: Ballot, chosen_index: Slot, snapshot: Value) {
+    fn on_install_snapshot(
+        &mut self,
+        ballot: Ballot,
+        chosen_index: Slot,
+        snapshot: Value,
+        sessions: Vec<SessionEntry>,
+    ) {
         // Never go backward: a snapshot at or below our chosen prefix teaches us
         // nothing and must not lower the floor or re-truncate live slots.
         if self
@@ -1249,20 +1326,32 @@ impl RawNode {
         // handed the folded slots' `inflight` entries over. Drop them: a mapping
         // to a slot that no longer exists would answer a retry with
         // `Duplicate(slot)` for a slot whose commit can never ack anyone, and
-        // the reply would hang to the client's deadline every time. (The dedup
-        // state itself is not recoverable here — an opaque snapshot carries the
-        // application's state, not paros' `(client, seq)` table — so a retry of
-        // a command folded into the snapshot is re-proposed. That gap belongs to
-        // the snapshot doctrine, not to the applied-prefix hand-off.)
+        // the reply would hang to the client's deadline every time.
         self.inflight.retain(|_, s| *s >= first);
         self.next_slot = self.next_slot.max(first);
-        // Persist the install (opaque bytes + boundary). Snapshot-xor-entries: this
-        // batch surfaces no committed user entries for the folded prefix; the
-        // application installs the opaque state via the driver's storage write.
+        // Adopt the serving peer's session ledger for the folded prefix (#94):
+        // those slots' log records will never be walked here, so this transfer
+        // is the only way this node learns their `(client, seq) -> slot` facts —
+        // both for the dedup fast path and for suppressing a later re-choose of
+        // the same identity exactly like every peer does. `or_insert` keeps any
+        // record this node already holds; the prefixes agree cluster-wide, so a
+        // collision carries the same slot either way.
+        for (client, seq, slot) in &sessions {
+            self.applied_seq
+                .entry(*client)
+                .or_default()
+                .entry(*seq)
+                .or_insert(*slot);
+        }
+        // Persist the install (opaque bytes + boundary + sealed sessions).
+        // Snapshot-xor-entries: this batch surfaces no committed user entries
+        // for the folded prefix; the application installs the opaque state via
+        // the driver's storage write, and the ledger is sealed beside it.
         self.pending_writes.push(WriteOp::InstallSnapshot {
             chosen_index,
             ballot,
             snapshot,
+            sessions,
         });
         // Re-drive the contiguous walk: a `Commit` learned out of order may
         // already sit in `chosen` just above the boundary, and without the walk
@@ -1463,10 +1552,25 @@ impl RawNode {
         //   that learns a slot chosen by `Commit` alone (it never proposed it,
         //   so it never had an `inflight` mapping to keep).
         self.inflight.retain(|_, s| *s != slot);
-        if let Command::User(entry) = command {
+        if let Command::User(entry) = command
+            && !self.applied_elsewhere(entry, slot)
+        {
+            // An identity already applied at another slot is a #94 duplicate:
+            // this slot will suppress to a no-op at apply, so pointing a retry
+            // at it would park a reply no commit ever acks. Leaving the table
+            // alone lets the retry hit the `applied_seq` fast path instead.
             self.inflight.insert((entry.client, entry.seq), slot);
         }
         self.advance_chosen_index();
+    }
+
+    /// Whether `entry`'s `(client, seq)` identity is recorded in the applied
+    /// ledger at a slot **other than** `slot` — the #94 duplicate test.
+    fn applied_elsewhere(&self, entry: &Entry, slot: Slot) -> bool {
+        self.applied_seq
+            .get(&entry.client)
+            .and_then(|m| m.get(&entry.seq))
+            .is_some_and(|&first| first != slot)
     }
 
     /// Walk the contiguous chosen prefix forward, surfacing each newly-applied
@@ -1487,7 +1591,7 @@ impl RawNode {
         // mutation `compact` makes to `chosen`/`accepted` cannot disturb the
         // iteration above.
         let mut truncate_up_to: Option<Slot> = None;
-        while let Some(command) = self.chosen.get(&next).cloned() {
+        while let Some(mut command) = self.chosen.get(&next).cloned() {
             self.hard_state.chosen_index = Some(next);
             self.pending_writes.push(WriteOp::SetChosenIndex(next));
             if let Command::Control(Control::Truncate { up_to }) = &command {
@@ -1501,10 +1605,28 @@ impl RawNode {
             // held for this slot leaves as `applied_seq` takes it over.
             self.inflight.retain(|_, s| *s != next);
             if let Command::User(entry) = &command {
-                self.applied_seq
-                    .entry(entry.client)
-                    .or_default()
-                    .insert(entry.seq, next);
+                let seqs = self.applied_seq.entry(entry.client).or_default();
+                match seqs.get(&entry.seq) {
+                    // The #94 duplicate: correct Paxos chose this identity at a
+                    // second slot (a retry served across a partition plus the
+                    // mandatory P2c re-proposal of the deposed leader's lone
+                    // accept). Execute the slot as a no-op. The decision reads
+                    // only the replicated ledger, and the walk runs in slot
+                    // order on every node, so first-slot-wins is cluster-wide
+                    // deterministic — and `RawNode::new` re-derives the same
+                    // set from sealed sessions + the retained log on restart.
+                    Some(&first) if first != next => {
+                        self.duplicate_slots.insert(next);
+                        self.duplicates_suppressed += 1;
+                        command = Command::Control(Control::Noop);
+                    }
+                    // First application of this identity: record it at this
+                    // slot, and never overwrite it later — the ledger entry IS
+                    // the at-most-once claim.
+                    _ => {
+                        seqs.insert(entry.seq, next);
+                    }
+                }
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);
@@ -1595,6 +1717,36 @@ impl RawNode {
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
         self.election_gap_fills
+    }
+
+    /// The full at-most-once session ledger: every `(client, seq) -> slot`
+    /// record in this node's applied prefix, flattened. The driver attaches it
+    /// to each [`Message::InstallSnapshot`] it serves (paros-owned metadata
+    /// beside the opaque application bytes), so a snapshot-recovered peer makes
+    /// the same #94 duplicate-suppression decisions as everyone else.
+    #[must_use]
+    pub fn session_ledger(&self) -> Vec<SessionEntry> {
+        self.applied_seq
+            .iter()
+            .flat_map(|(client, seqs)| seqs.iter().map(|(&seq, &slot)| (*client, seq, slot)))
+            .collect()
+    }
+
+    /// Chosen slots the apply seam executes as a no-op because their
+    /// `Command::User` identity already applied at a lower slot (see the field
+    /// doc). The driver's boot replay consults this so a restart re-applies the
+    /// retained prefix with the identical suppression decisions.
+    #[must_use]
+    pub fn duplicate_slots(&self) -> &BTreeSet<Slot> {
+        &self.duplicate_slots
+    }
+
+    /// Monotone count of #94 duplicate suppressions the contiguous walk
+    /// performed this incarnation. The driver reads the delta per batch and
+    /// reports it through its audit port.
+    #[must_use]
+    pub fn duplicates_suppressed(&self) -> u64 {
+        self.duplicates_suppressed
     }
 
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`

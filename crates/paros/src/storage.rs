@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use paros_core::{Ballot, Command, Config, HardState, MustSync, Slot, Storage};
+use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
 
 /// A durable-write failure. The read-side [`paros_core::Storage`] recovery port
 /// stays infallible, but every *write* is fallible **from day one** so a later
@@ -77,11 +77,15 @@ pub trait NodeStorage: Storage {
     /// record `first` as the durable compaction floor (returned by
     /// [`Storage::first_slot`] after a restart). The application drives this via
     /// [`paros_core::RawNode::compact`], which only ever names slots within the
-    /// chosen prefix, so nothing undecided is dropped.
+    /// chosen prefix, so nothing undecided is dropped. `sealed` carries the
+    /// at-most-once ledger records whose slots this truncation drops; persist
+    /// them durably (upsert by `(client, seq)`) so [`Storage::sealed_sessions`]
+    /// returns them after a restart — losing them would let a restarted node
+    /// re-execute a truncated identity every peer suppresses (#94).
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn truncate(&mut self, first: Slot) -> Result<(), StorageError>;
+    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError>;
 
     /// The opaque application snapshot at this node's chosen prefix, for serving a
     /// below-floor peer. The **application** owns its meaning; paros only transfers
@@ -93,8 +97,10 @@ pub trait NodeStorage: Storage {
     /// Install an opaque application snapshot at `chosen_index`: set the durable
     /// commit index, raise the promise to at least `ballot`, record
     /// `chosen_index + 1` as the compaction floor, and persist `snapshot` (so a
-    /// restart boots from it and the node can serve it onward). Mirrors
-    /// [`paros_core::WriteOp::InstallSnapshot`].
+    /// restart boots from it and the node can serve it onward). `sessions` is
+    /// the serving peer's at-most-once ledger for the folded prefix; persist it
+    /// as sealed records (upsert), exactly like [`NodeStorage::truncate`]'s
+    /// `sealed`. Mirrors [`paros_core::WriteOp::InstallSnapshot`].
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
@@ -103,6 +109,7 @@ pub trait NodeStorage: Storage {
         chosen_index: Slot,
         ballot: Ballot,
         snapshot: Vec<u8>,
+        sessions: &[SessionEntry],
     ) -> Result<(), StorageError>;
 
     /// Stage one newly chosen command for durable application. Implementations
@@ -145,6 +152,9 @@ pub struct MemStorage {
     /// The compaction floor: the first slot still retained. Everything below it
     /// has been truncated away.
     first: Slot,
+    /// Sealed at-most-once ledger records for truncated slots, keyed by
+    /// `(client, seq)` (see [`NodeStorage::truncate`]).
+    sealed: BTreeMap<(paros_core::ClientId, paros_core::ClientSeq), Slot>,
 }
 
 impl MemStorage {
@@ -156,6 +166,13 @@ impl MemStorage {
             accepted: BTreeMap::new(),
             config,
             first: Slot(0),
+            sealed: BTreeMap::new(),
+        }
+    }
+
+    fn seal(&mut self, sealed: &[SessionEntry]) {
+        for &(client, seq, slot) in sealed {
+            self.sealed.entry((client, seq)).or_insert(slot);
         }
     }
 }
@@ -186,7 +203,8 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
-    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+        self.seal(sealed);
         self.first = self.first.max(first);
         self.accepted.retain(|slot, _| *slot >= self.first);
         Ok(())
@@ -206,7 +224,9 @@ impl NodeStorage for MemStorage {
         chosen_index: Slot,
         ballot: Ballot,
         _snapshot: Vec<u8>,
+        sessions: &[SessionEntry],
     ) -> Result<(), StorageError> {
+        self.seal(sessions);
         self.hard_state.chosen_index = Some(chosen_index);
         self.hard_state.max_promised_ballot = self.hard_state.max_promised_ballot.max(ballot);
         let first = Slot(chosen_index.0 + 1);
@@ -244,5 +264,12 @@ impl Storage for MemStorage {
 
     fn last_slot(&self) -> Slot {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
+    }
+
+    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+        self.sealed
+            .iter()
+            .map(|(&(client, seq), &slot)| (client, seq, slot))
+            .collect()
     }
 }

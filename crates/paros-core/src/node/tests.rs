@@ -1268,7 +1268,7 @@ fn a_compact_batch_requires_fsync() {
     assert!(
         r.writes()
             .iter()
-            .any(|w| matches!(w, WriteOp::Truncate { first } if *first == Slot(3))),
+            .any(|w| matches!(w, WriteOp::Truncate { first, .. } if *first == Slot(3))),
         "the batch carries the Truncate delta"
     );
     assert_eq!(
@@ -1459,6 +1459,7 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
         ballot: ballot(3, 0),
         chosen_index: Slot(5),
         snapshot: Value(vec![1, 2, 3]),
+        sessions: vec![],
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -1502,6 +1503,7 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
         ballot: ballot(9, 0),
         chosen_index: Slot(4),
         snapshot: Value(vec![]),
+        sessions: vec![],
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -2338,6 +2340,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         ballot: m,
         chosen_index: Slot(5),
         snapshot: val(0xEE),
+        sessions: vec![],
     });
     let _ = drain(&mut x);
     assert_eq!(x.hard_state.max_promised_ballot, m, "promise raised to m");
@@ -2465,6 +2468,7 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
         ballot: ballot(3, 2),
         chosen_index: Slot(9),
         snapshot: val(0xEE),
+        sessions: vec![],
     });
     let _ = drain(&mut x);
 

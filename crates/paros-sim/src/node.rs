@@ -23,8 +23,9 @@ use moonpool_sim::{
 use crate::audit::{NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, DriverHooks, HardState, MemStorage, Message, MustSync, NodeId,
-    NodeStorage, Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
+    Ballot, ClientId, ClientSeq, Command, Config, DriverHooks, HardState, MemStorage, Message,
+    MustSync, NodeId, NodeStorage, Seam, SessionEntry, Slot, Storage, StorageError, is_seam_crash,
+    parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -152,6 +153,9 @@ struct NodeDisk {
     first_slot: Slot,
     /// Application-produced snapshot state, durable across clean reboot.
     chain: ChainState,
+    /// Sealed at-most-once ledger records for truncated slots (#94): read back
+    /// on boot so a restart suppresses re-chosen identities like every peer.
+    sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -197,6 +201,9 @@ struct DurableStorage {
     staged_floor: Option<Slot>,
     staged_snapshot: Option<ChainState>,
     staged_applies: Vec<PendingApply>,
+    /// Sealed ledger records staged with a truncate / snapshot install (#94),
+    /// flushed to the durable world with the rest of the batch.
+    staged_sealed: Vec<SessionEntry>,
 }
 
 struct PendingApply {
@@ -220,8 +227,15 @@ impl DurableStorage {
             if let Some(disk) = guard.disks.get(&key) {
                 application = disk.chain;
                 // Seed the read view through the semantic ops (records, not a blob).
-                // Set the floor first so first_slot() reads it back on boot.
-                let _ = boot.truncate(disk.first_slot);
+                // Set the floor first so first_slot() reads it back on boot; the
+                // sealed ledger rides on the same op, exactly as a truncate
+                // persisted it.
+                let sealed: Vec<SessionEntry> = disk
+                    .sealed
+                    .iter()
+                    .map(|(&(client, seq), &slot)| (client, seq, slot))
+                    .collect();
+                let _ = boot.truncate(disk.first_slot, &sealed);
                 let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
                 for (slot, (ballot, command)) in &disk.accepted {
                     let _ = boot.append_accepted(*slot, *ballot, command.clone());
@@ -244,6 +258,7 @@ impl DurableStorage {
             staged_floor: None,
             staged_snapshot: None,
             staged_applies: Vec::new(),
+            staged_sealed: Vec::new(),
         }
     }
 
@@ -292,7 +307,13 @@ impl NodeStorage for DurableStorage {
         let floor = self.staged_floor.take();
         let snapshot = self.staged_snapshot.take();
         let applies = std::mem::take(&mut self.staged_applies);
+        let sealed = std::mem::take(&mut self.staged_sealed);
         self.with_disk(|d| {
+            // Sealed ledger records are upserts keyed by (client, seq); the
+            // first-slot claim wins, matching the core's ledger semantics.
+            for (client, seq, slot) in sealed {
+                d.sealed.entry((client, seq)).or_insert(slot);
+            }
             if let Some(b) = ballot {
                 // The promise is monotonic: never let a flush lower it. A
                 // SetPromise write only ever raises it, but an InstallSnapshot
@@ -344,10 +365,12 @@ impl NodeStorage for DurableStorage {
         Ok(())
     }
 
-    fn truncate(&mut self, first: Slot) -> Result<(), StorageError> {
+    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
         // Stage the floor like every other write: it reaches the durable world
         // only on the next Sync flush (Truncate classifies as MustSync::Sync).
+        // The sealed ledger records ride in the same staged batch.
         self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        self.staged_sealed.extend_from_slice(sealed);
         Ok(())
     }
 
@@ -360,11 +383,14 @@ impl NodeStorage for DurableStorage {
         chosen_index: Slot,
         ballot: Ballot,
         snapshot: Vec<u8>,
+        sessions: &[SessionEntry],
     ) -> Result<(), StorageError> {
         // Stage the install like every other write (InstallSnapshot is
-        // MustSync::Sync): the chosen index, the adopted ballot, and the floor
-        // (`chosen_index + 1`) reach the durable world on the next Sync flush,
-        // where the floor is applied last so it never outruns the chosen index.
+        // MustSync::Sync): the chosen index, the adopted ballot, the floor
+        // (`chosen_index + 1`), and the serving peer's session ledger reach the
+        // durable world on the next Sync flush, where the floor is applied last
+        // so it never outruns the chosen index.
+        self.staged_sealed.extend_from_slice(sessions);
         self.staged_chosen = Some(chosen_index);
         self.staged_ballot = Some(ballot);
         let first = Slot(chosen_index.0 + 1);
@@ -404,6 +430,12 @@ impl NodeStorage for DurableStorage {
             .application
             .applied_slot()
             .map_or(Slot(0), |applied| Slot(applied.0.saturating_add(1)));
+        if slot != expected {
+            eprintln!(
+                "CONTIGUITY: node={} slot={} expected={} chosen_index={} applied_count={}",
+                self.node_id, slot.0, expected.0, chosen_index.0, self.application.applied_count
+            );
+        }
         assert_always!(
             slot == expected,
             "chain: local application transition is contiguous"
@@ -431,6 +463,9 @@ impl Storage for DurableStorage {
     }
     fn last_slot(&self) -> Slot {
         self.boot.last_slot()
+    }
+    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+        self.boot.sealed_sessions()
     }
 }
 

@@ -24,7 +24,7 @@ use moonpool_core::{
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
-    RawNode, ReadIndexResult, ReadState, Slot, Value, WriteOp,
+    RawNode, ReadIndexResult, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -276,6 +276,13 @@ pub const EV_CHOSEN_GAP: &str = "chosen_gap";
 /// acceptor" interleaving was reached, so the sweep can assert it stays reachable
 /// once the acceptor floor guard is in place.
 pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
+
+/// Tracing event: this node's apply seam executed a chosen slot as a no-op
+/// because its `(client, seq)` identity had already applied at a lower slot —
+/// the #94 double-apply, suppressed. Carries `node` and `count` (suppressions in
+/// the batch). Rare and mechanism-specific: it is the only outside evidence the
+/// at-most-once suppression path ran.
+pub const EV_DUPLICATE_SUPPRESSED: &str = "duplicate_suppressed";
 
 /// Tracing event: a client proposal was answered by the **dedup fast path** —
 /// the `(client, seq)` was already applied here, so the reply fired immediately
@@ -600,6 +607,7 @@ fn send_snapshot_offers<S, H, A>(
     hooks: &H,
     audit: &A,
     snapshot_offers: &[(NodeId, Slot, Ballot)],
+    sessions: &[SessionEntry],
 ) -> SimulationResult<()>
 where
     S: NodeStorage,
@@ -617,6 +625,10 @@ where
             ballot,
             chosen_index: offered_index,
             snapshot: Value(storage.snapshot()),
+            // The at-most-once ledger travels beside the opaque bytes (#94):
+            // the receiver seals it so its duplicate-suppression decisions for
+            // the folded prefix match every peer's.
+            sessions: sessions.to_vec(),
         };
         if hooks.drop_outgoing(to, &message) {
             trace_send_drop(audit, out.self_id, to, &message);
@@ -876,7 +888,10 @@ where
             .map_err(|e| storage_err(&e))?;
     }
 
-    send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers)?;
+    if !snapshot_offers.is_empty() {
+        let sessions = node.session_ledger();
+        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions)?;
+    }
 
     ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
 
@@ -947,16 +962,19 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
                     .set_chosen_index(*slot)
                     .map_err(|e| storage_err(&e))?;
             }
-            WriteOp::Truncate { first } => {
-                storage.truncate(*first).map_err(|e| storage_err(&e))?;
+            WriteOp::Truncate { first, sealed } => {
+                storage
+                    .truncate(*first, sealed)
+                    .map_err(|e| storage_err(&e))?;
             }
             WriteOp::InstallSnapshot {
                 chosen_index,
                 ballot,
                 snapshot,
+                sessions,
             } => {
                 storage
-                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone())
+                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
                     .map_err(|e| storage_err(&e))?;
             }
         }
@@ -1033,7 +1051,7 @@ fn surface_persisted<A: Audit>(
             WriteOp::SetChosenIndex(slot) => {
                 audit.chosen_index(NodeId(self_id), *slot);
             }
-            WriteOp::Truncate { first } => {
+            WriteOp::Truncate { first, .. } => {
                 audit.truncated(NodeId(self_id), *first);
                 tracing::info!(node = self_id, first = first.0, "compacted");
             }
@@ -1124,6 +1142,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,
     last_role: &mut NodeRole,
+    last_duplicates: &mut u64,
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
@@ -1131,6 +1150,15 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 ) {
     if node.needs_election_timeout() {
         node.set_election_timeout(draw_election_timeout(providers, hooks, audit, self_id));
+    }
+    // Surface any #94 duplicate suppressions the batch's contiguous walk
+    // performed (the counter is monotone per incarnation).
+    let duplicates = node.duplicates_suppressed();
+    if duplicates > *last_duplicates {
+        let count = duplicates - *last_duplicates;
+        *last_duplicates = duplicates;
+        audit.duplicate_suppressed(NodeId(self_id), count);
+        tracing::info!(node = self_id, count, "duplicate_suppressed");
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
@@ -1231,7 +1259,17 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
     let mut replayed_application = false;
     if let Some(ci) = node.hard_state().chosen_index {
         let applied_slot = storage.applied_slot();
-        for (slot, (_b, command)) in node.accepted().range(..=ci) {
+        for (slot, (_b, stored)) in node.accepted().range(..=ci) {
+            // A #94 duplicate slot replays exactly as the live walk applied it:
+            // a no-op. The core re-derived `duplicate_slots` from the sealed
+            // sessions + the retained log in `RawNode::new`, so the substitution
+            // is deterministic across the restart.
+            let noop = Command::Control(Control::Noop);
+            let command = if node.duplicate_slots().contains(slot) {
+                &noop
+            } else {
+                stored
+            };
             if applied_slot.is_none_or(|applied| *slot > applied) {
                 storage
                     .apply(ci, *slot, command)
@@ -1420,6 +1458,7 @@ where
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
     let mut last_role = node.role();
+    let mut last_duplicates = node.duplicates_suppressed();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -1481,7 +1520,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1501,7 +1540,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1547,7 +1586,7 @@ where
                 }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -1569,7 +1608,7 @@ where
                     },
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1614,7 +1653,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

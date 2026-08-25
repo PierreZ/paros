@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, SessionEntry, Slot,
+    Value,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
@@ -134,12 +135,21 @@ fn snapshot_to_proto(
     ballot: Ballot,
     chosen_index: Slot,
     snapshot: &Value,
+    sessions: &[SessionEntry],
 ) -> internal::consensus_message::Kind {
     internal::consensus_message::Kind::InstallSnapshot(internal::InstallSnapshot {
         from: from.0,
         ballot: Some(ballot_to_proto(ballot)),
         chosen_index: chosen_index.0,
         snapshot: snapshot.0.clone(),
+        sessions: sessions
+            .iter()
+            .map(|&(client, seq, slot)| internal::SessionRecord {
+                client: client.0,
+                seq: seq.0,
+                slot: slot.0,
+            })
+            .collect(),
     })
 }
 
@@ -225,7 +235,8 @@ pub(crate) fn message_to_proto(
             ballot,
             chosen_index,
             snapshot,
-        } => snapshot_to_proto(*from, *ballot, *chosen_index, snapshot),
+            sessions,
+        } => snapshot_to_proto(*from, *ballot, *chosen_index, snapshot, sessions),
         Message::CheckLeader { from } => Kind::CheckLeader(internal::CheckLeader { from: from.0 }),
         Message::Heartbeat {
             from,
@@ -302,6 +313,17 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             chosen_index: Slot(message.chosen_index),
             snapshot: Value(message.snapshot),
+            sessions: message
+                .sessions
+                .into_iter()
+                .map(|record| {
+                    (
+                        ClientId(record.client),
+                        ClientSeq(record.seq),
+                        Slot(record.slot),
+                    )
+                })
+                .collect(),
         }),
         Kind::CheckLeader(message) => Ok(Message::CheckLeader {
             from: NodeId(message.from),

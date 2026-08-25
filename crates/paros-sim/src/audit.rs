@@ -298,6 +298,11 @@ struct AuditState {
     /// a healed partition) — every node applies it, so per-index agreement is
     /// blind to it by construction.
     applied_identity: BTreeMap<(u64, u64), u64>,
+    /// The #94 suppression fired: a re-chosen `(client, seq)` executed as a
+    /// no-op. Reachable-only (no `sometimes` counterpart): the interleaving
+    /// needs a partition-shaped seed and would starve saturation as a per-run
+    /// gate, but when a seed does reach it, the sweep records it.
+    duplicate_suppressed: bool,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -965,6 +970,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.shortest_timeout,
             "the driver selects the shortest valid election timeout"
+        );
+    }
+
+    fn duplicate_suppressed(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        // Reachable-only: the double-choose needs a partition-era retry plus a
+        // later election's mandatory P2c re-proposal — a per-run `sometimes`
+        // would starve saturation on seeds that never partition a leader.
+        reach_once!(
+            st.duplicate_suppressed,
+            "a re-chosen (client, seq) is suppressed at the apply seam (at-most-once)"
         );
     }
 

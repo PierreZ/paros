@@ -9,7 +9,7 @@
 //! whole, the log persists per record — and is what lets later stages truncate,
 //! checksum, and recover per entry without a blob rewrite.
 
-use crate::types::{Ballot, Command, Slot, Value};
+use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
 
 /// A single semantic durable write the driver must apply to stable storage,
 /// **in order**, before sending the batch's messages.
@@ -46,6 +46,14 @@ pub enum WriteOp {
     Truncate {
         /// The first slot still retained. Everything below it is dropped.
         first: Slot,
+        /// The at-most-once ledger records whose slots this truncation drops,
+        /// **sealed** durably in the same flush: the ledger is rebuilt from the
+        /// retained log on boot, so without sealing, a restart after truncation
+        /// would forget these `(client, seq) -> slot` facts and a later mandatory
+        /// P2c re-proposal of the same identity would apply for real on the
+        /// restarted node while every other node suppresses it — state
+        /// divergence, strictly worse than the double-apply (#94).
+        sealed: Vec<SessionEntry>,
     },
     /// Install an opaque application snapshot: record `chosen_index` as the
     /// durable commit index, `chosen_index + 1` as the durable compaction floor,
@@ -60,6 +68,11 @@ pub enum WriteOp {
         ballot: Ballot,
         /// Opaque application snapshot bytes at `chosen_index`.
         snapshot: Value,
+        /// The serving peer's at-most-once session ledger, persisted as sealed
+        /// records beside the opaque bytes: the folded prefix's log records will
+        /// never be walked here, so this is the only carrier of its
+        /// `(client, seq) -> slot` facts (see [`WriteOp::Truncate::sealed`]).
+        sessions: Vec<SessionEntry>,
     },
 }
 
@@ -139,7 +152,7 @@ mod tests {
         assert!(WriteOp::SetPromise(ballot()).needs_sync());
         assert!(append(0).needs_sync());
         assert!(!WriteOp::SetChosenIndex(Slot(0)).needs_sync());
-        assert!(WriteOp::Truncate { first: Slot(1) }.needs_sync());
+        assert!(WriteOp::Truncate { first: Slot(1), sealed: vec![] }.needs_sync());
     }
 
     #[test]
@@ -159,13 +172,13 @@ mod tests {
         );
         // A truncate is fsync'd, on its own or mixed with a chosen-index advance.
         assert_eq!(
-            classify(&[WriteOp::Truncate { first: Slot(1) }]),
+            classify(&[WriteOp::Truncate { first: Slot(1), sealed: vec![] }]),
             MustSync::Sync
         );
         assert_eq!(
             classify(&[
                 WriteOp::SetChosenIndex(Slot(3)),
-                WriteOp::Truncate { first: Slot(1) }
+                WriteOp::Truncate { first: Slot(1), sealed: vec![] }
             ]),
             MustSync::Sync
         );
