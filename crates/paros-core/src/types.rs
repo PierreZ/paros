@@ -108,6 +108,41 @@ pub enum Command {
     Control(Control),
 }
 
+/// A stable fingerprint of the complete consensus value identity.
+///
+/// Unlike application-level value hashes, this includes the command variant,
+/// client identity, sequence number, payload length, and control metadata. It
+/// is carried by [`crate::Message::Accepted`] so a leader never credits an ack
+/// for a different command at the same `(slot, ballot)`.
+#[must_use]
+pub fn command_fingerprint(command: &Command) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn mix(mut hash: u64, bytes: &[u8]) -> u64 {
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash
+    }
+
+    match command {
+        Command::User(entry) => {
+            let hash = mix(OFFSET, &[0]);
+            let hash = mix(hash, &entry.client.0.to_le_bytes());
+            let hash = mix(hash, &entry.seq.0.to_le_bytes());
+            let hash = mix(hash, &(entry.value.0.len() as u64).to_le_bytes());
+            mix(hash, &entry.value.0)
+        }
+        Command::Control(Control::Truncate { up_to }) => {
+            let hash = mix(OFFSET, &[1]);
+            mix(hash, &up_to.0.to_le_bytes())
+        }
+        Command::Control(Control::Noop) => mix(OFFSET, &[2]),
+    }
+}
+
 impl Command {
     /// The client [`Entry`] if this is a [`Command::User`], else `None`.
     #[must_use]

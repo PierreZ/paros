@@ -3,11 +3,16 @@
 
 use std::collections::BTreeMap;
 
-use super::{NodeRole, ProposeResult, READ_ROUND_TTL_TICKS, RawNode, ReadIndexResult, ReadState};
+use super::{
+    LEADER_RECOVERY_BATCH, NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode,
+    ReadIndexResult, ReadState,
+};
 use crate::message::Message;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
+use crate::types::{
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value, command_fingerprint,
+};
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
 /// tests): the durable scalars plus a per-slot accepted log.
@@ -130,16 +135,16 @@ fn deliver_all(nodes: &mut [RawNode], queue: Vec<(NodeId, Message)>) {
     deliver_filtered(nodes, queue, |_, _| true);
 }
 
-/// A CheckQuorum window far past any unit test's tick horizon. Unit tests
+/// A `CheckQuorum` window far past any unit test's tick horizon. Unit tests
 /// step messages by hand rather than pumping ack traffic every tick, so a
 /// realistic short timeout would demote their leaders mid-test; tests that
-/// *target* CheckQuorum set a short window explicitly instead.
+/// *target* `CheckQuorum` set a short window explicitly instead.
 const NO_CHECK_QUORUM: u64 = 1_000_000;
 
 /// Drive `nodes[idx]` to leadership in a healthy cluster, then beat once so the
 /// followers learn who the leader is (a follower only adopts a leader on
 /// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
-/// effectively infinite CheckQuorum window (see [`NO_CHECK_QUORUM`]).
+/// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
 fn make_leader(nodes: &mut [RawNode], idx: usize) {
     nodes[idx].set_election_timeout(1);
     nodes[idx].tick(); // fires CheckLeader -> Candidate, broadcasts Prepare
@@ -874,6 +879,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
         ballot: camp,
         from_slot: Slot(0),
         accepted: acc_low,
+        next_from_slot: None,
     });
     assert!(!n.is_leader(), "one promise short of quorum");
     n.step(Message::Promise {
@@ -881,6 +887,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
         ballot: camp,
         from_slot: Slot(0),
         accepted: acc_high,
+        next_from_slot: None,
     });
     assert!(n.is_leader(), "quorum reached");
     let (_, e) = n.accepted().get(&Slot(0)).expect("slot 0 re-accepted");
@@ -952,10 +959,9 @@ fn nack_steps_a_candidate_down_instead_of_stalling() {
 }
 
 #[test]
-fn nack_ratchets_the_next_campaign_past_the_acceptors_promised_round() {
-    // A candidate nacked by an acceptor already promised at a much higher round
-    // must not climb one round per election timeout: it should jump straight
-    // past the reported promise on its next campaign.
+fn nack_does_not_retain_an_untrusted_promised_round() {
+    // A valid member's Nack still deposes the stale campaign, but its reported
+    // promise is an untrusted wire value and must not pin future round selection.
     let mut n = node(0, &[0, 1, 2]);
     n.set_election_timeout(1);
     n.tick(); // Candidate at round 1
@@ -978,9 +984,237 @@ fn nack_ratchets_the_next_campaign_past_the_acceptors_promised_round() {
     );
     assert_eq!(
         n.ballot(),
-        ballot(51, 0),
-        "the next campaign starts past the acceptor's promised round, not one above our own"
+        ballot(2, 0),
+        "the next campaign advances from durable local state, not the Nack wire hint"
     );
+}
+
+#[test]
+fn a_non_member_nack_cannot_depose_a_campaign() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+
+    n.step(Message::Nack {
+        from: NodeId(99),
+        ballot: camp,
+        promised: ballot(u64::MAX, 99),
+        slot: Slot(0),
+    });
+
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.ballot(), camp);
+}
+
+#[test]
+fn promise_suffix_is_served_in_bounded_pages() {
+    let mut storage = TestStorage::new(0, &[0, 1, 2]);
+    for slot in 0..130 {
+        storage.accepted.insert(
+            Slot(slot),
+            (
+                ballot(0, 0),
+                ucmd(7, slot, u8::try_from(slot).expect("test slot fits u8")),
+            ),
+        );
+    }
+    let mut n = RawNode::new(&storage);
+    let prepared = ballot(1, 1);
+    let mut cursor = Slot(0);
+    let mut pages = Vec::new();
+
+    loop {
+        n.step(Message::Prepare {
+            from: NodeId(1),
+            ballot: prepared,
+            from_slot: cursor,
+        });
+        let out = drain(&mut n);
+        let [
+            (
+                NodeId(1),
+                Message::Promise {
+                    accepted,
+                    next_from_slot,
+                    ..
+                },
+            ),
+        ] = out.as_slice()
+        else {
+            panic!("expected one Promise page, got {out:?}");
+        };
+        assert!(accepted.len() <= PROMISE_BATCH);
+        pages.push(accepted.len());
+        let Some(next) = next_from_slot else {
+            break;
+        };
+        cursor = *next;
+    }
+
+    assert_eq!(pages, vec![PROMISE_BATCH, PROMISE_BATCH, 2]);
+}
+
+#[test]
+fn a_partial_promise_page_does_not_count_toward_the_quorum() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+    let accepted = (0..PROMISE_BATCH as u64)
+        .map(|slot| {
+            (
+                Slot(slot),
+                (
+                    ballot(0, 1),
+                    ucmd(8, slot, u8::try_from(slot).expect("test slot fits u8")),
+                ),
+            )
+        })
+        .collect();
+
+    n.step(Message::Promise {
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted,
+        next_from_slot: Some(Slot(PROMISE_BATCH as u64)),
+    });
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let _ = drain(&mut n);
+
+    n.step(Message::Promise {
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(PROMISE_BATCH as u64),
+        accepted: BTreeMap::new(),
+        next_from_slot: None,
+    });
+    assert_eq!(n.role(), NodeRole::Leader);
+}
+
+#[test]
+fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    let stale_campaign = n.ballot();
+    let _ = drain(&mut n);
+    let learned = ballot(stale_campaign.round + 1, 1);
+    n.step(Message::Commit {
+        from: NodeId(1),
+        ballot: learned,
+        slot: Slot(0),
+        command: ucmd(5, 1, 9),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.hard_state().max_promised_ballot, learned);
+
+    n.step(Message::Prepare {
+        from: NodeId(1),
+        ballot: learned,
+        from_slot: Slot(1),
+    });
+
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(n.election.is_none());
+    let out = drain(&mut n);
+    assert!(matches!(out.as_slice(), [(_, Message::Promise { .. })]));
+}
+
+#[test]
+fn leader_recovery_is_split_across_ready_batches() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+
+    for (from, len, next) in [
+        (0_u64, PROMISE_BATCH, Some(PROMISE_BATCH as u64)),
+        (
+            PROMISE_BATCH as u64,
+            PROMISE_BATCH,
+            Some((2 * PROMISE_BATCH) as u64),
+        ),
+        ((2 * PROMISE_BATCH) as u64, 2, None),
+    ] {
+        let accepted = (from..from + len as u64)
+            .map(|slot| {
+                (
+                    Slot(slot),
+                    (
+                        ballot(0, 1),
+                        ucmd(9, slot, u8::try_from(slot).expect("test slot fits u8")),
+                    ),
+                )
+            })
+            .collect();
+        n.step(Message::Promise {
+            from: NodeId(1),
+            ballot: camp,
+            from_slot: Slot(from),
+            accepted,
+            next_from_slot: next.map(Slot),
+        });
+        if next.is_some() {
+            let _ = drain(&mut n);
+        }
+    }
+
+    assert_eq!(n.role(), NodeRole::Leader);
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((LEADER_RECOVERY_BATCH, 0, 66)));
+    ready.advance();
+    n.advance_recovery();
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((LEADER_RECOVERY_BATCH, 0, 2)));
+    ready.advance();
+    n.advance_recovery();
+    let ready = n.ready();
+    assert_eq!(ready.recovery_batch(), Some((2, 0, 0)));
+    ready.advance();
+    assert!(n.leader_recovery.is_none());
+}
+
+#[test]
+fn accepted_fingerprint_must_match_the_inflight_command() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_election_timeout(1);
+    n.tick();
+    let _ = drain(&mut n);
+    let camp = n.ballot();
+    n.step(Message::Promise {
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: BTreeMap::new(),
+        next_from_slot: None,
+    });
+    let _ = drain(&mut n);
+
+    let ProposeResult::Accepted(slot) = n.propose(ClientId(4), ClientSeq(5), val(6)) else {
+        panic!("leader must admit the proposal");
+    };
+    let expected = command_fingerprint(&n.proposer[&slot].command);
+    n.step(Message::Accepted {
+        from: NodeId(1),
+        ballot: camp,
+        slot,
+        vhash: expected ^ 1,
+    });
+    assert_eq!(n.hard_state().chosen_index, None);
+
+    n.step(Message::Accepted {
+        from: NodeId(1),
+        ballot: camp,
+        slot,
+        vhash: expected,
+    });
+    assert_eq!(n.hard_state().chosen_index, Some(slot));
 }
 
 #[test]
@@ -2250,6 +2484,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
         ballot: b,
         from_slot: Slot(0),
         accepted: reported,
+        next_from_slot: None,
     });
     assert_eq!(x.role, NodeRole::Candidate, "the stale win is refused");
     assert!(x.election.is_some(), "the refused campaign stays open");
@@ -2277,6 +2512,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
         // chosen by the learned commit, so the probe starts at slot 1.
         from_slot: Slot(1),
         accepted: reported,
+        next_from_slot: None,
     });
     assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
     assert!(
@@ -2420,6 +2656,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         ballot: b,
         from_slot: Slot(0),
         accepted: reported,
+        next_from_slot: None,
     });
     assert_eq!(
         x.role,
@@ -2444,6 +2681,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         ballot: b2,
         from_slot: x.first_slot,
         accepted: reported,
+        next_from_slot: None,
     });
     assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
     assert!(

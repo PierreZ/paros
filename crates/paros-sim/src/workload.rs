@@ -13,7 +13,7 @@ use moonpool_sim::{
     assert_always, assert_sometimes, buggify_knob,
 };
 
-use paros::{Compact, ParosClient, Propose, Read, parse_addr};
+use paros::{Compact, ParosClient, Propose, Read, parse_addr, proposal_checksum};
 
 use crate::audit::{ClientHistory, ClientMode, GateScope, audit_world};
 use crate::{CHAOS_DURATION_MS, GAP_MS, REQUESTS, SETTLE_MS, TIMEOUT_MS};
@@ -271,10 +271,12 @@ impl Workload for ProposeClient {
                 let attempt = async {
                     let mut target = usize::try_from(seq).unwrap_or(0) % n;
                     loop {
+                        let command = seq.to_le_bytes().to_vec();
                         let proposal = Propose {
                             client: client_id,
                             seq,
-                            command: seq.to_le_bytes().to_vec(),
+                            checksum: proposal_checksum(client_id, seq, &command),
+                            command,
                         };
                         let mut client = clients[target].clone();
                         if let Ok(response) = client.propose(proposal).await {

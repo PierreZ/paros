@@ -9,6 +9,7 @@ use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
     Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
+    command_fingerprint,
 };
 use crate::write::WriteOp;
 
@@ -21,6 +22,12 @@ const HEARTBEAT_TICKS: u64 = 1;
 /// lagging peer that needs more re-requests on the next heartbeat, so a large
 /// backlog is drained over several rounds rather than one unbounded message.
 const CATCHUP_BATCH: usize = 64;
+
+/// Maximum accepted records carried by one [`Message::Promise`] page.
+pub const PROMISE_BATCH: usize = 64;
+
+/// Maximum recovered or gap-fill Phase-2 rounds started in one recovery pump.
+pub const LEADER_RECOVERY_BATCH: usize = 64;
 
 /// Ticks a pending read-index round may wait for its ack quorum before the
 /// leader garbage-collects it (lost acks, an unreachable quorum). Dropped
@@ -134,6 +141,18 @@ struct Election {
     /// Highest-ballot accepted command per slot seen across the promise quorum,
     /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
     recovered: BTreeMap<Slot, (Ballot, Command)>,
+    /// Next suffix-page cursor expected from each non-terminal acceptor.
+    promise_next: BTreeMap<NodeId, Slot>,
+}
+
+/// Bounded continuation for a newly elected leader's recovered suffix.
+struct LeaderRecovery {
+    /// Highest-ballot command reported for each retained slot.
+    recovered: BTreeMap<Slot, Command>,
+    /// Next slot to recover or fill.
+    cursor: Slot,
+    /// One past the highest slot covered by the Phase-1 quorum.
+    end: Slot,
 }
 
 /// The pure, synchronous, single-threaded Multi-Paxos state machine.
@@ -182,6 +201,8 @@ pub struct RawNode {
     /// Read-index rounds confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
+    /// `(started, gap_fills, remaining)` for this Ready's recovery chunk.
+    pending_recovery_batch: Option<(usize, usize, usize)>,
 
     /// Logical clock, advanced by [`RawNode::tick`].
     tick_count: u64,
@@ -194,13 +215,6 @@ pub struct RawNode {
     /// The ballot this node operates under as Candidate/Leader (and the highest
     /// leader ballot it has adopted as a Follower).
     ballot: Ballot,
-    /// The highest round some acceptor has reported already promised, via a
-    /// [`Message::Nack`] matching an in-flight campaign or accept round, even
-    /// when we never adopted that ballot ourselves. Floors the round
-    /// [`RawNode::on_check_leader`] picks for the next campaign, so a candidate
-    /// facing a much higher remote promise converges in one hop instead of
-    /// climbing one round per election timeout. Monotonically non-decreasing.
-    known_promised_round: u64,
     /// Ticks since the last leader contact (reset on `Prepare`/`Accept`/
     /// `Heartbeat`/`Commit` at a ballot `>=` ours, and on becoming Leader).
     election_elapsed: u64,
@@ -247,6 +261,12 @@ pub struct RawNode {
     proposer: BTreeMap<Slot, Proposing>,
     /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
     election: Option<Election>,
+    /// Remaining bounded recovery work for the current leadership.
+    leader_recovery: Option<LeaderRecovery>,
+    /// The bounded chosen-prefix walk stopped with another contiguous slot ready.
+    chosen_advance_pending: bool,
+    /// Fair cursor for bounded pending-Accept re-sends.
+    resend_cursor: Option<Slot>,
     /// Next slot the leader allocates to a fresh client proposal.
     next_slot: Slot,
     /// How many undecided holes this node filled with a [`Control::Noop`] when it
@@ -322,6 +342,7 @@ impl RawNode {
     /// ordering contract (a floor past the chosen prefix). A broken invariant
     /// here means corrupted storage or a broken storage implementation;
     /// crashing beats running on it.
+    #[allow(clippy::too_many_lines)]
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
         // Config shape: quorum arithmetic and broadcast both assume a strictly
@@ -424,11 +445,11 @@ impl RawNode {
             pending_committed: Vec::new(),
             pending_snapshot_offers: Vec::new(),
             pending_read_states: Vec::new(),
+            pending_recovery_batch: None,
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,
             ballot,
-            known_promised_round: 0,
             election_elapsed: 0,
             election_timeout: 0,
             needs_election_timeout: true,
@@ -442,6 +463,9 @@ impl RawNode {
             read_rounds: Vec::new(),
             proposer: BTreeMap::new(),
             election: None,
+            leader_recovery: None,
+            chosen_advance_pending: false,
+            resend_cursor: None,
             next_slot,
             election_gap_fills: 0,
             chosen,
@@ -465,12 +489,11 @@ impl RawNode {
             self.first_slot <= self.first_unchosen(),
             "the compaction floor never outruns the chosen prefix"
         );
-        // The contiguous walk runs after every `mark_chosen`, so the first
-        // unchosen slot itself is never left sitting in `chosen` (the
-        // `chosen_gap` accessor's contract).
+        // A chosen first-unchosen slot is legal only as the explicit bounded
+        // continuation left by `advance_chosen_index`.
         assert!(
-            !self.chosen.contains_key(&self.first_unchosen()),
-            "the first unchosen slot is never chosen-but-unwalked"
+            self.chosen.contains_key(&self.first_unchosen()) == self.chosen_advance_pending,
+            "a chosen first-unchosen slot has a deferred prefix continuation"
         );
         // Floor bounds: nothing below the floor survives in any slot map.
         assert!(
@@ -533,6 +556,12 @@ impl RawNode {
                 "only a leader holds pending read rounds"
             );
         }
+        if self.leader_recovery.is_some() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds deferred recovery work"
+            );
+        }
     }
 
     /// The single input entry point: every stimulus is a [`Message`], routed by
@@ -550,20 +579,26 @@ impl RawNode {
                 ballot,
                 from_slot,
                 accepted,
-            } => self.on_promise(from, ballot, from_slot, accepted),
+                next_from_slot,
+            } => self.on_promise(from, ballot, from_slot, accepted, next_from_slot),
             Message::Accept {
                 from,
                 ballot,
                 slot,
                 command,
             } => self.on_accept(from, ballot, slot, command),
-            Message::Accepted { from, ballot, slot } => self.on_accepted(from, ballot, slot),
+            Message::Accepted {
+                from,
+                ballot,
+                slot,
+                vhash,
+            } => self.on_accepted(from, ballot, slot, vhash),
             Message::Nack {
+                from,
                 ballot,
                 promised,
                 slot,
-                ..
-            } => self.on_nack(ballot, promised, slot),
+            } => self.on_nack(from, ballot, promised, slot),
             Message::Commit {
                 ballot,
                 slot,
@@ -666,6 +701,11 @@ impl RawNode {
         // round's confirmation costs one network round trip, not a tick.
         self.broadcast_heartbeat();
         let mut acked_by = BTreeSet::new();
+        // `QuorumSystem::Majority` is the load-bearing reason the leader may
+        // count its own real acceptor vote unconditionally: a stale leader can
+        // collect at most `q - 1` peer acks once an intersecting majority has
+        // promised higher. A future asymmetric quorum system must replace this
+        // cardinality check and explicit own vote with read-quorum membership.
         acked_by.insert(self.config.id);
         self.read_rounds.push(ReadRound {
             ctx,
@@ -747,6 +787,7 @@ impl RawNode {
             .collect();
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
+        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         self.proposer.retain(|slot, _| *slot >= first);
         self.first_slot = first;
         self.pending_writes
@@ -826,8 +867,8 @@ impl RawNode {
         self.assert_invariants();
     }
 
-    /// Re-broadcast the `Accept` for every Phase-2 round this leader still has in
-    /// flight. A no-op on a node that is not the leader, and on a leader with
+    /// Re-broadcast a fair bounded page of this leader's in-flight `Accept`
+    /// rounds. A no-op on a node that is not the leader, and on a leader with
     /// nothing pending.
     ///
     /// **The driver is expected to call this on each heartbeat beat**, right after
@@ -853,11 +894,25 @@ impl RawNode {
             return;
         }
         let me = self.config.id;
-        let pending: Vec<(Slot, Ballot, Command)> = self
+        let start = self.resend_cursor.unwrap_or(self.first_slot);
+        let mut pending: Vec<(Slot, Ballot, Command)> = self
             .proposer
-            .iter()
+            .range(start..)
+            .take(LEADER_RECOVERY_BATCH)
             .map(|(s, p)| (*s, p.ballot, p.command.clone()))
             .collect();
+        if pending.len() < LEADER_RECOVERY_BATCH {
+            let remaining = LEADER_RECOVERY_BATCH - pending.len();
+            pending.extend(
+                self.proposer
+                    .range(..start)
+                    .take(remaining)
+                    .map(|(s, p)| (*s, p.ballot, p.command.clone())),
+            );
+        }
+        self.resend_cursor = pending
+            .last()
+            .and_then(|(slot, _, _)| slot.0.checked_add(1).map(Slot));
         for (slot, ballot, command) in pending {
             self.broadcast(&Message::Accept {
                 from: me,
@@ -866,6 +921,29 @@ impl RawNode {
                 command,
             });
         }
+    }
+
+    /// Advance the next bounded page of deferred chosen-prefix application or
+    /// inherited leader-recovery rounds after the caller has fully processed
+    /// the previous [`Ready`] batch. A no-op when neither continuation exists.
+    ///
+    /// Drivers call this after persistence, sends, and application complete;
+    /// keeping it separate from [`Ready::advance`](crate::Ready::advance)
+    /// prevents a single-node recovery from advancing the in-memory chosen
+    /// prefix ahead of the batch the driver is still persisting.
+    ///
+    /// # Panics
+    ///
+    /// If an internal role/recovery invariant is broken.
+    pub fn advance_recovery(&mut self) {
+        let writes_before = self.pending_writes.len();
+        self.advance_chosen_index();
+        if self.pending_writes.len() != writes_before {
+            self.assert_invariants();
+            return;
+        }
+        self.pump_leader_recovery();
+        self.assert_invariants();
     }
 
     /// Whether this leader has Phase-2 rounds whose `Accept`s can be re-sent.
@@ -927,13 +1005,18 @@ impl RawNode {
             return;
         }
         let me = self.config.id;
-        let round = self
+        let base_round = self
             .hard_state
             .max_promised_ballot
             .round
-            .max(self.ballot.round)
-            .max(self.known_promised_round)
-            + 1;
+            .max(self.ballot.round);
+        let Some(round) = base_round.checked_add(1) else {
+            // The wire/domain round space is exhausted. There is no strictly
+            // higher valid ballot to campaign at, so remain a follower rather
+            // than wrapping or reusing the maximum round.
+            self.become_follower(None);
+            return;
+        };
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };
@@ -952,8 +1035,11 @@ impl RawNode {
             from_slot,
             promised_by,
             recovered,
+            promise_next: BTreeMap::new(),
         });
         self.proposer.clear();
+        self.leader_recovery = None;
+        self.resend_cursor = None;
         // A campaign opens at a ballot this node itself just promised: the
         // fresh round is strictly above every round in the max above, so the
         // promise landed exactly on the campaign ballot.
@@ -990,6 +1076,7 @@ impl RawNode {
         ballot: Ballot,
         from_slot: Slot,
         accepted: BTreeMap<Slot, (Ballot, Command)>,
+        next_from_slot: Option<Slot>,
     ) {
         // Quorum sets are keyed by NodeId: an id outside the configured
         // membership must never inflate one (wire hygiene; peers are trusted
@@ -997,20 +1084,55 @@ impl RawNode {
         if !self.config.peers.contains(&from) {
             return;
         }
+        let mut request_next = None;
         {
             let Some(e) = self.election.as_mut() else {
                 return;
             };
-            if e.ballot != ballot || e.from_slot != from_slot {
+            if e.ballot != ballot || e.promised_by.contains(&from) {
                 return;
             }
-            e.promised_by.insert(from);
+            let expected = e.promise_next.get(&from).copied().unwrap_or(e.from_slot);
+            // A page is useful only at the exact requested cursor, carries at
+            // most the advertised bound, and advances its continuation.
+            let shape_valid = from_slot == expected
+                && accepted.len() <= PROMISE_BATCH
+                && accepted.keys().all(|slot| *slot >= from_slot)
+                && next_from_slot.is_none_or(|next| {
+                    accepted.len() == PROMISE_BATCH
+                        && next > from_slot
+                        && accepted.keys().next_back().is_none_or(|last| next > *last)
+                });
+            if !shape_valid {
+                return;
+            }
             for (slot, (ab, command)) in accepted {
                 let supersedes = e.recovered.get(&slot).is_none_or(|(rb, _)| ab > *rb);
                 if supersedes {
                     e.recovered.insert(slot, (ab, command));
                 }
             }
+            if let Some(next) = next_from_slot {
+                e.promise_next.insert(from, next);
+                request_next = Some(next);
+                // A valid page is leader contact for election-timeout purposes;
+                // a long suffix must not make the same campaign expire mid-page.
+                self.election_elapsed = 0;
+            } else {
+                e.promise_next.remove(&from);
+                e.promised_by.insert(from);
+            }
+        }
+        if let Some(next) = request_next {
+            self.pending_messages.push((
+                from,
+                Message::Prepare {
+                    from: self.config.id,
+                    ballot,
+                    from_slot: next,
+                },
+            ));
+            return;
         }
         self.try_become_leader();
     }
@@ -1050,29 +1172,19 @@ impl RawNode {
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
         self.proposer.clear();
+        self.resend_cursor = None;
 
-        for (slot, (_old, command)) in e.recovered {
-            // A slot below our floor is chosen (only chosen slots are truncated),
-            // so it needs no re-proposal.
-            if slot < self.first_slot || self.chosen.contains_key(&slot) {
-                continue;
-            }
-            if let Command::User(entry) = &command
-                && !self.applied_elsewhere(entry, slot)
-            {
-                // Same guard as `mark_chosen`: a recovered identity that already
-                // applied at another slot is still re-proposed (P2c is
-                // mandatory — it may already be chosen here), but a retry must
-                // find the applied fast path, not park on the doomed slot.
-                self.inflight.insert((entry.client, entry.seq), slot);
-            }
-            self.start_accept_round(slot, command);
-        }
-        self.next_slot = self
+        // Fix the allocator/read fence from the complete Phase-1 result before
+        // starting only its first bounded recovery page. Fresh proposals may
+        // then allocate strictly above every inherited slot while the suffix is
+        // drained across later Ready batches.
+        let highest = self
             .accepted
             .keys()
-            .next_back()
-            .map_or(self.first_unchosen(), |s| Slot(s.0 + 1));
+            .chain(e.recovered.keys())
+            .max()
+            .copied();
+        self.next_slot = highest.map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)));
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -1095,23 +1207,19 @@ impl RawNode {
         // reported it (an acceptor that truncated the range Nacks instead of
         // under-reporting — see the floor guard in `on_prepare`). Nothing was
         // reported, so nothing is chosen there and the slot is genuinely free.
-        let fill: Vec<Slot> = (self.first_unchosen().0..self.next_slot.0)
-            .map(Slot)
-            .filter(|s| !self.proposer.contains_key(s))
+        let recovery_start = self.first_unchosen();
+        let recovered: BTreeMap<Slot, Command> = e
+            .recovered
+            .into_iter()
+            .map(|(slot, (_ballot, command))| (slot, command))
             .collect();
-        let mut filled = 0_u64;
-        for slot in fill {
-            // Re-checked per slot, not once up front: a fill can decide in this same
-            // loop (a single-node cluster is its own quorum), advancing the chosen
-            // prefix underneath it. Starting a round on an already-chosen slot would
-            // overwrite its authoritative accepted record with the no-op.
-            if slot < self.first_slot || self.chosen.contains_key(&slot) {
-                continue;
-            }
-            self.start_accept_round(slot, Command::Control(Control::Noop));
-            filled += 1;
-        }
-        self.election_gap_fills = filled;
+        self.election_gap_fills = 0;
+        self.leader_recovery = Some(LeaderRecovery {
+            recovered,
+            cursor: recovery_start,
+            end: self.next_slot,
+        });
+        self.pump_leader_recovery();
         // The fresh-leader read fence: nothing decided under an earlier ballot
         // can sit above `next_slot - 1` (the prepare quorum reported it all), so
         // reads wait until the chosen prefix covers that slot. Beat seqs are
@@ -1141,6 +1249,65 @@ impl RawNode {
         );
     }
 
+    /// Start one bounded page of inherited Phase-2 rounds. The first page is
+    /// created on election victory; [`RawNode::advance_recovery`] schedules at
+    /// most one more page after the driver finishes the batch just processed.
+    fn pump_leader_recovery(&mut self) {
+        if self.role != NodeRole::Leader || self.pending_recovery_batch.is_some() {
+            return;
+        }
+        let mut processed = 0_usize;
+        let mut started = 0_usize;
+        let mut gap_fills = 0_usize;
+        while processed < LEADER_RECOVERY_BATCH {
+            let Some((slot, command, is_gap)) =
+                self.leader_recovery.as_mut().and_then(|recovery| {
+                    if recovery.cursor >= recovery.end {
+                        return None;
+                    }
+                    let slot = recovery.cursor;
+                    recovery.cursor = Slot(recovery.cursor.0.saturating_add(1));
+                    let (command, is_gap) = recovery.recovered.remove(&slot).map_or_else(
+                        || (Command::Control(Control::Noop), true),
+                        |command| (command, false),
+                    );
+                    Some((slot, command, is_gap))
+                })
+            else {
+                break;
+            };
+            processed += 1;
+
+            // A previous page can decide and compact slots underneath the
+            // continuation (especially in a single-node cluster), so each slot
+            // is re-checked at the instant its round starts.
+            if slot < self.first_slot || self.chosen.contains_key(&slot) {
+                continue;
+            }
+            if is_gap {
+                gap_fills += 1;
+                self.election_gap_fills = self.election_gap_fills.saturating_add(1);
+            }
+            if let Command::User(entry) = &command
+                && !self.applied_elsewhere(entry, slot)
+            {
+                self.inflight.insert((entry.client, entry.seq), slot);
+            }
+            self.start_accept_round(slot, command);
+            started += 1;
+        }
+
+        let remaining = self.leader_recovery.as_ref().map_or(0, |recovery| {
+            usize::try_from(recovery.end.0.saturating_sub(recovery.cursor.0)).unwrap_or(usize::MAX)
+        });
+        if remaining == 0 {
+            self.leader_recovery = None;
+        }
+        if processed > 0 {
+            self.pending_recovery_batch = Some((started, gap_fills, remaining));
+        }
+    }
+
     // ---- acceptor ---------------------------------------------------------
 
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
@@ -1148,6 +1315,11 @@ impl RawNode {
     /// higher than our promise; otherwise `Nack`.
     fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
+        // A Promise continuation is valid only for the configured proposer
+        // named by the ballot. This also prevents replies to arbitrary wire ids.
+        if !self.config.peers.contains(&from) || ballot.node != from {
+            return;
+        }
         // Floor guard: a Prepare whose `from_slot` is below our compaction floor
         // cannot be promised. We truncated the accepted entries for
         // `[from_slot, first_slot)`, so our Promise could not report them, and the
@@ -1168,12 +1340,21 @@ impl RawNode {
             ));
             return;
         }
-        if ballot > self.hard_state.max_promised_ballot {
+        let raises_promise = ballot > self.hard_state.max_promised_ballot;
+        let continues_page = ballot == self.hard_state.max_promised_ballot;
+        if raises_promise || continues_page {
+            // A same-ballot continuation can arrive after this node learned the
+            // ballot through Commit/snapshot while it still held a different
+            // live campaign. The other proposer is leader contact even though
+            // the durable promise need not rise, so close that stale campaign
+            // before following the prepared ballot.
             if ballot.node != me && self.role != NodeRole::Follower {
                 self.become_follower(None);
             }
             self.election_elapsed = 0;
-            self.set_promise(ballot);
+            if raises_promise {
+                self.set_promise(ballot);
+            }
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
@@ -1187,11 +1368,13 @@ impl RawNode {
                 self.ballot >= ballot,
                 "the operating ballot follows a raised promise"
             );
-            let accepted: BTreeMap<Slot, (Ballot, Command)> = self
-                .accepted
-                .range(from_slot..)
+            let mut page = self.accepted.range(from_slot..);
+            let accepted: BTreeMap<Slot, (Ballot, Command)> = page
+                .by_ref()
+                .take(PROMISE_BATCH)
                 .map(|(s, v)| (*s, v.clone()))
                 .collect();
+            let next_from_slot = page.next().map(|(slot, _)| *slot);
             self.pending_messages.push((
                 from,
                 Message::Promise {
@@ -1199,6 +1382,7 @@ impl RawNode {
                     ballot,
                     from_slot,
                     accepted,
+                    next_from_slot,
                 },
             ));
         } else {
@@ -1243,6 +1427,7 @@ impl RawNode {
                 self.ballot = ballot;
             }
             self.set_promise(ballot);
+            let vhash = command_fingerprint(&command);
             self.record_accepted(slot, ballot, command);
             // The `Accepted` reply's durability claim: the promise sits exactly
             // at the accepted ballot, and the matching `AppendAccepted` write is
@@ -1257,6 +1442,7 @@ impl RawNode {
                     from: me,
                     ballot,
                     slot,
+                    vhash,
                 },
             ));
         } else {
@@ -1275,7 +1461,7 @@ impl RawNode {
     // ---- proposer / learner ----------------------------------------------
 
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
-    fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
+    fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot, vhash: u64) {
         // Quorum sets are keyed by NodeId: an id outside the configured
         // membership must never inflate one (wire hygiene; peers are trusted
         // but a misrouted or misconfigured sender is not a quorum member).
@@ -1286,7 +1472,7 @@ impl RawNode {
             let Some(p) = self.proposer.get_mut(&slot) else {
                 return;
             };
-            if p.ballot != ballot {
+            if p.ballot != ballot || command_fingerprint(&p.command) != vhash {
                 return;
             }
             p.accepted_by.insert(from);
@@ -1303,17 +1489,16 @@ impl RawNode {
     /// A rejection of an in-flight ballot. Step down to Follower and let the
     /// randomized election timeout reschedule us. We do **not** immediately
     /// re-prepare: that (with the randomized timeout) is the dueling-proposer
-    /// livelock fix. We do, however, remember the acceptor's reported `promised`
-    /// ballot so the *next* campaign starts past it instead of climbing one round
-    /// per timeout.
-    fn on_nack(&mut self, ballot: Ballot, promised: Ballot, slot: Slot) {
+    /// livelock fix. The reported promise is diagnostic only: retaining an
+    /// arbitrary wire round would let one garbage Nack pin every future campaign.
+    fn on_nack(&mut self, from: NodeId, ballot: Ballot, _promised: Ballot, slot: Slot) {
+        if !self.config.peers.contains(&from) {
+            return;
+        }
         let superseded = self.election.as_ref().is_some_and(|e| e.ballot == ballot)
             || self.proposer.get(&slot).is_some_and(|p| p.ballot == ballot);
         if superseded {
             self.become_follower(None);
-            if promised.round > self.known_promised_round {
-                self.known_promised_round = promised.round;
-            }
         }
     }
 
@@ -1596,6 +1781,7 @@ impl RawNode {
         self.first_slot = first;
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
+        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         self.proposer.retain(|slot, _| *slot >= first);
         // The prefix jumped without the contiguous walk running, so nothing
         // handed the folded slots' `inflight` entries over. Drop them: a mapping
@@ -1768,6 +1954,8 @@ impl RawNode {
         self.role = NodeRole::Follower;
         self.leader = leader;
         self.election = None;
+        self.leader_recovery = None;
+        self.resend_cursor = None;
         self.proposer.clear();
         // Unconfirmed read rounds die with the leadership; already-confirmed
         // `pending_read_states` stay — they were valid at their linearization
@@ -1896,12 +2084,15 @@ impl RawNode {
     /// applied.
     fn advance_chosen_index(&mut self) {
         let mut next = self.first_unchosen();
+        let mut advanced = 0_usize;
         // Highest `up_to` from any `Truncate` control command that entered the
         // contiguous chosen prefix this pass. Applied *after* the walk so the
         // mutation `compact` makes to `chosen`/`accepted` cannot disturb the
         // iteration above.
         let mut truncate_up_to: Option<Slot> = None;
-        while let Some(mut command) = self.chosen.get(&next).cloned() {
+        while advanced < LEADER_RECOVERY_BATCH
+            && let Some(mut command) = self.chosen.get(&next).cloned()
+        {
             // The walk is the *only* writer of `chosen_index`, and it advances
             // exactly one slot per iteration — the contiguity the apply seam
             // and the boot rebuild are built on.
@@ -1947,7 +2138,9 @@ impl RawNode {
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);
+            advanced += 1;
         }
+        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         // Apply (lazily, "in the background") the truncation the control command
         // decided: drop the now-safe prefix and raise the floor. `compact` clamps
         // to the chosen index just advanced, is idempotent, and emits a
@@ -1956,12 +2149,12 @@ impl RawNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        // The walk's exit condition, restated as its postcondition: nothing
-        // chosen is left sitting at the first unchosen slot (`chosen_gap`
-        // reports strictly-above slots on the strength of this).
+        // The walk's exit condition, restated as its postcondition: either it
+        // consumed the entire contiguous chosen prefix, or exactly one bounded
+        // chunk was released and the post-Ready continuation will resume it.
         assert!(
-            !self.chosen.contains_key(&self.first_unchosen()),
-            "the walk consumes the entire contiguous chosen prefix"
+            advanced == LEADER_RECOVERY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
+            "the walk consumes or bounds the contiguous chosen prefix"
         );
         // A read round waiting on the apply condition (`chosen_index >= index`,
         // the fresh-leader fence) resolves exactly here. No-op on a follower.
@@ -2096,8 +2289,8 @@ impl RawNode {
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
         let hole = self.first_unchosen();
-        // `hole` itself is never in `chosen`: `advance_chosen_index` runs after
-        // every `mark_chosen`, so anything at or above it is strictly above.
+        // `hole` may itself be chosen while the bounded prefix walk is pending;
+        // the driver drains that continuation before quiescence.
         let highest = *self.chosen.range(hole..).next_back()?.0;
         Some((hole, highest))
     }
@@ -2124,12 +2317,17 @@ impl RawNode {
         &self.pending_read_states
     }
 
+    pub(crate) fn pending_recovery_batch(&self) -> Option<(usize, usize, usize)> {
+        self.pending_recovery_batch
+    }
+
     pub(crate) fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.pending_committed.clear();
         self.pending_snapshot_offers.clear();
         self.pending_read_states.clear();
+        self.pending_recovery_batch = None;
     }
 }
 

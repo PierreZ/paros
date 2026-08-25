@@ -701,6 +701,7 @@ pub(crate) struct ChainAgreement {
     fault_cursor: Cell<usize>,
     compacted_cursor: Cell<usize>,
     acked_cursor: Cell<usize>,
+    checksum_rejected_cursor: Cell<usize>,
     submitted: RefCell<BTreeMap<String, u64>>,
     state_by_index: RefCell<BTreeMap<u64, String>>,
     command_by_index: RefCell<BTreeMap<u64, String>>,
@@ -737,6 +738,7 @@ impl ChainAgreement {
             fault_cursor: Cell::new(0),
             compacted_cursor: Cell::new(0),
             acked_cursor: Cell::new(0),
+            checksum_rejected_cursor: Cell::new(0),
             submitted: RefCell::new(BTreeMap::new()),
             state_by_index: RefCell::new(BTreeMap::new()),
             command_by_index: RefCell::new(BTreeMap::new()),
@@ -1007,6 +1009,9 @@ impl Invariant for ChainAgreement {
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
         self.ingest_submitted(q);
+        for _ in q.since("proposal_checksum_rejected", &self.checksum_rejected_cursor) {
+            assert_reachable!("chain: an invalid proposal checksum is rejected");
+        }
         for (stream, event) in self.merged(q) {
             match stream {
                 ChainStream::Snapshot => self.observe_snapshot(&event),
@@ -1026,6 +1031,7 @@ impl Invariant for ChainAgreement {
         self.fault_cursor.set(0);
         self.compacted_cursor.set(0);
         self.acked_cursor.set(0);
+        self.checksum_rejected_cursor.set(0);
         self.submitted.get_mut().clear();
         self.state_by_index.get_mut().clear();
         self.command_by_index.get_mut().clear();

@@ -119,6 +119,10 @@ pub trait Audit {
     /// outbound path (reported before the after-sync/before-send seam).
     fn snapshot_offered(&self, node: NodeId, offers: u64) {}
 
+    /// This Ready batch started `started` inherited or gap-fill accept rounds,
+    /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
+    fn recovery_batch(&self, node: NodeId, started: u64, gap_fills: u64, remaining: u64) {}
+
     /// This node deliberately skipped re-sending its pending `Accept`s.
     fn resend_skipped(&self, node: NodeId) {}
 

@@ -4,8 +4,9 @@
 
 use paros_sim::{
     AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome,
-    SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport, explore, explore_network_safety,
-    explore_snapshot_recovery, run_seed, run_seed_json,
+    PROTOCOL_BOUNDS_COVERAGE_ITERATIONS, SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport,
+    explore, explore_network_safety, explore_protocol_bounds, explore_snapshot_recovery, run_seed,
+    run_seed_json,
 };
 
 fn main() {
@@ -84,6 +85,7 @@ fn main() {
         std::process::exit(1);
     }
 
+    run_protocol_bounds_axis();
     run_snapshot_recovery_axis();
     run_network_axis();
 
@@ -118,6 +120,27 @@ fn main() {
     // Print the JSON the browser would receive, so the wire format is eyeballable.
     println!("\n--- JSON (what runSeed returns to the browser) ---");
     println!("{}", run_seed_json(seed));
+}
+
+/// One deterministic long-suffix sequence proving the protocol resource bounds.
+fn run_protocol_bounds_axis() {
+    println!("\n--- Protocol bounds choreography axis ---");
+    let bounds = explore_protocol_bounds(PROTOCOL_BOUNDS_COVERAGE_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed; convergence_timeout={}",
+        bounds.iterations, bounds.successful_runs, bounds.failed_runs, bounds.convergence_timeout,
+    );
+    if !bounds.assertion_violations.is_empty()
+        || bounds.failed_runs > 0
+        || !bounds.coverage_violations.is_empty()
+        || bounds.convergence_timeout
+    {
+        println!("  ASSERTION VIOLATIONS: {:?}", bounds.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", bounds.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", bounds.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Promise, Ready, Accepted, and Nack bounds are green");
 }
 
 /// One fixed three-node lifecycle sequence, kept separate from both broad

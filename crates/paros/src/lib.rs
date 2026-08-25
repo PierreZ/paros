@@ -27,15 +27,16 @@ pub use driver::{
 };
 pub use grpc::{
     Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
-    ProposeAck, Read, ReadAck,
+    ProposeAck, Read, ReadAck, proposal_checksum,
 };
 pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, Message, MustSync,
-    NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready,
-    SessionEntry, Slot, Storage, Value, WriteOp,
+    Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, LEADER_RECOVERY_BATCH,
+    Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
+    ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value, WriteOp,
+    command_fingerprint,
 };
 
 #[cfg(test)]
@@ -79,6 +80,7 @@ mod tests {
                 ballot,
                 from_slot: Slot(5),
                 accepted,
+                next_from_slot: None,
             },
             Message::Accept {
                 from: NodeId(2),
@@ -90,6 +92,7 @@ mod tests {
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
+                vhash: 17,
             },
             Message::Nack {
                 from: NodeId(2),
