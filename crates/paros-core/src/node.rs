@@ -220,13 +220,13 @@ pub struct RawNode {
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
-    /// CheckQuorum (#95): ticks since the leader last proved it can reach an
+    /// `CheckQuorum` (#95): ticks since the leader last proved it can reach an
     /// ack quorum. Leader-only, reset when the window closes with a quorum.
     quorum_elapsed: u64,
-    /// CheckQuorum: the distinct peers (incl. self) whose ballot-matching
+    /// `CheckQuorum`: the distinct peers (incl. self) whose ballot-matching
     /// `HeartbeatAck` or `Accepted` arrived inside the current window.
     quorum_acked_by: BTreeSet<NodeId>,
-    /// Monotone count of CheckQuorum step-downs this incarnation, for the
+    /// Monotone count of `CheckQuorum` step-downs this incarnation, for the
     /// driver's audit report (mirrors `duplicates_suppressed`).
     quorum_lost_step_downs: u64,
 
@@ -601,7 +601,8 @@ impl RawNode {
         self.chosen = self.chosen.split_off(&first);
         self.proposer.retain(|slot, _| *slot >= first);
         self.first_slot = first;
-        self.pending_writes.push(WriteOp::Truncate { first, sealed });
+        self.pending_writes
+            .push(WriteOp::Truncate { first, sealed });
         self.first_slot
     }
 
@@ -1801,7 +1802,7 @@ impl RawNode {
         self.duplicates_suppressed
     }
 
-    /// Monotone count of CheckQuorum step-downs (#95) this incarnation: the
+    /// Monotone count of `CheckQuorum` step-downs (#95) this incarnation: the
     /// times this node, as Leader, spent a full election-timeout window without
     /// hearing an ack quorum and demoted itself. The driver reads the delta per
     /// batch and reports it through its audit port.

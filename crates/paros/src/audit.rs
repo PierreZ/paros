@@ -136,7 +136,7 @@ pub trait Audit {
     fn waiter_superseded(&self, node: NodeId, slot: Slot) {}
 
     /// This node, as Leader, spent a full election-timeout window without an
-    /// ack quorum and demoted itself (CheckQuorum, #95). `count` is the number
+    /// ack quorum and demoted itself (`CheckQuorum`, #95). `count` is the number
     /// of such step-downs in the batch (in practice 1).
     fn quorum_lost(&self, node: NodeId, count: u64) {}
 

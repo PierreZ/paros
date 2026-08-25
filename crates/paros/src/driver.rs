@@ -285,7 +285,7 @@ pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 pub const EV_DUPLICATE_SUPPRESSED: &str = "duplicate_suppressed";
 
 /// Tracing event: this node, as Leader, spent a full election-timeout window
-/// without hearing an ack quorum and demoted itself (CheckQuorum, #95). Carries
+/// without hearing an ack quorum and demoted itself (`CheckQuorum`, #95). Carries
 /// `node` and `count` (step-downs in the batch — in practice 1). The zombie
 /// leader this bounds is the feeder of #94's stale-suffix interleaving.
 pub const EV_QUORUM_LOST: &str = "leader_quorum_lost";
@@ -797,6 +797,10 @@ where
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
+// One linear durability pipeline: every step is ordered against its neighbors
+// (persist → send → apply → app-fsync → truncate → offers → acks), so slicing
+// it into helpers would scatter the ordering contract this function *is*.
+#[allow(clippy::too_many_lines)]
 fn drain_ready<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
@@ -1201,6 +1205,10 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
 /// new leader).
+// The `last_*` parameters are the loop's cross-batch delta trackers (role,
+// #94 suppressions, `CheckQuorum` step-downs); bundling them into a struct
+// would only rename the same nine things.
+#[allow(clippy::too_many_arguments)]
 fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,

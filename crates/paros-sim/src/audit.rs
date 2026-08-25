@@ -47,9 +47,9 @@ const CONVERGENCE_GRACE_MS: u64 = 3_000;
 /// Consecutive **deposed heartbeats** a leader may broadcast before the checker
 /// calls it a zombie (#95). A leader whose ballot a promise-majority has moved
 /// strictly past can never again assemble any quorum at that ballot — every
-/// below-promise beat is ignored unacked — yet without CheckQuorum nothing ever
+/// below-promise beat is ignored unacked — yet without `CheckQuorum` nothing ever
 /// demotes it while it is partitioned from the very peers that could tell it.
-/// CheckQuorum bounds the zombie window to one ack-quorum-less election-timeout
+/// `CheckQuorum` bounds the zombie window to one ack-quorum-less election-timeout
 /// window (at most ~10 ticks, one beat per tick); forty beats is ~4x that on
 /// the protocol's own clock, immune to wall-time dilation.
 const DEPOSED_BEAT_STREAK: u64 = 40;
@@ -327,7 +327,7 @@ struct AuditState {
     /// needs a partition-shaped seed and would starve saturation as a per-run
     /// gate, but when a seed does reach it, the sweep records it.
     duplicate_suppressed: bool,
-    /// CheckQuorum fired (#95): a leader without an ack quorum for a full
+    /// `CheckQuorum` fired (#95): a leader without an ack quorum for a full
     /// election-timeout window demoted itself. The n=2 regime plus attrition
     /// generates it reliably (killing the only peer starves the window).
     quorum_lost: bool,
@@ -482,7 +482,7 @@ impl AuditState {
     /// a **promise-majority** has durably promised strictly past is deposed for
     /// good: an acceptor only acks a beat at or above its promise, so at most a
     /// minority can ever ack this ballot again, and no round it starts can
-    /// decide. Zombie-ness is a *bounded-liveness* claim — CheckQuorum demotes
+    /// decide. Zombie-ness is a *bounded-liveness* claim — `CheckQuorum` demotes
     /// a leader that spends a full election-timeout window without an ack
     /// quorum, partition or not — so the streak needs no quiescence gate: it
     /// counts beats (one per tick per leader; the seq dedups the per-peer

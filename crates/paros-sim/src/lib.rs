@@ -287,8 +287,41 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
 /// `committed: true` at another command's slot. Red on the latest-only
 /// `applied_seq`; green with the per-client executed-seq ledger (exact-seq
 /// `Chosen`, honest fall-through re-execution otherwise).
-pub const NETWORK_REGRESSION_SEEDS: &[u64] =
-    &[2_791_878_389_799_639_169, 8_872_503_201_755_490_526];
+pub const NETWORK_REGRESSION_SEEDS: &[u64] = &[
+    2_791_878_389_799_639_169,
+    8_872_503_201_755_490_526,
+    // --- the #94/#95 arc (2026-08-25): four bugs pinned by the 300k-seed raw
+    // --- hunt (`sim-paros-hunt network`), all red on the pre-arc tree and
+    // --- green after; each seed names the assertion that caught it.
+    //
+    // #94 at-most-once double-apply ("a (client, seq) command is applied at
+    // exactly one log index"): a retry crosses a partition and is served by
+    // the majority while the deposed leader's lone accept survives above the
+    // cluster prefix; a later election's mandatory P2c re-proposal decides the
+    // same identity at a second slot. 16 of the 24 hunt reds were this shape;
+    // two representatives pinned. Green with the session-ledger fix
+    // (apply-seam suppression + sealed sessions + InstallSnapshot transport).
+    17_924_630_138_148_251_668,
+    9_504_961_290_707_644_556,
+    // Truncation durability ordering ("chain: local application transition is
+    // contiguous" / "chain: one state per applied index"): a Truncate flushed
+    // in step 1 dropped the accepted records before the application fsync; an
+    // AfterApplyBeforeSync crash then left the application permanently behind
+    // its own floor, its apply stream shifted forever. Green with the driver
+    // flushing truncates only after the application fsync.
+    8_398_193_358_524_544_360,
+    7_767_531_023_511_969_805,
+    // False commit ack ("chain: every acknowledged command was applied"): a
+    // stale leader acked a parked waiter when its slot committed a *different*
+    // command (it learned the majority's decision via Commit while still
+    // role=Leader). Green with the ack-on-commit identity check.
+    12_491_191_414_293_127_136,
+    // #95 zombie leader ("a leader deposed by a promise-majority stops beating
+    // within an election timeout (CheckQuorum)"): 23/2000 seeds red pre-fix —
+    // an idle partitioned leader never demotes itself. Green with CheckQuorum
+    // (ack-quorum window = election timeout).
+    901_969_623_722_906_706,
+];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the

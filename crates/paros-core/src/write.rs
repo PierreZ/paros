@@ -152,7 +152,13 @@ mod tests {
         assert!(WriteOp::SetPromise(ballot()).needs_sync());
         assert!(append(0).needs_sync());
         assert!(!WriteOp::SetChosenIndex(Slot(0)).needs_sync());
-        assert!(WriteOp::Truncate { first: Slot(1), sealed: vec![] }.needs_sync());
+        assert!(
+            WriteOp::Truncate {
+                first: Slot(1),
+                sealed: vec![]
+            }
+            .needs_sync()
+        );
     }
 
     #[test]
@@ -172,13 +178,19 @@ mod tests {
         );
         // A truncate is fsync'd, on its own or mixed with a chosen-index advance.
         assert_eq!(
-            classify(&[WriteOp::Truncate { first: Slot(1), sealed: vec![] }]),
+            classify(&[WriteOp::Truncate {
+                first: Slot(1),
+                sealed: vec![]
+            }]),
             MustSync::Sync
         );
         assert_eq!(
             classify(&[
                 WriteOp::SetChosenIndex(Slot(3)),
-                WriteOp::Truncate { first: Slot(1), sealed: vec![] }
+                WriteOp::Truncate {
+                    first: Slot(1),
+                    sealed: vec![]
+                }
             ]),
             MustSync::Sync
         );
