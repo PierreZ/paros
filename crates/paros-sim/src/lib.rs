@@ -18,6 +18,7 @@ mod chain_workload;
 mod choreography;
 mod node;
 mod oracle;
+mod protocol_bounds;
 mod workload;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
@@ -40,6 +41,7 @@ use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
 };
+use crate::protocol_bounds::{ProtocolBoundsIdleProcess, ProtocolBoundsWorkload};
 use crate::workload::ProposeClient;
 
 /// Client-side gRPC channel config for the sim workloads. Mirrors the driver's
@@ -131,6 +133,9 @@ pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
 /// forces one ordered scenario per root, so it needs plateau headroom rather
 /// than the broad seed volume of the main and network axes.
 pub const SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS: usize = 32;
+/// Tiny cap for the deterministic protocol-bounds choreography. Every root
+/// drives the complete three-page suffix and 64/64/2 Ready sequence.
+pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 /// Eight is enough to drive real branches while keeping the sancov gate suitable
 /// for CI; Moonpool stops earlier when a root discovers no new frontier.
@@ -329,6 +334,12 @@ pub const NETWORK_REGRESSION_SEEDS: &[u64] = &[
     // an idle partitioned leader never demotes itself. Green with CheckQuorum
     // (ack-quorum window = election timeout).
     901_969_623_722_906_706,
+    // Moonpool #183 established-stream witness ("chain: applied command was
+    // proposed"): a directional partition silently removed an interior TCP
+    // chunk while later HTTP/2 bytes kept flowing, changing bytes 20..64 of a
+    // proposal with BitFlip disabled. Green with the client-proposal checksum:
+    // the public gRPC boundary rejects the altered request before consensus.
+    11_666_517_603_030_887_004,
 ];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
@@ -431,6 +442,12 @@ fn snapshot_recovery_builder() -> SimulationBuilder {
         .chaos_duration(Duration::from_secs(6))
 }
 
+fn protocol_bounds_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .processes(1, || Box::new(ProtocolBoundsIdleProcess))
+        .workload_factory(|| Box::new(ProtocolBoundsWorkload))
+}
+
 /// Run one deterministic seed and return its timeline. Driver decisions and
 /// clean-crash attrition are active; the same seed
 /// always produces the same [`RunResult`].
@@ -499,6 +516,30 @@ pub fn explore_snapshot_recovery(max_iterations: usize) -> SimulationReport {
     #[cfg(feature = "native")]
     let builder = builder.enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED));
     builder.until_coverage_stable(4, max_iterations).run()
+}
+
+/// Coverage-stable deterministic choreography for Promise paging, bounded
+/// leader recovery, Accepted fingerprints, and Nack round isolation.
+#[must_use]
+pub fn explore_protocol_bounds(max_iterations: usize) -> SimulationReport {
+    protocol_bounds_builder()
+        .until_coverage_stable(2, max_iterations)
+        .run()
+}
+
+/// Raw iterations through the deterministic protocol-bounds choreography.
+#[must_use]
+pub fn protocol_bounds_hunt(iterations: usize) -> SimulationReport {
+    protocol_bounds_builder().set_iterations(iterations).run()
+}
+
+/// Replay one deterministic protocol-bounds root seed.
+#[must_use]
+pub fn run_protocol_bounds_seed(seed: u64) -> SimulationReport {
+    protocol_bounds_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
 }
 
 /// Replay one dedicated graceful snapshot-recovery choreography seed.

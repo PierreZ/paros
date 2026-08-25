@@ -34,11 +34,15 @@ mod types;
 mod write;
 
 pub use message::Message;
-pub use node::{NodeRole, ProposeResult, RawNode, ReadIndexResult, ReadState};
+pub use node::{
+    LEADER_RECOVERY_BATCH, NodeRole, PROMISE_BATCH, ProposeResult, RawNode, ReadIndexResult,
+    ReadState,
+};
 pub use ready::Ready;
 pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;
 pub use types::{
     Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
+    command_fingerprint,
 };
 pub use write::{MustSync, WriteOp};

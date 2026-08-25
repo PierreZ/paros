@@ -13,7 +13,7 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Slot,
-    parse_addr,
+    parse_addr, proposal_checksum,
 };
 
 use crate::CHAOS_DURATION_MS;
@@ -320,6 +320,7 @@ impl Workload for ChainWorkload {
                 let call = client.propose(Propose {
                     client: client_id,
                     seq,
+                    checksum: proposal_checksum(client_id, seq, &payload),
                     command: payload,
                 });
                 if abandon {

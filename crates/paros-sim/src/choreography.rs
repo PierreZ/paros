@@ -17,7 +17,7 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Slot,
-    parse_addr,
+    parse_addr, proposal_checksum,
 };
 
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
@@ -206,6 +206,7 @@ impl Workload for SnapshotRecoveryWorkload {
                     response = client.propose(Propose {
                         client: client_id,
                         seq,
+                        checksum: proposal_checksum(client_id, seq, &payload),
                         command: payload.clone(),
                     }) => response.ok().map(tonic::Response::into_inner),
                     _ = time.sleep(RPC_TIMEOUT) => None,
@@ -400,6 +401,7 @@ impl Workload for SnapshotRecoveryWorkload {
                     response = client.propose(Propose {
                         client: client_id,
                         seq,
+                        checksum: proposal_checksum(client_id, seq, &payload),
                         command: payload.clone(),
                     }) => response.ok().map(tonic::Response::into_inner),
                     _ = time.sleep(RPC_TIMEOUT) => None,

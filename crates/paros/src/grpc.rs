@@ -32,14 +32,35 @@ pub use public::{Compact, CompactAck, Propose, ProposeAck, Read, ReadAck};
 pub(crate) type ReplySender<T> = oneshot::Sender<T>;
 type Call<T, U> = (T, ReplySender<U>);
 
-/// Stable FNV-1a integrity checksum for one encoded protobuf consensus message.
-pub(crate) fn wire_checksum(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn checksum_extend(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+/// Stable FNV-1a integrity checksum for one encoded protobuf consensus message.
+pub(crate) fn wire_checksum(bytes: &[u8]) -> u64 {
+    checksum_extend(FNV_OFFSET, bytes)
+}
+
+/// Stable integrity checksum for one client proposal.
+///
+/// The identity, explicit command length, and opaque bytes are all covered so a
+/// changed request is rejected before it can enter the consensus log. This is
+/// an integrity check for transport damage, not an authentication primitive.
+#[must_use]
+pub fn proposal_checksum(client: u64, seq: u64, command: &[u8]) -> u64 {
+    let command_len = u64::try_from(command.len()).unwrap_or(u64::MAX);
+    let hash = checksum_extend(FNV_OFFSET, b"paros-propose-v1");
+    let hash = checksum_extend(hash, &client.to_le_bytes());
+    let hash = checksum_extend(hash, &seq.to_le_bytes());
+    let hash = checksum_extend(hash, &command_len.to_le_bytes());
+    checksum_extend(hash, command)
 }
 
 fn ballot_to_proto(ballot: Ballot) -> internal::Ballot {
@@ -154,6 +175,7 @@ fn snapshot_to_proto(
 }
 
 /// Convert one domain message into its typed protobuf representation.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn message_to_proto(
     message: &Message,
 ) -> Result<internal::ConsensusMessage, &'static str> {
@@ -174,11 +196,13 @@ pub(crate) fn message_to_proto(
             ballot,
             from_slot,
             accepted,
+            next_from_slot,
         } => Kind::Promise(internal::Promise {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
             accepted: slot_commands_to_proto(accepted),
+            next_from_slot: next_from_slot.map(|slot| slot.0),
         }),
         Message::Accept {
             from,
@@ -191,10 +215,16 @@ pub(crate) fn message_to_proto(
             slot: slot.0,
             command: Some(command_to_proto(command)),
         }),
-        Message::Accepted { from, ballot, slot } => Kind::Accepted(internal::Accepted {
+        Message::Accepted {
+            from,
+            ballot,
+            slot,
+            vhash,
+        } => Kind::Accepted(internal::Accepted {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
+            vhash: *vhash,
         }),
         Message::Nack {
             from,
@@ -276,6 +306,7 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
             accepted: slot_commands_from_proto(message.accepted)?,
+            next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
             from: NodeId(message.from),
@@ -287,6 +318,7 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
+            vhash: message.vhash,
         }),
         Kind::Nack(message) => Ok(Message::Nack {
             from: NodeId(message.from),
@@ -404,9 +436,16 @@ async fn dispatch<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U
 #[tonic::async_trait]
 impl public::paros_server::Paros for RpcService {
     async fn propose(&self, request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
-        dispatch(&self.propose, request.into_inner())
-            .await
-            .map(Response::new)
+        let request = request.into_inner();
+        if proposal_checksum(request.client, request.seq, &request.command) != request.checksum {
+            tracing::warn!(
+                client = request.client,
+                seq = request.seq,
+                "proposal_checksum_rejected"
+            );
+            return Err(Status::data_loss("invalid proposal checksum"));
+        }
+        dispatch(&self.propose, request).await.map(Response::new)
     }
 
     async fn read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
@@ -456,7 +495,18 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
 
 #[cfg(test)]
 mod tests {
-    use super::{internal, message_from_proto};
+    use super::{internal, message_from_proto, proposal_checksum};
+
+    #[test]
+    fn proposal_checksum_covers_identity_length_and_command() {
+        let command = [1_u8, 2, 3, 4];
+        let checksum = proposal_checksum(7, 11, &command);
+
+        assert_ne!(checksum, proposal_checksum(8, 11, &command));
+        assert_ne!(checksum, proposal_checksum(7, 12, &command));
+        assert_ne!(checksum, proposal_checksum(7, 11, &[1, 2, 3]));
+        assert_ne!(checksum, proposal_checksum(7, 11, &[1, 2, 3, 5]));
+    }
 
     #[test]
     fn protobuf_rejects_a_missing_message_kind() {

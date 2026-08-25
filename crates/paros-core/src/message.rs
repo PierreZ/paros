@@ -46,6 +46,10 @@ pub enum Message {
         from_slot: Slot,
         /// All accepted commands for slots `>= from_slot`. Empty if none.
         accepted: BTreeMap<Slot, (Ballot, Command)>,
+        /// Cursor for the next bounded suffix page. `None` marks the terminal
+        /// page; only then may the candidate count this acceptor in its Phase-1
+        /// quorum.
+        next_from_slot: Option<Slot>,
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----
@@ -68,6 +72,8 @@ pub enum Message {
         ballot: Ballot,
         /// The accepted slot.
         slot: Slot,
+        /// Fingerprint of the complete command accepted at `(ballot, slot)`.
+        vhash: u64,
     },
     /// Acceptor → proposer: rejection of a `Prepare` or `Accept`.
     Nack {
@@ -76,10 +82,9 @@ pub enum Message {
         /// The rejected ballot, echoed from the `Prepare`/`Accept` that was
         /// refused (matches the proposer's in-flight campaign or accept round).
         ballot: Ballot,
-        /// The acceptor's current `max_promised_ballot`, so the proposer's next
-        /// campaign can jump straight past it instead of climbing one round at a
-        /// time. Below the acceptor's compaction floor this still reports the
-        /// current promise, but sending it never raises that promise.
+        /// The acceptor's current `max_promised_ballot`, for diagnostics. The
+        /// receiver deliberately does not retain this untrusted wire value as a
+        /// future campaign-round hint.
         promised: Ballot,
         /// The contested slot.
         slot: Slot,

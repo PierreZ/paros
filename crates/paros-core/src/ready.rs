@@ -34,7 +34,8 @@ use crate::write::{self, MustSync, WriteOp};
 /// The accessors borrow node-owned buffers, so a guard must not be held across
 /// an `.await`. An async driver should copy the buckets out
 /// (`writes().to_vec()`, `must_sync()`, `messages().to_vec()`,
-/// `committed().to_vec()`), `advance()`, and *then* await its I/O.
+/// `committed().to_vec()`), `advance()`, await its I/O, then call
+/// [`RawNode::advance_recovery`] to release the next bounded continuation.
 #[must_use = "a Ready must be processed and then advanced; dropping it silently skips a batch"]
 pub struct Ready<'a> {
     node: &'a mut RawNode,
@@ -105,11 +106,17 @@ impl<'a> Ready<'a> {
         self.node.pending_read_states()
     }
 
+    /// Newly started leader-recovery rounds, how many are fresh gap fills, and
+    /// the suffix slots remaining after this batch. Pure observability.
+    #[must_use]
+    pub fn recovery_batch(&self) -> Option<(usize, usize, usize)> {
+        self.node.pending_recovery_batch()
+    }
+
     /// Acknowledge the batch: clears the pending buckets and releases the unique
     /// borrow, so the next [`RawNode::ready`] is allowed. Consumes `self` — the
     /// guard cannot be reused.
     pub fn advance(self) {
         self.node.clear_pending();
-        // Stage 0: no follow-up self-messages to replay on advance yet.
     }
 }

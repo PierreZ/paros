@@ -90,6 +90,7 @@ message Promise {
   Ballot ballot = 2;
   uint64 from_slot = 3;
   repeated SlotCommand accepted = 4;
+  optional uint64 next_from_slot = 5;
 }
 
 message Accept {
@@ -103,6 +104,7 @@ message Accepted {
   uint64 from = 1;
   Ballot ballot = 2;
   uint64 slot = 3;
+  uint64 vhash = 4;
 }
 
 message Nack {

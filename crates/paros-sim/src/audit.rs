@@ -27,7 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
-use paros::{Audit, Ballot, Message, NodeId, Seam, Slot, command_hash};
+use paros::{
+    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, command_hash,
+};
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`AuditWorld`] is published (shared by every node and every workload).
@@ -790,6 +792,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             self.state().observe_beat(node.0, *ballot, *seq);
             return;
         }
+        if let Message::Promise { accepted, .. } = msg {
+            assert_always!(
+                accepted.len() <= PROMISE_BATCH,
+                "a Promise carries at most one bounded suffix chunk",
+                { "entries" => accepted.len() }
+            );
+        }
         // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
         // own proposer, so exactly one node ever sends `Accept`s at it, and
         // two different commands under one `(ballot, slot)` mean the
@@ -823,7 +832,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn elected(&self, node: NodeId, won: Ballot, promised: Ballot, gap_fills: u64) {
+    fn elected(&self, node: NodeId, won: Ballot, promised: Ballot, _gap_fills: u64) {
         let now = self.now_ms();
         let mut st = self.state();
         if let Some(prev) = st.leader_round.insert(node.0, won.round) {
@@ -859,12 +868,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 st.leader_change_ms = Some(now);
             }
             Some(_) => {}
-        }
-        if gap_fills > 0 {
-            reach_once!(
-                st.gap_filled,
-                "a new leader gap-fills a hole its promise quorum never reported"
-            );
         }
     }
 
@@ -1093,6 +1096,26 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.duplicate_suppressed,
             "a re-chosen (client, seq) is suppressed at the apply seam (at-most-once)"
         );
+    }
+
+    fn recovery_batch(&self, _node: NodeId, started: u64, gap_fills: u64, remaining: u64) {
+        assert_always!(
+            started <= LEADER_RECOVERY_BATCH as u64,
+            "a leader starts at most one bounded recovery chunk per Ready",
+            { "started" => started, "remaining" => remaining }
+        );
+        assert_always!(
+            gap_fills <= started,
+            "a recovery batch reports only gap fills it actually started",
+            { "started" => started, "gap_fills" => gap_fills }
+        );
+        if gap_fills > 0 {
+            let mut st = self.state();
+            reach_once!(
+                st.gap_filled,
+                "a new leader gap-fills a hole its promise quorum never reported"
+            );
+        }
     }
 
     fn prepare_below_floor(&self, _node: NodeId, _from_slot: Slot, _floor: Slot) {

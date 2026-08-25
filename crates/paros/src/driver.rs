@@ -396,7 +396,9 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
         Message::Accept {
             from, ballot, slot, ..
         }
-        | Message::Accepted { from, ballot, slot }
+        | Message::Accepted {
+            from, ballot, slot, ..
+        }
         | Message::Nack {
             from, ballot, slot, ..
         }
@@ -843,6 +845,7 @@ where
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
+    let recovery_batch = ready.recovery_batch();
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
@@ -850,6 +853,23 @@ where
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit)?;
+
+    if let Some((started, gap_fills, remaining)) = recovery_batch {
+        let started = u64::try_from(started).unwrap_or(u64::MAX);
+        let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
+        let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
+        audit.recovery_batch(NodeId(self_id), started, gap_fills, remaining);
+        tracing::info!(
+            node = self_id,
+            started,
+            gap_fills,
+            remaining,
+            "leader_recovery_batch"
+        );
+        if gap_fills > 0 {
+            tracing::info!(node = self_id, gaps = gap_fills, "election_gap_filled");
+        }
+    }
 
     note_mid_election_snapshot(node, &writes, self_id, audit);
 
@@ -983,6 +1003,12 @@ where
             });
         }
     }
+
+    // The previous recovery page is now fully durable, sent, and applied. Only
+    // at this boundary may the core materialize the next bounded Ready page;
+    // doing it inside `Ready::advance` would move single-node state ahead of the
+    // I/O the async driver is still performing.
+    node.advance_recovery();
 
     Ok(())
 }
@@ -1261,17 +1287,6 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             pbnode = promised.node.0,
             "leader_elected"
         );
-        // This election found holes the promise quorum reported nothing for and
-        // filled them with no-ops. Rare and mechanism-specific, so surface it: it is
-        // the only outside evidence the fill path ran.
-        if gaps > 0 {
-            tracing::info!(
-                node = self_id,
-                round = node.ballot().round,
-                gaps,
-                "election_gap_filled"
-            );
-        }
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
         waiters.pending.clear();
         // Parked reads have no slot whose commit could ever answer them:
