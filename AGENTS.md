@@ -142,6 +142,38 @@ run's observability pumps, and the audit callback for that transition already ex
 method away. Preserve assertion **message strings** when moving a check — the assertion slot is the
 hash of its message, so a reworded message silently resets the sweep's saturation history.
 
+**Assertion doctrine (TigerBeetle-style).** Two assertion families, split by layer, and neither
+substitutes for the other:
+
+- **`paros-core` uses hard `assert!` — always on, in production too.** A broken invariant is a
+  programmer error, never an operating condition: crash beats corruption. Operating errors (a
+  non-leader proposal, a stale snapshot, a below-floor prepare) stay result values / guarded
+  returns — never assert on external input; re-assert it only once it has crossed the validation
+  boundary. Style rules: precondition stacks at function entry, postconditions at exit, split
+  compound conditions, assert positive *and* negative space, pair each property across two code
+  paths (e.g. the write-side flush ordering vs. the boot read-back). `RawNode::assert_invariants`
+  is the dedicated cross-field checker (ordering chain, role/election couplings, floor bounds,
+  chosen-gap contract), called at boot and at every public mutating entry point — keep it O(1)/
+  O(log n) per check so it can stay unconditional; an O(N) structural check goes behind
+  `debug_assert!` instead. Public functions that assert need a `# Panics` doc section (clippy
+  pedantic enforces it). This adds no deps and no conditional compilation, so the "core is never
+  buggified" rule is untouched.
+- **Sim layers use moonpool macros, never plain `assert!`.** In `paros-sim`, a violation should
+  *record and continue* (`assert_always!` + detail map), so one root cause surfaces its full
+  cascade in a single deterministic trace; coverage claims are `assert_sometimes!` (only where the
+  sweep is certain to reach it — an evaluated-but-never-true sometimes fails the runner) or a
+  branch-guarded `assert_reachable!` (the `reach_once!` idiom; creates no slot when unreached, so
+  it can never fail coverage); guidance is the numeric/`sometimes_all`/`sometimes_each` family.
+  Pair every BUGGIFY site with a sometimes/reachable proving it fired. **Budget:** one slot per
+  unique message string (identity = the message hash — never reword an existing message), 128
+  slots per campaign process shared with moonpool's own internals, and overflow is *silent*; count
+  before adding, keep messages short/stable/free of interpolated ids, and put dynamic context in
+  the detail map.
+- The audit (`paros_sim::audit`) and workload `check()` remain where *cluster-level protocol and
+  client-visible* correctness live (see above); in-core asserts guard single-node state-machine
+  invariants — the two catch different bug shapes and deliberately overlap (e.g. promise
+  monotonicity is asserted in `set_promise` *and* audited across restarts).
+
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:

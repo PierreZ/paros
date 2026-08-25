@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, assert_always, buggify_knob,
-    buggify_with_prob,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, assert_always,
+    assert_reachable, assert_sometimes, buggify_knob, buggify_with_prob,
 };
 
 use crate::audit::{NodeAudit, audit_world};
@@ -122,6 +122,9 @@ impl Process for NodeProcess {
                 Err(e) if is_seam_crash(&e) => {
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {
+                        // BUGGIFY pairing: the restart-delay knob fired — the
+                        // held-down-past-the-floor generator is genuinely live.
+                        assert_reachable!("a seam-crashed node restarts after a buggified delay");
                         ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
                     }
                 }
@@ -224,8 +227,34 @@ impl DurableStorage {
         let mut application = ChainState::default();
         if let Some(strong) = world.upgrade() {
             let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
+            // Coverage: the recovery paths only matter if boots genuinely
+            // re-read a prior incarnation's records (attrition + seam crashes
+            // make this common across the sweep).
+            assert_sometimes!(
+                guard.disks.contains_key(&key),
+                "a node boots from a prior incarnation's durable records"
+            );
             if let Some(disk) = guard.disks.get(&key) {
                 application = disk.chain;
+                // Read-back pair of the flush ordering `sync` claims: a floor
+                // that reached the disk never outruns the chosen index that
+                // reached the disk (the flush applies the floor last, and a
+                // crash drops the whole stage together).
+                assert_always!(
+                    disk.first_slot.0 == 0
+                        || disk
+                            .hard_state
+                            .chosen_index
+                            .is_some_and(|ci| disk.first_slot.0 <= ci.0 + 1),
+                    "a restored floor never outruns the restored chosen index",
+                    {
+                        "floor" => disk.first_slot.0,
+                        "chosen" => disk.hard_state.chosen_index.map_or(0, |c| c.0)
+                    }
+                );
+                if disk.first_slot.0 > 0 {
+                    assert_reachable!("a node reboots above a non-zero compaction floor");
+                }
                 // Seed the read view through the semantic ops (records, not a blob).
                 // Set the floor first so first_slot() reads it back on boot; the
                 // sealed ledger rides on the same op, exactly as a truncate
@@ -299,6 +328,18 @@ impl NodeStorage for DurableStorage {
         // durable only once a later Sync flushes it, and lost on a crash before
         // then. A Sync batch flushes the whole stage through to the world.
         if must_sync != MustSync::Sync {
+            // The classification contract, checked from the other side: a batch
+            // allowed to skip the fsync can be holding no safety-critical write
+            // (every promise-raise or accept classifies as `MustSync::Sync` and
+            // was flushed by its own batch's sync).
+            assert_always!(
+                self.staged_ballot.is_none(),
+                "a relaxed flush holds no staged promise"
+            );
+            assert_always!(
+                self.staged_accepted.is_empty(),
+                "a relaxed flush holds no staged accept"
+            );
             return Ok(());
         }
         let ballot = self.staged_ballot.take();
@@ -339,6 +380,21 @@ impl NodeStorage for DurableStorage {
             if let Some(last) = applies.last() {
                 d.chain = last.transition.next;
             }
+            // Write-side pair of the `restore` read-back check: the floor is
+            // applied last, behind the chosen index it sits under, so no flush
+            // ever leaves a durable floor above the durable chosen index.
+            assert_always!(
+                d.first_slot.0 == 0
+                    || d
+                        .hard_state
+                        .chosen_index
+                        .is_some_and(|ci| d.first_slot.0 <= ci.0 + 1),
+                "a flushed floor never outruns the flushed chosen index",
+                {
+                    "floor" => d.first_slot.0,
+                    "chosen" => d.hard_state.chosen_index.map_or(0, |c| c.0)
+                }
+            );
         })?;
 
         if let Some(installed) = snapshot {
@@ -424,6 +480,10 @@ impl NodeStorage for DurableStorage {
             .applied_slot()
             .is_some_and(|applied| slot <= applied)
         {
+            // The driver's boot replay re-walks the retained chosen prefix; a
+            // node whose application state survived (clean reboot, or a crash
+            // after the app fsync) skips the already-applied prefix here.
+            assert_reachable!("a boot replay skips an already-applied slot");
             return Ok(());
         }
         let expected = self
