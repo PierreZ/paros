@@ -12,6 +12,7 @@
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
+mod audit;
 mod chain;
 mod chain_workload;
 mod node;
@@ -33,13 +34,30 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::oracle::{
-    AppliedAckOracle, ChainAgreement, ClientLivenessOracle, ConvergenceOracle, DriverHookOracle,
-    GapFillOracle, LeadershipOracle, LinearizabilityOracle, NoGapsOracle, ProgressOracle,
-    ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryOracle, RecoveryRecorder,
-    SafetyOracle, SnapshotOracle, TimelineRecorder, TruncationOracle, assert_final_convergence,
-    build_result,
+    ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
+    TimelineRecorder, build_result,
 };
 use crate::workload::ProposeClient;
+
+/// Client-side gRPC channel config for the sim workloads. Mirrors the driver's
+/// peer channels: h2 PING keep-alive so a connection left half-open by a node
+/// restart is detected and replaced deterministically instead of swallowing
+/// requests forever. Without it, a workload probe channel established before an
+/// attrition restart can stay dead for the entire recovery tail (the seed
+/// 6442591786636745658 convergence false-negative: every node had applied and
+/// agreed by t=12.7s, and the probe to one restarted node then timed out for 74
+/// simulated seconds).
+pub(crate) fn client_channel_config() -> moonpool_hyper::ChannelConfig {
+    moonpool_hyper::ChannelConfig {
+        connection_timeout: Duration::from_secs(1),
+        keep_alive: Some(moonpool_hyper::KeepAlive {
+            interval: Duration::from_secs(2),
+            timeout: Duration::from_secs(1),
+            while_idle: false,
+        }),
+        ..moonpool_hyper::ChannelConfig::default()
+    }
+}
 
 #[cfg(feature = "native")]
 use moonpool_sim::ExplorationConfig;
@@ -73,8 +91,20 @@ pub(crate) const GAP_MS: u64 = 20;
 /// a delayed leadership turnover made the final follower catch up 6.05 seconds
 /// into the tail.
 pub(crate) const SETTLE_MS: u64 = 8_000;
-/// Number of paros nodes in the cluster.
-pub(crate) const CLUSTER_SIZE: usize = 3;
+/// Per-seed cluster-size draw (inclusive), AGENTS.md prong 2: the cluster size
+/// is workload-buggified config, resolved from the seeded RNG at topology-build
+/// time so every seed replays its own shape. The full #61 set: n=1 and n=2 are
+/// the quorum edge cases (a singleton decides alone; a pair needs both nodes,
+/// so any attrition freezes it until recovery), and n=5 (quorum 3) is the
+/// shape issue #88's stale-ballot scenario needs — at n=3 the two nodes pinned
+/// above the stale ballot always intersect the accept quorum, so only n>=5
+/// leaves a full quorum below the minted promise. Per-regime sometimes-gates
+/// in the audit prove the sweep actually visits the edges.
+pub(crate) const CLUSTER_SIZE_RANGE: std::ops::RangeInclusive<usize> = 1..=5;
+/// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
+/// are what give the real linearizability checker (#60) conflicting concurrent
+/// histories to reject; single-client runs keep the cheap sequential fast path.
+pub(crate) const CLIENT_COUNT_RANGE: std::ops::Range<usize> = 1..4;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
 pub(crate) const PLATEAU_SEEDS: usize = 8;
@@ -157,7 +187,13 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 ///   evaluating each independent location only when its action can matter;
 /// - #56 added the quiet workload mode, whose draw sits *ahead* of the
 ///   sequential/pipelined coin on the config stream, so which script a seed runs
-///   (and at what pipeline depth) moved again.
+///   (and at what pipeline depth) moved again;
+/// - the #88/#61 swarm arc made cluster size (`3..=5`, later widened to the
+///   full `1..=5` with the quorum edge cases) and client count (`1..4`)
+///   per-seed draws resolved at topology-build time — *before* every BUGGIFY
+///   activation and workload draw on the counted stream — and added the
+///   send-seam drop locations, so every seed's script moved once more. The
+///   whole corpus was re-verified green against the shifted stream.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -206,7 +242,53 @@ pub const REGRESSION_SEEDS: &[u64] = &[
     283,
 ];
 /// Chain-workload witnesses discovered by the application-state oracle.
-pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[9_708_989_754_240_691_684, 11_811_656_051_295_404_958];
+pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
+    9_708_989_754_240_691_684,
+    11_811_656_051_295_404_958,
+    // The half-open probe-channel witness (2026-08-25 swarm, round 11 of 15):
+    // every node had applied and agreed by t=12.7s, then the workload's
+    // convergence probe to one attrition-restarted node timed out for 74
+    // simulated seconds — the probe channel predated the restart and had no
+    // keep-alive to detect the dead connection. Red on `ChannelConfig::default`
+    // for the workload clients; green with [`client_channel_config`]'s h2 PING
+    // keep-alive. Likely the root cause of the #93-era bounded-recovery
+    // false positive that widening `recovery_budget_ms` papered over.
+    6_442_591_786_636_745_658,
+    // The time-dilation false-positive witness (2026-08-25, first sweep with the
+    // widened BUGGIFY surface): moonpool's buggified sleep delay — enabled by
+    // the per-seed network chaos config and NOT gated on the chaos window —
+    // stretched every node's 50ms tick sleep through the tail, collapsing the
+    // cluster to ~2 ticks/second. No elections could fire for 4.5 wall-sim
+    // seconds, the wall-time quiescence heuristic called that "settled", and
+    // the gap assert flagged a chosen slot that healed the instant a stretched
+    // election timer finally fired. Red on the wall-time wedge gate; green with
+    // the GAP_WEDGE_TICKS streak (the wedge claim now counts the protocol's
+    // own tick clock, immune to time dilation).
+    8_057_455_177_754_870_256,
+    // The tick-starvation witness (2026-08-25, the n=1 edge case's first
+    // catch): `run_node`'s tick arm was a fresh relative sleep re-created on
+    // every `select!` pass, so a singleton absorbing every client retry (plus
+    // reconnect/keep-alive traffic) at sub-interval cadence never ticked —
+    // twice in 81 simulated seconds — never elected itself, never acked, and
+    // the clients retried harder: a self-sustaining starvation loop. Red on
+    // the relative sleep; green with the absolute tick deadline. Seeds
+    // 8838873099546465481 and 1481936964395890271 are the same shape.
+    3_847_608_256_092_482_294,
+    8_838_873_099_546_465_481,
+    1_481_936_964_395_890_271,
+];
+
+/// Network-swarm-axis witnesses, replayed via [`run_network_seed`].
+///
+/// Both pin the **false-commit dedup bug**: `propose`'s old `seq <= applied`
+/// shortcut assumed a client's seqs execute in order, but an early seq can die
+/// without entering the log (a `NotLeader` window on a fresh singleton) while a
+/// later seq applies — and the retry of the dead command was then acked
+/// `committed: true` at another command's slot. Red on the latest-only
+/// `applied_seq`; green with the per-client executed-seq ledger (exact-seq
+/// `Chosen`, honest fall-through re-execution otherwise).
+pub const NETWORK_REGRESSION_SEEDS: &[u64] =
+    &[2_791_878_389_799_639_169, 8_872_503_201_755_490_526];
 /// Simulated window (ms) over which chaos (network faults + attrition reboots)
 /// fires — wide enough to span the proposal phase so crashes land mid-protocol
 /// (creating the follower holes convergence must heal), but ending *before* the
@@ -249,10 +331,25 @@ fn chaos_surfaces() -> [Chaos; 2] {
 
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
+///
+/// `BuggifiedDelay` is masked (like `BitFlip` before it, and mask changes
+/// consume no randomness): moonpool applies it to **every sleep for the whole
+/// run** — including the driver's tick sleeps, un-gated by `chaos_duration` —
+/// so one near-max inflation can freeze a node's protocol clock for tens of
+/// simulated seconds (seeds 8057455177754870256 and 3847608256092482294: a
+/// four-node cluster "quiesced" mid-election-outage, and an n=1 singleton that
+/// ticked twice in 81 s). Every liveness claim this campaign makes (chain
+/// recovery budget, `run_seed`'s settle-tail convergence) is wall-clock-based
+/// and therefore unsound under whole-run time dilation. Re-enable if moonpool
+/// gates the fault on the chaos window (upstream issue filed).
 fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .cluster(LocalityConfig::new(CLUSTER_SIZE, 1, 1, 1), || {
+        .network_fault_mask(
+            NetworkFaultMask::all()
+                .without(NetworkFault::BitFlip)
+                .without(NetworkFault::BuggifiedDelay),
+        )
+        .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess)
         })
         .link_latency(LinkLatencyConfig::default())
@@ -262,24 +359,12 @@ fn chain_logic_builder() -> SimulationBuilder {
     chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::default()))
         .invariant(ChainAgreement::new())
-        .invariant(SafetyOracle)
-        .invariant(AppliedAckOracle)
-        .invariant(RecoveryOracle)
-        .invariant(NoGapsOracle)
-        .invariant(LeadershipOracle)
-        .invariant(ProgressOracle)
-        .invariant(GapFillOracle)
-        .invariant(TruncationOracle)
-        .invariant(SnapshotOracle)
-        .invariant(DriverHookOracle)
 }
 
 fn chain_network_builder() -> SimulationBuilder {
     chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::network_safety()))
         .invariant(ChainAgreement::network())
-        .invariant(SafetyOracle)
-        .invariant(AppliedAckOracle)
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
@@ -306,25 +391,20 @@ pub fn run_seed(seed: u64) -> RunResult {
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(ProcessCount::Fixed(CLUSTER_SIZE), || Box::new(NodeProcess))
-        .workloads(WorkloadCount::Fixed(1), |_| Box::new(ProposeClient))
+        .network_fault_mask(
+            NetworkFaultMask::all()
+                .without(NetworkFault::BitFlip)
+                .without(NetworkFault::BuggifiedDelay),
+        )
+        .processes(ProcessCount::Range(CLUSTER_SIZE_RANGE), || {
+            Box::new(NodeProcess)
+        })
+        .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), |_| {
+            Box::new(ProposeClient::default())
+        })
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(RecoveryRecorder::new(recovery.clone()))
-        .invariant(ClientLivenessOracle)
-        .invariant(SafetyOracle)
-        .invariant(LinearizabilityOracle)
-        .invariant(AppliedAckOracle)
-        .invariant(RecoveryOracle)
-        .invariant(NoGapsOracle)
-        .invariant(LeadershipOracle)
-        .invariant(ProgressOracle)
-        .invariant(ConvergenceOracle)
-        .invariant(GapFillOracle)
-        .invariant(TruncationOracle)
-        .invariant(SnapshotOracle)
-        .invariant(DriverHookOracle)
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -340,7 +420,6 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
     let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
-    assert_final_convergence(&proto);
     build_result(seed, &data, &proto, &recovery)
 }
 
@@ -372,6 +451,16 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
 pub fn explore_network_safety(max_iterations: usize) -> SimulationReport {
     chain_network_builder()
         .until_coverage_stable(32, max_iterations)
+        .run()
+}
+
+/// Replay one network-swarm safety-axis seed deterministically (the axis
+/// [`explore_network_safety`] sweeps): same builder, one iteration.
+#[must_use]
+pub fn run_network_seed(seed: u64) -> SimulationReport {
+    chain_network_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
         .run()
 }
 

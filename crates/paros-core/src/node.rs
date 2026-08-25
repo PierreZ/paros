@@ -258,7 +258,18 @@ pub struct RawNode {
     /// an entry here always means "inside this node's applied prefix" — never
     /// merely "chosen somewhere above the prefix". That is the whole difference
     /// between an honest immediate ack and one the client cannot trust.
-    applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)>,
+    ///
+    /// Per client it maps **each executed seq** to its slot, not merely the
+    /// latest `(seq, slot)`: a `seq <= latest` shortcut would assume a client's
+    /// seqs execute in order, and they do not — an early seq can die without
+    /// ever entering the log (a `NotLeader` window, a lost round the gap fill
+    /// paved over) while a later seq applies, and the shortcut then acked the
+    /// dead command as committed, at another command's slot (the network-axis
+    /// seeds 2791878389799639169 / 8872503201755490526). An exact-seq hit is
+    /// the only honest `Chosen`; a miss falls through and executes the retry
+    /// for real. Volatile and rebuilt from the remaining log on boot, so the
+    /// truncation-across-restart window (see `propose`) is unchanged in kind.
+    applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>>,
     /// Client requests mapped to the slot they will land in, so a retry dedups
     /// against that slot instead of allocating a second one. Covers the whole
     /// span before the command is applied: proposed at a slot
@@ -291,21 +302,20 @@ impl RawNode {
         }
 
         let mut chosen = BTreeMap::new();
-        let mut applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)> = BTreeMap::new();
+        let mut applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
         for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
             if is_chosen {
                 chosen.insert(*slot, command.clone());
                 // Only client entries carry a `(client, seq)` dedup key; a control
-                // command never dedups.
+                // command never dedups. Every executed seq is recorded, not just
+                // the latest per client (see the `applied_seq` field doc).
                 if let Command::User(entry) = command {
-                    let bump = applied_seq
-                        .get(&entry.client)
-                        .is_none_or(|(c, _)| entry.seq > *c);
-                    if bump {
-                        applied_seq.insert(entry.client, (entry.seq, *slot));
-                    }
+                    applied_seq
+                        .entry(entry.client)
+                        .or_default()
+                        .insert(entry.seq, *slot);
                 }
             } else if let Command::User(entry) = command {
                 inflight.insert((entry.client, entry.seq), *slot);
@@ -418,9 +428,7 @@ impl RawNode {
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
             return ProposeResult::Duplicate(slot);
         }
-        if let Some(&(applied, at)) = self.applied_seq.get(&client)
-            && seq <= applied
-        {
+        if let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq)) {
             return ProposeResult::Chosen(at);
         }
         let slot = self.next_slot;
@@ -715,6 +723,12 @@ impl RawNode {
         from_slot: Slot,
         accepted: BTreeMap<Slot, (Ballot, Command)>,
     ) {
+        // Quorum sets are keyed by NodeId: an id outside the configured
+        // membership must never inflate one (wire hygiene; peers are trusted
+        // but a misrouted or misconfigured sender is not a quorum member).
+        if !self.config.peers.contains(&from) {
+            return;
+        }
         {
             let Some(e) = self.election.as_mut() else {
                 return;
@@ -735,13 +749,28 @@ impl RawNode {
 
     /// Candidate -> Leader once a promise quorum holds: re-propose every
     /// recovered in-flight slot under the new ballot (gap fill), then stream.
+    ///
+    /// A campaign whose ballot has fallen **below the node's own promise** is
+    /// refused even with a quorum behind it (#67/#88). Mid-election, two paths
+    /// raise `max_promised_ballot` without closing the campaign: `mark_chosen`
+    /// on a learned `Commit`/`CatchUpResponse`, and `on_install_snapshot` on a
+    /// snapshot whose serving peer minted its promise with no quorum at all.
+    /// Winning below the own promise breaks "a leader's ballot >= its own
+    /// promise": every self-accept is skipped (`start_accept_round`'s
+    /// `ballot >= max_promised_ballot` check), so recovered slots reach
+    /// `proposer` but never `accepted`, `next_slot` — derived from `accepted` —
+    /// lands *below* an in-flight slot, and a later `propose` re-proposes a
+    /// different command under the same `(slot, ballot)`: two values can then
+    /// assemble accept quorums for one slot at n >= 5. Refusal is a plain
+    /// non-win: the election stays open and self-heals — the next election
+    /// timeout campaigns at `max(max_promised_ballot.round, ..) + 1`
+    /// (`on_check_leader`), above the promise that caused the refusal.
     fn try_become_leader(&mut self) {
         let quorum = self.quorum();
         let won = self.role == NodeRole::Candidate
-            && self
-                .election
-                .as_ref()
-                .is_some_and(|e| e.promised_by.len() >= quorum);
+            && self.election.as_ref().is_some_and(|e| {
+                e.promised_by.len() >= quorum && e.ballot >= self.hard_state.max_promised_ballot
+            });
         if !won {
             return;
         }
@@ -931,6 +960,12 @@ impl RawNode {
 
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
     fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
+        // Quorum sets are keyed by NodeId: an id outside the configured
+        // membership must never inflate one (wire hygiene; peers are trusted
+        // but a misrouted or misconfigured sender is not a quorum member).
+        if !self.config.peers.contains(&from) {
+            return;
+        }
         {
             let Some(p) = self.proposer.get_mut(&slot) else {
                 return;
@@ -1055,7 +1090,13 @@ impl RawNode {
             // leader, which then advertises the true prefix and the genuinely-behind
             // nodes pull. A sender with nothing chosen needs the replay from the
             // very first slot.
-            self.serve_catchup(from, commit.unwrap_or(Slot(0)));
+            // Serve from one PAST the sender's contiguous chosen index: it
+            // already holds everything at and below `commit`. Serving from
+            // `commit` itself wasted one batch entry — and at the floor
+            // boundary it converted a one-slot-behind peer into a snapshot
+            // install (`commit == first_slot - 1` tripped the below-floor
+            // branch for a replay we can serve normally).
+            self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));
         }
     }
 
@@ -1065,6 +1106,12 @@ impl RawNode {
     /// about leadership after the round began, so it never counts. Stale or
     /// cross-ballot acks are dropped whole.
     fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
+        // Quorum sets are keyed by NodeId: an id outside the configured
+        // membership must never inflate one (wire hygiene; peers are trusted
+        // but a misrouted or misconfigured sender is not a quorum member).
+        if !self.config.peers.contains(&from) {
+            return;
+        }
         if self.role != NodeRole::Leader || ballot != self.ballot {
             return;
         }
@@ -1123,8 +1170,18 @@ impl RawNode {
         // record the offer (the driver attaches the opaque application bytes and
         // sends the `InstallSnapshot`), bringing the peer up to our chosen prefix.
         if from_slot < self.first_slot {
-            self.pending_snapshot_offers
-                .push((to, ci, self.hard_state.max_promised_ballot));
+            // The offer carries the boundary slot's *choosing* ballot when the
+            // log still holds it — a ballot with a real quorum behind it — not
+            // this node's own promise, which one quorumless campaigner can
+            // mint arbitrarily high; a receiver adopting a minted promise
+            // above the live leader's ballot stops acking beats and Nacks its
+            // accepts, forcing a spurious election. (If compaction dropped the
+            // boundary record, the promise remains the safe upper bound.)
+            let choosing = self
+                .accepted
+                .get(&ci)
+                .map_or(self.hard_state.max_promised_ballot, |(b, _)| *b);
+            self.pending_snapshot_offers.push((to, ci, choosing));
             return;
         }
         if from_slot > ci {
@@ -1178,7 +1235,8 @@ impl RawNode {
         if ballot > self.hard_state.max_promised_ballot {
             self.set_promise(ballot);
         }
-        let first = Slot(chosen_index.0 + 1);
+        // Wire value: saturate rather than overflow on an adversarial u64::MAX.
+        let first = Slot(chosen_index.0.saturating_add(1));
         self.hard_state.chosen_index = Some(chosen_index);
         // Fully compact up to the snapshot: everything at or below `chosen_index`
         // is folded into the opaque bytes, so drop the in-memory prefix and raise
@@ -1206,6 +1264,12 @@ impl RawNode {
             ballot,
             snapshot,
         });
+        // Re-drive the contiguous walk: a `Commit` learned out of order may
+        // already sit in `chosen` just above the boundary, and without the walk
+        // this node would freeze at `chosen_index` forever — catch-up loops
+        // (`mark_chosen` returns early for a slot already in `chosen`), and a
+        // later leadership here would fence reads above the frozen prefix.
+        self.advance_chosen_index();
     }
 
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
@@ -1353,6 +1417,12 @@ impl RawNode {
             return;
         }
         if self.chosen.contains_key(&slot) {
+            // Known value, nothing to relearn — but still re-drive the walk: a
+            // snapshot install (or a boot) can leave `chosen_index` *below* a
+            // slot already present in `chosen`, and a catch-up replay of that
+            // slot is then the only message this node keeps receiving. Skipping
+            // the walk here wedged that node in a forever catch-up loop.
+            self.advance_chosen_index();
             return;
         }
         // Record the *chosen* value as the authoritative accepted command. Using
@@ -1431,13 +1501,10 @@ impl RawNode {
             // held for this slot leaves as `applied_seq` takes it over.
             self.inflight.retain(|_, s| *s != next);
             if let Command::User(entry) = &command {
-                let bump = self
-                    .applied_seq
-                    .get(&entry.client)
-                    .is_none_or(|(c, _)| entry.seq > *c);
-                if bump {
-                    self.applied_seq.insert(entry.client, (entry.seq, next));
-                }
+                self.applied_seq
+                    .entry(entry.client)
+                    .or_default()
+                    .insert(entry.seq, next);
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);

@@ -41,6 +41,10 @@ bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is 
 recipes replay from a fresh builder. The shared assertion tables allow at most 128 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
+**Moonpool questions.** For any question about moonpool's APIs or behavior, consult the
+LLM-oriented docs at <https://pierrez.github.io/moonpool/llms.html> before digging through its
+source.
+
 **Upstream Moonpool improvements.** When paros work exposes a limitation that is properly reusable
 Moonpool infrastructure—not a paros protocol or harness bug—open a focused issue in
 `PierreZ/moonpool` instead of silently accepting or locally reimplementing it. Include the concrete
@@ -64,6 +68,13 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
+
+**Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
+what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
+truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
+production we will later search for and adopt an existing high-level storage engine rather than
+building on moonpool's primitives. (Moonpool's *storage chaos* still applies in simulation — it
+perturbs the environment, not the abstraction we code against.)
 
 **Where each kind of turbulence lives.** Three layers, and nothing crosses them (this is the FDB
 separation; #81 removed the message-class nemesis, which mixed them):
@@ -100,6 +111,28 @@ The driver's provider-generic `DriverHooks` also exposes the two durability seam
 attrition cannot reach: before fsync and after fsync/before send. Give each seam its own BUGGIFY
 location; treating both as one location prevents the sweep from independently selecting the two
 distinct failure modes.
+
+**Audit doctrine — observation, never perturbation.** The mirror image of the `DriverHooks` rule.
+The driver also carries a provider-generic `Audit` port (`paros::Audit`, production passes
+`NoAudit`): it *reports* every externally meaningful transition — promise raised, accept persisted,
+slot applied, message sent or dropped at the send seam, leader elected, gap observed, client acked,
+node recovered — typed, once, at the instant it happens, right where the matching `tracing` event is
+emitted. Nothing an `Audit` implementation does may change the run: it returns nothing, it draws no
+randomness, it reads no wall clock, and deleting every audit call must leave the shipped program
+bit-identical. Hooks perturb; the audit only watches.
+
+**Correctness lives in the audit + workload `check()`, not in trace scanning.** `paros-sim`'s
+`audit::AuditWorld` is the per-iteration shared checker (published on the `StateHandle` beside the
+storage world, factory-created per seed): every callback folds one transition into O(1) incremental
+state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
+the **workload**, which records its own operation history and checks it in `check()`; the client is
+the only party that knows its own program order. Tracing stays for humans and the wasm demo, and
+`oracle.rs` keeps only the demo-data recorders plus `ChainAgreement` (the *application* state
+machine, whose transitions the storage layer emits as trace facts). Do not add a new
+`Invariant` that re-scans an event stream to check the protocol: the scan is O(trace²) across a
+run's observability pumps, and the audit callback for that transition already exists or is one
+method away. Preserve assertion **message strings** when moving a check — the assertion slot is the
+hash of its message, so a reworded message silently resets the sweep's saturation history.
 
 **Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
 application state. The application owns compaction of its own state. What paros does own is its
@@ -140,8 +173,8 @@ prefix would freeze one below it cluster-wide and forever, with reads fenced abo
 commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
 quorum intersection: a value already chosen there would have been reported by some Promise. The core
 surfaces the failure through `RawNode::chosen_gap()` (the `Ready` handshake only ever hands out the
-*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver traces each
-tick and `paros_sim::oracle::GapFillOracle` asserts against at quiescence.
+*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver reports
+each tick through `Audit::chosen_gap` and `paros_sim::audit` asserts against at quiescence.
 
 ## Simulation-driven development
 
@@ -156,8 +189,12 @@ test. Reproduce it as a **failing simulation**:
    `Chaos::Attrition`, storage faults) and use `buggify!()` / `buggify_knob!()` to make the rare
    interleaving likely. If the harness lacks a capability (e.g. persistent storage across restart),
    **build that capability**, do not downgrade to a unit test.
-3. Add or strengthen an oracle (an `Invariant` using `assert_always!`) so the violation surfaces as
-   a `SimulationReport.assertion_violation`.
+3. Add or strengthen a check so the violation surfaces as a
+   `SimulationReport.assertion_violation`. Put it where the fact arrives: a driver-observable
+   transition goes in `paros_sim::audit` (adding an `Audit` callback if the driver does not report
+   it yet), a client-observable one in the workload's own history + `check()`. Only reach for a
+   trace-scanning `Invariant` when the fact exists nowhere else (application state, simulator
+   faults) — and then read it through a cursor, never a re-scan.
 4. Run the sweep, confirm it goes **red** on the unfixed code, and record the failing seed.
 5. Fix `paros-core`.
 6. Run the sweep, confirm it goes **green** and saturates.

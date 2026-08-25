@@ -29,11 +29,12 @@ use paros_core::{
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
+use crate::audit::Audit;
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
     ReadAck, ReplySender, RpcInbox, internal, message_to_proto, rpc_channel, wire_checksum,
 };
-use crate::hooks::{DriverHooks, Seam};
+use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 /// How often a node advances its logical clock.
@@ -158,6 +159,32 @@ pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
 
 /// Tracing event: the driver deliberately asked the current leader to resign.
 pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
+
+/// Tracing event: a snapshot install persisted while this node was a live
+/// Candidate (`role == Candidate`, election open). This is the #88 window —
+/// `on_install_snapshot` may raise the candidate's promise above the ballot it
+/// is campaigning at — surfaced so the sweep can prove the interleaving is
+/// actually visited. Carries `node`.
+pub const EV_SNAPSHOT_MID_ELECTION: &str = "snapshot_mid_election";
+
+/// Tracing event: the driver deliberately dropped one outbound protocol message
+/// at the send seam (after durability, before the transport). Carries `node`,
+/// `to`, `kind`, and for an `Accept` the `slot`. Indistinguishable from network
+/// loss to the peers; emitted so the sweep can prove the per-message-loss
+/// BUGGIFY location is active and so a trace shows why a message never arrived.
+pub const EV_SEND_DROPPED: &str = "msg_dropped_at_send";
+
+/// Tracing event: the driver deliberately sent one outbound protocol message
+/// twice at the send seam. Carries `node`, `to`, `kind`. Retransmission is
+/// legal transport behavior; the sweep uses it to prove set-based quorum
+/// counting tolerates duplicates.
+pub const EV_SEND_DUPLICATED: &str = "msg_duplicated_at_send";
+
+/// Tracing event: the driver deliberately dropped one client-facing reply
+/// after the server state advanced. Carries `node` and `reply`
+/// (`propose`/`propose_dedup`/`read`). The client's retry takes the
+/// `(client, seq)` dedup path, which is the edge this exists to exercise.
+pub const EV_CLIENT_REPLY_DROPPED: &str = "client_reply_dropped";
 
 /// Tracing event: the driver selected the shortest valid election timeout.
 /// Carries `node` and `ticks`. The driver-hook oracle uses it to prove the
@@ -293,7 +320,12 @@ fn value_hash(bytes: &[u8]) -> u64 {
 /// encoding of its metadata, so every node agrees on the per-slot hash the safety
 /// oracle compares (a control command decided for a slot is the same on all
 /// nodes).
-fn command_hash(command: &Command) -> u64 {
+///
+/// Public so an [`Audit`] implementation can hash a `Command` it observes on the
+/// wire ([`Audit::sent`]) with the *same* function the driver uses for the
+/// durable-write and apply callbacks.
+#[must_use]
+pub fn command_hash(command: &Command) -> u64 {
     match command {
         Command::User(entry) => value_hash(&entry.value.0),
         Command::Control(Control::Truncate { up_to }) => {
@@ -380,7 +412,8 @@ fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
 /// core's `ctx` token.
 #[derive(Default)]
 struct ClientWaiters {
-    pending: BTreeMap<Slot, Vec<(u64, ReplySender<ProposeAck>)>>,
+    /// `(client id, client seq, the held reply)` per slot.
+    pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<ProposeAck>)>>,
     pending_reads: BTreeMap<u64, (u64, u64, ReplySender<ReadAck>)>,
 }
 
@@ -403,7 +436,8 @@ impl Outbound {
     /// `msg_sent` deliberately records the core's outbound decision even when
     /// the bounded mailbox or network later drops it; safety oracles inspect the
     /// messages a proposer attempted, independently of delivery.
-    fn transmit(&self, to: NodeId, msg: &Message) {
+    fn transmit<A: Audit>(&self, audit: &A, to: NodeId, msg: &Message) {
+        audit.sent(NodeId(self.self_id), to, msg);
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
         // only one whose command hash the trace needs: it is what lets an oracle
@@ -557,19 +591,182 @@ fn wire_message(message: internal::ConsensusMessage) -> internal::WireMessage {
     }
 }
 
+/// Materialize and send this batch's snapshot offers. An offered snapshot must
+/// describe exactly the application prefix named by the protocol message, so
+/// this runs only after the batch's committed entries are durably applied.
+fn send_snapshot_offers<S, H, A>(
+    storage: &mut S,
+    out: &Outbound,
+    hooks: &H,
+    audit: &A,
+    snapshot_offers: &[(NodeId, Slot, Ballot)],
+) -> SimulationResult<()>
+where
+    S: NodeStorage,
+    H: DriverHooks,
+    A: Audit,
+{
+    for &(to, offered_index, ballot) in snapshot_offers {
+        if storage.applied_slot() != Some(offered_index) {
+            return Err(SimulationError::InvalidState(
+                "application snapshot does not match offered chosen index".into(),
+            ));
+        }
+        let message = Message::InstallSnapshot {
+            from: NodeId(out.self_id),
+            ballot,
+            chosen_index: offered_index,
+            snapshot: Value(storage.snapshot()),
+        };
+        if hooks.drop_outgoing(to, &message) {
+            trace_send_drop(audit, out.self_id, to, &message);
+            continue;
+        }
+        out.transmit(audit, to, &message);
+        if hooks.duplicate_outgoing(to, &message) {
+            audit.duplicated_at_send(NodeId(out.self_id), to, &message);
+            tracing::info!(
+                node = out.self_id,
+                to = to.0,
+                kind = message_kind(&message),
+                "msg_duplicated_at_send"
+            );
+            out.transmit(audit, to, &message);
+        }
+    }
+    Ok(())
+}
+
+/// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names
+/// its slot so a trace shows exactly which round the loss isolated.
+fn trace_send_drop<A: Audit>(audit: &A, self_id: u64, to: NodeId, msg: &Message) {
+    audit.dropped_at_send(NodeId(self_id), to, msg);
+    let kind = message_kind(msg);
+    if let Message::Accept { slot, .. } = msg {
+        tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind,
+            slot = slot.0,
+            "msg_dropped_at_send"
+        );
+    } else {
+        tracing::info!(node = self_id, to = to.0, kind, "msg_dropped_at_send");
+    }
+}
+
+/// Surface the #88 window: a snapshot install persisted while this node's own
+/// campaign is open (`on_install_snapshot` deliberately does not touch the
+/// election), so the sweep can prove the interleaving is visited.
+fn note_mid_election_snapshot<A: Audit>(
+    node: &RawNode,
+    writes: &[WriteOp],
+    self_id: u64,
+    audit: &A,
+) {
+    if node.role() == NodeRole::Candidate
+        && writes
+            .iter()
+            .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
+    {
+        audit.snapshot_mid_election(NodeId(self_id));
+        tracing::info!(node = self_id, "snapshot_mid_election");
+    }
+}
+
+/// Ack-on-commit: only now can a client learn success — both the chosen index
+/// and the application transition are durable. Controls have no proposal
+/// waiter. The reply may be deliberately dropped at the reply seam
+/// ([`DriverHooks::drop_client_reply`]): the server state has advanced either
+/// way, and the client's retry takes the `(client, seq)` dedup path.
+fn ack_committed_waiters<S, H, A>(
+    storage: &S,
+    waiters: &mut ClientWaiters,
+    hooks: &H,
+    audit: &A,
+    self_id: u64,
+    committed: &[(Slot, Command)],
+) where
+    S: NodeStorage,
+    H: DriverHooks,
+    A: Audit,
+{
+    for (slot, command) in committed {
+        if matches!(command, Command::Control(_)) {
+            continue;
+        }
+        if let Some(replies) = waiters.pending.remove(slot) {
+            for (client, seq, waiter) in replies {
+                audit.client_acked(
+                    NodeId(self_id),
+                    client,
+                    seq,
+                    *slot,
+                    storage.applied_slot(),
+                    false,
+                );
+                if hooks.drop_client_reply(Reply::Propose) {
+                    audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
+                    tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
+                    continue;
+                }
+                let _ = waiter.send(ProposeAck {
+                    seq,
+                    leader: Some(self_id),
+                    committed: true,
+                    slot: Some(slot.0),
+                });
+            }
+        }
+    }
+}
+
+/// Send one batch's addressed messages (fire-and-forget). The core addresses
+/// each one; the driver maps `NodeId` → address. Each message may be dropped
+/// at this seam — per-message loss the network layer cannot produce on its own
+/// (a TCP stream loses intervals, never one isolated message), with
+/// `resend_pending` re-deriving what matters — or sent twice (retransmission
+/// is legal transport behavior; set-based quorum counting must tolerate it).
+fn send_messages<H, A>(out: &Outbound, hooks: &H, audit: &A, messages: Vec<(NodeId, Message)>)
+where
+    H: DriverHooks,
+    A: Audit,
+{
+    let self_id = out.self_id;
+    for (to, msg) in messages {
+        if hooks.drop_outgoing(to, &msg) {
+            trace_send_drop(audit, self_id, to, &msg);
+            continue;
+        }
+        out.transmit(audit, to, &msg);
+        if hooks.duplicate_outgoing(to, &msg) {
+            audit.duplicated_at_send(NodeId(self_id), to, &msg);
+            tracing::info!(
+                node = self_id,
+                to = to.0,
+                kind = message_kind(&msg),
+                "msg_duplicated_at_send"
+            );
+            out.transmit(audit, to, &msg);
+        }
+    }
+}
+
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
-fn drain_ready<S, H>(
+fn drain_ready<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
     out: &Outbound,
     waiters: &mut ClientWaiters,
     hooks: &H,
+    audit: &A,
 ) -> SimulationResult<()>
 where
     S: NodeStorage,
     H: DriverHooks,
+    A: Audit,
 {
     let self_id = out.self_id;
     // Copy the batch out of the borrow guard, advance to release the gate, then
@@ -589,7 +786,9 @@ where
     //    surface the persisted state for the safety + recovery oracles. The
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, hooks)?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit)?;
+
+    note_mid_election_snapshot(node, &writes, self_id, audit);
 
     // Snapshot offers are outbound protocol messages too. Count them before the
     // after-sync seam so a crash can drop an offer-only batch just as it can any
@@ -597,6 +796,10 @@ where
     // an application snapshot must cover exactly the boundary it advertises.
     let snapshot_offer_count = snapshot_offers.len();
     if snapshot_offer_count > 0 {
+        audit.snapshot_offered(
+            NodeId(self_id),
+            u64::try_from(snapshot_offer_count).unwrap_or(u64::MAX),
+        );
         tracing::info!(
             node = self_id,
             snapshot_offers = snapshot_offer_count as u64,
@@ -611,6 +814,7 @@ where
     if (!writes.is_empty() || !messages.is_empty() || snapshot_offer_count > 0)
         && hooks.crash_at(Seam::AfterSyncBeforeSend)
     {
+        audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
         tracing::info!(
             node = self_id,
             seam = "after_sync_before_send",
@@ -620,11 +824,8 @@ where
         return Err(seam_crash());
     }
 
-    // 2. Send messages — only after (1) is durable. The core addresses each one;
-    //    the driver maps NodeId → address and fires (fire-and-forget).
-    for (to, msg) in messages {
-        out.transmit(to, &msg);
-    }
+    // 2. Send messages — only after (1) is durable.
+    send_messages(out, hooks, audit, messages);
 
     // 3. Apply newly chosen entries (already durable, in contiguous order) —
     //    surface them to the oracles and ack any clients waiting on each slot
@@ -637,12 +838,17 @@ where
         storage
             .apply(chosen_index, *slot, command)
             .map_err(|e| storage_err(&e))?;
-        tracing::info!(
-            node = self_id,
-            slot = slot.0,
-            vhash = command_hash(command),
-            "value_chosen"
+        let vhash = command_hash(command);
+        audit.applied(
+            NodeId(self_id),
+            *slot,
+            vhash,
+            match command {
+                Command::User(e) => Some((e.client.0, e.seq.0)),
+                Command::Control(_) => None,
+            },
         );
+        tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
         tracing::info!(
             node = self_id,
             slot = slot.0,
@@ -656,46 +862,23 @@ where
     // also makes a chosen-index-only Ready durable before its application effect,
     // so reboot replay can never observe an application prefix ahead of consensus.
     if !committed.is_empty() {
+        // Crash seam: the consensus prefix is durable and the application
+        // transitions are staged, but their fsync has not happened. A crash
+        // here is the only way to land "consensus ahead of application" on
+        // disk — the state the boot replay's idempotent re-apply heals.
+        if hooks.crash_at(Seam::AfterApplyBeforeSync) {
+            audit.crashed(NodeId(self_id), Seam::AfterApplyBeforeSync);
+            tracing::info!(node = self_id, seam = "after_apply_before_sync", "crashed");
+            return Err(seam_crash());
+        }
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_err(&e))?;
     }
 
-    // An offered snapshot must describe exactly the application prefix named by
-    // the protocol message. Materialize and send it only after this batch's
-    // committed entries have been durably applied.
-    for (to, offered_index, ballot) in snapshot_offers {
-        if storage.applied_slot() != Some(offered_index) {
-            return Err(SimulationError::InvalidState(
-                "application snapshot does not match offered chosen index".into(),
-            ));
-        }
-        let message = Message::InstallSnapshot {
-            from: NodeId(self_id),
-            ballot,
-            chosen_index: offered_index,
-            snapshot: Value(storage.snapshot()),
-        };
-        out.transmit(to, &message);
-    }
+    send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers)?;
 
-    // Only now can a client learn success: both the chosen index and the
-    // application transition are durable. Controls have no proposal waiter.
-    for (slot, command) in &committed {
-        if matches!(command, Command::Control(_)) {
-            continue;
-        }
-        if let Some(replies) = waiters.pending.remove(slot) {
-            for (seq, waiter) in replies {
-                let _ = waiter.send(ProposeAck {
-                    seq,
-                    leader: Some(self_id),
-                    committed: true,
-                    slot: Some(slot.0),
-                });
-            }
-        }
-    }
+    ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
 
     // 3b. Answer confirmed reads — after the apply loop, so the applied prefix
     //     this same batch carried is covered by what the read observes. The ack
@@ -703,11 +886,18 @@ where
     //     index): that is the local state actually served.
     for state in &read_states {
         if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
+            let read_index = node.hard_state().chosen_index;
+            audit.read_confirmed(NodeId(self_id), read_index);
+            if hooks.drop_client_reply(Reply::Read) {
+                audit.client_reply_dropped(NodeId(self_id), Reply::Read);
+                tracing::info!(node = self_id, reply = "read", "client_reply_dropped");
+                continue;
+            }
             let _ = waiter.send(ReadAck {
                 seq,
                 leader: Some(self_id),
                 committed: true,
-                read_index: node.hard_state().chosen_index.map(|s| s.0),
+                read_index: read_index.map(|s| s.0),
             });
         }
     }
@@ -725,13 +915,14 @@ where
 /// claim a write the `BeforeSync` crash seam then discards: a crash before the
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
-fn persist_writes<S: NodeStorage, H: DriverHooks>(
+fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
     promised: Ballot,
     self_id: u64,
     hooks: &H,
+    audit: &A,
 ) -> SimulationResult<()> {
     let mut promise_changed = false;
     for op in writes {
@@ -776,6 +967,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks>(
     // the crash marker itself. Only meaningful when the batch actually staged
     // something.
     if !writes.is_empty() && hooks.crash_at(Seam::BeforeSync) {
+        audit.crashed(NodeId(self_id), Seam::BeforeSync);
         tracing::info!(node = self_id, seam = "before_sync", "crashed");
         return Err(seam_crash());
     }
@@ -794,8 +986,23 @@ fn persist_writes<S: NodeStorage, H: DriverHooks>(
         );
     }
 
+    surface_persisted(writes, promised, promise_changed, self_id, audit);
+    Ok(())
+}
+
+/// Report a flushed batch's durable state — one audit callback and one tracing
+/// event per op. Split out of [`persist_writes`] so the staging half and the
+/// reporting half each stay readable; both loops walk `writes` in order.
+fn surface_persisted<A: Audit>(
+    writes: &[WriteOp],
+    promised: Ballot,
+    promise_changed: bool,
+    self_id: u64,
+    audit: &A,
+) {
     // Durable now — emit the truthful persisted state for the oracles.
     if promise_changed {
+        audit.promised(NodeId(self_id), promised);
         tracing::info!(
             node = self_id,
             pround = promised.round,
@@ -810,6 +1017,8 @@ fn persist_writes<S: NodeStorage, H: DriverHooks>(
                 ballot,
                 command,
             } => {
+                let vhash = command_hash(command);
+                audit.accepted(NodeId(self_id), *slot, *ballot, promised, vhash);
                 tracing::info!(
                     node = self_id,
                     slot = slot.0,
@@ -817,25 +1026,36 @@ fn persist_writes<S: NodeStorage, H: DriverHooks>(
                     pbnode = promised.node.0,
                     around = ballot.round,
                     abnode = ballot.node.0,
-                    vhash = command_hash(command),
+                    vhash,
                     "persist"
                 );
             }
+            WriteOp::SetChosenIndex(slot) => {
+                audit.chosen_index(NodeId(self_id), *slot);
+            }
             WriteOp::Truncate { first } => {
+                audit.truncated(NodeId(self_id), *first);
                 tracing::info!(node = self_id, first = first.0, "compacted");
             }
-            WriteOp::InstallSnapshot { chosen_index, .. } => {
+            WriteOp::InstallSnapshot {
+                chosen_index,
+                ballot,
+                ..
+            } => {
                 let first = chosen_index.0 + 1;
+                // The install jumps the applied prefix to `chosen_index` without
+                // replaying entries (snapshot-xor-entries); the audit callback
+                // reports both the install and that jump.
+                audit.snapshot_installed(NodeId(self_id), *chosen_index, *ballot);
                 tracing::info!(
                     node = self_id,
                     chosen_index = chosen_index.0,
                     first,
                     "snapshot_installed"
                 );
-                // The install jumps the applied prefix to `chosen_index` without
-                // replaying entries (snapshot-xor-entries); surface the jump so the
-                // no-gaps oracle (which admits it as a snapshot jump) and the
-                // convergence oracle see the node reach the cluster prefix.
+                // Surface the jump so the no-gaps oracle (which admits it as a
+                // snapshot jump) and the convergence oracle see the node reach the
+                // cluster prefix.
                 tracing::info!(
                     node = self_id,
                     slot = chosen_index.0,
@@ -843,10 +1063,9 @@ fn persist_writes<S: NodeStorage, H: DriverHooks>(
                     "log_applied"
                 );
             }
-            WriteOp::SetPromise(_) | WriteOp::SetChosenIndex(_) => {}
+            WriteOp::SetPromise(_) => {}
         }
     }
-    Ok(())
 }
 
 /// Map a [`StorageError`] into a driver [`SimulationError`] so a durable-write
@@ -876,12 +1095,14 @@ pub fn is_seam_crash(e: &SimulationError) -> bool {
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
 /// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
 /// deterministic and dependency-free while a seed still replays bit-identically.
-fn draw_election_timeout<P: Providers, H: DriverHooks>(
+fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
     providers: &P,
     hooks: &H,
+    audit: &A,
     self_id: u64,
 ) -> u64 {
     if hooks.shortest_election_timeout() {
+        audit.election_timeout_extreme(NodeId(self_id), ELECTION_TIMEOUT_BASE);
         tracing::info!(
             node = self_id,
             ticks = ELECTION_TIMEOUT_BASE,
@@ -899,16 +1120,17 @@ fn draw_election_timeout<P: Providers, H: DriverHooks>(
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
 /// new leader).
-fn maintain<P: Providers, H: DriverHooks>(
+fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,
     last_role: &mut NodeRole,
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
+    audit: &A,
 ) {
     if node.needs_election_timeout() {
-        node.set_election_timeout(draw_election_timeout(providers, hooks, self_id));
+        node.set_election_timeout(draw_election_timeout(providers, hooks, audit, self_id));
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
@@ -921,6 +1143,8 @@ fn maintain<P: Providers, H: DriverHooks>(
         // higher-ballot commit and the state is no longer distinguishable.
         let ballot = node.ballot();
         let promised = node.hard_state().max_promised_ballot;
+        let gaps = node.election_gap_fills();
+        audit.elected(NodeId(self_id), ballot, promised, gaps);
         tracing::info!(
             node = self_id,
             round = ballot.round,
@@ -932,7 +1156,6 @@ fn maintain<P: Providers, H: DriverHooks>(
         // This election found holes the promise quorum reported nothing for and
         // filled them with no-ops. Rare and mechanism-specific, so surface it: it is
         // the only outside evidence the fill path ran.
-        let gaps = node.election_gap_fills();
         if gaps > 0 {
             tracing::info!(
                 node = self_id,
@@ -971,10 +1194,11 @@ fn maintain<P: Providers, H: DriverHooks>(
 /// accepted log starts at its floor, so the replay naturally covers only the
 /// retained prefix. A clean first boot has empty scalars/log, so this is a near
 /// no-op.
-fn replay_boot_state<S: NodeStorage>(
+fn replay_boot_state<S: NodeStorage, A: Audit>(
     node: &RawNode,
     storage: &mut S,
     self_id: u64,
+    audit: &A,
 ) -> SimulationResult<()> {
     // Mark this incarnation coming up. The recovery recorder turns every `booted`
     // after a node's first into a *restart* event for the animation.
@@ -987,16 +1211,23 @@ fn replay_boot_state<S: NodeStorage>(
         pbnode = promised.node.0,
         "node_state"
     );
+    // One typed report of the whole recovered belief: the promise plus every
+    // durable accepted record read back. Built once so the audit sees the boot
+    // as a single transition, matching the `recovered` trace stream.
+    let mut records: Vec<(Slot, Ballot, u64)> = Vec::with_capacity(node.accepted().len());
     for (slot, (ballot, command)) in node.accepted() {
+        let vhash = command_hash(command);
+        records.push((*slot, *ballot, vhash));
         tracing::info!(
             node = self_id,
             slot = slot.0,
             around = ballot.round,
             abnode = ballot.node.0,
-            vhash = command_hash(command),
+            vhash,
             "recovered"
         );
     }
+    audit.recovered(NodeId(self_id), promised, &records);
     let mut replayed_application = false;
     if let Some(ci) = node.hard_state().chosen_index {
         let applied_slot = storage.applied_slot();
@@ -1007,12 +1238,17 @@ fn replay_boot_state<S: NodeStorage>(
                     .map_err(|e| storage_err(&e))?;
                 replayed_application = true;
             }
-            tracing::info!(
-                node = self_id,
-                slot = slot.0,
-                vhash = command_hash(command),
-                "value_chosen"
+            let vhash = command_hash(command);
+            audit.applied(
+                NodeId(self_id),
+                *slot,
+                vhash,
+                match command {
+                    Command::User(e) => Some((e.client.0, e.seq.0)),
+                    Command::Control(_) => None,
+                },
             );
+            tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
             tracing::info!(
                 node = self_id,
                 slot = slot.0,
@@ -1046,6 +1282,10 @@ fn replay_boot_state<S: NodeStorage>(
 /// alternatives. Production passes [`NoHooks`](crate::NoHooks), whose default
 /// methods are inert.
 ///
+/// `audit` is the pure-observation mirror of `hooks`: the driver reports every
+/// externally meaningful transition to it, and nothing it does can change the
+/// run. Production passes [`NoAudit`](crate::NoAudit).
+///
 /// # Errors
 ///
 /// Returns an error if the gRPC server fails to bind or listen on `local_addr`. May
@@ -1057,18 +1297,20 @@ fn replay_boot_state<S: NodeStorage>(
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state.
 #[allow(clippy::too_many_lines)]
-pub async fn run_node<P, S, H>(
+pub async fn run_node<P, S, H, A>(
     providers: P,
     mut storage: S,
     local_addr: String,
     members: Vec<(NodeId, String)>,
     shutdown: CancellationToken,
     hooks: &H,
+    audit: &A,
 ) -> SimulationResult<()>
 where
     P: Providers,
     S: NodeStorage,
     H: DriverHooks,
+    A: Audit,
 {
     // Every task spawned by this incarnation must stop when `run_node` exits,
     // including a durability-seam error that immediately starts a replacement
@@ -1097,7 +1339,7 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&node, &mut storage, self_id)?;
+    replay_boot_state(&node, &mut storage, self_id, audit)?;
 
     // Validate every origin before starting reconnecting-channel tasks. Once
     // channels exist, there are no fallible setup steps before their drop guard
@@ -1176,11 +1418,21 @@ where
     let mut waiters = ClientWaiters::default();
     let mut next_read_ctx: u64 = 0;
     // Seed the first randomized election timeout (jitter from the driver's RNG).
-    node.set_election_timeout(draw_election_timeout(&providers, hooks, self_id));
+    node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
     let mut last_role = node.role();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
+    // The tick deadline is ABSOLUTE, not a fresh relative sleep per loop
+    // iteration: `select!` drops and re-creates its futures every pass, so a
+    // relative `sleep(TICK_INTERVAL)` resets whenever any other branch is
+    // ready. Under sustained sub-interval traffic (a singleton absorbing every
+    // client retry, a reconnect storm) the protocol clock then never advances —
+    // no election, no ack, clients retry harder: a self-sustaining starvation
+    // loop (seed 3847608256092482294 ticked twice in 81 simulated seconds).
+    // With an absolute deadline the sleep is zero-length once the deadline
+    // passes and fires regardless of load.
+    let mut next_tick = time.now() + TICK_INTERVAL;
 
     loop {
         moonpool_core::select! {
@@ -1203,12 +1455,13 @@ where
                 // reply is held until the slot commits (ack-on-commit); a non-leader
                 // redirects immediately.
                 let seq = req.seq;
+                let client = req.client;
                 match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
                     ProposeResult::NotLeader(hint) => {
                         let _ = reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
-                        waiters.pending.entry(slot).or_default().push((seq, reply));
+                        waiters.pending.entry(slot).or_default().push((client, seq, reply));
                     }
                     ProposeResult::Chosen(slot) => {
                         // Already inside this node's applied prefix before this
@@ -1217,12 +1470,18 @@ where
                         // ack that named nothing was unfalsifiable: the client was
                         // told "applied" with no way for an oracle to check the
                         // claim against the applied prefix.
+                        audit.client_acked(NodeId(self_id), client, seq, slot, storage.applied_slot(), true);
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
-                        let _ = reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
+                        if hooks.drop_client_reply(Reply::ProposeDedup) {
+                            audit.client_reply_dropped(NodeId(self_id), Reply::ProposeDedup);
+                            tracing::info!(node = self_id, reply = "propose_dedup", "client_reply_dropped");
+                        } else {
+                            let _ = reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
+                        }
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1241,8 +1500,8 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1278,6 +1537,7 @@ where
                 if let Message::Prepare { from_slot, .. } = &msg
                     && *from_slot < node.first_slot()
                 {
+                    audit.prepare_below_floor(NodeId(self_id), *from_slot, node.first_slot());
                     tracing::info!(
                         node = self_id,
                         from_slot = from_slot.0,
@@ -1286,8 +1546,8 @@ where
                     );
                 }
                 node.step(msg);
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -1308,8 +1568,8 @@ where
                         first_slot: node.first_slot().0,
                     },
                 };
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1319,19 +1579,22 @@ where
                     snapshot: storage.snapshot(),
                 });
             }
-            _ = time.sleep(TICK_INTERVAL) => {
+            _ = time.sleep(next_tick.saturating_sub(time.now())) => {
+                next_tick = time.now() + TICK_INTERVAL;
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision
                 // an independent BUGGIFY location.
                 if node.has_pending_accepts() {
                     if hooks.skip_accept_resend() {
+                        audit.resend_skipped(NodeId(self_id));
                         tracing::info!(node = self_id, "accept_resend_skipped");
                     } else {
                         node.resend_pending();
                     }
                 }
                 if node.role() == NodeRole::Leader && hooks.resign_leadership() {
+                    audit.stepped_down(NodeId(self_id));
                     tracing::info!(node = self_id, "leadership_resigned");
                     node.step_down();
                 }
@@ -1350,14 +1613,15 @@ where
                         let _ = waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks);
+                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the
                 // core. Re-emitted every tick while it lasts: the oracle reads its
                 // persistence past quiescence, not a single instant.
                 if let Some((hole, above)) = node.chosen_gap() {
+                    audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
                 }
                 tracing::info!(tick = ticks, "node_tick");

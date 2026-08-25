@@ -41,6 +41,18 @@ fn chain_single_seed_converges() {
 }
 
 #[test]
+fn network_regression_seeds_replay_clean() {
+    for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {
+        let report = paros_sim::run_network_seed(seed);
+        assert!(
+            report.assertion_violations.is_empty(),
+            "network seed {seed}: {:?}",
+            report.assertion_violations
+        );
+    }
+}
+
+#[test]
 fn chain_regression_seeds_replay_clean() {
     for seed in CHAIN_REGRESSION_SEEDS {
         let report = run_chain_seed(*seed);
@@ -97,7 +109,11 @@ fn distinct_seeds_are_independent() {
 fn chaotic_run_is_well_formed() {
     let r = run_seed(42);
 
-    assert_eq!(r.requests, 12, "every proposal is observed");
+    assert!(
+        r.requests >= 4,
+        "every client's proposals are observed (client count and request count are per-seed draws), got {}",
+        r.requests
+    );
     assert_eq!(
         r.delivered + r.dropped,
         r.requests,
@@ -139,7 +155,7 @@ fn chaotic_run_is_well_formed() {
             "a protocol message arrived before it left"
         );
         assert!(
-            (shot.from as usize) < 3 && (shot.to as usize) < 3,
+            (shot.from as usize) < r.nodes && (shot.to as usize) < r.nodes,
             "protocol legs are between cluster nodes"
         );
     }

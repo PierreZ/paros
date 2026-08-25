@@ -16,14 +16,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationResult, StateHandle, TimeProvider, assert_always,
+    Process, SimContext, SimulationResult, StateHandle, TimeProvider, assert_always, buggify_knob,
     buggify_with_prob,
 };
 
+use crate::audit::{NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, DriverHooks, HardState, MemStorage, MustSync, NodeId, NodeStorage,
-    Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
+    Ballot, Command, Config, DriverHooks, HardState, MemStorage, Message, MustSync, NodeId,
+    NodeStorage, Seam, Slot, Storage, StorageError, is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -82,6 +83,10 @@ impl Process for NodeProcess {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
         };
+        // The per-iteration shared audit: pure observation, published beside the
+        // storage world so every node folds its transitions into one incremental
+        // checker. It never influences the driver — that is `hooks`' job.
+        let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
@@ -102,12 +107,23 @@ impl Process for NodeProcess {
                 members.clone(),
                 ctx.shutdown().clone(),
                 &hooks,
+                &audit,
             )
             .await
             {
                 // Simulated crash at a durability seam: fall through to recover
                 // and re-run (rebuilding volatile state from the durable world).
-                Err(e) if is_seam_crash(&e) => {}
+                // The restart delay is workload-buggified config (prong 2): a
+                // real process does not restart in zero time, and a node held
+                // down while the cluster keeps committing and truncating comes
+                // back below the compaction floor — a second, independent
+                // generator for snapshot recovery besides the attrition window.
+                Err(e) if is_seam_crash(&e) => {
+                    let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
+                    if delay_ms > 0 {
+                        ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
+                    }
+                }
                 other => return other,
             }
         }
@@ -439,6 +455,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             && match seam {
                 Seam::BeforeSync => buggify_with_prob!(0.03),
                 Seam::AfterSyncBeforeSend => buggify_with_prob!(0.03),
+                Seam::AfterApplyBeforeSync => buggify_with_prob!(0.03),
             }
     }
 
@@ -452,5 +469,78 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
 
     fn shortest_election_timeout(&self) -> bool {
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn drop_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Three locations, selected independently per seed: an isolated
+        // `Accept` loss is the interleaving behind a stranded chosen-gap wedge
+        // (#80) — one earlier slot's Accept vanishes while later slots land —
+        // while losing a `Promise`/`Prepare` stretches elections open, and a
+        // lost `Nack` keeps a below-floor candidate's campaign alive long
+        // enough for the answering snapshot to land mid-election (the
+        // truncated-quorum Nack otherwise steps the candidate down before the
+        // `CatchUpRequest`'s snapshot offer arrives — the #88 window).
+        match msg {
+            Message::Accept { .. } => buggify_with_prob!(0.05),
+            Message::Prepare { .. } | Message::Promise { .. } => buggify_with_prob!(0.10),
+            Message::Nack { .. } => buggify_with_prob!(0.25),
+            // A dropped `Commit` delays a follower's floor-raise (truncation
+            // applies lazily at its Truncate slot), widening the mixed-floor
+            // window the #88 mid-election snapshot needs — and leaves the
+            // follower hole commit-replay catch-up must heal (#80's terrain).
+            Message::Commit { .. } => buggify_with_prob!(0.05),
+            // The lost *ack*: a slot durably accepted by a quorum whose
+            // proposer never learns it — the pure quorum-intersection edge
+            // that forces a re-propose under a new ballot (P2c for real).
+            Message::Accepted { .. } => buggify_with_prob!(0.05),
+            // Starve the read fence / the catch-up push direction. Kept low:
+            // these fire per tick per peer, and a high rate is just a
+            // partition, which is moonpool's job.
+            Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => buggify_with_prob!(0.02),
+            // Repair traffic for a node that is already behind: a lost
+            // response costs one beat of latency and re-derives on the next.
+            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+                buggify_with_prob!(0.10)
+            }
+            _ => false,
+        }
+    }
+
+    fn duplicate_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Moonpool has no message-duplication fault, so this seam is the only
+        // duplicate generator. The quorum-counting kinds are the point of the
+        // location: every quorum in the core is set-based today, and this
+        // keeps a future "optimization" into counters from fabricating a
+        // quorum out of a duplicated ack.
+        match msg {
+            Message::Promise { .. } | Message::Accepted { .. } | Message::HeartbeatAck { .. } => {
+                buggify_with_prob!(0.05)
+            }
+            Message::Commit { .. } => buggify_with_prob!(0.05),
+            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+                buggify_with_prob!(0.10)
+            }
+            _ => false,
+        }
+    }
+
+    fn drop_client_reply(&self, reply: paros::Reply) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Dropped *after* the server committed/applied: the client's retry
+        // must take the `(client, seq)` dedup path, the at-most-once edge the
+        // truncated-dedup-window hazard lives on. One location per reply kind.
+        match reply {
+            paros::Reply::Propose => buggify_with_prob!(0.10),
+            paros::Reply::ProposeDedup => buggify_with_prob!(0.10),
+            paros::Reply::Read => buggify_with_prob!(0.10),
+        }
     }
 }

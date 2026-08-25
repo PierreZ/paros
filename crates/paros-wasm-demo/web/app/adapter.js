@@ -10,7 +10,8 @@
 // each renderer's `frames(run)`, but the shared snapshot/derivation helpers it
 // leans on live here.
 
-export const CLUSTER = 3; // run_seed fixes a 3-node cluster (CLUSTER_SIZE)
+export const CLUSTER = 3; // fallback when a run predates the per-seed cluster-size draw
+export const clusterOf = (run) => run.nodes || CLUSTER;
 
 // Ballot order is lexicographic on (round, node).
 export const cmpBallot = (ar, an, br, bn) => (ar !== br ? ar - br : an - bn);
@@ -18,7 +19,7 @@ export const cmpBallot = (ar, an, br, bn) => (ar !== br ? ar - br : an - bn);
 // ---- per-node durable/volatile state as of simulated time T ----------------
 // Latest node_states entry at or before T for each node → its promised ballot and
 // its accepted value (slot 0 only, per the contract). Order-independent.
-export function stateAt(run, T, n = CLUSTER) {
+export function stateAt(run, T, n = clusterOf(run)) {
   const st = Array.from({ length: n }, () => ({ pr: 0, pn: 0, acc: false, vh: 0, t: -1 }));
   for (const s of run.node_states) {
     if (s.time_ms <= T && s.node < st.length && s.time_ms >= st[s.node].t) {
@@ -51,7 +52,7 @@ export function leaderAt(run, T) {
 }
 
 // Per-node highest applied (committed) slot at or before T; -1 = nothing applied.
-export function committedAt(run, T, n = CLUSTER) {
+export function committedAt(run, T, n = clusterOf(run)) {
   const c = Array.from({ length: n }, () => -1);
   for (const a of run.applied) {
     if (a.time_ms <= T && a.node < c.length) c[a.node] = Math.max(c[a.node], a.slot);
@@ -60,7 +61,7 @@ export function committedAt(run, T, n = CLUSTER) {
 }
 
 // Per-node map slot -> chosen value hash, as learned by time T.
-export function logAt(run, T, n = CLUSTER) {
+export function logAt(run, T, n = clusterOf(run)) {
   const m = Array.from({ length: n }, () => new Map());
   for (const ch of run.chosen) {
     if (ch.time_ms <= T && ch.node < m.length) m[ch.node].set(ch.slot, ch.vhash);
@@ -142,7 +143,7 @@ export function oracleBadge(run, mode) {
 // ---- node snapshot (drives node rings, swatches, and the inspector) --------
 // A uniform per-node view at simulated time T, blending durable promised ballot,
 // volatile accepted value, chosen status, and inferred role.
-export function nodesAt(run, T, n = CLUSTER) {
+export function nodesAt(run, T, n = clusterOf(run)) {
   const st = stateAt(run, T, n);
   const ch = chosenAt(run, T);
   const lead = leaderAt(run, T);

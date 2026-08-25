@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use moonpool_hyper::{ChannelConfig, ReconnectingChannel};
+use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
     Workload, assert_always, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
@@ -17,6 +17,7 @@ use paros::{
 };
 
 use crate::CHAOS_DURATION_MS;
+use crate::audit::{GateScope, audit_world};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 
 const PROPOSE: u8 = 0;
@@ -150,6 +151,16 @@ impl Workload for ChainWorkload {
         "chain-client"
     }
 
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The network-swarm safety axis has no quiet recovery tail — provider
+        // faults outlive `chaos_duration` in the pinned Moonpool revision — so
+        // it must never make the quiescence-gated liveness claim.
+        if !self.safety_only {
+            audit_world(ctx.state()).enable_liveness_checks();
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
@@ -172,7 +183,8 @@ impl Workload for ChainWorkload {
         let mut internal_clients = Vec::with_capacity(endpoints.len());
         let mut channels = Vec::with_capacity(endpoints.len());
         for (addr, origin) in endpoints {
-            let channel = ReconnectingChannel::new(ctx.providers(), addr, ChannelConfig::default());
+            let channel =
+                ReconnectingChannel::new(ctx.providers(), addr, crate::client_channel_config());
             public_clients.push(ParosClient::with_origin(channel.clone(), origin.clone()));
             internal_clients.push(ParosInternalClient::with_origin(channel.clone(), origin));
             channels.push(channel);
@@ -305,7 +317,13 @@ impl Workload for ChainWorkload {
                             "chain_command_acked"
                         );
                         if let Some(node) = leader {
-                            tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                            tracing::info!(
+                                client_id,
+                                seq_id = seq,
+                                slot,
+                                node,
+                                "client_acknowledged"
+                            );
                         }
                     }
                     ProposalResult::Rejected { leader } => {
@@ -451,7 +469,13 @@ impl Workload for ChainWorkload {
                                 "chain_command_acked"
                             );
                             if let Some(node) = leader {
-                                tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                                tracing::info!(
+                                    client_id,
+                                    seq_id = seq,
+                                    slot,
+                                    node,
+                                    "client_acknowledged"
+                                );
                             }
                             if seq.is_multiple_of(config.compact_every) {
                                 let control =
@@ -548,6 +572,19 @@ impl Workload for ChainWorkload {
                 .collect();
             for (cmd_hash, outcome) in &self.outcomes {
                 if matches!(outcome, Outcome::Acked { .. }) {
+                    if !applied_hashes.contains(&hash_text(*cmd_hash)) {
+                        let q = ctx.observability();
+                        eprintln!(
+                            "ACK-NOT-APPLIED: outcome={:?} t={}ms; dedup_acks={} crashes={} boots={} applied_events={} nodes={}",
+                            outcome,
+                            time.now().as_millis(),
+                            q.len("propose_dedup_ack"),
+                            q.len("crashed"),
+                            q.len("booted"),
+                            q.len(EV_APPLIED),
+                            server_count,
+                        );
+                    }
                     assert_always!(
                         applied_hashes.contains(&hash_text(*cmd_hash)),
                         "chain: every acknowledged command was applied"
@@ -616,7 +653,13 @@ impl Workload for ChainWorkload {
                             "chain_command_acked"
                         );
                         if let Some(node) = leader {
-                            tracing::info!(seq_id = seq, slot, node, "client_acknowledged");
+                            tracing::info!(
+                                client_id,
+                                seq_id = seq,
+                                slot,
+                                node,
+                                "client_acknowledged"
+                            );
                             target = usize::try_from(node).unwrap_or(target) % server_count;
                         }
                         break;
@@ -637,6 +680,7 @@ impl Workload for ChainWorkload {
         self.issued_count = next_seq;
 
         let mut converged = false;
+        let mut last_probe: Vec<Option<ChainState>> = Vec::new();
         while time.now() < recovery_deadline && !shutdown.is_cancelled() {
             let mut observed = Vec::with_capacity(server_count);
             for client in &internal_clients {
@@ -654,6 +698,9 @@ impl Workload for ChainWorkload {
                     break;
                 }
             }
+            last_probe = (0..server_count)
+                .map(|i| observed.get(i).copied())
+                .collect();
             if observed.len() == server_count
                 && observed
                     .first()
@@ -667,6 +714,54 @@ impl Workload for ChainWorkload {
             time.sleep(Duration::from_millis(50)).await.ok();
         }
 
+        if !converged {
+            // Failure diagnostic (fires only on the red path): which node is
+            // stuck, and where. `None` = the node did not answer the inspect
+            // probe inside its timeout.
+            let q = ctx.observability();
+            let last_applied: BTreeMap<u64, u64> = q
+                .snapshot(EV_APPLIED)
+                .iter()
+                .filter_map(|e| Some((e.u64("node")?, e.time_ms)))
+                .fold(BTreeMap::new(), |mut m, (n, t)| {
+                    let entry = m.entry(n).or_insert(0);
+                    *entry = (*entry).max(t);
+                    m
+                });
+            let count_by_node = |name: &str| -> BTreeMap<u64, usize> {
+                q.snapshot(name).iter().filter_map(|e| e.u64("node")).fold(
+                    BTreeMap::new(),
+                    |mut m, n| {
+                        *m.entry(n).or_insert(0) += 1;
+                        m
+                    },
+                )
+            };
+            eprintln!(
+                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): \
+                 per-node states = {:?}; last command_applied per node = {:?}; \
+                 boots per node = {:?}; seam crashes per node = {:?}",
+                time.now().as_millis(),
+                recovery_deadline.as_millis(),
+                pre_tail_count,
+                last_probe,
+                last_applied,
+                count_by_node("booted"),
+                count_by_node("crashed"),
+            );
+            eprintln!(
+                "  ticks={} leader_elected={} prepares_sent={} msg_sent={} msg_received={} check_leader_evts={}",
+                q.len("node_tick"),
+                q.len("leader_elected"),
+                q.snapshot("msg_sent")
+                    .iter()
+                    .filter(|e| e.str("kind") == Some("prepare"))
+                    .count(),
+                q.len("msg_sent"),
+                q.len("msg_received"),
+                q.len("election_timeout_extreme"),
+            );
+        }
         assert_always!(
             recovery_acked > 0 && converged,
             "chain: cluster converged after chaos"
@@ -695,7 +790,13 @@ impl Workload for ChainWorkload {
         Ok(())
     }
 
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let scope = if self.safety_only {
+            GateScope::SafetyOnly
+        } else {
+            GateScope::Full
+        };
+        audit_world(ctx.state()).check_gates(scope);
         assert_always!(
             self.outcomes
                 .values()
