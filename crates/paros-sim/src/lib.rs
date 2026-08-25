@@ -365,23 +365,11 @@ fn chaos_surfaces() -> [Chaos; 2] {
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
 ///
-/// `BuggifiedDelay` is masked (like `BitFlip` before it, and mask changes
-/// consume no randomness): moonpool applies it to **every sleep for the whole
-/// run** — including the driver's tick sleeps, un-gated by `chaos_duration` —
-/// so one near-max inflation can freeze a node's protocol clock for tens of
-/// simulated seconds (seeds 8057455177754870256 and 3847608256092482294: a
-/// four-node cluster "quiesced" mid-election-outage, and an n=1 singleton that
-/// ticked twice in 81 s). Every liveness claim this campaign makes (chain
-/// recovery budget, `run_seed`'s settle-tail convergence) is wall-clock-based
-/// and therefore unsound under whole-run time dilation. Re-enable if moonpool
-/// gates the fault on the chaos window (upstream issue filed).
+/// `BuggifiedDelay` stays enabled: the pinned moonpool gates sleep inflation to
+/// `chaos_duration`, so setup and the quiet recovery tail remain fault-free.
 fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
-        .network_fault_mask(
-            NetworkFaultMask::all()
-                .without(NetworkFault::BitFlip)
-                .without(NetworkFault::BuggifiedDelay),
-        )
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess)
         })
@@ -424,11 +412,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
-        .network_fault_mask(
-            NetworkFaultMask::all()
-                .without(NetworkFault::BitFlip)
-                .without(NetworkFault::BuggifiedDelay),
-        )
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(ProcessCount::Range(CLUSTER_SIZE_RANGE), || {
             Box::new(NodeProcess)
         })

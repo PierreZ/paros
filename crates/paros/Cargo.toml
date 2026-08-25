@@ -20,8 +20,8 @@ paros-core = { path = "../paros-core", version = "0.2.0" }
 # wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
 # release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "3a0b2cb2746f6d262bb63fcfbc1964c70cb5718d", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "3a0b2cb2746f6d262bb63fcfbc1964c70cb5718d" }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "8c408aab8792f7fb8ae8d84469a6e4cc0eafafcb", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "8c408aab8792f7fb8ae8d84469a6e4cc0eafafcb" }
 
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
 # tonic's tokio-bound `transport` feature remains disabled.
