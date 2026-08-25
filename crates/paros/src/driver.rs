@@ -839,7 +839,15 @@ where
             .apply(chosen_index, *slot, command)
             .map_err(|e| storage_err(&e))?;
         let vhash = command_hash(command);
-        audit.applied(NodeId(self_id), *slot, vhash);
+        audit.applied(
+            NodeId(self_id),
+            *slot,
+            vhash,
+            match command {
+                Command::User(e) => Some((e.client.0, e.seq.0)),
+                Command::Control(_) => None,
+            },
+        );
         tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
         tracing::info!(
             node = self_id,
@@ -1231,7 +1239,15 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
                 replayed_application = true;
             }
             let vhash = command_hash(command);
-            audit.applied(NodeId(self_id), *slot, vhash);
+            audit.applied(
+                NodeId(self_id),
+                *slot,
+                vhash,
+                match command {
+                    Command::User(e) => Some((e.client.0, e.seq.0)),
+                    Command::Control(_) => None,
+                },
+            );
             tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
             tracing::info!(
                 node = self_id,

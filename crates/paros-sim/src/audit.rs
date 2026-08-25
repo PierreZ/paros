@@ -291,6 +291,13 @@ struct AuditState {
     /// [`GAP_WEDGE_TICKS`] such opportunities after quiescence; a merely
     /// slowed cluster never accumulates the streak (seed 8057455177754870256).
     gap_streaks: BTreeMap<u64, (u64, u64)>,
+    /// At-most-once ledger for the oracle: each applied user command's
+    /// `(client, seq)` and the single log index it applied at. A second apply
+    /// of the same identity at a *different* index is the double-apply the
+    /// core review flagged (mandatory P2c re-proposal of a stale suffix after
+    /// a healed partition) — every node applies it, so per-index agreement is
+    /// blind to it by construction.
+    applied_identity: BTreeMap<(u64, u64), u64>,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -662,12 +669,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn applied(&self, node: NodeId, slot: Slot, vhash: u64) {
+    fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
         let now = self.now_ms();
         let mut st = self.state();
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
+        }
+        // The at-most-once half: one (client, seq) applies at exactly one
+        // index, cluster-wide. Keyed on identity, not payload bytes (distinct
+        // requests legitimately share bytes); a boot replay of the same slot
+        // is idempotent and passes.
+        if let Some(id) = identity {
+            let first = *st.applied_identity.entry(id).or_insert(slot.0);
+            assert_always!(
+                first == slot.0,
+                "a (client, seq) command is applied at exactly one log index"
+            );
         }
         reach_once!(st.any_chosen, "a value is chosen");
         st.observe_applied_index(node.0, slot.0, now);

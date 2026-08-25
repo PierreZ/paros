@@ -2435,3 +2435,88 @@ fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
         "a dead seq below the latest applied one is re-proposed, never falsely acked"
     );
 }
+
+/// A snapshot install must re-drive the contiguous walk: a `Commit` learned
+/// out of order can already sit in `chosen` just above the boundary, and
+/// without the walk the node freezes at `boundary` forever — catch-up loops
+/// (`mark_chosen`'s already-chosen early return never re-drives either), and
+/// if the node later leads, its read fence sits above its prefix so no read
+/// ever confirms. Red before the fix: `chosen_index` stuck at 9 with
+/// `chosen[10]` in hand.
+#[test]
+fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
+    let mut x = node(0, &[0, 1, 2]);
+
+    // Slot 10 arrives out of order (reordered/duplicated `Commit`): chosen,
+    // but far above the (empty) contiguous prefix.
+    x.step(Message::Commit {
+        from: NodeId(2),
+        ballot: ballot(3, 2),
+        slot: Slot(10),
+        command: ucmd(1, 1, 0xAA),
+    });
+    let _ = drain(&mut x);
+    assert_eq!(x.hard_state.chosen_index, None, "nothing contiguous yet");
+    assert!(x.chosen.contains_key(&Slot(10)));
+
+    // A peer answers the below-floor catch-up with a snapshot at boundary 9.
+    x.step(Message::InstallSnapshot {
+        from: NodeId(2),
+        ballot: ballot(3, 2),
+        chosen_index: Slot(9),
+        snapshot: val(0xEE),
+    });
+    let _ = drain(&mut x);
+
+    assert_eq!(
+        x.hard_state.chosen_index,
+        Some(Slot(10)),
+        "the walk resumed over the out-of-order chosen slot at the boundary"
+    );
+    assert_eq!(
+        x.chosen_gap(),
+        None,
+        "no stranded chosen slot survives the install"
+    );
+}
+
+/// The catch-up half of the same freeze: a `Commit` for a slot already in
+/// `chosen` must still re-drive the contiguous walk. Pre-fix, `mark_chosen`'s
+/// early return skipped it, so a node stuck one below an already-known slot
+/// looped `CatchUpRequest` forever while holding the very commit it needed.
+#[test]
+fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
+    let mut x = node(0, &[0, 1, 2]);
+    x.step(Message::Commit {
+        from: NodeId(2),
+        ballot: ballot(3, 2),
+        slot: Slot(1),
+        command: ucmd(1, 1, 0xBB),
+    });
+    let _ = drain(&mut x);
+    assert_eq!(
+        x.hard_state.chosen_index, None,
+        "slot 1 is above the hole at 0"
+    );
+
+    // Slot 0 arrives; the prefix advances through both.
+    x.step(Message::Commit {
+        from: NodeId(2),
+        ballot: ballot(3, 2),
+        slot: Slot(0),
+        command: ucmd(1, 0, 0xCC),
+    });
+    let _ = drain(&mut x);
+    assert_eq!(x.hard_state.chosen_index, Some(Slot(1)));
+
+    // A duplicated / catch-up-replayed commit for a known slot is a no-op for
+    // state but must never wedge: the early return still re-drives the walk.
+    x.step(Message::Commit {
+        from: NodeId(2),
+        ballot: ballot(3, 2),
+        slot: Slot(1),
+        command: ucmd(1, 1, 0xBB),
+    });
+    let _ = drain(&mut x);
+    assert_eq!(x.hard_state.chosen_index, Some(Slot(1)));
+}

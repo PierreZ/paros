@@ -49,7 +49,10 @@ pub trait Audit {
 
     /// This node applied the chosen command at `slot` (hashed to `vhash`),
     /// advancing its contiguous applied prefix.
-    fn applied(&self, node: NodeId, slot: Slot, vhash: u64) {}
+    /// `identity` is the `(client, seq)` dedup key for a user command (`None`
+    /// for a control command): the at-most-once oracle keys on it, because two
+    /// distinct requests can legitimately share payload bytes.
+    fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {}
 
     /// This node handed `msg` to the transport, addressed to `to`. Reports the
     /// core's outbound decision even when the network later drops it.
