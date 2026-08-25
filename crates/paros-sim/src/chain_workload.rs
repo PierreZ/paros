@@ -9,7 +9,7 @@ use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
     Workload, assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
-    buggify_knob, buggify_with_prob, swarm_op_enabled,
+    buggify_knob, buggify_with_prob, sim::config_random_f64, swarm_op_enabled,
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Slot,
@@ -25,7 +25,10 @@ const PROPOSE_TO_NON_LEADER: u8 = 1;
 const COMPACT: u8 = 2;
 const READ_STATE: u8 = 3;
 const PAUSE: u8 = 4;
-const OP_COUNT: u8 = 5;
+const DUP_REPROPOSE: u8 = 5;
+const DUAL_SUBMIT: u8 = 6;
+const COMPACT_STORM: u8 = 7;
+const OP_COUNT: u8 = 8;
 
 const EV_APPLIED: &str = "command_applied";
 
@@ -38,6 +41,7 @@ struct ChainConfig {
     pause_ms: u64,
     compact_every: u64,
     pipeline_depth: usize,
+    compact_storm_attempts: usize,
     recovery_budget_ms: u64,
 }
 
@@ -51,8 +55,47 @@ impl ChainConfig {
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
             pipeline_depth: buggify_knob!(8_usize, 4_usize..17_usize),
+            compact_storm_attempts: buggify_knob!(6_usize, 3_usize..13_usize),
             recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WeightProfile {
+    ReadHeavy,
+    WriteHeavy,
+    Mixed,
+}
+
+impl WeightProfile {
+    fn for_timeline() -> Self {
+        let draw = config_random_f64();
+        if draw < 1.0 / 3.0 {
+            Self::ReadHeavy
+        } else if draw < 2.0 / 3.0 {
+            Self::WriteHeavy
+        } else {
+            Self::Mixed
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ReadHeavy => "read-heavy",
+            Self::WriteHeavy => "write-heavy",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    fn weight(self, operation: u8) -> u64 {
+        let weights = match self {
+            // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM
+            Self::ReadHeavy => [10, 5, 4, 52, 12, 5, 5, 7],
+            Self::WriteHeavy => [30, 12, 8, 8, 4, 14, 14, 10],
+            Self::Mixed => [20, 10, 9, 16, 10, 11, 11, 13],
+        };
+        weights[usize::from(operation)]
     }
 }
 
@@ -75,6 +118,30 @@ enum ProposalResult {
     Acked { leader: Option<u64>, slot: u64 },
     Rejected { leader: Option<u64> },
     Ambiguous,
+}
+
+enum CompactResult {
+    Accepted { leader: Option<u64> },
+    Rejected { leader: Option<u64> },
+    Ambiguous,
+}
+
+#[derive(Clone)]
+struct AckedCommand {
+    seq: u64,
+    payload: Vec<u8>,
+    cmd_hash: u64,
+    slot: u64,
+    node: usize,
+}
+
+#[derive(Default)]
+struct AdversarialCoverage {
+    duplicate_reproposed: bool,
+    duplicate_across_leader_change: bool,
+    dual_submitted: bool,
+    compact_storm_modes: [bool; 3],
+    payload_classes: [bool; 4],
 }
 
 struct OnDrop<F: FnOnce()> {
@@ -106,6 +173,7 @@ pub(crate) struct ChainWorkload {
     final_state: Option<ChainState>,
     issued_count: u64,
     external_digests_compared: bool,
+    adversarial: AdversarialCoverage,
     safety_only: bool,
 }
 
@@ -126,11 +194,44 @@ impl ChainWorkload {
         }
     }
 
+    fn choose_operation(profile: WeightProfile, enabled: &[u8], draw: u64) -> u8 {
+        let total = enabled
+            .iter()
+            .map(|operation| profile.weight(*operation))
+            .sum::<u64>();
+        let mut ticket = draw % total.max(1);
+        for operation in enabled {
+            let weight = profile.weight(*operation);
+            if ticket < weight {
+                return *operation;
+            }
+            ticket -= weight;
+        }
+        enabled[0]
+    }
+
+    fn update_leader_hint(
+        current: &mut Option<usize>,
+        stale: &mut Option<usize>,
+        observed: Option<u64>,
+        server_count: usize,
+    ) {
+        let next = observed
+            .and_then(|id| usize::try_from(id).ok())
+            .filter(|node| *node < server_count);
+        if let (Some(previous), Some(next)) = (*current, next)
+            && previous != next
+        {
+            *stale = Some(previous);
+        }
+        *current = next;
+    }
+
     fn payload(class: u64, ordinary: usize, large: usize, mut seed: u64) -> Vec<u8> {
         let len = match class % 4 {
             0 => 0,
             1 => 1,
-            2 => 1 + usize::try_from(seed % u64::try_from(ordinary).unwrap_or(1)).unwrap_or(0),
+            2 => ordinary,
             _ => large,
         };
         let mut bytes = Vec::with_capacity(len);
@@ -198,15 +299,19 @@ impl Workload for ChainWorkload {
 
         let config = ChainConfig::for_timeline();
         let operations = Self::enabled_operations();
+        let weight_profile = WeightProfile::for_timeline();
+        tracing::info!(profile = weight_profile.name(), "chain_weight_profile");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         let server_count = public_clients.len();
         let mut next_seq = 0_u64;
         let mut leader_hint: Option<usize> = None;
+        let mut stale_leader_hint: Option<usize> = None;
         let mut max_acked_slot: Option<u64> = None;
         let mut successful_after_ambiguity = false;
         let mut live_states = BTreeMap::<u64, u64>::new();
+        let mut acked_commands = Vec::<AckedCommand>::new();
 
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
             let mut client = public_clients[target].clone();
@@ -260,10 +365,18 @@ impl Workload for ChainWorkload {
             let time = time.clone();
             async move {
                 moonpool_sim::select! {
-                    response = client.compact(Compact { up_to }) => response
-                        .ok()
-                        .is_some_and(|response| response.into_inner().accepted),
-                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => false,
+                    response = client.compact(Compact { up_to }) => match response {
+                        Ok(response) => {
+                            let ack = response.into_inner();
+                            if ack.accepted {
+                                CompactResult::Accepted { leader: ack.leader }
+                            } else {
+                                CompactResult::Rejected { leader: ack.leader }
+                            }
+                        }
+                        Err(_) => CompactResult::Ambiguous,
+                    },
+                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => CompactResult::Ambiguous,
                 }
             }
         };
@@ -278,6 +391,7 @@ impl Workload for ChainWorkload {
                 let seq = next_seq;
                 next_seq = next_seq.saturating_add(1);
                 let raw = ctx.random().random::<u64>();
+                let payload_class = offset.saturating_add(1) % 4;
                 let payload = Self::payload(
                     u64::try_from(offset).unwrap_or(0).saturating_add(1),
                     config.command_bytes,
@@ -292,9 +406,9 @@ impl Workload for ChainWorkload {
                     bytes = payload.len() as u64,
                     "chain_command_submitted"
                 );
-                primer.push((seq, payload, cmd_hash, offset % server_count));
+                primer.push((seq, payload, payload_class, cmd_hash, offset % server_count));
             }
-            let results = join_all(primer.iter().map(|(seq, payload, _, target)| {
+            let results = join_all(primer.iter().map(|(seq, payload, _, _, target)| {
                 let attempt = propose_once(*target, *seq, payload.clone(), false);
                 let time = time.clone();
                 async move {
@@ -305,10 +419,17 @@ impl Workload for ChainWorkload {
                 }
             }))
             .await;
-            for ((seq, _, cmd_hash, _), result) in primer.into_iter().zip(results) {
+            for ((seq, payload, payload_class, cmd_hash, target), result) in
+                primer.into_iter().zip(results)
+            {
                 match result {
                     ProposalResult::Acked { leader, slot } => {
-                        leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                        Self::update_leader_hint(
+                            &mut leader_hint,
+                            &mut stale_leader_hint,
+                            leader,
+                            server_count,
+                        );
                         max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                         self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
                         tracing::info!(
@@ -326,9 +447,22 @@ impl Workload for ChainWorkload {
                                 "client_acknowledged"
                             );
                         }
+                        acked_commands.push(AckedCommand {
+                            seq,
+                            payload,
+                            cmd_hash,
+                            slot,
+                            node: leader_hint.unwrap_or(target),
+                        });
+                        self.adversarial.payload_classes[payload_class] = true;
                     }
                     ProposalResult::Rejected { leader } => {
-                        leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                        Self::update_leader_hint(
+                            &mut leader_hint,
+                            &mut stale_leader_hint,
+                            leader,
+                            server_count,
+                        );
                         self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
@@ -345,7 +479,10 @@ impl Workload for ChainWorkload {
                     up_to,
                     "chain_control_submitted"
                 );
-                if compact_once(leader_hint.unwrap_or(0), up_to).await {
+                if matches!(
+                    compact_once(leader_hint.unwrap_or(0), up_to).await,
+                    CompactResult::Accepted { .. }
+                ) {
                     tracing::info!(up_to, "chain_compact_accepted");
                 }
             }
@@ -368,8 +505,7 @@ impl Workload for ChainWorkload {
             let raw_class = ctx.random().random::<u64>();
             let raw_payload = ctx.random().random::<u64>();
             let raw_pause = ctx.random().random::<u64>();
-            let op_span = u64::try_from(operations.len()).unwrap_or(1);
-            let op = operations[usize::try_from(raw_op % op_span).unwrap_or(0)];
+            let op = Self::choose_operation(weight_profile, &operations, raw_op);
             let target =
                 usize::try_from(raw_target % u64::try_from(server_count).unwrap_or(1)).unwrap_or(0);
 
@@ -377,6 +513,7 @@ impl Workload for ChainWorkload {
                 PROPOSE | PROPOSE_TO_NON_LEADER => {
                     let seq = next_seq;
                     next_seq = next_seq.saturating_add(1);
+                    let payload_class = usize::try_from(raw_class % 4).unwrap_or(0);
                     let payload = Self::payload(
                         raw_class,
                         config.command_bytes,
@@ -446,7 +583,7 @@ impl Workload for ChainWorkload {
                         let retry_target =
                             leader_hint.unwrap_or((chosen_target + 1) % server_count);
                         let reconciled = moonpool_sim::select! {
-                            result = propose_once(retry_target, seq, payload, false) => result,
+                            result = propose_once(retry_target, seq, payload.clone(), false) => result,
                             _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
                             () = shutdown.cancelled() => ProposalResult::Ambiguous,
                         };
@@ -460,7 +597,12 @@ impl Workload for ChainWorkload {
 
                     match result {
                         ProposalResult::Acked { leader, slot } => {
-                            leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                            Self::update_leader_hint(
+                                &mut leader_hint,
+                                &mut stale_leader_hint,
+                                leader,
+                                server_count,
+                            );
                             max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                             self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
                             tracing::info!(
@@ -478,6 +620,14 @@ impl Workload for ChainWorkload {
                                     "client_acknowledged"
                                 );
                             }
+                            acked_commands.push(AckedCommand {
+                                seq,
+                                payload: payload.clone(),
+                                cmd_hash,
+                                slot,
+                                node: leader_hint.unwrap_or(chosen_target),
+                            });
+                            self.adversarial.payload_classes[payload_class] = true;
                             if seq.is_multiple_of(config.compact_every) {
                                 let control =
                                     Command::Control(Control::Truncate { up_to: Slot(slot) });
@@ -486,18 +636,235 @@ impl Workload for ChainWorkload {
                                     up_to = slot,
                                     "chain_control_submitted"
                                 );
-                                if compact_once(leader_hint.unwrap_or(chosen_target), slot).await {
+                                if matches!(
+                                    compact_once(leader_hint.unwrap_or(chosen_target), slot).await,
+                                    CompactResult::Accepted { .. }
+                                ) {
                                     tracing::info!(up_to = slot, "chain_compact_accepted");
                                 }
                             }
                         }
                         ProposalResult::Rejected { leader } => {
-                            leader_hint = leader.and_then(|id| usize::try_from(id).ok());
+                            Self::update_leader_hint(
+                                &mut leader_hint,
+                                &mut stale_leader_hint,
+                                leader,
+                                server_count,
+                            );
                             self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
                         ProposalResult::Ambiguous => {
                             self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                        }
+                    }
+                }
+                DUP_REPROPOSE => {
+                    if let Some(current_leader) = leader_hint {
+                        let candidates = acked_commands
+                            .iter()
+                            .filter(|command| command.node != current_leader)
+                            .collect::<Vec<_>>();
+                        if candidates.is_empty() {
+                            continue;
+                        }
+                        let index = usize::try_from(
+                            raw_payload % u64::try_from(candidates.len()).unwrap_or(1),
+                        )
+                        .unwrap_or(0);
+                        let command = (*candidates[index]).clone();
+                        let duplicate_target = current_leader;
+                        tracing::info!(
+                            cmd = %hash_text(command.cmd_hash),
+                            seq = command.seq,
+                            original_slot = command.slot,
+                            original_node = command.node,
+                            target = duplicate_target,
+                            "chain_duplicate_reproposed"
+                        );
+                        if !self.adversarial.duplicate_reproposed {
+                            assert_reachable!("chain: duplicate reproposal executes");
+                            self.adversarial.duplicate_reproposed = true;
+                        }
+                        let result = moonpool_sim::select! {
+                            result = propose_once(
+                                duplicate_target,
+                                command.seq,
+                                command.payload,
+                                false,
+                            ) => result,
+                            _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
+                            () = shutdown.cancelled() => ProposalResult::Ambiguous,
+                        };
+                        match result {
+                            ProposalResult::Acked { leader, slot } => {
+                                assert_always!(
+                                    slot == command.slot,
+                                    "chain: duplicate committed ack preserves its slot",
+                                    {
+                                        "original_slot" => command.slot,
+                                        "observed_slot" => slot,
+                                        "target" => duplicate_target,
+                                    }
+                                );
+                                if !self.adversarial.duplicate_across_leader_change {
+                                    assert_reachable!(
+                                        "chain: duplicate suppression observed after leader change"
+                                    );
+                                    self.adversarial.duplicate_across_leader_change = true;
+                                }
+                                Self::update_leader_hint(
+                                    &mut leader_hint,
+                                    &mut stale_leader_hint,
+                                    leader,
+                                    server_count,
+                                );
+                            }
+                            ProposalResult::Rejected { leader } => {
+                                Self::update_leader_hint(
+                                    &mut leader_hint,
+                                    &mut stale_leader_hint,
+                                    leader,
+                                    server_count,
+                                );
+                            }
+                            ProposalResult::Ambiguous => {}
+                        }
+                    }
+                }
+                DUAL_SUBMIT => {
+                    if server_count > 1 && time.now() < Duration::from_millis(CHAOS_DURATION_MS) {
+                        let seq = next_seq;
+                        next_seq = next_seq.saturating_add(1);
+                        let payload_class = usize::try_from(raw_class % 4).unwrap_or(0);
+                        let payload = Self::payload(
+                            raw_class,
+                            config.command_bytes,
+                            config.large_command_bytes,
+                            raw_payload,
+                        );
+                        let cmd_hash = user_command_hash(&payload);
+                        self.submitted.insert(cmd_hash);
+                        tracing::info!(
+                            cmd = %hash_text(cmd_hash),
+                            seq,
+                            bytes = payload.len() as u64,
+                            "chain_command_submitted"
+                        );
+                        let second_target = (target
+                            + 1
+                            + usize::try_from(
+                                raw_pause % u64::try_from(server_count - 1).unwrap_or(1),
+                            )
+                            .unwrap_or(0))
+                            % server_count;
+                        tracing::info!(
+                            cmd = %hash_text(cmd_hash),
+                            seq,
+                            first = target,
+                            second = second_target,
+                            "chain_dual_submitted"
+                        );
+                        if !self.adversarial.dual_submitted {
+                            assert_reachable!("chain: dual-submit operation executes");
+                            self.adversarial.dual_submitted = true;
+                        }
+
+                        let targets = [target, second_target];
+                        let attempts = targets.iter().map(|target| {
+                            let attempt = propose_once(*target, seq, payload.clone(), false);
+                            let time = time.clone();
+                            let shutdown = shutdown.clone();
+                            async move {
+                                moonpool_sim::select! {
+                                    result = attempt => result,
+                                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
+                                    () = shutdown.cancelled() => ProposalResult::Ambiguous,
+                                }
+                            }
+                        });
+                        let results = join_all(attempts).await;
+                        let mut committed: Option<(u64, Option<u64>, usize)> = None;
+                        let mut rejected = 0_usize;
+                        let mut redirect = None;
+                        for (attempt_target, result) in targets.into_iter().zip(results) {
+                            match result {
+                                ProposalResult::Acked { leader, slot } => {
+                                    if let Some((original_slot, _, _)) = committed {
+                                        assert_always!(
+                                            slot == original_slot,
+                                            "chain: dual-submit committed slots agree",
+                                            {
+                                                "original_slot" => original_slot,
+                                                "observed_slot" => slot,
+                                                "target" => attempt_target,
+                                            }
+                                        );
+                                    } else {
+                                        committed = Some((slot, leader, attempt_target));
+                                    }
+                                }
+                                ProposalResult::Rejected { leader } => {
+                                    rejected += 1;
+                                    redirect = redirect.or(leader);
+                                }
+                                ProposalResult::Ambiguous => {}
+                            }
+                        }
+
+                        if let Some((slot, leader, ack_target)) = committed {
+                            Self::update_leader_hint(
+                                &mut leader_hint,
+                                &mut stale_leader_hint,
+                                leader,
+                                server_count,
+                            );
+                            max_acked_slot =
+                                Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
+                            self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                            tracing::info!(
+                                cmd = %hash_text(cmd_hash),
+                                seq,
+                                slot,
+                                "chain_command_acked"
+                            );
+                            if let Some(node) = leader {
+                                tracing::info!(
+                                    client_id,
+                                    seq_id = seq,
+                                    slot,
+                                    node,
+                                    "client_acknowledged"
+                                );
+                            }
+                            acked_commands.push(AckedCommand {
+                                seq,
+                                payload,
+                                cmd_hash,
+                                slot,
+                                node: leader_hint.unwrap_or(ack_target),
+                            });
+                            self.adversarial.payload_classes[payload_class] = true;
+                        } else if rejected == targets.len() {
+                            Self::update_leader_hint(
+                                &mut leader_hint,
+                                &mut stale_leader_hint,
+                                redirect,
+                                server_count,
+                            );
+                            self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
+                            tracing::info!(
+                                cmd = %hash_text(cmd_hash),
+                                seq,
+                                "chain_command_rejected"
+                            );
+                        } else {
+                            self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                            tracing::info!(
+                                cmd = %hash_text(cmd_hash),
+                                seq,
+                                "chain_proposal_ambiguous"
+                            );
                         }
                     }
                 }
@@ -514,8 +881,108 @@ impl Workload for ChainWorkload {
                         );
                         let target = leader_hint.unwrap_or(target);
                         let accepted = compact_once(target, up_to).await;
-                        if accepted {
+                        if matches!(accepted, CompactResult::Accepted { .. }) {
                             tracing::info!(up_to, "chain_compact_accepted");
+                        }
+                    }
+                }
+                COMPACT_STORM => {
+                    if let Some(base) = max_acked_slot {
+                        let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
+                        for attempt in 0..config.compact_storm_attempts {
+                            let mode = (first_mode + attempt) % 3;
+                            let (mode_name, up_to, request_target) = match mode {
+                                0 => (
+                                    "overask",
+                                    base.saturating_add(10_000 + raw_payload % 10_000),
+                                    leader_hint.unwrap_or(target),
+                                ),
+                                1 if server_count > 1 && leader_hint.is_some() => {
+                                    let leader = leader_hint.unwrap_or(0) % server_count;
+                                    let offset = 1 + usize::try_from(
+                                        (raw_target + u64::try_from(attempt).unwrap_or(0))
+                                            % u64::try_from(server_count - 1).unwrap_or(1),
+                                    )
+                                    .unwrap_or(0);
+                                    ("follower", base, (leader + offset) % server_count)
+                                }
+                                2 if stale_leader_hint.is_some()
+                                    && stale_leader_hint != leader_hint =>
+                                {
+                                    ("stale-leader", base, stale_leader_hint.unwrap_or(target))
+                                }
+                                _ => continue,
+                            };
+                            let control =
+                                Command::Control(Control::Truncate { up_to: Slot(up_to) });
+                            let cmd_hash = command_hash(&control);
+                            tracing::info!(
+                                cmd = %hash_text(cmd_hash),
+                                up_to,
+                                "chain_control_submitted"
+                            );
+                            tracing::info!(
+                                cmd = %hash_text(cmd_hash),
+                                up_to,
+                                target = request_target,
+                                mode = mode_name,
+                                attempt,
+                                "chain_compact_storm_request"
+                            );
+                            if !self.adversarial.compact_storm_modes[mode] {
+                                match mode {
+                                    0 => {
+                                        assert_reachable!("chain: compact-storm overask executes");
+                                    }
+                                    1 => {
+                                        assert_reachable!(
+                                            "chain: compact-storm follower request executes"
+                                        );
+                                    }
+                                    2 => {
+                                        assert_reachable!(
+                                            "chain: compact-storm stale-leader request executes"
+                                        );
+                                    }
+                                    _ => unreachable!("compact storm mode is modulo three"),
+                                }
+                                self.adversarial.compact_storm_modes[mode] = true;
+                            }
+
+                            let first = compact_once(request_target, up_to).await;
+                            let result = match first {
+                                CompactResult::Rejected {
+                                    leader: Some(redirect),
+                                } if usize::try_from(redirect).ok().is_some_and(|node| {
+                                    node < server_count && node != request_target
+                                }) =>
+                                {
+                                    let redirect =
+                                        usize::try_from(redirect).unwrap_or(request_target);
+                                    compact_once(redirect, up_to).await
+                                }
+                                terminal => terminal,
+                            };
+                            match result {
+                                CompactResult::Accepted { leader } => {
+                                    Self::update_leader_hint(
+                                        &mut leader_hint,
+                                        &mut stale_leader_hint,
+                                        leader,
+                                        server_count,
+                                    );
+                                    tracing::info!(up_to, "chain_compact_accepted");
+                                }
+                                CompactResult::Rejected { leader } => {
+                                    Self::update_leader_hint(
+                                        &mut leader_hint,
+                                        &mut stale_leader_hint,
+                                        leader,
+                                        server_count,
+                                    );
+                                }
+                                CompactResult::Ambiguous => {}
+                            }
                         }
                     }
                 }
@@ -555,6 +1022,56 @@ impl Workload for ChainWorkload {
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
         );
+        if !self.safety_only {
+            assert_sometimes!(
+                matches!(weight_profile, WeightProfile::ReadHeavy),
+                "chain: read-heavy operation weights are selected"
+            );
+            assert_sometimes!(
+                matches!(weight_profile, WeightProfile::WriteHeavy),
+                "chain: write-heavy operation weights are selected"
+            );
+            assert_sometimes!(
+                matches!(weight_profile, WeightProfile::Mixed),
+                "chain: mixed operation weights are selected"
+            );
+            assert_sometimes!(
+                self.adversarial.duplicate_across_leader_change,
+                "a duplicate is suppressed across a leader change"
+            );
+            assert_sometimes!(
+                self.adversarial.dual_submitted,
+                "chain: concurrent dual-submit is exercised"
+            );
+            assert_sometimes!(
+                self.adversarial.compact_storm_modes[0],
+                "chain: compact-storm overask is exercised"
+            );
+            assert_sometimes!(
+                self.adversarial.compact_storm_modes[1],
+                "chain: compact-storm follower targeting is exercised"
+            );
+            assert_sometimes!(
+                self.adversarial.compact_storm_modes[2],
+                "chain: compact-storm stale-leader targeting is exercised"
+            );
+            assert_sometimes!(
+                self.adversarial.payload_classes[0],
+                "chain: an empty payload is acknowledged"
+            );
+            assert_sometimes!(
+                self.adversarial.payload_classes[1],
+                "chain: a one-byte payload is acknowledged"
+            );
+            assert_sometimes!(
+                self.adversarial.payload_classes[2],
+                "chain: a boundary-sized payload is acknowledged"
+            );
+            assert_sometimes!(
+                self.adversarial.payload_classes[3],
+                "chain: a large payload is acknowledged"
+            );
+        }
 
         if self.safety_only {
             let observation_end =

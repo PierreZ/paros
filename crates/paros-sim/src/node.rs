@@ -31,9 +31,29 @@ use paros::{
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
+const QUIET_HOOKS_KEY: &str = "paros-quiet-driver-hooks";
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
+
+/// A paros node with simulation-only driver decisions disabled. This keeps the
+/// dedicated lifecycle choreography's built-in graceful attrition as its sole
+/// perturbation without mutating Moonpool's iteration-owned BUGGIFY state.
+pub(crate) struct QuietNodeProcess;
+
+#[async_trait]
+impl Process for QuietNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if ctx.state().get::<bool>(QUIET_HOOKS_KEY).is_none() {
+            ctx.state().publish(QUIET_HOOKS_KEY, true);
+        }
+        NodeProcess.run(ctx).await
+    }
+}
 
 #[async_trait]
 impl Process for NodeProcess {
@@ -83,6 +103,7 @@ impl Process for NodeProcess {
         let hooks = BuggifyHooks {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
+            enabled: ctx.state().get::<bool>(QUIET_HOOKS_KEY) != Some(true),
         };
         // The per-iteration shared audit: pure observation, published beside the
         // storage world so every node folds its transitions into one incremental
@@ -536,11 +557,12 @@ impl Storage for DurableStorage {
 struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
+    enabled: bool,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
     fn active(&self) -> bool {
-        self.time.now() < self.cutoff
+        self.enabled && self.time.now() < self.cutoff
     }
 }
 

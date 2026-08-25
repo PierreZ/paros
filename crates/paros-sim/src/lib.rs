@@ -15,6 +15,7 @@
 mod audit;
 mod chain;
 mod chain_workload;
+mod choreography;
 mod node;
 mod oracle;
 mod workload;
@@ -33,6 +34,8 @@ use moonpool_sim::{
 };
 
 use crate::chain_workload::ChainWorkload;
+use crate::choreography::SnapshotRecoveryWorkload;
+use crate::node::QuietNodeProcess;
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
@@ -124,6 +127,10 @@ pub const COVERAGE_ITERATIONS: usize = 256;
 /// Cap for the network-swarm safety axis. This is likewise only a ceiling; its
 /// wider timing surface needs room to establish the unchanged 32-root plateau.
 pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
+/// Small cap for the dedicated graceful lifecycle choreography. Its workload
+/// forces one ordered scenario per root, so it needs plateau headroom rather
+/// than the broad seed volume of the main and network axes.
+pub const SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS: usize = 32;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 /// Eight is enough to drive real branches while keeping the sancov gate suitable
 /// for CI; Moonpool stops earlier when a root discovers no new frontier.
@@ -399,6 +406,31 @@ fn chain_builder() -> SimulationBuilder {
         .swarm_operations()
 }
 
+/// Fixed-shape lifecycle axis: one graceful Moonpool reboot, no network or
+/// storage chaos, no operation swarm, and no buggified provider knobs.
+fn snapshot_recovery_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .processes(3, || Box::new(QuietNodeProcess))
+        .workload_factory(|| Box::new(SnapshotRecoveryWorkload::default()))
+        // Reuse ChainAgreement's continuously pumped application-safety checks,
+        // but not the main campaign's unrelated driver-hook/liveness gates. The
+        // choreography workload owns the stronger ordered lifecycle gate.
+        .invariant(ChainAgreement::network())
+        .enable_chaos([Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 1.0,
+                prob_crash: 0.0,
+                prob_wipe: 0.0,
+                recovery_delay_ms: Some(30_000..30_001),
+                grace_period_ms: Some(1..2),
+                scope: AttritionScope::PerProcess,
+            },
+            mode: ChaosMode::Random,
+        }])
+        .chaos_duration(Duration::from_secs(6))
+}
+
 /// Run one deterministic seed and return its timeline. Driver decisions and
 /// clean-crash attrition are active; the same seed
 /// always produces the same [`RunResult`].
@@ -456,6 +488,25 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
     let builder = builder.enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED));
     builder
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
+        .run()
+}
+
+/// Coverage-stable roots for the dedicated graceful kill → truncate → restart
+/// → snapshot-install choreography.
+#[must_use]
+pub fn explore_snapshot_recovery(max_iterations: usize) -> SimulationReport {
+    let builder = snapshot_recovery_builder();
+    #[cfg(feature = "native")]
+    let builder = builder.enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED));
+    builder.until_coverage_stable(4, max_iterations).run()
+}
+
+/// Replay one dedicated graceful snapshot-recovery choreography seed.
+#[must_use]
+pub fn run_snapshot_recovery_seed(seed: u64) -> SimulationReport {
+    snapshot_recovery_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
         .run()
 }
 
