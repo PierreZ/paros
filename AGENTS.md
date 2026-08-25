@@ -15,6 +15,14 @@ Dev shell is a Nix flake — enter `nix develop` (or rely on direnv) before runn
 Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl. the `wasm32-unknown-unknown`
 target). Clippy pedantic is on (`[workspace.lints]` in `Cargo.toml`).
 
+**Meta issue upkeep.** Issue #69 (`meta: up next`, label `up-next`) is the rolling backlog
+pointer — always exactly the next 3 issues, edited in place, never closed. Whenever a PR merges
+that closes or materially advances a tracked issue, update #69 in the same session: move closed
+work into "Recently landed" (one line: PR number, what it proved/fixed, seeds pinned), promote
+the next item from "On deck" into "Next 3" with a one-line why, and re-rank if the merge changed
+the picture (e.g. a feeder bug closed, an oracle went from armed to proven). Keep the issue's own
+maintenance contract: never more than 3 in "Next 3".
+
 - `cargo check --target wasm32-unknown-unknown -p paros-core` — portability gate; `paros-core`
   must stay buildable for wasm (CI enforces it).
 - `cargo xtask sim …` — sancov-instrumented simulation runner (`scripts/sancov-rustc.sh` is the
@@ -203,6 +211,18 @@ A regression unit test may *pin* the bug afterward, but it never replaces step 4
 the simulation cannot reproduce is treated as **unproven** (it is probably not a real bug: safety is
 often preserved by an invariant you missed). Do not add speculative defensive code for an
 unreproducible claim.
+
+The sim surface is never finished, and growing it is part of every change, not a follow-up.
+Every new feature or protocol path lands *with* its `sometimes`/`reachable` gates (so saturation
+proves the path is genuinely visited, not merely present), with its rare-but-valid decisions
+hooked through `DriverHooks` BUGGIFY locations, and with its tunables born as workload-buggified
+config. And beyond the operation alphabet: keep planting **new inline `buggify_with_prob!` /
+`buggify_knob!` call sites** at the boundaries the BUGGIFY post names — optional work that can be
+skipped, error-handling paths that can be taken spuriously, concurrency windows that can be
+stretched, tuning knobs that can be pushed to extremes — wherever a rare-but-valid state needs to
+become *likely* instead of waiting for the swarm to stumble into it. Those sites live in the
+driver hooks and the sim/workload layers (per the turbulence doctrine above — never in
+`paros-core`), each as its own independent location so per-seed activation composes.
 
 ## Simulation references
 

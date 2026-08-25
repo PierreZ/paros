@@ -454,6 +454,17 @@ pub fn explore_network_safety(max_iterations: usize) -> SimulationReport {
         .run()
 }
 
+/// Raw-iteration network-swarm sweep: `iterations` fresh seeds through the
+/// safety oracles with **no** saturation gate and no plateau stop. This is the
+/// red-seed *hunting* entry point for partition-shaped interleavings (the #94
+/// double-apply lives on this axis): [`explore_network_safety`] stops once
+/// coverage plateaus, which is exactly wrong for a hunt that needs raw seed
+/// volume past the plateau.
+#[must_use]
+pub fn network_hunt(iterations: usize) -> SimulationReport {
+    chain_network_builder().set_iterations(iterations).run()
+}
+
 /// Replay one network-swarm safety-axis seed deterministically (the axis
 /// [`explore_network_safety`] sweeps): same builder, one iteration.
 #[must_use]
