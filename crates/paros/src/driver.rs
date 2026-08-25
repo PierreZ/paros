@@ -1407,6 +1407,16 @@ where
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
+    // The tick deadline is ABSOLUTE, not a fresh relative sleep per loop
+    // iteration: `select!` drops and re-creates its futures every pass, so a
+    // relative `sleep(TICK_INTERVAL)` resets whenever any other branch is
+    // ready. Under sustained sub-interval traffic (a singleton absorbing every
+    // client retry, a reconnect storm) the protocol clock then never advances —
+    // no election, no ack, clients retry harder: a self-sustaining starvation
+    // loop (seed 3847608256092482294 ticked twice in 81 simulated seconds).
+    // With an absolute deadline the sleep is zero-length once the deadline
+    // passes and fires regardless of load.
+    let mut next_tick = time.now() + TICK_INTERVAL;
 
     loop {
         moonpool_core::select! {
@@ -1553,7 +1563,8 @@ where
                     snapshot: storage.snapshot(),
                 });
             }
-            _ = time.sleep(TICK_INTERVAL) => {
+            _ = time.sleep(next_tick.saturating_sub(time.now())) => {
+                next_tick = time.now() + TICK_INTERVAL;
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision
