@@ -81,6 +81,7 @@ impl RawNode {
             "a candidate promises the ballot it campaigns at"
         );
         self.broadcast(&Message::Prepare {
+            config_id: self.hard_state.config_id,
             from: me,
             ballot: self.ballot,
             from_slot,
@@ -160,6 +161,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Prepare {
+                    config_id: self.hard_state.config_id,
                     from: self.config.id,
                     ballot,
                     from_slot: next,

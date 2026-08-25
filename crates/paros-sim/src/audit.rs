@@ -298,6 +298,7 @@ struct AuditState {
     any_chosen: bool,
     any_proposal_checked: bool,
     any_ack_checked: bool,
+    config_tagged_protocol_message: bool,
     any_leader: bool,
     leader_promise_checked: bool,
     compacted: bool,
@@ -379,6 +380,10 @@ impl AuditState {
             "leadership turns over and the cluster recovers"
         );
         assert_sometimes!(self.any_leader, "a leader is elected");
+        assert_sometimes!(
+            self.config_tagged_protocol_message,
+            "a protocol message carries a configuration identity"
+        );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -787,6 +792,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn sent(&self, node: NodeId, _to: NodeId, msg: &Message) {
+        if msg.config_id().is_some() {
+            let mut st = self.state();
+            reach_once!(
+                st.config_tagged_protocol_message,
+                "a protocol message carries a configuration identity"
+            );
+        }
         // #95: every broadcast leader beat feeds the zombie-leader streak.
         if let Message::Heartbeat { ballot, seq, .. } = msg {
             self.state().observe_beat(node.0, *ballot, *seq);

@@ -41,7 +41,8 @@ impl RawNode {
                 .accepted
                 .get(&ci)
                 .map_or(self.hard_state.max_promised_ballot, |(b, _)| *b);
-            self.pending_snapshot_offers.push((to, ci, choosing));
+            self.pending_snapshot_offers
+                .push((to, ci, choosing, self.hard_state.config_id));
             return;
         }
         if from_slot > ci {

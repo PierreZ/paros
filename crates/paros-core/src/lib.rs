@@ -42,7 +42,7 @@ pub use ready::Ready;
 pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, SessionEntry, Slot,
+    Value, command_fingerprint,
 };
 pub use write::{MustSync, WriteOp};

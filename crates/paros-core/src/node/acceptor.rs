@@ -28,6 +28,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Nack {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     promised: self.hard_state.max_promised_ballot,
@@ -74,6 +75,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Promise {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     from_slot,
@@ -91,6 +93,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Nack {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     promised: self.hard_state.max_promised_ballot,
@@ -135,6 +138,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Accepted {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     slot,
@@ -145,6 +149,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::Nack {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     promised: self.hard_state.max_promised_ballot,

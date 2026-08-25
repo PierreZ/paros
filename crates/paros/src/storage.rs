@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
+use paros_core::{
+    Ballot, Command, Config, ConfigId, HardState, MustSync, SessionEntry, Slot, Storage,
+};
 
 /// A durable-write failure. The read-side [`paros_core::Storage`] recovery port
 /// stays infallible, but every *write* is fallible **from day one** so a later
@@ -40,6 +42,12 @@ impl std::error::Error for StorageError {}
 /// **before** sending its messages (the persist-before-send rule). Every write
 /// returns [`Result`] so faults are injectable from the start.
 pub trait NodeStorage: Storage {
+    /// Persist the durable cluster configuration identity.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError>;
+
     /// Persist a raised promised ballot (Phase 1).
     ///
     /// # Errors
@@ -178,6 +186,11 @@ impl MemStorage {
 }
 
 impl NodeStorage for MemStorage {
+    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
+        self.hard_state.config_id = config_id;
+        Ok(())
+    }
+
     fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.hard_state.max_promised_ballot = ballot;
         Ok(())
@@ -271,5 +284,29 @@ impl Storage for MemStorage {
             .iter()
             .map(|(&(client, seq), &slot)| (client, seq, slot))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::{ConfigId, NodeId, QuorumSystem};
+
+    #[test]
+    fn config_id_round_trips_through_storage() {
+        let mut storage = MemStorage::new(Config {
+            id: NodeId(1),
+            peers: vec![NodeId(1)],
+            quorum_system: QuorumSystem::Majority,
+        });
+
+        storage
+            .persist_config_id(ConfigId(17))
+            .expect("persist configuration identity");
+        storage
+            .sync(MustSync::Sync)
+            .expect("sync configuration identity");
+
+        assert_eq!(storage.initial_state().0.config_id, ConfigId(17));
     }
 }

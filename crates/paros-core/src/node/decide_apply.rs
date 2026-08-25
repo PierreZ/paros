@@ -70,6 +70,7 @@ impl RawNode {
             },
         );
         self.broadcast(&Message::Accept {
+            config_id: self.hard_state.config_id,
             from: me,
             ballot,
             slot,
@@ -92,6 +93,7 @@ impl RawNode {
         };
         self.mark_chosen(slot, &command, ballot);
         self.broadcast(&Message::Commit {
+            config_id: self.hard_state.config_id,
             from: me,
             ballot,
             slot,

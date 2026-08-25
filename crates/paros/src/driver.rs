@@ -23,8 +23,8 @@ use moonpool_core::{
 };
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
-    RawNode, ReadIndexResult, ReadState, SessionEntry, Slot, Value, WriteOp,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Message, NodeId, NodeRole,
+    ProposeResult, RawNode, ReadIndexResult, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -379,44 +379,64 @@ fn message_kind(m: &Message) -> &'static str {
 /// `None` on a leader that has chosen nothing (an empty prefix is not slot 0;
 /// see [`paros_core::Message::Heartbeat`]). The kinds with no ballot at all
 /// (`CheckLeader`, the catch-up pair) return `None` outright.
-fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
+fn message_route(m: &Message) -> Option<(NodeId, ConfigId, Ballot, Option<Slot>)> {
     match m {
         // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {
+            config_id,
             from,
             ballot,
             from_slot,
         }
         | Message::Promise {
+            config_id,
             from,
             ballot,
             from_slot,
             ..
-        } => Some((*from, *ballot, Some(*from_slot))),
+        } => Some((*from, *config_id, *ballot, Some(*from_slot))),
         Message::Accept {
-            from, ballot, slot, ..
+            config_id,
+            from,
+            ballot,
+            slot,
+            ..
         }
         | Message::Accepted {
-            from, ballot, slot, ..
+            config_id,
+            from,
+            ballot,
+            slot,
+            ..
         }
         | Message::Nack {
-            from, ballot, slot, ..
+            config_id,
+            from,
+            ballot,
+            slot,
+            ..
         }
         | Message::Commit {
-            from, ballot, slot, ..
-        } => Some((*from, *ballot, Some(*slot))),
+            config_id,
+            from,
+            ballot,
+            slot,
+            ..
+        } => Some((*from, *config_id, *ballot, Some(*slot))),
         Message::Heartbeat {
+            config_id,
             from,
             ballot,
             commit,
             ..
-        } => Some((*from, *ballot, *commit)),
+        } => Some((*from, *config_id, *ballot, *commit)),
         Message::InstallSnapshot {
+            config_id,
             from,
             ballot,
             chosen_index,
             ..
-        } => Some((*from, *ballot, Some(*chosen_index))),
+        } => Some((*from, *config_id, *ballot, Some(*chosen_index))),
         _ => None,
     }
 }
@@ -462,6 +482,7 @@ impl Outbound {
         // wire without either ever being accepted or chosen.
         match msg {
             Message::Accept {
+                config_id,
                 ballot,
                 slot,
                 command,
@@ -474,30 +495,45 @@ impl Outbound {
                 bnode = ballot.node.0,
                 slot = slot.0,
                 vhash = command_hash(command),
+                config_id = config_id.0,
                 "msg_sent"
             ),
             _ => match message_route(msg) {
-                Some((_, ballot, Some(slot))) => tracing::info!(
+                Some((_, config_id, ballot, Some(slot))) => tracing::info!(
                     node = self.self_id,
                     to = to.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
                     slot = slot.0,
+                    config_id = config_id.0,
                     "msg_sent"
                 ),
                 // A beat from a leader whose chosen prefix is still empty: there is
                 // no slot to report, and reporting a bare `0` would put back on the
                 // trace exactly the sentinel #56 took off the wire.
-                Some((_, ballot, None)) => tracing::info!(
+                Some((_, config_id, ballot, None)) => tracing::info!(
                     node = self.self_id,
                     to = to.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
+                    config_id = config_id.0,
                     "msg_sent"
                 ),
-                None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
+                None => {
+                    if let Some(config_id) = msg.config_id() {
+                        tracing::info!(
+                            node = self.self_id,
+                            to = to.0,
+                            kind,
+                            config_id = config_id.0,
+                            "msg_sent"
+                        );
+                    } else {
+                        tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent");
+                    }
+                }
             },
         }
         if let Some(queues) = self.peer_queues.get(&to) {
@@ -614,7 +650,7 @@ fn send_snapshot_offers<S, H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    snapshot_offers: &[(NodeId, Slot, Ballot)],
+    snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
     sessions: &[SessionEntry],
 ) -> SimulationResult<()>
 where
@@ -622,13 +658,14 @@ where
     H: DriverHooks,
     A: Audit,
 {
-    for &(to, offered_index, ballot) in snapshot_offers {
+    for &(to, offered_index, ballot, config_id) in snapshot_offers {
         if storage.applied_slot() != Some(offered_index) {
             return Err(SimulationError::InvalidState(
                 "application snapshot does not match offered chosen index".into(),
             ));
         }
         let message = Message::InstallSnapshot {
+            config_id,
             from: NodeId(out.self_id),
             ballot,
             chosen_index: offered_index,
@@ -843,7 +880,7 @@ where
     };
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
-    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
+    let snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     ready.advance();
@@ -1645,25 +1682,38 @@ where
                 // receives and mark the unmatched ones as network drops.
                 let kind = message_kind(&msg);
                 match message_route(&msg) {
-                    Some((from, ballot, Some(slot))) => tracing::info!(
+                    Some((from, config_id, ballot, Some(slot))) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
                         slot = slot.0,
+                        config_id = config_id.0,
                         "msg_received"
                     ),
                     // The empty-prefix beat: no slot field, mirroring `msg_sent`.
-                    Some((from, ballot, None)) => tracing::info!(
+                    Some((from, config_id, ballot, None)) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
+                        config_id = config_id.0,
                         "msg_received"
                     ),
-                    None => tracing::info!(node = self_id, kind, "msg_received"),
+                    None => {
+                        if let Some(config_id) = msg.config_id() {
+                            tracing::info!(
+                                node = self_id,
+                                kind,
+                                config_id = config_id.0,
+                                "msg_received"
+                            );
+                        } else {
+                            tracing::info!(node = self_id, kind, "msg_received");
+                        }
+                    }
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it

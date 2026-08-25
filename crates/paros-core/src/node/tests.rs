@@ -11,7 +11,8 @@ use crate::message::Message;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, Slot, Value,
+    command_fingerprint,
 };
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart

@@ -168,6 +168,7 @@ fn stale_ballot_heartbeat_ack_never_credits_a_round() {
     let stale = ballot(nodes[0].ballot().round - 1, 0);
     let seq = nodes[0].heartbeat_seq;
     nodes[0].step(Message::HeartbeatAck {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: stale,
         seq,
@@ -189,6 +190,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
     // An ack to a beat broadcast *before* the round began proves nothing: the
     // follower may have answered before a higher ballot promised elsewhere.
     nodes[0].step(Message::HeartbeatAck {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
         seq: required - 1,
@@ -197,6 +199,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
 
     // An ack to a *later* beat counts for every older pending round.
     nodes[0].step(Message::HeartbeatAck {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: b,
         seq: required + 1,
@@ -228,6 +231,7 @@ fn duplicate_acks_from_one_peer_are_not_a_quorum() {
     // The same peer acking three times is still one voice (quorum of 5 is 3).
     for _ in 0..3 {
         nodes[0].step(Message::HeartbeatAck {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: b,
             seq,
@@ -237,6 +241,7 @@ fn duplicate_acks_from_one_peer_are_not_a_quorum() {
 
     // A second distinct peer completes the quorum (self + 1 + 2).
     nodes[0].step(Message::HeartbeatAck {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: b,
         seq,
@@ -261,6 +266,7 @@ fn step_down_drops_pending_read_rounds() {
 
     // A higher-ballot Prepare deposes the leader mid-round.
     nodes[0].step(Message::Prepare {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(b.round + 1, 2),
         from_slot: Slot(3),
@@ -273,6 +279,7 @@ fn step_down_drops_pending_read_rounds() {
 
     // Late acks for the dead round are ignored (role + ballot guard).
     nodes[0].step(Message::HeartbeatAck {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
         seq,
