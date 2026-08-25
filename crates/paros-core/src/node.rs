@@ -314,8 +314,31 @@ impl RawNode {
     /// Bootstrap and restart share this path. The volatile dedup tables
     /// (`applied_seq`, `inflight`) and the `chosen` map are rebuilt from the
     /// durable `accepted` log and `chosen_index`.
+    ///
+    /// # Panics
+    ///
+    /// If the configuration is malformed (membership not sorted/deduplicated,
+    /// or missing this node's own id) or the durable state violates the write
+    /// ordering contract (a floor past the chosen prefix). A broken invariant
+    /// here means corrupted storage or a broken storage implementation;
+    /// crashing beats running on it.
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
+        // Config shape: quorum arithmetic and broadcast both assume a strictly
+        // sorted, deduplicated membership that includes this node. A duplicated
+        // peer silently inflates the quorum; a missing self silently deflates it.
+        assert!(
+            !config.peers.is_empty(),
+            "membership includes at least self"
+        );
+        assert!(
+            config.peers.windows(2).all(|w| w[0] < w[1]),
+            "membership is sorted and deduplicated"
+        );
+        assert!(
+            config.peers.binary_search(&config.id).is_ok(),
+            "membership includes this node's own id"
+        );
         let ballot = hard_state.max_promised_ballot;
 
         // Rebuild the working accepted log by scanning the durable per-slot log
@@ -377,8 +400,21 @@ impl RawNode {
             .keys()
             .next_back()
             .map_or(first_unchosen, |s| Slot(s.0 + 1));
+        // Trust-boundary re-assertion of the durable write ordering: a flushed
+        // floor never outruns the flushed chosen index (only chosen slots are
+        // truncated), and a durable chosen index implies its accept was flushed
+        // in the same or an earlier sync, so the rebuilt `next_slot` sits at or
+        // past the first unchosen slot.
+        assert!(
+            first_slot <= first_unchosen,
+            "the durable floor never outruns the durable chosen index"
+        );
+        assert!(
+            next_slot >= first_unchosen,
+            "the rebuilt next slot never falls inside the chosen prefix"
+        );
 
-        Self {
+        let node = Self {
             config,
             hard_state,
             accepted,
@@ -413,6 +449,89 @@ impl RawNode {
             inflight,
             duplicate_slots,
             duplicates_suppressed: 0,
+        };
+        node.assert_invariants();
+        node
+    }
+
+    /// Assert every cross-field invariant of the node's volatile state. All
+    /// checks are O(1) or O(log n) (min-key probes), so this runs
+    /// unconditionally — TigerBeetle-style — at boot and at the exit of every
+    /// public mutating entry point.
+    fn assert_invariants(&self) {
+        // Ordering chain: only chosen slots are ever dropped, so the compaction
+        // floor never passes the first unchosen slot.
+        assert!(
+            self.first_slot <= self.first_unchosen(),
+            "the compaction floor never outruns the chosen prefix"
+        );
+        // The contiguous walk runs after every `mark_chosen`, so the first
+        // unchosen slot itself is never left sitting in `chosen` (the
+        // `chosen_gap` accessor's contract).
+        assert!(
+            !self.chosen.contains_key(&self.first_unchosen()),
+            "the first unchosen slot is never chosen-but-unwalked"
+        );
+        // Floor bounds: nothing below the floor survives in any slot map.
+        assert!(
+            self.accepted
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot),
+            "no accepted record survives below the compaction floor"
+        );
+        assert!(
+            self.chosen
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot),
+            "no chosen record survives below the compaction floor"
+        );
+        assert!(
+            self.proposer
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot),
+            "no in-flight round survives below the compaction floor"
+        );
+        // Role couplings. Note "leader ballot >= own promise" is deliberately
+        // NOT a global invariant: a still-Leader node can learn a higher-ballot
+        // `Commit` (raising its promise via `mark_chosen`) before any deposing
+        // message arrives — `start_accept_round`'s self-accept guard is the
+        // designed defense. It holds only for a *fresh* leader
+        // (see `try_become_leader`).
+        match self.role {
+            NodeRole::Leader => {
+                assert!(self.election.is_none(), "a leader has no open campaign");
+                assert!(
+                    self.leader == Some(self.config.id),
+                    "a leader knows itself as leader"
+                );
+            }
+            NodeRole::Candidate => {
+                assert!(
+                    self.election
+                        .as_ref()
+                        .is_some_and(|e| e.ballot == self.ballot),
+                    "a candidate's campaign runs at its own operating ballot"
+                );
+            }
+            NodeRole::Follower => {
+                assert!(self.election.is_none(), "a follower has no open campaign");
+            }
+        }
+        // Volatile leadership state exists only on a leader.
+        if !self.proposer.is_empty() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds in-flight accept rounds"
+            );
+        }
+        if !self.read_rounds.is_empty() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds pending read rounds"
+            );
         }
     }
 
@@ -471,6 +590,7 @@ impl RawNode {
                 self.on_heartbeat_ack(from, ballot, seq);
             }
         }
+        self.assert_invariants();
     }
 
     /// Client entry point: try to get `value` chosen, deduplicated by
@@ -496,6 +616,7 @@ impl RawNode {
         let entry = Entry { client, seq, value };
         self.inflight.insert((client, seq), slot);
         self.start_accept_round(slot, Command::User(entry));
+        self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
 
@@ -516,6 +637,7 @@ impl RawNode {
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
         self.start_accept_round(slot, Command::Control(control));
+        self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
 
@@ -527,6 +649,11 @@ impl RawNode {
     /// after this call **and** the chosen prefix covers the captured index
     /// (the fresh-leader fence, see the `read_floor` field). A non-leader
     /// returns [`ReadIndexResult::NotLeader`] with a redirect hint.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition): read rounds must confirm in creation order.
     pub fn read_index(&mut self, ctx: u64) -> ReadIndexResult {
         if self.role != NodeRole::Leader {
             return ReadIndexResult::NotLeader(self.leader);
@@ -547,8 +674,22 @@ impl RawNode {
             acked_by,
             created_tick: self.tick_count,
         });
+        // `try_confirm_reads` front-scans on the premise that creation order is
+        // monotone in both the index and the required beat; pin it at the only
+        // place a round is created (O(1): the last two entries).
+        if let [.., prev, last] = self.read_rounds.as_slice() {
+            assert!(
+                prev.index <= last.index,
+                "read rounds are created with monotone indexes"
+            );
+            assert!(
+                prev.required_seq <= last.required_seq,
+                "read rounds are created with monotone required beats"
+            );
+        }
         // A single-node cluster is its own quorum: confirm in this same batch.
         self.try_confirm_reads();
+        self.assert_invariants();
         ReadIndexResult::Pending
     }
 
@@ -574,6 +715,12 @@ impl RawNode {
     /// sealed ledger grows with distinct client identities for the lifetime of
     /// the cluster; bounding it needs a client-session expiry policy, which is
     /// out of scope here.)
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition): the floor must rise monotonically and stay
+    /// clamped inside the chosen prefix.
     pub fn compact(&mut self, up_to: Slot) -> Slot {
         let Some(ci) = self.hard_state.chosen_index else {
             return self.first_slot;
@@ -583,6 +730,7 @@ impl RawNode {
         if first <= self.first_slot {
             return self.first_slot;
         }
+        let old_floor = self.first_slot;
         // Seal from the *ledger*, not from the dropped `chosen` range: a
         // duplicate slot's chosen command is a `User` entry whose ledger record
         // points at its first slot, and sealing the duplicate's own slot would
@@ -603,6 +751,14 @@ impl RawNode {
         self.first_slot = first;
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
+        // Postconditions: the floor strictly rose (the no-op path returned
+        // above) and stayed clamped inside the chosen prefix.
+        assert!(self.first_slot > old_floor, "compaction raised the floor");
+        assert!(
+            self.first_slot <= self.first_unchosen(),
+            "compaction never drops an undecided slot"
+        );
+        self.assert_invariants();
         self.first_slot
     }
 
@@ -667,6 +823,7 @@ impl RawNode {
                 self.step(Message::CheckLeader { from: me });
             }
         }
+        self.assert_invariants();
     }
 
     /// Re-broadcast the `Accept` for every Phase-2 round this leader still has in
@@ -797,6 +954,13 @@ impl RawNode {
             recovered,
         });
         self.proposer.clear();
+        // A campaign opens at a ballot this node itself just promised: the
+        // fresh round is strictly above every round in the max above, so the
+        // promise landed exactly on the campaign ballot.
+        assert!(
+            self.hard_state.max_promised_ballot == self.ballot,
+            "a candidate promises the ballot it campaigns at"
+        );
         self.broadcast(&Message::Prepare {
             from: me,
             ballot: self.ballot,
@@ -961,6 +1125,20 @@ impl RawNode {
         self.quorum_elapsed = 0;
         self.quorum_acked_by.clear();
         self.quorum_acked_by.insert(me);
+        // Fresh-leader postconditions (#67/#88): the win condition demanded
+        // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
+        // gap-fill loops raises the promise past the leader's own ballot.
+        assert!(
+            self.ballot >= self.hard_state.max_promised_ballot,
+            "a fresh leader's ballot is at or above its own promise"
+        );
+        assert!(self.election.is_none(), "winning closes the campaign");
+        // Every slot below `next_slot` is chosen, re-proposed, or gap-filled,
+        // so the allocator never hands out a slot inside the chosen prefix.
+        assert!(
+            self.next_slot >= self.first_unchosen(),
+            "a fresh leader's next slot sits at or past the chosen prefix"
+        );
     }
 
     // ---- acceptor ---------------------------------------------------------
@@ -999,6 +1177,16 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
+            // A `Promise` claims exactly this: the promise now sits at the
+            // prepared ballot, and the operating ballot followed it up.
+            assert!(
+                self.hard_state.max_promised_ballot == ballot,
+                "a promise reply carries the exact promised ballot"
+            );
+            assert!(
+                self.ballot >= ballot,
+                "the operating ballot follows a raised promise"
+            );
             let accepted: BTreeMap<Slot, (Ballot, Command)> = self
                 .accepted
                 .range(from_slot..)
@@ -1014,6 +1202,12 @@ impl RawNode {
                 },
             ));
         } else {
+            // Negative space: a Nack means the prepare lost — the promise was
+            // already at or above it and must not have moved.
+            assert!(
+                ballot <= self.hard_state.max_promised_ballot,
+                "a nacked prepare never raises the promise"
+            );
             self.pending_messages.push((
                 from,
                 Message::Nack {
@@ -1050,6 +1244,13 @@ impl RawNode {
             }
             self.set_promise(ballot);
             self.record_accepted(slot, ballot, command);
+            // The `Accepted` reply's durability claim: the promise sits exactly
+            // at the accepted ballot, and the matching `AppendAccepted` write is
+            // in this same batch (persist-before-send seals it).
+            assert!(
+                self.hard_state.max_promised_ballot == ballot,
+                "an accept lands with the promise at its ballot"
+            );
             self.pending_messages.push((
                 from,
                 Message::Accepted {
@@ -1129,6 +1330,12 @@ impl RawNode {
     /// [`RawNode::read_index`] beat through here, so every broadcast beat
     /// carries a seq an ack can be matched against.
     fn broadcast_heartbeat(&mut self) {
+        // Both callers (the tick self-trigger and `read_index`) are
+        // leader-gated, and a self-addressed beat never arrives off the wire.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader broadcasts beats"
+        );
         self.heartbeat_seq += 1;
         self.broadcast(&Message::Heartbeat {
             from: self.config.id,
@@ -1165,8 +1372,12 @@ impl RawNode {
             // toward read-index confirmation quorums. Below-promise beats fall
             // through unacked, so a deposed leader's read rounds starve instead
             // of confirming. No durable write precedes the ack — it claims only
-            // "my promise is at or below `ballot` right now", which the guard
-            // above just checked and promise monotonicity preserves.
+            // "my promise is at or below `ballot` right now", which is exactly
+            // what this restates (and promise monotonicity preserves).
+            assert!(
+                self.hard_state.max_promised_ballot <= ballot,
+                "a beat ack never claims a promise above the acked ballot"
+            );
             self.pending_messages.push((
                 from,
                 Message::HeartbeatAck {
@@ -1311,6 +1522,17 @@ impl RawNode {
         if from_slot > ci {
             return;
         }
+        // Both early exits above bound the served range: it starts at or above
+        // our floor (entries below it are truncated) and reaches at most our
+        // contiguous chosen prefix (everything served is decided).
+        assert!(
+            from_slot >= self.first_slot,
+            "catch-up is served from at or above the floor"
+        );
+        assert!(
+            from_slot <= ci,
+            "catch-up is served from inside the chosen prefix"
+        );
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         for (slot, command) in self.chosen.range(from_slot..=ci) {
             if entries.len() >= CATCHUP_BATCH {
@@ -1406,6 +1628,17 @@ impl RawNode {
             snapshot,
             sessions,
         });
+        // Install postconditions: the floor lands exactly one past the new
+        // chosen boundary, and the durable promise absorbed the snapshot's
+        // ballot without ever regressing.
+        assert!(
+            self.first_slot == self.first_unchosen(),
+            "a snapshot install raises the floor to its boundary"
+        );
+        assert!(
+            self.hard_state.max_promised_ballot >= ballot,
+            "a snapshot install never lowers the promise"
+        );
         // Re-drive the contiguous walk: a `Commit` learned out of order may
         // already sit in `chosen` just above the boundary, and without the walk
         // this node would freeze at `chosen_index` forever — catch-up loops
@@ -1471,15 +1704,27 @@ impl RawNode {
     /// Quorum size of the cluster, per the configured [`crate::QuorumSystem`]
     /// (membership includes self).
     fn quorum(&self) -> usize {
-        self.config
-            .quorum_system
-            .quorum_size(self.config.peers.len())
+        let n = self.config.peers.len();
+        let q = self.config.quorum_system.quorum_size(n);
+        // Paxos safety rests on any two quorums intersecting; for the majority
+        // system that is `2q > n`. A future quorum system that breaks this must
+        // fail loudly here, not silently choose two values for one slot.
+        assert!(q >= 1, "a quorum requires at least one acceptor");
+        assert!(2 * q > n, "any two quorums must intersect");
+        q
     }
 
     /// Raise (or re-affirm) the promised ballot to `ballot`, recording a
     /// [`WriteOp::SetPromise`] delta only when it actually changes. Callers that
     /// must never lower the promise guard with `ballot >` first.
     fn set_promise(&mut self, ballot: Ballot) {
+        // The single choke point for the promise-monotonicity contract every
+        // caller guards individually: a promise is never lowered, across the
+        // node's whole lifetime (the durable safety hinge).
+        assert!(
+            ballot >= self.hard_state.max_promised_ballot,
+            "a node's promised ballot never decreases"
+        );
         if self.hard_state.max_promised_ballot != ballot {
             self.hard_state.max_promised_ballot = ballot;
             self.pending_writes.push(WriteOp::SetPromise(ballot));
@@ -1490,7 +1735,7 @@ impl RawNode {
     /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
     /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
     fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
-        debug_assert!(
+        assert!(
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
         );
@@ -1614,6 +1859,18 @@ impl RawNode {
             // alone lets the retry hit the `applied_seq` fast path instead.
             self.inflight.insert((entry.client, entry.seq), slot);
         }
+        // The chosen/accepted coupling: a chosen slot always holds its
+        // authoritative accepted record, at the same command (`serve_catchup`
+        // and election recovery both read one map and trust the other).
+        // Checked before the walk below, which may compact this very slot away.
+        assert!(
+            self.accepted.contains_key(&slot),
+            "a chosen slot holds its authoritative accepted record"
+        );
+        debug_assert!(
+            self.accepted.get(&slot).map(|(_, c)| c) == Some(command),
+            "a chosen slot's accepted record carries the chosen command"
+        );
         self.advance_chosen_index();
     }
 
@@ -1645,6 +1902,13 @@ impl RawNode {
         // iteration above.
         let mut truncate_up_to: Option<Slot> = None;
         while let Some(mut command) = self.chosen.get(&next).cloned() {
+            // The walk is the *only* writer of `chosen_index`, and it advances
+            // exactly one slot per iteration — the contiguity the apply seam
+            // and the boot rebuild are built on.
+            assert!(
+                next == self.first_unchosen(),
+                "the chosen prefix advances one slot at a time"
+            );
             self.hard_state.chosen_index = Some(next);
             self.pending_writes.push(WriteOp::SetChosenIndex(next));
             if let Command::Control(Control::Truncate { up_to }) = &command {
@@ -1692,6 +1956,13 @@ impl RawNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
+        // The walk's exit condition, restated as its postcondition: nothing
+        // chosen is left sitting at the first unchosen slot (`chosen_gap`
+        // reports strictly-above slots on the strength of this).
+        assert!(
+            !self.chosen.contains_key(&self.first_unchosen()),
+            "the walk consumes the entire contiguous chosen prefix"
+        );
         // A read round waiting on the apply condition (`chosen_index >= index`,
         // the fresh-leader fence) resolves exactly here. No-op on a follower.
         self.try_confirm_reads();
