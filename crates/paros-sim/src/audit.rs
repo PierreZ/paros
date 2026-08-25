@@ -308,10 +308,10 @@ struct AuditState {
     below_all_floors: bool,
     /// Per-node `(hole, consecutive quiesced-tick reports)`. The driver emits
     /// `chosen_gap` once per *node tick* while a gap lasts, so the streak counts
-    /// the protocol's own clock: under moonpool's buggified sleep delay (which
-    /// persists past the chaos window and can stretch every tick), wall sim
-    /// time dilates but a tick is still one real opportunity for an election
-    /// timeout / re-send to heal the hole. A wedge is a hole that survives
+    /// the protocol's own clock: under moonpool's buggified sleep delay, wall
+    /// sim time dilates during the chaos window but a tick is still one real
+    /// opportunity for an election timeout / re-send to heal the hole. A wedge
+    /// is a hole that survives
     /// [`GAP_WEDGE_TICKS`] such opportunities after quiescence; a merely
     /// slowed cluster never accumulates the streak (seed 8057455177754870256).
     gap_streaks: BTreeMap<u64, (u64, u64)>,
@@ -889,7 +889,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         //    reports of the same node — the drift-immune part: the driver
         //    emits this once per node tick, so the streak counts genuine
         //    election-timeout/re-send opportunities even when moonpool's
-        //    buggified sleep delay stretches every tick in wall sim time.
+        //    buggified sleep delay stretches ticks during the chaos window.
         let wedged = st.quiesced(now)
             && st
                 .cluster_applied_max

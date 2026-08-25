@@ -114,11 +114,11 @@ impl Process for NodeProcess {
             {
                 // Simulated crash at a durability seam: fall through to recover
                 // and re-run (rebuilding volatile state from the durable world).
-                // The restart delay is workload-buggified config (prong 2): a
-                // real process does not restart in zero time, and a node held
-                // down while the cluster keeps committing and truncating comes
-                // back below the compaction floor — a second, independent
-                // generator for snapshot recovery besides the attrition window.
+                // The restart delay is workload-buggified config (prong 2): it
+                // stretches the durability-seam crash window that process-level
+                // attrition cannot reach. A node held down while the cluster
+                // keeps committing and truncating returns below the compaction
+                // floor and independently exercises snapshot recovery.
                 Err(e) if is_seam_crash(&e) => {
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {

@@ -117,12 +117,13 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// through the safety oracles, enough to catch an obvious regression quickly.
 /// Saturation/coverage is **not** asserted here (that is `cargo xtask sim`'s job).
 pub const SMOKE_ITERATIONS: usize = 50;
-/// Cap on the sancov coverage run (`cargo xtask sim`): enough headroom for the
-/// eight-root quiet window while keeping the instrumented sweep CI-sized.
-pub const COVERAGE_ITERATIONS: usize = 96;
-/// Cap for the network-swarm safety axis. It has no quiet-tail liveness
-/// contract because Moonpool's provider faults persist past `chaos_duration`.
-pub const NETWORK_COVERAGE_ITERATIONS: usize = 256;
+/// Cap on the sancov coverage run (`cargo xtask sim`). Re-armed provider timing
+/// needs headroom to reach the rare gates before the eight-root quiet window;
+/// the adaptive sweep still stops as soon as it saturates.
+pub const COVERAGE_ITERATIONS: usize = 256;
+/// Cap for the network-swarm safety axis. This is likewise only a ceiling; its
+/// wider timing surface needs room to establish the unchanged 32-root plateau.
+pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 /// Eight is enough to drive real branches while keeping the sancov gate suitable
 /// for CI; Moonpool stops earlier when a root discovers no new frontier.
@@ -365,23 +366,11 @@ fn chaos_surfaces() -> [Chaos; 2] {
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
 ///
-/// `BuggifiedDelay` is masked (like `BitFlip` before it, and mask changes
-/// consume no randomness): moonpool applies it to **every sleep for the whole
-/// run** — including the driver's tick sleeps, un-gated by `chaos_duration` —
-/// so one near-max inflation can freeze a node's protocol clock for tens of
-/// simulated seconds (seeds 8057455177754870256 and 3847608256092482294: a
-/// four-node cluster "quiesced" mid-election-outage, and an n=1 singleton that
-/// ticked twice in 81 s). Every liveness claim this campaign makes (chain
-/// recovery budget, `run_seed`'s settle-tail convergence) is wall-clock-based
-/// and therefore unsound under whole-run time dilation. Re-enable if moonpool
-/// gates the fault on the chaos window (upstream issue filed).
+/// `BuggifiedDelay` stays enabled: the pinned moonpool gates sleep inflation to
+/// `chaos_duration`, so setup and the quiet recovery tail remain fault-free.
 fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
-        .network_fault_mask(
-            NetworkFaultMask::all()
-                .without(NetworkFault::BitFlip)
-                .without(NetworkFault::BuggifiedDelay),
-        )
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess)
         })
@@ -424,11 +413,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
     let report = SimulationBuilder::new()
-        .network_fault_mask(
-            NetworkFaultMask::all()
-                .without(NetworkFault::BitFlip)
-                .without(NetworkFault::BuggifiedDelay),
-        )
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(ProcessCount::Range(CLUSTER_SIZE_RANGE), || {
             Box::new(NodeProcess)
         })
