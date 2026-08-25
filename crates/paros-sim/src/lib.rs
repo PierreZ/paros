@@ -117,12 +117,13 @@ pub const SWEEP_ITERATIONS: usize = 5000;
 /// through the safety oracles, enough to catch an obvious regression quickly.
 /// Saturation/coverage is **not** asserted here (that is `cargo xtask sim`'s job).
 pub const SMOKE_ITERATIONS: usize = 50;
-/// Cap on the sancov coverage run (`cargo xtask sim`): enough headroom for the
-/// eight-root quiet window while keeping the instrumented sweep CI-sized.
-pub const COVERAGE_ITERATIONS: usize = 96;
-/// Cap for the network-swarm safety axis. It has no quiet-tail liveness
-/// contract because Moonpool's provider faults persist past `chaos_duration`.
-pub const NETWORK_COVERAGE_ITERATIONS: usize = 256;
+/// Cap on the sancov coverage run (`cargo xtask sim`). Re-armed provider timing
+/// needs headroom to reach the rare gates before the eight-root quiet window;
+/// the adaptive sweep still stops as soon as it saturates.
+pub const COVERAGE_ITERATIONS: usize = 256;
+/// Cap for the network-swarm safety axis. This is likewise only a ceiling; its
+/// wider timing surface needs room to establish the unchanged 32-root plateau.
+pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 /// Eight is enough to drive real branches while keeping the sancov gate suitable
 /// for CI; Moonpool stops earlier when a root discovers no new frontier.
