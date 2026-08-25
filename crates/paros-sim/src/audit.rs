@@ -44,6 +44,16 @@ const GAP_WEDGE_TICKS: u64 = 40;
 
 const CONVERGENCE_GRACE_MS: u64 = 3_000;
 
+/// Consecutive **deposed heartbeats** a leader may broadcast before the checker
+/// calls it a zombie (#95). A leader whose ballot a promise-majority has moved
+/// strictly past can never again assemble any quorum at that ballot — every
+/// below-promise beat is ignored unacked — yet without CheckQuorum nothing ever
+/// demotes it while it is partitioned from the very peers that could tell it.
+/// CheckQuorum bounds the zombie window to one ack-quorum-less election-timeout
+/// window (at most ~10 ticks, one beat per tick); forty beats is ~4x that on
+/// the protocol's own clock, immune to wall-time dilation.
+const DEPOSED_BEAT_STREAK: u64 = 40;
+
 /// Cap on the committed-operation history the interval checker walks pairwise.
 /// The current workloads stay far below it (a few dozen operations per client);
 /// the cap only bounds the `O(n^2)` walk if a future workload explodes.
@@ -179,6 +189,18 @@ impl AuditWorld {
     }
 }
 
+/// One leader's deposed-heartbeat streak (#95): the ballot it is beating at,
+/// the last beat seq counted (one broadcast fans out to n-1 sends, so the seq
+/// dedups the fan-out), and how many consecutive beats were sent while a
+/// promise-majority sat strictly above the ballot.
+#[derive(Clone, Copy, Default)]
+struct DeposedStreak {
+    round: u64,
+    node: u64,
+    seq: u64,
+    count: u64,
+}
+
 /// One node's compaction floor, plus what it was before the most recent raise.
 ///
 /// The truncation checks admit a record at a slot the node compacts away *in
@@ -259,6 +281,8 @@ struct AuditState {
     booted: BTreeSet<u64>,
 
     // --- leadership ---------------------------------------------------------
+    /// Per node: its deposed-heartbeat streak (#95, see [`DeposedStreak`]).
+    deposed_streaks: BTreeMap<u64, DeposedStreak>,
     leader_round: BTreeMap<u64, u64>,
     leader_rounds: BTreeSet<u64>,
     first_leader_round: Option<u64>,
@@ -303,6 +327,10 @@ struct AuditState {
     /// needs a partition-shaped seed and would starve saturation as a per-run
     /// gate, but when a seed does reach it, the sweep records it.
     duplicate_suppressed: bool,
+    /// CheckQuorum fired (#95): a leader without an ack quorum for a full
+    /// election-timeout window demoted itself. The n=2 regime plus attrition
+    /// generates it reliably (killing the only peer starves the window).
+    quorum_lost: bool,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -373,6 +401,13 @@ impl AuditState {
             self.snapshot_mid_election,
             "a snapshot lands during a live election"
         );
+        // CheckQuorum (#95) is actually exercised: some seed isolates a leader
+        // from its ack quorum long enough that it demotes itself (the n=2
+        // regime plus attrition is the reliable generator).
+        assert_sometimes!(
+            self.quorum_lost,
+            "a leader without an ack quorum steps down (CheckQuorum)"
+        );
     }
 
     /// The driver's durability seams and rare-but-valid policy decisions are
@@ -437,6 +472,55 @@ impl AuditState {
         if let Some(prev) = self.promised.insert(node, ballot) {
             assert_always!(ballot >= prev, "a node's promised ballot never decreases");
         }
+    }
+
+    /// Fold one broadcast leader beat (#95). A leader beating at a ballot that
+    /// a **promise-majority** has durably promised strictly past is deposed for
+    /// good: an acceptor only acks a beat at or above its promise, so at most a
+    /// minority can ever ack this ballot again, and no round it starts can
+    /// decide. Zombie-ness is a *bounded-liveness* claim — CheckQuorum demotes
+    /// a leader that spends a full election-timeout window without an ack
+    /// quorum, partition or not — so the streak needs no quiescence gate: it
+    /// counts beats (one per tick per leader; the seq dedups the per-peer
+    /// fan-out) and must reset well inside [`DEPOSED_BEAT_STREAK`].
+    ///
+    /// Below n=3 the condition is unreachable honestly: a singleton has no
+    /// peers to depose it, and an n=2 majority (both nodes) includes the leader
+    /// itself, whose own promise cannot sit above the ballot it is beating.
+    fn observe_beat(&mut self, node: u64, ballot: Ballot, seq: u64) {
+        let n = self.booted.len();
+        if n < 3 {
+            return;
+        }
+        let majority = n / 2 + 1;
+        let above = self.promised.values().filter(|p| **p > ballot).count();
+        let entry = self.deposed_streaks.entry(node).or_default();
+        if entry.round != ballot.round || entry.node != ballot.node.0 {
+            *entry = DeposedStreak {
+                round: ballot.round,
+                node: ballot.node.0,
+                seq,
+                count: 0,
+            };
+        } else if entry.seq == seq {
+            return;
+        }
+        entry.seq = seq;
+        if above >= majority {
+            entry.count += 1;
+        } else {
+            entry.count = 0;
+        }
+        let streak = entry.count;
+        assert_always!(
+            streak < DEPOSED_BEAT_STREAK,
+            "a leader deposed by a promise-majority stops beating within an election timeout (CheckQuorum)",
+            {
+                "node" => node,
+                "round" => ballot.round,
+                "streak_beats" => streak
+            }
+        );
     }
 
     /// Fold one applied index into the per-node prefix, the no-gaps frontier and
@@ -696,7 +780,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.observe_applied_index(node.0, slot.0, now);
     }
 
-    fn sent(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+    fn sent(&self, node: NodeId, _to: NodeId, msg: &Message) {
+        // #95: every broadcast leader beat feeds the zombie-leader streak.
+        if let Message::Heartbeat { ballot, seq, .. } = msg {
+            self.state().observe_beat(node.0, *ballot, *seq);
+            return;
+        }
         // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
         // own proposer, so exactly one node ever sends `Accept`s at it, and
         // two different commands under one `(ballot, slot)` mean the
@@ -970,6 +1059,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.shortest_timeout,
             "the driver selects the shortest valid election timeout"
+        );
+    }
+
+    fn quorum_lost(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.quorum_lost,
+            "a leader without an ack quorum steps down (CheckQuorum)"
         );
     }
 

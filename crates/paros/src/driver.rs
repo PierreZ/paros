@@ -284,6 +284,12 @@ pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
 /// at-most-once suppression path ran.
 pub const EV_DUPLICATE_SUPPRESSED: &str = "duplicate_suppressed";
 
+/// Tracing event: this node, as Leader, spent a full election-timeout window
+/// without hearing an ack quorum and demoted itself (CheckQuorum, #95). Carries
+/// `node` and `count` (step-downs in the batch — in practice 1). The zombie
+/// leader this bounds is the feeder of #94's stale-suffix interleaving.
+pub const EV_QUORUM_LOST: &str = "leader_quorum_lost";
+
 /// Tracing event: a client proposal was answered by the **dedup fast path** —
 /// the `(client, seq)` was already applied here, so the reply fired immediately
 /// instead of being parked on a slot ([`ProposeResult::Chosen`]). Carries `node`
@@ -1176,6 +1182,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     providers: &P,
     last_role: &mut NodeRole,
     last_duplicates: &mut u64,
+    last_quorum_lost: &mut u64,
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
@@ -1192,6 +1199,14 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         *last_duplicates = duplicates;
         audit.duplicate_suppressed(NodeId(self_id), count);
         tracing::info!(node = self_id, count, "duplicate_suppressed");
+    }
+    // Surface any CheckQuorum step-down the batch's tick performed (#95).
+    let quorum_lost = node.quorum_lost_step_downs();
+    if quorum_lost > *last_quorum_lost {
+        let count = quorum_lost - *last_quorum_lost;
+        *last_quorum_lost = quorum_lost;
+        audit.quorum_lost(NodeId(self_id), count);
+        tracing::info!(node = self_id, count, "leader_quorum_lost");
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
@@ -1492,6 +1507,7 @@ where
     node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
     let mut last_role = node.role();
     let mut last_duplicates = node.duplicates_suppressed();
+    let mut last_quorum_lost = node.quorum_lost_step_downs();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -1553,7 +1569,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1573,7 +1589,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1619,7 +1635,7 @@ where
                 }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -1641,7 +1657,7 @@ where
                     },
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1686,7 +1702,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

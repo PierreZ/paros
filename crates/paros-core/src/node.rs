@@ -220,6 +220,15 @@ pub struct RawNode {
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
+    /// CheckQuorum (#95): ticks since the leader last proved it can reach an
+    /// ack quorum. Leader-only, reset when the window closes with a quorum.
+    quorum_elapsed: u64,
+    /// CheckQuorum: the distinct peers (incl. self) whose ballot-matching
+    /// `HeartbeatAck` or `Accepted` arrived inside the current window.
+    quorum_acked_by: BTreeSet<NodeId>,
+    /// Monotone count of CheckQuorum step-downs this incarnation, for the
+    /// driver's audit report (mirrors `duplicates_suppressed`).
+    quorum_lost_step_downs: u64,
 
     // ---- linearizable reads (all volatile: a read round carries no durable
     // ---- obligation — losing one merely fails an RPC whose reply promise dies
@@ -390,6 +399,9 @@ impl RawNode {
             heartbeat_elapsed: 0,
             heartbeat_timeout: HEARTBEAT_TICKS,
             heartbeat_seq: 0,
+            quorum_elapsed: 0,
+            quorum_acked_by: BTreeSet::new(),
+            quorum_lost_step_downs: 0,
             read_floor: None,
             read_rounds: Vec::new(),
             proposer: BTreeMap::new(),
@@ -620,6 +632,32 @@ impl RawNode {
             let now = self.tick_count;
             self.read_rounds
                 .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
+            // CheckQuorum (#95): a leader must re-prove, once per election
+            // timeout, that an ack quorum can still reach it. Without this, an
+            // idle leader cut off from its quorum stays Leader forever — its
+            // election clock is frozen (the branch below runs only for
+            // non-leaders), below-promise beats are ignored unacked rather than
+            // Nacked, and an idle leader emits no `Accept`s whose Nack could
+            // demote it — while it keeps admitting proposals into a stale
+            // suffix for the whole partition, feeding #94's double-apply. The
+            // window is the same length as the election timeout (etcd-raft's
+            // CheckQuorum), so a demoted leader's peers are already eligible to
+            // campaign by the time it steps down. Every beat is acked by every
+            // reachable follower each tick, so a healthy leader trivially
+            // refills the window.
+            if self.election_timeout != 0 {
+                self.quorum_elapsed += 1;
+                if self.quorum_elapsed >= self.election_timeout {
+                    if self.quorum_acked_by.len() >= self.quorum() {
+                        self.quorum_elapsed = 0;
+                        self.quorum_acked_by.clear();
+                        self.quorum_acked_by.insert(me);
+                    } else {
+                        self.quorum_lost_step_downs += 1;
+                        self.become_follower(None);
+                    }
+                }
+            }
         } else {
             self.election_elapsed += 1;
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
@@ -917,6 +955,11 @@ impl RawNode {
         self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
         self.heartbeat_seq = 0;
         self.read_rounds.clear();
+        // CheckQuorum: a fresh leadership starts a fresh ack window (self is
+        // always reachable).
+        self.quorum_elapsed = 0;
+        self.quorum_acked_by.clear();
+        self.quorum_acked_by.insert(me);
     }
 
     // ---- acceptor ---------------------------------------------------------
@@ -1045,6 +1088,12 @@ impl RawNode {
                 return;
             }
             p.accepted_by.insert(from);
+        }
+        // CheckQuorum: an `Accepted` at our current ballot is leader contact,
+        // exactly like a beat ack — a busy leader must not need idle beats to
+        // keep its window full.
+        if self.role == NodeRole::Leader && ballot == self.ballot {
+            self.quorum_acked_by.insert(from);
         }
         self.try_decide(slot);
     }
@@ -1186,6 +1235,9 @@ impl RawNode {
         if self.role != NodeRole::Leader || ballot != self.ballot {
             return;
         }
+        // CheckQuorum: an ack at our ballot is proof this peer can still reach
+        // us and has not promised past us — credit the current window.
+        self.quorum_acked_by.insert(from);
         for round in &mut self.read_rounds {
             if seq >= round.required_seq {
                 round.acked_by.insert(from);
@@ -1747,6 +1799,15 @@ impl RawNode {
     #[must_use]
     pub fn duplicates_suppressed(&self) -> u64 {
         self.duplicates_suppressed
+    }
+
+    /// Monotone count of CheckQuorum step-downs (#95) this incarnation: the
+    /// times this node, as Leader, spent a full election-timeout window without
+    /// hearing an ack quorum and demoted itself. The driver reads the delta per
+    /// batch and reports it through its audit port.
+    #[must_use]
+    pub fn quorum_lost_step_downs(&self) -> u64 {
+        self.quorum_lost_step_downs
     }
 
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`
