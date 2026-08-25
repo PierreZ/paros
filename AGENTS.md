@@ -38,6 +38,11 @@ pinned `REGRESSION_SEEDS`; they do **not** assert coverage saturation. So: to pr
 oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
+**Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
+target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
+introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided
+saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume.
+
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
 operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`.
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
