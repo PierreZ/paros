@@ -710,31 +710,55 @@ fn ack_committed_waiters<S, H, A>(
     A: Audit,
 {
     for (slot, command) in committed {
-        if matches!(command, Command::Control(_)) {
+        let Some(replies) = waiters.pending.remove(slot) else {
             continue;
-        }
-        if let Some(replies) = waiters.pending.remove(slot) {
-            for (client, seq, waiter) in replies {
-                audit.client_acked(
-                    NodeId(self_id),
-                    client,
-                    seq,
-                    *slot,
-                    storage.applied_slot(),
-                    false,
-                );
-                if hooks.drop_client_reply(Reply::Propose) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
-                    tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
-                    continue;
-                }
+        };
+        // The slot's decided identity. A reply may only claim `committed: true`
+        // if the slot decided *this waiter's* command: a stale leader can park
+        // a proposal on a slot the majority then decides differently (it
+        // learns the decision by `Commit`/catch-up while still believing
+        // itself leader — nothing in `on_commit` demotes it), and acking by
+        // slot number alone then told a client its write was committed while
+        // no node ever applied it (network-axis seed 12491191414293127136).
+        // A control command — including a #94 duplicate suppressed to a Noop —
+        // matches no waiter.
+        let decided = command.user().map(|e| (e.client.0, e.seq.0));
+        for (client, seq, waiter) in replies {
+            if decided != Some((client, seq)) {
+                // Not this proposal's commit: its fate is unknown here (the
+                // core's dedup tables track it if it is still in flight
+                // anywhere). Answer a retry-now redirect instead of holding
+                // the reply to the client's deadline; the retry goes through
+                // the honest `(client, seq)` dedup path.
+                audit.waiter_superseded(NodeId(self_id), *slot);
+                tracing::info!(node = self_id, slot = slot.0, "propose_waiter_superseded");
                 let _ = waiter.send(ProposeAck {
                     seq,
                     leader: Some(self_id),
-                    committed: true,
-                    slot: Some(slot.0),
+                    committed: false,
+                    slot: None,
                 });
+                continue;
             }
+            audit.client_acked(
+                NodeId(self_id),
+                client,
+                seq,
+                *slot,
+                storage.applied_slot(),
+                false,
+            );
+            if hooks.drop_client_reply(Reply::Propose) {
+                audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
+                tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
+                continue;
+            }
+            let _ = waiter.send(ProposeAck {
+                seq,
+                leader: Some(self_id),
+                committed: true,
+                slot: Some(slot.0),
+            });
         }
     }
 }

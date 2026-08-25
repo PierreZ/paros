@@ -129,6 +129,12 @@ pub trait Audit {
     /// "campaign against a truncated acceptor" interleaving.
     fn prepare_below_floor(&self, node: NodeId, from_slot: Slot, floor: Slot) {}
 
+    /// This node dropped a parked proposal reply because its slot decided a
+    /// *different* command (a stale leader's admission superseded by the
+    /// majority's decision); the client was answered with a retry redirect
+    /// instead of a false commit.
+    fn waiter_superseded(&self, node: NodeId, slot: Slot) {}
+
     /// This node, as Leader, spent a full election-timeout window without an
     /// ack quorum and demoted itself (CheckQuorum, #95). `count` is the number
     /// of such step-downs in the batch (in practice 1).

@@ -331,6 +331,10 @@ struct AuditState {
     /// election-timeout window demoted itself. The n=2 regime plus attrition
     /// generates it reliably (killing the only peer starves the window).
     quorum_lost: bool,
+    /// A parked proposal reply was superseded by a different decided command
+    /// and answered with a redirect instead of a false commit. Reachable-only:
+    /// needs a stale leader learning a foreign decision for a slot it admitted.
+    waiter_superseded: bool,
     multi_slot_applied: bool,
     several_slots_applied: bool,
     leadership_turnover: bool,
@@ -1059,6 +1063,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.shortest_timeout,
             "the driver selects the shortest valid election timeout"
+        );
+    }
+
+    fn waiter_superseded(&self, _node: NodeId, _slot: Slot) {
+        let mut st = self.state();
+        reach_once!(
+            st.waiter_superseded,
+            "a parked proposal reply is superseded by a different decided command"
         );
     }
 
