@@ -785,8 +785,11 @@ fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[2].hard_state().chosen_index, Some(Slot(2)));
     assert_eq!(
-        nodes[2].applied_seq.get(&ClientId(7)),
-        Some(&(ClientSeq(5), Slot(2))),
+        nodes[2]
+            .applied_seq
+            .get(&ClientId(7))
+            .and_then(|m| m.get(&ClientSeq(5))),
+        Some(&Slot(2)),
         "applied now, naming the slot it applied at"
     );
     assert_eq!(
@@ -1031,8 +1034,10 @@ fn restart_rebuilds_state_from_hard_state() {
     assert_eq!(n.role(), NodeRole::Follower);
     // Dedup: applied seqs for the chosen prefix; slot 2 still in flight.
     assert_eq!(
-        n.applied_seq.get(&ClientId(1)),
-        Some(&(ClientSeq(2), Slot(1)))
+        n.applied_seq
+            .get(&ClientId(1))
+            .and_then(|m| m.get(&ClientSeq(2))),
+        Some(&Slot(1))
     );
     assert_eq!(n.inflight.get(&(ClientId(1), ClientSeq(3))), Some(&Slot(2)));
 }
@@ -2388,5 +2393,45 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         x.read_floor,
         Some(Slot(8)),
         "the read fence sits on the recovered suffix"
+    );
+}
+
+/// The dedup ledger acks `Chosen` only for a seq that **actually executed** —
+/// never inferred from "a later seq applied". A client's seqs do not execute in
+/// order: an early seq can die without entering the log (a `NotLeader` window,
+/// a round lost and paved over by the gap fill) while a later seq applies, and
+/// the old `seq <= applied` shortcut then acked the dead command as committed,
+/// at another command's slot (network-axis seeds 2791878389799639169 /
+/// 8872503201755490526). The honest miss falls through and executes the retry
+/// for real.
+#[test]
+fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
+    let mut nodes = vec![
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+
+    // Seq 4 executes (seqs 0..=3 never reached this cluster: they died in a
+    // NotLeader window elsewhere).
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(4), val(0x44)),
+        ProposeResult::Accepted(Slot(0))
+    );
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
+
+    // An exact-seq retry is honestly deduplicated to its real slot…
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(4), val(0x44)),
+        ProposeResult::Chosen(Slot(0))
+    );
+    // …but a never-executed earlier seq is NOT lied about: it executes now.
+    assert_eq!(
+        nodes[0].propose(ClientId(7), ClientSeq(2), val(0x22)),
+        ProposeResult::Accepted(Slot(1)),
+        "a dead seq below the latest applied one is re-proposed, never falsely acked"
     );
 }

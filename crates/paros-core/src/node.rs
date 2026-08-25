@@ -258,7 +258,18 @@ pub struct RawNode {
     /// an entry here always means "inside this node's applied prefix" — never
     /// merely "chosen somewhere above the prefix". That is the whole difference
     /// between an honest immediate ack and one the client cannot trust.
-    applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)>,
+    ///
+    /// Per client it maps **each executed seq** to its slot, not merely the
+    /// latest `(seq, slot)`: a `seq <= latest` shortcut would assume a client's
+    /// seqs execute in order, and they do not — an early seq can die without
+    /// ever entering the log (a `NotLeader` window, a lost round the gap fill
+    /// paved over) while a later seq applies, and the shortcut then acked the
+    /// dead command as committed, at another command's slot (the network-axis
+    /// seeds 2791878389799639169 / 8872503201755490526). An exact-seq hit is
+    /// the only honest `Chosen`; a miss falls through and executes the retry
+    /// for real. Volatile and rebuilt from the remaining log on boot, so the
+    /// truncation-across-restart window (see `propose`) is unchanged in kind.
+    applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>>,
     /// Client requests mapped to the slot they will land in, so a retry dedups
     /// against that slot instead of allocating a second one. Covers the whole
     /// span before the command is applied: proposed at a slot
@@ -291,21 +302,20 @@ impl RawNode {
         }
 
         let mut chosen = BTreeMap::new();
-        let mut applied_seq: BTreeMap<ClientId, (ClientSeq, Slot)> = BTreeMap::new();
+        let mut applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> = BTreeMap::new();
         let mut inflight = BTreeMap::new();
         for (slot, (_b, command)) in &accepted {
             let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
             if is_chosen {
                 chosen.insert(*slot, command.clone());
                 // Only client entries carry a `(client, seq)` dedup key; a control
-                // command never dedups.
+                // command never dedups. Every executed seq is recorded, not just
+                // the latest per client (see the `applied_seq` field doc).
                 if let Command::User(entry) = command {
-                    let bump = applied_seq
-                        .get(&entry.client)
-                        .is_none_or(|(c, _)| entry.seq > *c);
-                    if bump {
-                        applied_seq.insert(entry.client, (entry.seq, *slot));
-                    }
+                    applied_seq
+                        .entry(entry.client)
+                        .or_default()
+                        .insert(entry.seq, *slot);
                 }
             } else if let Command::User(entry) = command {
                 inflight.insert((entry.client, entry.seq), *slot);
@@ -418,9 +428,7 @@ impl RawNode {
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
             return ProposeResult::Duplicate(slot);
         }
-        if let Some(&(applied, at)) = self.applied_seq.get(&client)
-            && seq <= applied
-        {
+        if let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq)) {
             return ProposeResult::Chosen(at);
         }
         let slot = self.next_slot;
@@ -1446,13 +1454,10 @@ impl RawNode {
             // held for this slot leaves as `applied_seq` takes it over.
             self.inflight.retain(|_, s| *s != next);
             if let Command::User(entry) = &command {
-                let bump = self
-                    .applied_seq
-                    .get(&entry.client)
-                    .is_none_or(|(c, _)| entry.seq > *c);
-                if bump {
-                    self.applied_seq.insert(entry.client, (entry.seq, next));
-                }
+                self.applied_seq
+                    .entry(entry.client)
+                    .or_default()
+                    .insert(entry.seq, next);
             }
             self.pending_committed.push((next, command));
             next = Slot(next.0 + 1);
