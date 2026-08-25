@@ -339,6 +339,18 @@ impl AuditState {
             self.leader_promise_checked,
             "a fresh leader's promise is checked against the ballot it won"
         );
+        // #61's cluster-size regimes are actually visited: the quorum edge
+        // cases (a singleton that decides alone; a pair where any attrition
+        // freezes progress until recovery) and the n>=5 shape whose accept
+        // quorums can avoid a two-node pin. Every node boots at start, so the
+        // booted set is the drawn topology.
+        let n = self.booted.len();
+        assert_sometimes!(n == 1, "a run drives a single-node cluster");
+        assert_sometimes!(
+            n == 2,
+            "a run drives a two-node cluster (any attrition freezes it)"
+        );
+        assert_sometimes!(n >= 5, "a run drives a five-node cluster");
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
         assert_sometimes!(

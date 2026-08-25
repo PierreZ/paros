@@ -41,6 +41,18 @@ fn chain_single_seed_converges() {
 }
 
 #[test]
+fn network_regression_seeds_replay_clean() {
+    for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {
+        let report = paros_sim::run_network_seed(seed);
+        assert!(
+            report.assertion_violations.is_empty(),
+            "network seed {seed}: {:?}",
+            report.assertion_violations
+        );
+    }
+}
+
+#[test]
 fn chain_regression_seeds_replay_clean() {
     for seed in CHAIN_REGRESSION_SEEDS {
         let report = run_chain_seed(*seed);

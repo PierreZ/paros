@@ -572,6 +572,19 @@ impl Workload for ChainWorkload {
                 .collect();
             for (cmd_hash, outcome) in &self.outcomes {
                 if matches!(outcome, Outcome::Acked { .. }) {
+                    if !applied_hashes.contains(&hash_text(*cmd_hash)) {
+                        let q = ctx.observability();
+                        eprintln!(
+                            "ACK-NOT-APPLIED: outcome={:?} t={}ms; dedup_acks={} crashes={} boots={} applied_events={} nodes={}",
+                            outcome,
+                            time.now().as_millis(),
+                            q.len("propose_dedup_ack"),
+                            q.len("crashed"),
+                            q.len("booted"),
+                            q.len(EV_APPLIED),
+                            server_count,
+                        );
+                    }
                     assert_always!(
                         applied_hashes.contains(&hash_text(*cmd_hash)),
                         "chain: every acknowledged command was applied"
@@ -735,6 +748,18 @@ impl Workload for ChainWorkload {
                 last_applied,
                 count_by_node("booted"),
                 count_by_node("crashed"),
+            );
+            eprintln!(
+                "  ticks={} leader_elected={} prepares_sent={} msg_sent={} msg_received={} check_leader_evts={}",
+                q.len("node_tick"),
+                q.len("leader_elected"),
+                q.snapshot("msg_sent")
+                    .iter()
+                    .filter(|e| e.str("kind") == Some("prepare"))
+                    .count(),
+                q.len("msg_sent"),
+                q.len("msg_received"),
+                q.len("election_timeout_extreme"),
             );
         }
         assert_always!(
