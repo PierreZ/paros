@@ -53,6 +53,18 @@ fn network_regression_seeds_replay_clean() {
 }
 
 #[test]
+fn snapshot_recovery_choreography_replays_clean() {
+    let seed = 42;
+    let report = paros_sim::run_snapshot_recovery_seed(seed);
+    assert_eq!(report.failed_runs, 0, "snapshot choreography seed {seed}");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "snapshot choreography seed {seed}: {:?}",
+        report.assertion_violations
+    );
+}
+
+#[test]
 fn chain_regression_seeds_replay_clean() {
     for seed in CHAIN_REGRESSION_SEEDS {
         let report = run_chain_seed(*seed);

@@ -3,8 +3,9 @@
 //! visualization timeline for the browser contract.
 
 use paros_sim::{
-    AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome, SimulationReport,
-    explore, explore_network_safety, run_seed, run_seed_json,
+    AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome,
+    SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport, explore, explore_network_safety,
+    explore_snapshot_recovery, run_seed, run_seed_json,
 };
 
 fn main() {
@@ -83,6 +84,7 @@ fn main() {
         std::process::exit(1);
     }
 
+    run_snapshot_recovery_axis();
     run_network_axis();
 
     // 3. A single seed, with its full message timeline for eyeballing.
@@ -116,6 +118,43 @@ fn main() {
     // Print the JSON the browser would receive, so the wire format is eyeballable.
     println!("\n--- JSON (what runSeed returns to the browser) ---");
     println!("{}", run_seed_json(seed));
+}
+
+/// One fixed three-node lifecycle sequence, kept separate from both broad
+/// operation chaos and the network-only safety axis.
+fn run_snapshot_recovery_axis() {
+    println!("\n--- Chain graceful snapshot-recovery choreography axis ---");
+    let recovery = explore_snapshot_recovery(SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed; convergence_timeout={}",
+        recovery.iterations,
+        recovery.successful_runs,
+        recovery.failed_runs,
+        recovery.convergence_timeout,
+    );
+    if let Some(s) = &recovery.saturation {
+        println!(
+            "  signal {:?}: {}/{} reachability fired, plateau {}",
+            s.signal, s.sometimes_hit, s.sometimes_total, s.plateau_seeds,
+        );
+    }
+    if !recovery.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &recovery.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !recovery.assertion_violations.is_empty()
+        || recovery.failed_runs > 0
+        || !recovery.coverage_violations.is_empty()
+        || recovery.convergence_timeout
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", recovery.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", recovery.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", recovery.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Graceful kill, truncation, restart, and snapshot recovery are green");
 }
 
 fn print_guidance(report: &SimulationReport) {
