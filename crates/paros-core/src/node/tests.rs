@@ -130,9 +130,16 @@ fn deliver_all(nodes: &mut [RawNode], queue: Vec<(NodeId, Message)>) {
     deliver_filtered(nodes, queue, |_, _| true);
 }
 
+/// A CheckQuorum window far past any unit test's tick horizon. Unit tests
+/// step messages by hand rather than pumping ack traffic every tick, so a
+/// realistic short timeout would demote their leaders mid-test; tests that
+/// *target* CheckQuorum set a short window explicitly instead.
+const NO_CHECK_QUORUM: u64 = 1_000_000;
+
 /// Drive `nodes[idx]` to leadership in a healthy cluster, then beat once so the
 /// followers learn who the leader is (a follower only adopts a leader on
-/// `Accept`/`Heartbeat`, never on Phase 1).
+/// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
+/// effectively infinite CheckQuorum window (see [`NO_CHECK_QUORUM`]).
 fn make_leader(nodes: &mut [RawNode], idx: usize) {
     nodes[idx].set_election_timeout(1);
     nodes[idx].tick(); // fires CheckLeader -> Candidate, broadcasts Prepare
@@ -142,6 +149,7 @@ fn make_leader(nodes: &mut [RawNode], idx: usize) {
         nodes[idx].is_leader(),
         "node {idx} should have won the election"
     );
+    nodes[idx].set_election_timeout(NO_CHECK_QUORUM);
     nodes[idx].tick(); // fires Heartbeat -> followers adopt the leader
     let q = drain(&mut nodes[idx]);
     deliver_all(nodes, q);
@@ -1875,6 +1883,61 @@ fn step_down_drops_pending_read_rounds() {
         seq,
     });
     assert!(nodes[0].pending_read_states.is_empty());
+}
+
+#[test]
+fn a_leader_without_an_ack_quorum_steps_down_after_its_window() {
+    // Pins the #95 CheckQuorum contract after its sim red→green (23 zombie
+    // seeds, e.g. 901969623722906706): an isolated leader must not stay
+    // Leader past an ack-quorum-less election-timeout window.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(3);
+    // Tick without ever delivering the beats (a fully partitioned leader):
+    // the first window may have been pre-credited by `make_leader`'s
+    // delivered beat, so demotion lands within two windows at the latest.
+    let mut demoted_at = None;
+    for i in 0..10 {
+        nodes[0].tick();
+        let _ = drain(&mut nodes[0]);
+        if !nodes[0].is_leader() {
+            demoted_at = Some(i);
+            break;
+        }
+    }
+    let at = demoted_at.expect("an isolated leader demotes itself (CheckQuorum)");
+    assert!(at <= 6, "within two ack windows, demoted at tick {at}");
+    assert_eq!(nodes[0].role(), NodeRole::Follower);
+    assert_eq!(nodes[0].quorum_lost_step_downs(), 1);
+    assert!(
+        nodes[0].needs_election_timeout(),
+        "the demoted leader re-enters the ordinary election path"
+    );
+}
+
+#[test]
+fn a_leader_hearing_acks_keeps_leadership_across_windows() {
+    // The healthy half of CheckQuorum: every delivered beat is acked by both
+    // followers, so the window refills each time it closes and leadership is
+    // never disturbed.
+    let mut nodes = [
+        node(0, &[0, 1, 2]),
+        node(1, &[0, 1, 2]),
+        node(2, &[0, 1, 2]),
+    ];
+    make_leader(&mut nodes, 0);
+    nodes[0].set_election_timeout(2);
+    for _ in 0..8 {
+        nodes[0].tick();
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q); // beats out, acks back, window credited
+        assert!(nodes[0].is_leader(), "a reachable leader never demotes");
+    }
+    assert_eq!(nodes[0].quorum_lost_step_downs(), 0);
 }
 
 #[test]
