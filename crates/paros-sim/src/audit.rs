@@ -890,10 +890,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         //    emits this once per node tick, so the streak counts genuine
         //    election-timeout/re-send opportunities even when moonpool's
         //    buggified sleep delay stretches ticks during the chaos window.
+        // `None` is the empty applied prefix (conceptually slot -1), so every
+        // real hole sits above it and must remain observable.
         let wedged = st.quiesced(now)
             && st
                 .cluster_applied_max
-                .is_some_and(|cluster_max| hole.0 > cluster_max);
+                .is_none_or(|cluster_max| hole.0 > cluster_max);
         let streak = {
             let entry = st.gap_streaks.entry(node.0).or_insert((hole.0, 0));
             if entry.0 == hole.0 && wedged {
