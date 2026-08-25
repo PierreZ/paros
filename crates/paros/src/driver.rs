@@ -24,7 +24,7 @@ use moonpool_core::{
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Control, Message, NodeId, NodeRole, ProposeResult,
-    RawNode, ReadIndexResult, ReadState, Slot, Value, WriteOp,
+    RawNode, ReadIndexResult, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -276,6 +276,19 @@ pub const EV_CHOSEN_GAP: &str = "chosen_gap";
 /// acceptor" interleaving was reached, so the sweep can assert it stays reachable
 /// once the acceptor floor guard is in place.
 pub const EV_PREPARE_BELOW_FLOOR: &str = "prepare_below_floor";
+
+/// Tracing event: this node's apply seam executed a chosen slot as a no-op
+/// because its `(client, seq)` identity had already applied at a lower slot —
+/// the #94 double-apply, suppressed. Carries `node` and `count` (suppressions in
+/// the batch). Rare and mechanism-specific: it is the only outside evidence the
+/// at-most-once suppression path ran.
+pub const EV_DUPLICATE_SUPPRESSED: &str = "duplicate_suppressed";
+
+/// Tracing event: this node, as Leader, spent a full election-timeout window
+/// without hearing an ack quorum and demoted itself (`CheckQuorum`, #95). Carries
+/// `node` and `count` (step-downs in the batch — in practice 1). The zombie
+/// leader this bounds is the feeder of #94's stale-suffix interleaving.
+pub const EV_QUORUM_LOST: &str = "leader_quorum_lost";
 
 /// Tracing event: a client proposal was answered by the **dedup fast path** —
 /// the `(client, seq)` was already applied here, so the reply fired immediately
@@ -600,6 +613,7 @@ fn send_snapshot_offers<S, H, A>(
     hooks: &H,
     audit: &A,
     snapshot_offers: &[(NodeId, Slot, Ballot)],
+    sessions: &[SessionEntry],
 ) -> SimulationResult<()>
 where
     S: NodeStorage,
@@ -617,6 +631,10 @@ where
             ballot,
             chosen_index: offered_index,
             snapshot: Value(storage.snapshot()),
+            // The at-most-once ledger travels beside the opaque bytes (#94):
+            // the receiver seals it so its duplicate-suppression decisions for
+            // the folded prefix match every peer's.
+            sessions: sessions.to_vec(),
         };
         if hooks.drop_outgoing(to, &message) {
             trace_send_drop(audit, out.self_id, to, &message);
@@ -692,31 +710,55 @@ fn ack_committed_waiters<S, H, A>(
     A: Audit,
 {
     for (slot, command) in committed {
-        if matches!(command, Command::Control(_)) {
+        let Some(replies) = waiters.pending.remove(slot) else {
             continue;
-        }
-        if let Some(replies) = waiters.pending.remove(slot) {
-            for (client, seq, waiter) in replies {
-                audit.client_acked(
-                    NodeId(self_id),
-                    client,
-                    seq,
-                    *slot,
-                    storage.applied_slot(),
-                    false,
-                );
-                if hooks.drop_client_reply(Reply::Propose) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
-                    tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
-                    continue;
-                }
+        };
+        // The slot's decided identity. A reply may only claim `committed: true`
+        // if the slot decided *this waiter's* command: a stale leader can park
+        // a proposal on a slot the majority then decides differently (it
+        // learns the decision by `Commit`/catch-up while still believing
+        // itself leader — nothing in `on_commit` demotes it), and acking by
+        // slot number alone then told a client its write was committed while
+        // no node ever applied it (network-axis seed 12491191414293127136).
+        // A control command — including a #94 duplicate suppressed to a Noop —
+        // matches no waiter.
+        let decided = command.user().map(|e| (e.client.0, e.seq.0));
+        for (client, seq, waiter) in replies {
+            if decided != Some((client, seq)) {
+                // Not this proposal's commit: its fate is unknown here (the
+                // core's dedup tables track it if it is still in flight
+                // anywhere). Answer a retry-now redirect instead of holding
+                // the reply to the client's deadline; the retry goes through
+                // the honest `(client, seq)` dedup path.
+                audit.waiter_superseded(NodeId(self_id), *slot);
+                tracing::info!(node = self_id, slot = slot.0, "propose_waiter_superseded");
                 let _ = waiter.send(ProposeAck {
                     seq,
                     leader: Some(self_id),
-                    committed: true,
-                    slot: Some(slot.0),
+                    committed: false,
+                    slot: None,
                 });
+                continue;
             }
+            audit.client_acked(
+                NodeId(self_id),
+                client,
+                seq,
+                *slot,
+                storage.applied_slot(),
+                false,
+            );
+            if hooks.drop_client_reply(Reply::Propose) {
+                audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
+                tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
+                continue;
+            }
+            let _ = waiter.send(ProposeAck {
+                seq,
+                leader: Some(self_id),
+                committed: true,
+                slot: Some(slot.0),
+            });
         }
     }
 }
@@ -755,6 +797,10 @@ where
 /// Run the [`paros_core::Ready`] handshake once, honoring persist-before-send:
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
+// One linear durability pipeline: every step is ordered against its neighbors
+// (persist → send → apply → app-fsync → truncate → offers → acks), so slicing
+// it into helpers would scatter the ordering contract this function *is*.
+#[allow(clippy::too_many_lines)]
 fn drain_ready<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
@@ -774,8 +820,25 @@ where
     // documented async pattern; persist-before-send still holds because the
     // persist loop below precedes the send loop.
     let ready = node.ready();
-    let writes: Vec<WriteOp> = ready.writes().to_vec();
-    let must_sync = ready.must_sync();
+    // A durable compaction floor must never outrun the durable *application*
+    // state covering the slots it drops: flushing a `Truncate` in step 1
+    // discards the accepted records, and a crash at the `AfterApplyBeforeSync`
+    // seam then lands a node whose application prefix is behind a floor nothing
+    // can replay — its apply stream stays shifted forever (network-axis seed
+    // 8398193358524544360). Split the truncates out of the batch and flush them
+    // only after the application fsync below. A truncate lost to a crash in
+    // that window is safe: the floor is pure space reclamation, re-raised by
+    // the next decided `Truncate`.
+    let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
+        .writes()
+        .to_vec()
+        .into_iter()
+        .partition(|w| matches!(w, WriteOp::Truncate { .. }));
+    let must_sync = if writes.iter().any(WriteOp::needs_sync) {
+        paros_core::MustSync::Sync
+    } else {
+        paros_core::MustSync::Relaxed
+    };
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
@@ -876,7 +939,26 @@ where
             .map_err(|e| storage_err(&e))?;
     }
 
-    send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers)?;
+    // Only now that the application state covering the dropped slots is
+    // fsync-durable may the compaction floor become durable (see the batch
+    // split above). Runs through the same persist path, so the truncate keeps
+    // its `BeforeSync` crash location and its after-fsync audit report.
+    if !truncates.is_empty() {
+        persist_writes(
+            storage,
+            &truncates,
+            paros_core::MustSync::Sync,
+            promised,
+            self_id,
+            hooks,
+            audit,
+        )?;
+    }
+
+    if !snapshot_offers.is_empty() {
+        let sessions = node.session_ledger();
+        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions)?;
+    }
 
     ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
 
@@ -947,16 +1029,19 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
                     .set_chosen_index(*slot)
                     .map_err(|e| storage_err(&e))?;
             }
-            WriteOp::Truncate { first } => {
-                storage.truncate(*first).map_err(|e| storage_err(&e))?;
+            WriteOp::Truncate { first, sealed } => {
+                storage
+                    .truncate(*first, sealed)
+                    .map_err(|e| storage_err(&e))?;
             }
             WriteOp::InstallSnapshot {
                 chosen_index,
                 ballot,
                 snapshot,
+                sessions,
             } => {
                 storage
-                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone())
+                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
                     .map_err(|e| storage_err(&e))?;
             }
         }
@@ -1033,7 +1118,7 @@ fn surface_persisted<A: Audit>(
             WriteOp::SetChosenIndex(slot) => {
                 audit.chosen_index(NodeId(self_id), *slot);
             }
-            WriteOp::Truncate { first } => {
+            WriteOp::Truncate { first, .. } => {
                 audit.truncated(NodeId(self_id), *first);
                 tracing::info!(node = self_id, first = first.0, "compacted");
             }
@@ -1120,10 +1205,16 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
 /// new leader).
+// The `last_*` parameters are the loop's cross-batch delta trackers (role,
+// #94 suppressions, `CheckQuorum` step-downs); bundling them into a struct
+// would only rename the same nine things.
+#[allow(clippy::too_many_arguments)]
 fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,
     last_role: &mut NodeRole,
+    last_duplicates: &mut u64,
+    last_quorum_lost: &mut u64,
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
@@ -1131,6 +1222,23 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 ) {
     if node.needs_election_timeout() {
         node.set_election_timeout(draw_election_timeout(providers, hooks, audit, self_id));
+    }
+    // Surface any #94 duplicate suppressions the batch's contiguous walk
+    // performed (the counter is monotone per incarnation).
+    let duplicates = node.duplicates_suppressed();
+    if duplicates > *last_duplicates {
+        let count = duplicates - *last_duplicates;
+        *last_duplicates = duplicates;
+        audit.duplicate_suppressed(NodeId(self_id), count);
+        tracing::info!(node = self_id, count, "duplicate_suppressed");
+    }
+    // Surface any CheckQuorum step-down the batch's tick performed (#95).
+    let quorum_lost = node.quorum_lost_step_downs();
+    if quorum_lost > *last_quorum_lost {
+        let count = quorum_lost - *last_quorum_lost;
+        *last_quorum_lost = quorum_lost;
+        audit.quorum_lost(NodeId(self_id), count);
+        tracing::info!(node = self_id, count, "leader_quorum_lost");
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader {
@@ -1231,7 +1339,17 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
     let mut replayed_application = false;
     if let Some(ci) = node.hard_state().chosen_index {
         let applied_slot = storage.applied_slot();
-        for (slot, (_b, command)) in node.accepted().range(..=ci) {
+        for (slot, (_b, stored)) in node.accepted().range(..=ci) {
+            // A #94 duplicate slot replays exactly as the live walk applied it:
+            // a no-op. The core re-derived `duplicate_slots` from the sealed
+            // sessions + the retained log in `RawNode::new`, so the substitution
+            // is deterministic across the restart.
+            let noop = Command::Control(Control::Noop);
+            let command = if node.duplicate_slots().contains(slot) {
+                &noop
+            } else {
+                stored
+            };
             if applied_slot.is_none_or(|applied| *slot > applied) {
                 storage
                     .apply(ci, *slot, command)
@@ -1420,6 +1538,8 @@ where
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
     let mut last_role = node.role();
+    let mut last_duplicates = node.duplicates_suppressed();
+    let mut last_quorum_lost = node.quorum_lost_step_downs();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -1481,7 +1601,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1501,7 +1621,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1547,7 +1667,7 @@ where
                 }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -1569,7 +1689,7 @@ where
                     },
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1614,7 +1734,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

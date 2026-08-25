@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Command, NodeId, Slot, Value};
+use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -147,6 +147,15 @@ pub enum Message {
         /// Opaque application snapshot bytes at `chosen_index`. Paros never
         /// interprets them; the application owns their meaning.
         snapshot: Value,
+        /// The serving peer's at-most-once session ledger — every
+        /// `(client, seq) -> slot` fact in its applied prefix — carried as
+        /// **paros-owned metadata beside the opaque bytes** (#94). The folded
+        /// prefix's log records never reach the receiver, so without this the
+        /// receiver's walk-derived ledger would silently miss them, and its
+        /// duplicate-suppression decision at the apply seam would diverge from
+        /// every peer's: a mandatory P2c re-proposal of an already-applied
+        /// identity would apply for real here and as a no-op elsewhere.
+        sessions: Vec<SessionEntry>,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----

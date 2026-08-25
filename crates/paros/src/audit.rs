@@ -128,6 +128,23 @@ pub trait Audit {
     /// This node received a `Prepare` below its own compaction floor — the
     /// "campaign against a truncated acceptor" interleaving.
     fn prepare_below_floor(&self, node: NodeId, from_slot: Slot, floor: Slot) {}
+
+    /// This node dropped a parked proposal reply because its slot decided a
+    /// *different* command (a stale leader's admission superseded by the
+    /// majority's decision); the client was answered with a retry redirect
+    /// instead of a false commit.
+    fn waiter_superseded(&self, node: NodeId, slot: Slot) {}
+
+    /// This node, as Leader, spent a full election-timeout window without an
+    /// ack quorum and demoted itself (`CheckQuorum`, #95). `count` is the number
+    /// of such step-downs in the batch (in practice 1).
+    fn quorum_lost(&self, node: NodeId, count: u64) {}
+
+    /// This node's apply seam suppressed `count` chosen slots whose
+    /// `(client, seq)` identity had already applied at a lower slot — the #94
+    /// double-apply, executed as a no-op instead. Reported once per batch with
+    /// the number of suppressions the batch performed.
+    fn duplicate_suppressed(&self, node: NodeId, count: u64) {}
 }
 
 /// Inert production audit: every observation is dropped.

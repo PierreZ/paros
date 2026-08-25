@@ -29,6 +29,15 @@ pub struct ClientSeq(pub u64);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Value(pub Vec<u8>);
 
+/// One at-most-once session-ledger record: the client request `(client, seq)`
+/// was applied at `slot` (the *first* — lowest — slot it entered the applied
+/// prefix at). The ledger is paros-owned metadata: it is **sealed** durably when
+/// truncation drops the log records it was derived from, and it travels beside
+/// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
+/// every restart — reproduces the identical duplicate-suppression decision at
+/// the apply seam (see [`crate::RawNode::advance_chosen_index`]'s doc).
+pub type SessionEntry = (ClientId, ClientSeq, Slot);
+
 /// A log entry: the [`Value`] chosen for a slot, tagged with the client request
 /// that produced it. Carrying `(client, seq)` in the entry is what lets the core
 /// deduplicate client retries for at-most-once execution, even for an in-flight

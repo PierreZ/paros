@@ -19,11 +19,11 @@ mod storage;
 pub use audit::{Audit, NoAudit};
 pub use driver::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED,
-    EV_CRASHED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER, EV_LEADERSHIP_RESIGNED,
-    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR,
-    EV_PROPOSE_DEDUP_ACK, EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED,
-    EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_SYNCED, command_hash,
-    is_seam_crash, parse_addr, run_node,
+    EV_CRASHED, EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER,
+    EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
+    EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED, EV_RESEND_SKIPPED,
+    EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_MID_ELECTION,
+    EV_SNAPSHOT_OFFERED, EV_SYNCED, command_hash, is_seam_crash, parse_addr, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
@@ -35,7 +35,7 @@ pub use storage::{MemStorage, NodeStorage, StorageError};
 pub use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, Message, MustSync,
     NodeId, NodeRole, ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready,
-    Slot, Storage, Value, WriteOp,
+    SessionEntry, Slot, Storage, Value, WriteOp,
 };
 
 #[cfg(test)]
@@ -119,6 +119,12 @@ mod tests {
                 ballot,
                 chosen_index: Slot(5),
                 snapshot: Value(vec![9, 9, 9]),
+                // The #94 session ledger rides beside the opaque bytes and must
+                // survive the wire round trip record-for-record.
+                sessions: vec![
+                    (ClientId(1), ClientSeq(2), Slot(3)),
+                    (ClientId(4), ClientSeq(0), Slot(5)),
+                ],
             },
             Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {

@@ -1,7 +1,7 @@
 //! The read-only [`Storage`] port the core depends on.
 
 use crate::state::{Config, HardState};
-use crate::types::{Ballot, Command, Slot};
+use crate::types::{Ballot, Command, SessionEntry, Slot};
 
 /// A read-only recovery/serving port. The **application** implements it and owns
 /// *all* writes; the core only ever *reads back* state the application has
@@ -31,4 +31,15 @@ pub trait Storage {
 
     /// The last slot present in storage.
     fn last_slot(&self) -> Slot;
+
+    /// The **sealed** at-most-once session ledger: every `(client, seq) -> slot`
+    /// record persisted when truncation (or a snapshot install) dropped the log
+    /// records it was derived from. Read once at construction and merged under
+    /// the walk-derived ledger, so a restart after truncation reproduces the
+    /// same duplicate-suppression decisions as a node that never restarted
+    /// (#94). Defaults to empty: a storage that has never truncated has nothing
+    /// sealed.
+    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+        Vec::new()
+    }
 }

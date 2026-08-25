@@ -13,6 +13,10 @@ autobins = false
 name = "sim-paros-chain"
 path = "src/main.rs"
 
+[[bin]]
+name = "sim-paros-hunt"
+path = "src/hunt.rs"
+
 [dependencies]
 paros-sim = { path = "../paros-sim", version = "0.2.0" }
 

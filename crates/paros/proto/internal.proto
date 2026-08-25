@@ -134,6 +134,17 @@ message InstallSnapshot {
   Ballot ballot = 2;
   uint64 chosen_index = 3;
   bytes snapshot = 4;
+  // The serving peer's at-most-once session ledger for the folded prefix —
+  // paros-owned metadata beside the opaque application bytes (#94). The
+  // receiver persists these as sealed dedup records.
+  repeated SessionRecord sessions = 5;
+}
+
+// One at-most-once ledger record: (client, seq) applied at slot.
+message SessionRecord {
+  uint64 client = 1;
+  uint64 seq = 2;
+  uint64 slot = 3;
 }
 
 message CheckLeader {
