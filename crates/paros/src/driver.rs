@@ -786,8 +786,25 @@ where
     // documented async pattern; persist-before-send still holds because the
     // persist loop below precedes the send loop.
     let ready = node.ready();
-    let writes: Vec<WriteOp> = ready.writes().to_vec();
-    let must_sync = ready.must_sync();
+    // A durable compaction floor must never outrun the durable *application*
+    // state covering the slots it drops: flushing a `Truncate` in step 1
+    // discards the accepted records, and a crash at the `AfterApplyBeforeSync`
+    // seam then lands a node whose application prefix is behind a floor nothing
+    // can replay — its apply stream stays shifted forever (network-axis seed
+    // 8398193358524544360). Split the truncates out of the batch and flush them
+    // only after the application fsync below. A truncate lost to a crash in
+    // that window is safe: the floor is pure space reclamation, re-raised by
+    // the next decided `Truncate`.
+    let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
+        .writes()
+        .to_vec()
+        .into_iter()
+        .partition(|w| matches!(w, WriteOp::Truncate { .. }));
+    let must_sync = if writes.iter().any(WriteOp::needs_sync) {
+        paros_core::MustSync::Sync
+    } else {
+        paros_core::MustSync::Relaxed
+    };
     let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
@@ -886,6 +903,22 @@ where
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_err(&e))?;
+    }
+
+    // Only now that the application state covering the dropped slots is
+    // fsync-durable may the compaction floor become durable (see the batch
+    // split above). Runs through the same persist path, so the truncate keeps
+    // its `BeforeSync` crash location and its after-fsync audit report.
+    if !truncates.is_empty() {
+        persist_writes(
+            storage,
+            &truncates,
+            paros_core::MustSync::Sync,
+            promised,
+            self_id,
+            hooks,
+            audit,
+        )?;
     }
 
     if !snapshot_offers.is_empty() {
