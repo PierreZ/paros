@@ -1,6 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
-use crate::types::{Ballot, NodeId, Slot};
+use crate::types::{Ballot, ConfigId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -8,7 +8,7 @@ use crate::types::{Ballot, NodeId, Slot};
 /// The per-slot accepted log is *not* here — it is persisted separately, one
 /// record at a time, through the semantic write ops a [`crate::Ready`] surfaces
 /// ([`crate::WriteOp`]). This mirrors etcd-raft's `HardState`-vs-`entries` shape:
-/// these two scalars are tiny and rewritten whole, while the log grows and is
+/// these scalars are tiny and rewritten whole, while the log grows and is
 /// appended per record (so a mutation no longer clones the whole log).
 ///
 /// # Durability contract
@@ -22,7 +22,11 @@ use crate::types::{Ballot, NodeId, Slot};
 /// [`crate::Ready`] handshake enforces *persist writes → then send messages*.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub struct HardState {
+    /// Durable identity of the cluster configuration this node belongs to.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub config_id: ConfigId,
     /// Highest ballot this node has promised (Phase 1). Monotonically
     /// non-decreasing across the node's lifetime.
     pub max_promised_ballot: Ballot,

@@ -160,6 +160,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     let old = ballot(1, 0);
     let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: old,
         slot: Slot(0),
@@ -210,6 +211,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     let mut acc_high = BTreeMap::new();
     acc_high.insert(Slot(0), high.clone());
     n.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: camp,
         from_slot: Slot(0),
@@ -218,6 +220,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     });
     assert!(!n.is_leader(), "one promise short of quorum");
     n.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(3),
         ballot: camp,
         from_slot: Slot(0),
@@ -241,6 +244,7 @@ fn nack_steps_a_candidate_down_instead_of_stalling() {
     assert_eq!(n.role(), NodeRole::Candidate);
     let camp = n.ballot();
     n.step(Message::Nack {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         promised: camp,
@@ -267,6 +271,7 @@ fn nack_does_not_retain_an_untrusted_promised_round() {
     let _ = drain(&mut n);
     let camp = n.ballot();
     n.step(Message::Nack {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         promised: ballot(50, 1),
@@ -297,6 +302,7 @@ fn a_non_member_nack_cannot_depose_a_campaign() {
     let camp = n.ballot();
 
     n.step(Message::Nack {
+        config_id: ConfigId::default(),
         from: NodeId(99),
         ballot: camp,
         promised: ballot(u64::MAX, 99),
@@ -326,6 +332,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
 
     loop {
         n.step(Message::Prepare {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: prepared,
             from_slot: cursor,
@@ -375,6 +382,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
         .collect();
 
     n.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         from_slot: Slot(0),
@@ -385,6 +393,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
     let _ = drain(&mut n);
 
     n.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         from_slot: Slot(PROMISE_BATCH as u64),
@@ -403,6 +412,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     let _ = drain(&mut n);
     let learned = ballot(stale_campaign.round + 1, 1);
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: learned,
         slot: Slot(0),
@@ -413,6 +423,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     assert_eq!(n.hard_state().max_promised_ballot, learned);
 
     n.step(Message::Prepare {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
@@ -453,6 +464,7 @@ fn leader_recovery_is_split_across_ready_batches() {
             })
             .collect();
         n.step(Message::Promise {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: camp,
             from_slot: Slot(from),
@@ -491,6 +503,7 @@ fn leader_never_lowers_its_promise_on_self_accept() {
     make_leader(&mut nodes, 0);
     let higher = ballot(99, 2);
     nodes[0].step(Message::Prepare {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: higher,
         from_slot: Slot(0),
@@ -617,6 +630,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     // was not part of, and decided slot 0. X learns it as a *learner*; the
     // campaign stays open, but the promise is now above the campaign's ballot.
     x.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: b_prime,
         slot: Slot(0),
@@ -634,6 +648,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
         from_slot: Slot(0),
@@ -660,6 +675,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,
         // The fresh campaign solicits from `first_unchosen()` — slot 0 was
@@ -715,6 +731,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     // decision at `b'` had to have.
     let mut p = node(1, &[0, 1, 2]);
     p.step(Message::Prepare {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: b_prime,
         from_slot: Slot(0),
@@ -724,6 +741,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
 
     // It rejects the stale leader's `Accept` …
     p.step(Message::Accept {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         slot: Slot(3),
@@ -738,6 +756,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     // … and stays silent on its beat, so no read round of the stale leader's can
     // reach a confirmation quorum either.
     p.step(Message::Heartbeat {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         commit: None,
@@ -789,6 +808,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     // snapshot offer. The ballot on it is node 2's *promise* — minted by
     // campaigning at round 5 itself, with no quorum behind it.
     x.step(Message::InstallSnapshot {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: m,
         chosen_index: Slot(5),
@@ -806,6 +826,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
         from_slot: Slot(0),
@@ -831,6 +852,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,
         from_slot: x.first_slot,

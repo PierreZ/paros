@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::RawNode::step`] router.
@@ -21,6 +21,9 @@ pub enum Message {
     /// every slot at or after `from_slot`." One Phase 1 per ballot covers the
     /// whole log suffix (the stable-leader optimization).
     Prepare {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot being prepared.
@@ -38,6 +41,9 @@ pub enum Message {
     /// already-chosen slots as free. A candidate that far behind must recover the
     /// compacted prefix out of band.
     Promise {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot promised.
@@ -55,6 +61,9 @@ pub enum Message {
     // ---- Phase 2 (accept / accepted / nack) ----
     /// Proposer → acceptors: "accept `command` for `slot` at `ballot`."
     Accept {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot under which the command is proposed.
@@ -66,6 +75,9 @@ pub enum Message {
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The accepted ballot.
@@ -77,6 +89,9 @@ pub enum Message {
     },
     /// Acceptor → proposer: rejection of a `Prepare` or `Accept`.
     Nack {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The rejected ballot, echoed from the `Prepare`/`Accept` that was
@@ -93,6 +108,9 @@ pub enum Message {
     // ---- Learning ----
     /// Any → any: `command` is chosen for `slot` (decided at `ballot`).
     Commit {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot at which the command was chosen.
@@ -141,6 +159,9 @@ pub enum Message {
     /// node that was down while the cluster advanced and truncated past it, so
     /// commit-replay catch-up can no longer heal it.
     InstallSnapshot {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// Sender (the serving peer).
         from: NodeId,
         /// The ballot the requester adopts (`>=` every ballot the snapshot's
@@ -174,6 +195,9 @@ pub enum Message {
     /// carrying the leader's commit index so followers advance their chosen
     /// prefix; also the trigger to re-send un-acked `Accept`s.
     Heartbeat {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// The leader heartbeating.
         from: NodeId,
         /// The leader's current ballot (lets a follower adopt or refuse it).
@@ -201,6 +225,9 @@ pub enum Message {
     /// reads need. Carries no durable obligation: the ack claims only "my promise
     /// is at or below `ballot` right now".
     HeartbeatAck {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// The acknowledging follower.
         from: NodeId,
         /// The heartbeat's ballot, echoed.
@@ -208,4 +235,27 @@ pub enum Message {
         /// The heartbeat's beat sequence number, echoed.
         seq: u64,
     },
+}
+
+impl Message {
+    /// Return the durable configuration identity carried by a ballot-bearing
+    /// protocol message. Local triggers and configuration-neutral catch-up
+    /// requests/responses carry no identity.
+    #[must_use]
+    pub fn config_id(&self) -> Option<ConfigId> {
+        match self {
+            Self::Prepare { config_id, .. }
+            | Self::Promise { config_id, .. }
+            | Self::Accept { config_id, .. }
+            | Self::Accepted { config_id, .. }
+            | Self::Nack { config_id, .. }
+            | Self::Commit { config_id, .. }
+            | Self::InstallSnapshot { config_id, .. }
+            | Self::Heartbeat { config_id, .. }
+            | Self::HeartbeatAck { config_id, .. } => Some(*config_id),
+            Self::CatchUpRequest { .. }
+            | Self::CatchUpResponse { .. }
+            | Self::CheckLeader { .. } => None,
+        }
+    }
 }

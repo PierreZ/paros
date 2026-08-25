@@ -19,6 +19,7 @@ impl RawNode {
         );
         self.heartbeat_seq += 1;
         self.broadcast(&Message::Heartbeat {
+            config_id: self.hard_state.config_id,
             from: self.config.id,
             ballot: self.ballot,
             commit: self.hard_state.chosen_index,
@@ -68,6 +69,7 @@ impl RawNode {
             self.pending_messages.push((
                 from,
                 Message::HeartbeatAck {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot,
                     seq,

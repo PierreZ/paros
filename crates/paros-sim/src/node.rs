@@ -23,9 +23,9 @@ use moonpool_sim::{
 use crate::audit::{NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, ClientId, ClientSeq, Command, Config, DriverHooks, HardState, MemStorage, Message,
-    MustSync, NodeId, NodeStorage, Seam, SessionEntry, Slot, Storage, StorageError, is_seam_crash,
-    parse_addr, run_node,
+    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, DriverHooks, HardState, MemStorage,
+    Message, MustSync, NodeId, NodeStorage, Seam, SessionEntry, Slot, Storage, StorageError,
+    is_seam_crash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -219,6 +219,7 @@ struct DurableStorage {
     /// the next durability flush.
     application: ChainState,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
+    staged_config_id: Option<ConfigId>,
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
     staged_chosen: Option<Slot>,
@@ -286,6 +287,7 @@ impl DurableStorage {
                     .map(|(&(client, seq), &slot)| (client, seq, slot))
                     .collect();
                 let _ = boot.truncate(disk.first_slot, &sealed);
+                let _ = boot.persist_config_id(disk.hard_state.config_id);
                 let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
                 for (slot, (ballot, command)) in &disk.accepted {
                     let _ = boot.append_accepted(*slot, *ballot, command.clone());
@@ -302,6 +304,7 @@ impl DurableStorage {
             key,
             node_id,
             application,
+            staged_config_id: None,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
@@ -324,6 +327,11 @@ impl DurableStorage {
 }
 
 impl NodeStorage for DurableStorage {
+    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
+        self.staged_config_id = Some(config_id);
+        Ok(())
+    }
+
     fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.staged_ballot = Some(ballot);
         Ok(())
@@ -361,8 +369,13 @@ impl NodeStorage for DurableStorage {
                 self.staged_accepted.is_empty(),
                 "a relaxed flush holds no staged accept"
             );
+            assert_always!(
+                self.staged_config_id.is_none(),
+                "a relaxed flush holds no staged configuration identity"
+            );
             return Ok(());
         }
+        let config_id = self.staged_config_id.take();
         let ballot = self.staged_ballot.take();
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
@@ -371,6 +384,9 @@ impl NodeStorage for DurableStorage {
         let applies = std::mem::take(&mut self.staged_applies);
         let sealed = std::mem::take(&mut self.staged_sealed);
         self.with_disk(|d| {
+            if let Some(config_id) = config_id {
+                d.hard_state.config_id = config_id;
+            }
             // Sealed ledger records are upserts keyed by (client, seq); the
             // first-slot claim wins, matching the core's ledger semantics.
             for (client, seq, slot) in sealed {

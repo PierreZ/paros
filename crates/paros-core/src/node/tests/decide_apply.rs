@@ -59,6 +59,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
 
     // The cluster decided a no-op at slot 1 under a later ballot; we learn it.
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: ballot(2, 1),
         slot: Slot(1),
@@ -189,6 +190,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
     // `Accept`, slot 0 is chosen, and the walk applies slots 0 and 1 together.
     let b = nodes[0].ballot();
     nodes[0].step(Message::Heartbeat {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         commit: None,
@@ -282,12 +284,14 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
     let mut n = node(1, &[0, 1, 2]);
     let b = ballot(3, 0);
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         slot: Slot(0),
         command: ucmd(1, 1, 10),
     });
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         slot: Slot(2),
@@ -299,6 +303,7 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
         "gap at slot 1 holds the prefix at slot 0"
     );
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         slot: Slot(1),
@@ -319,6 +324,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     let _ = drain(&mut n);
     let camp = n.ballot();
     n.step(Message::Promise {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         from_slot: Slot(0),
@@ -332,6 +338,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     };
     let expected = command_fingerprint(&n.proposer[&slot].command);
     n.step(Message::Accepted {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         slot,
@@ -340,6 +347,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     assert_eq!(n.hard_state().chosen_index, None);
 
     n.step(Message::Accepted {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
         slot,
@@ -357,6 +365,7 @@ fn restart_rebuilds_state_from_hard_state() {
     accepted.insert(Slot(1), (ballot(2, 0), ucmd(1, 2, 20)));
     accepted.insert(Slot(2), (ballot(2, 0), ucmd(1, 3, 30)));
     let hard_state = HardState {
+        config_id: ConfigId::default(),
         max_promised_ballot: ballot(2, 0),
         chosen_index: Some(Slot(1)),
     };
@@ -412,6 +421,7 @@ fn commit_below_floor_is_not_relearned() {
     let _ = drain(n);
 
     n.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: ballot(1, 0),
         slot: Slot(1),
@@ -475,6 +485,7 @@ fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
 fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     let mut x = node(0, &[0, 1, 2]);
     x.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(1),
@@ -488,6 +499,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
 
     // Slot 0 arrives; the prefix advances through both.
     x.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(0),
@@ -499,6 +511,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     // A duplicated / catch-up-replayed commit for a known slot is a no-op for
     // state but must never wedge: the early return still re-drives the walk.
     x.step(Message::Commit {
+        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(1),

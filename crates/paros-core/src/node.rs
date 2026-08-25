@@ -20,8 +20,8 @@ use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, SessionEntry, Slot,
+    Value, command_fingerprint,
 };
 use crate::write::WriteOp;
 
@@ -138,11 +138,12 @@ pub struct RawNode {
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(NodeId, Message)>,
     pending_committed: Vec<(Slot, Command)>,
-    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`. The core
-    /// decides *who* needs a snapshot and *up to where* (a below-floor catch-up
-    /// request), but holds no application state, so the driver attaches the opaque
-    /// snapshot bytes (from storage) and sends the [`Message::InstallSnapshot`].
-    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
+    /// Snapshot offers to serve this batch:
+    /// `(to, chosen_index, ballot, config_id)`. The core decides *who* needs a
+    /// snapshot and *up to where* (a below-floor catch-up request), but holds no
+    /// application state, so the driver attaches the opaque snapshot bytes (from
+    /// storage) and sends the [`Message::InstallSnapshot`].
+    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)>,
     /// Read-index rounds confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
@@ -512,12 +513,24 @@ impl RawNode {
     /// The single input entry point: every stimulus is a [`Message`], routed by
     /// variant and role. Tick-injected self-events (`CheckLeader`/`Heartbeat`)
     /// enter here too.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a ballot-bearing protocol message names a configuration other
+    /// than this node's durable configuration, or if processing exposes a
+    /// broken internal invariant.
     pub fn step(&mut self, msg: Message) {
+        assert!(
+            msg.config_id()
+                .is_none_or(|config_id| config_id == self.hard_state.config_id),
+            "a protocol message matches the local durable configuration"
+        );
         match msg {
             Message::Prepare {
                 from,
                 ballot,
                 from_slot,
+                ..
             } => self.on_prepare(from, ballot, from_slot),
             Message::Promise {
                 from,
@@ -525,24 +538,28 @@ impl RawNode {
                 from_slot,
                 accepted,
                 next_from_slot,
+                ..
             } => self.on_promise(from, ballot, from_slot, accepted, next_from_slot),
             Message::Accept {
                 from,
                 ballot,
                 slot,
                 command,
+                ..
             } => self.on_accept(from, ballot, slot, command),
             Message::Accepted {
                 from,
                 ballot,
                 slot,
                 vhash,
+                ..
             } => self.on_accepted(from, ballot, slot, vhash),
             Message::Nack {
                 from,
                 ballot,
                 promised,
                 slot,
+                ..
             } => self.on_nack(from, ballot, promised, slot),
             Message::Commit {
                 ballot,
@@ -565,8 +582,11 @@ impl RawNode {
                 ballot,
                 commit,
                 seq,
+                ..
             } => self.on_heartbeat(from, ballot, commit, seq),
-            Message::HeartbeatAck { from, ballot, seq } => {
+            Message::HeartbeatAck {
+                from, ballot, seq, ..
+            } => {
                 self.on_heartbeat_ack(from, ballot, seq);
             }
         }
@@ -762,6 +782,7 @@ impl RawNode {
             if self.heartbeat_elapsed >= self.heartbeat_timeout {
                 self.heartbeat_elapsed = 0;
                 self.step(Message::Heartbeat {
+                    config_id: self.hard_state.config_id,
                     from: me,
                     ballot: self.ballot,
                     commit: self.hard_state.chosen_index,
@@ -860,6 +881,7 @@ impl RawNode {
             .and_then(|(slot, _, _)| slot.0.checked_add(1).map(Slot));
         for (slot, ballot, command) in pending {
             self.broadcast(&Message::Accept {
+                config_id: self.hard_state.config_id,
                 from: me,
                 ballot,
                 slot,
@@ -1089,7 +1111,7 @@ impl RawNode {
         &self.pending_committed
     }
 
-    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
+    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
         &self.pending_snapshot_offers
     }
 

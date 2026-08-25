@@ -33,10 +33,10 @@ pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
 pub use storage::{MemStorage, NodeStorage, StorageError};
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, Control, Entry, HardState, LEADER_RECOVERY_BATCH,
-    Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
-    ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value, WriteOp,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry, HardState,
+    LEADER_RECOVERY_BATCH, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult,
+    QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value,
+    WriteOp, command_fingerprint,
 };
 
 #[cfg(test)]
@@ -44,16 +44,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     use paros_core::{
-        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
+        Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Message, NodeId, Slot,
+        Value,
     };
     use prost::Message as ProstMessage;
 
     /// One representative of every `Message` variant.
+    #[allow(clippy::too_many_lines)] // Exhaustive wire fixture: one literal per variant.
     fn every_variant() -> Vec<Message> {
         let ballot = Ballot {
             round: 7,
             node: NodeId(3),
         };
+        let config_id = ConfigId(42);
         let entry = Entry {
             client: ClientId(1),
             seq: ClientSeq(2),
@@ -71,11 +74,13 @@ mod tests {
         catchup.insert(Slot(4), (ballot, command.clone()));
         vec![
             Message::Prepare {
+                config_id,
                 from: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
             },
             Message::Promise {
+                config_id,
                 from: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
@@ -83,18 +88,21 @@ mod tests {
                 next_from_slot: None,
             },
             Message::Accept {
+                config_id,
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 command: command.clone(),
             },
             Message::Accepted {
+                config_id,
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 vhash: 17,
             },
             Message::Nack {
+                config_id,
                 from: NodeId(2),
                 ballot,
                 promised: Ballot {
@@ -104,6 +112,7 @@ mod tests {
                 slot: Slot(6),
             },
             Message::Commit {
+                config_id,
                 from: NodeId(0),
                 ballot,
                 slot: Slot(6),
@@ -118,6 +127,7 @@ mod tests {
                 entries: catchup,
             },
             Message::InstallSnapshot {
+                config_id,
                 from: NodeId(0),
                 ballot,
                 chosen_index: Slot(5),
@@ -131,6 +141,7 @@ mod tests {
             },
             Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {
+                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: Some(Slot(2)),
@@ -140,12 +151,14 @@ mod tests {
             // wire encoding used to be unable to say (#56): a leader that has
             // chosen nothing is not a leader that has chosen slot 0.
             Message::Heartbeat {
+                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: None,
                 seq: 10,
             },
             Message::HeartbeatAck {
+                config_id,
                 from: NodeId(1),
                 ballot,
                 seq: 9,

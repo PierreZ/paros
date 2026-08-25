@@ -83,6 +83,7 @@ message Prepare {
   uint64 from = 1;
   Ballot ballot = 2;
   uint64 from_slot = 3;
+  uint64 config_id = 4;
 }
 
 message Promise {
@@ -91,6 +92,7 @@ message Promise {
   uint64 from_slot = 3;
   repeated SlotCommand accepted = 4;
   optional uint64 next_from_slot = 5;
+  uint64 config_id = 6;
 }
 
 message Accept {
@@ -98,6 +100,7 @@ message Accept {
   Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
+  uint64 config_id = 5;
 }
 
 message Accepted {
@@ -105,6 +108,7 @@ message Accepted {
   Ballot ballot = 2;
   uint64 slot = 3;
   uint64 vhash = 4;
+  uint64 config_id = 5;
 }
 
 message Nack {
@@ -112,6 +116,7 @@ message Nack {
   Ballot ballot = 2;
   Ballot promised = 3;
   uint64 slot = 4;
+  uint64 config_id = 5;
 }
 
 message Commit {
@@ -119,6 +124,7 @@ message Commit {
   Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
+  uint64 config_id = 5;
 }
 
 message CatchUpRequest {
@@ -140,6 +146,7 @@ message InstallSnapshot {
   // paros-owned metadata beside the opaque application bytes (#94). The
   // receiver persists these as sealed dedup records.
   repeated SessionRecord sessions = 5;
+  uint64 config_id = 6;
 }
 
 // One at-most-once ledger record: (client, seq) applied at slot.
@@ -158,12 +165,14 @@ message Heartbeat {
   Ballot ballot = 2;
   optional uint64 commit = 3;
   uint64 seq = 4;
+  uint64 config_id = 5;
 }
 
 message HeartbeatAck {
   uint64 from = 1;
   Ballot ballot = 2;
   uint64 seq = 3;
+  uint64 config_id = 4;
 }
 
 message InspectRequest {}

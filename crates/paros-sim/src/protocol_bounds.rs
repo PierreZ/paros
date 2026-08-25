@@ -8,9 +8,9 @@ use moonpool_sim::{
     assert_reachable, assert_sometimes,
 };
 use paros::{
-    Ballot, ClientId, ClientSeq, Command, Config, Entry, HardState, LEADER_RECOVERY_BATCH, Message,
-    NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode, Slot, Storage, Value,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Entry, HardState,
+    LEADER_RECOVERY_BATCH, Message, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem,
+    RawNode, Slot, Storage, Value, command_fingerprint,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
@@ -107,6 +107,7 @@ impl Workload for ProtocolBoundsWorkload {
 
         loop {
             acceptor.step(Message::Prepare {
+                config_id: ConfigId::default(),
                 from: NodeId(1),
                 ballot,
                 from_slot: cursor,
@@ -118,6 +119,7 @@ impl Workload for ProtocolBoundsWorkload {
                 from_slot,
                 accepted,
                 next_from_slot,
+                ..
             }) = messages
                 .into_iter()
                 .map(|(_, message)| message)
@@ -138,6 +140,7 @@ impl Workload for ProtocolBoundsWorkload {
             entries_seen += accepted.len();
 
             candidate.step(Message::Promise {
+                config_id: ConfigId::default(),
                 from,
                 ballot: promised,
                 from_slot,
@@ -153,6 +156,7 @@ impl Workload for ProtocolBoundsWorkload {
                     from,
                     ballot: continuation_ballot,
                     from_slot,
+                    ..
                 }) = candidate_messages
                     .into_iter()
                     .map(|(_, message)| message)
@@ -228,6 +232,7 @@ impl Workload for ProtocolBoundsWorkload {
         };
         for slot in 1..SUFFIX_LEN {
             gapped.step(Message::Commit {
+                config_id: ConfigId::default(),
                 from: NodeId(1),
                 ballot: prior,
                 slot: Slot(slot),
@@ -240,6 +245,7 @@ impl Workload for ProtocolBoundsWorkload {
         let gap_ballot = gapped.ballot();
         let _ = take_ready(&mut gapped);
         gapped.step(Message::Promise {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: gap_ballot,
             from_slot: Slot(0),
@@ -249,6 +255,7 @@ impl Workload for ProtocolBoundsWorkload {
         let _ = take_ready(&mut gapped);
         let noop = Command::Control(paros::Control::Noop);
         gapped.step(Message::Accepted {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: gap_ballot,
             slot: Slot(0),
@@ -280,6 +287,7 @@ impl Workload for ProtocolBoundsWorkload {
         let rejected = nacked.ballot();
         let _ = take_ready(&mut nacked);
         nacked.step(Message::Nack {
+            config_id: ConfigId::default(),
             from: NodeId(0),
             ballot: rejected,
             promised: Ballot {
@@ -306,6 +314,7 @@ impl Workload for ProtocolBoundsWorkload {
             node: NodeId(1),
         };
         stale.step(Message::Commit {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: learned,
             slot: Slot(0),
@@ -313,6 +322,7 @@ impl Workload for ProtocolBoundsWorkload {
         });
         let _ = take_ready(&mut stale);
         stale.step(Message::Prepare {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: learned,
             from_slot: Slot(1),
@@ -328,6 +338,7 @@ impl Workload for ProtocolBoundsWorkload {
         let proposal_ballot = proposer.ballot();
         let _ = take_ready(&mut proposer);
         proposer.step(Message::Promise {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: proposal_ballot,
             from_slot: Slot(0),
@@ -356,6 +367,7 @@ impl Workload for ProtocolBoundsWorkload {
             "command fingerprints include identity"
         );
         proposer.step(Message::Accepted {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: proposal_ballot,
             slot,
@@ -366,6 +378,7 @@ impl Workload for ProtocolBoundsWorkload {
             "a mismatched Accepted fingerprint is not credited"
         );
         proposer.step(Message::Accepted {
+            config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: proposal_ballot,
             slot,

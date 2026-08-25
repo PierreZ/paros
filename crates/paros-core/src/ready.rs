@@ -3,7 +3,7 @@
 
 use crate::message::Message;
 use crate::node::{RawNode, ReadState};
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
@@ -83,7 +83,8 @@ impl<'a> Ready<'a> {
         self.node.pending_committed()
     }
 
-    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`. The core
+    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot, config_id)`.
+    /// The core
     /// decided a peer needs a snapshot (it asked for a prefix below this node's
     /// compaction floor) but holds no application state, so the **driver** must
     /// read the opaque snapshot bytes from storage, build a
@@ -91,7 +92,7 @@ impl<'a> Ready<'a> {
     /// `to`. Process these alongside [`Ready::messages`] (step 2), after the batch
     /// is durable.
     #[must_use]
-    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
+    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
         self.node.pending_snapshot_offers()
     }
 
