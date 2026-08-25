@@ -51,7 +51,7 @@ that opaque state. `ChainAgreement` checks one command/state per applied index, 
 application, and proposal validity. Keep its messages stable. Client timeouts and deliberately
 abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
 bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
-recipes replay from a fresh builder. The shared assertion tables allow at most 128 sites and 256
+recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
 **Moonpool questions.** For any question about moonpool's APIs or behavior, consult the
@@ -170,10 +170,10 @@ substitutes for the other:
   branch-guarded `assert_reachable!` (the `reach_once!` idiom; creates no slot when unreached, so
   it can never fail coverage); guidance is the numeric/`sometimes_all`/`sometimes_each` family.
   Pair every BUGGIFY site with a sometimes/reachable proving it fired. **Budget:** one slot per
-  unique message string (identity = the message hash — never reword an existing message), 128
-  slots per campaign process shared with moonpool's own internals, and overflow is *silent*; count
-  before adding, keep messages short/stable/free of interpolated ids, and put dynamic context in
-  the detail map.
+  unique message string (identity = the message hash — never reword an existing message), 512
+  slots per campaign process shared with moonpool's own internals; overflow is reported as an
+  always violation. Count before adding, keep messages short/stable/free of interpolated ids, and
+  put dynamic context in the detail map.
 - The audit (`paros_sim::audit`) and workload `check()` remain where *cluster-level protocol and
   client-visible* correctness live (see above); in-core asserts guard single-node state-machine
   invariants — the two catch different bug shapes and deliberately overlap (e.g. promise

@@ -8,8 +8,8 @@ use futures::future::join_all;
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
-    Workload, assert_always, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
-    buggify_with_prob, swarm_op_enabled,
+    Workload, assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
+    buggify_knob, buggify_with_prob, swarm_op_enabled,
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Slot,
@@ -105,6 +105,7 @@ pub(crate) struct ChainWorkload {
     submitted: BTreeSet<u64>,
     final_state: Option<ChainState>,
     issued_count: u64,
+    external_digests_compared: bool,
     safety_only: bool,
 }
 
@@ -701,15 +702,43 @@ impl Workload for ChainWorkload {
             last_probe = (0..server_count)
                 .map(|i| observed.get(i).copied())
                 .collect();
-            if observed.len() == server_count
-                && observed
-                    .first()
-                    .is_some_and(|first| first.applied_count > pre_tail_count)
-                && observed.windows(2).all(|pair| pair[0] == pair[1])
-            {
-                self.final_state = observed.first().copied();
-                converged = true;
-                break;
+            // This is deliberately independent of `command_applied`: these are
+            // live RPC reads of each application's opaque snapshot. A driver or
+            // trace bug cannot manufacture agreement here. Different counts may
+            // be ordinary catch-up; equal counts with different digests are an
+            // immediate state-machine-safety violation.
+            if observed.len() == server_count {
+                let reference = observed[0];
+                let equal_count = observed
+                    .iter()
+                    .all(|state| state.applied_count == reference.applied_count);
+                if equal_count {
+                    if !self.external_digests_compared {
+                        assert_reachable!(
+                            "chain: external replica digests are compared after chaos"
+                        );
+                        self.external_digests_compared = true;
+                    }
+                    for (node, state) in observed.iter().enumerate().skip(1) {
+                        assert_always!(
+                            state.chain_hash == reference.chain_hash,
+                            "chain: live reads agree at equal count",
+                            {
+                                "node" => node,
+                                "applied_count" => state.applied_count,
+                                "expected_state" => hash_text(reference.chain_hash),
+                                "observed_state" => hash_text(state.chain_hash),
+                            }
+                        );
+                    }
+                    if reference.applied_count > pre_tail_count
+                        && observed.iter().all(|state| *state == reference)
+                    {
+                        self.final_state = Some(reference);
+                        converged = true;
+                        break;
+                    }
+                }
             }
             time.sleep(Duration::from_millis(50)).await.ok();
         }
