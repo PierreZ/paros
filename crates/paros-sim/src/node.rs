@@ -24,9 +24,8 @@ use crate::audit::{AuditWorld, GateScope, NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, ClientId, ClientSeq, Command, Config, ConfigId, DriverHooks, HardState, MemStorage,
-    Message, MustSync, NodeId, NodeStorage, Seam, SessionEntry, Slot, Storage, StorageError,
-    StorageRecord, WriteOutcome, command_hash, is_seam_crash, is_storage_crash, parse_addr,
-    run_node,
+    Message, MustSync, NodeId, NodeStorage, RunError, Seam, SessionEntry, Slot, Storage,
+    StorageError, StorageRecord, WriteOutcome, command_hash, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -204,7 +203,7 @@ impl Process for NodeProcess {
                 // attrition cannot reach. A node held down while the cluster
                 // keeps committing and truncating returns below the compaction
                 // floor and independently exercises snapshot recovery.
-                Err(e) if is_seam_crash(&e) => {
+                Err(RunError::SeamCrash(_)) => {
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {
                         // BUGGIFY pairing: the restart-delay knob fired — the
@@ -219,14 +218,17 @@ impl Process for NodeProcess {
                 // boots from whatever the disk *actually* holds, which is how
                 // an ambiguous write's two possible outcomes both resolve.
                 // Its restart delay is its own independent BUGGIFY location.
-                Err(e) if is_storage_crash(&e) => {
+                Err(RunError::Storage(_)) => {
                     assert_reachable!("a storage-fault crash recovers through the restart path");
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {
                         ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
                     }
                 }
-                other => return other,
+                // The only non-crash exit: a genuine infrastructure failure
+                // propagates to the harness instead of being retried.
+                Err(RunError::Infra(e)) => return Err(e),
+                Ok(()) => return Ok(()),
             }
         }
     }
