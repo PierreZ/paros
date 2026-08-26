@@ -40,6 +40,27 @@ fn chain_single_seed_converges() {
     );
 }
 
+/// The amnesia **red demo** stays red (issue #19 item D): a node wiped of its
+/// disk rejoins naively, and the cross-restart promise audit — the only oracle
+/// the wipe cannot evade, since `set_promise`'s in-core assert lives in the
+/// storage record the wipe deletes — must catch the reneged promise. This test
+/// asserts the *violation fires*: if the demo ever comes back green, either
+/// the wipe stopped happening or the oracle went blind, and both are bugs.
+/// (CTRL's `MarkNonVoting` takedown is the citation for why a wiped node must
+/// never rejoin as itself; `prob_wipe` stays 0 on every real campaign.)
+#[test]
+fn amnesia_demo_stays_red() {
+    let report = paros_sim::run_amnesia_demo_seed(paros_sim::AMNESIA_DEMO_SEED);
+    assert!(
+        report
+            .assertion_violations
+            .iter()
+            .any(|v| format!("{v:?}").contains("promised ballot never decreases")),
+        "the naive-wipe demo must surface the reneged promise; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {

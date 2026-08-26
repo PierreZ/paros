@@ -20,6 +20,18 @@
 use paros_core::{Ballot, Message, NodeId, Slot};
 
 use crate::hooks::Seam;
+use crate::storage::StorageError;
+
+/// The driver's reaction to a [`StorageError`]. Stage 6 has exactly one honest
+/// reaction — crash and re-enter the crash/recovery path — but the decision is
+/// typed so Stage 8's protocol-aware choices (mark-faulty, degrade a single
+/// record, stay up) slot in as variants the audit can match on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageFaultDecision {
+    /// Fail-stop: the node crashes rather than run on state it does not
+    /// durably have, and recovery is the ordinary crash/restart path.
+    Crash,
+}
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
 ///
@@ -97,6 +109,13 @@ pub trait Audit {
 
     /// This node crashed at a durability `seam` inside a `Ready` batch.
     fn crashed(&self, node: NodeId, seam: Seam) {}
+
+    /// A [`NodeStorage`](crate::NodeStorage) call surfaced `error` and the
+    /// driver decided `decision` — reported at the instant of the decision,
+    /// before the crash unwinds. The error carries the fault kind, the record
+    /// identity, and the durability outcome as data, so a checker can fold
+    /// injected-vs-detected accounting into O(1) state without string parsing.
+    fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {}
 
     /// This node dropped one outbound message at the send seam (hook-decided
     /// per-message loss, indistinguishable from network loss to the peers).

@@ -28,7 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, command_hash,
+    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, StorageError,
+    StorageFaultDecision, command_hash,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -145,6 +146,45 @@ impl AuditWorld {
         let mut st = self.lock();
         st.lin.merge(history);
         st.check_client_history();
+    }
+
+    /// How many storage faults the drivers *detected* (one typed
+    /// [`Audit::storage_fault`] crash decision each). The workload's `check()`
+    /// correlates this against the storage world's injected ground truth.
+    pub(crate) fn storage_faults_detected(&self) -> u64 {
+        self.lock().storage_faults_detected
+    }
+
+    /// Ground-truth feed from the storage world (issue #19 C). A record can
+    /// become durable through an *ambiguous* fault leg — the flush happened,
+    /// but the driver crashed on the reported error before surfacing it — so
+    /// the driver's audit stream alone would go stale and the next reboot
+    /// would trip the cross-restart checks as false positives. The world owns
+    /// the ground truth, so every flush refreshes the **reference data** those
+    /// checks compare against: the per-`(node, slot)` persisted value, the
+    /// compaction floor, and the admitted snapshot landings. Reference data
+    /// only — progress/liveness state (`applied_max`, quiescence clocks) stays
+    /// driver-reported, so this observation cannot mask a liveness bug. This
+    /// is what keeps recovered-equals-persisted checkable against *actual*
+    /// durable state (the #71 weakening is for Stage 7-8, not this).
+    pub(crate) fn note_flushed_ground_truth(
+        &self,
+        node: u64,
+        now_ms: u64,
+        accepted: &[(u64, u64)],
+        floor: Option<u64>,
+        snapshot_landing: Option<u64>,
+    ) {
+        let mut st = self.lock();
+        for &(slot, vhash) in accepted {
+            st.persisted.insert((node, slot), vhash);
+        }
+        if let Some(first) = floor {
+            st.floor.entry(node).or_default().raise(first, now_ms);
+        }
+        if let Some(landing) = snapshot_landing {
+            st.snap_landings.entry(node).or_default().insert(landing);
+        }
     }
 
     /// The convergence deliverable, judged when no future leader change can
@@ -343,6 +383,9 @@ struct AuditState {
     leadership_turnover: bool,
     crashed_before_sync: bool,
     crashed_after_sync: bool,
+    /// Typed storage-fault crash decisions folded in ([`Audit::storage_fault`]).
+    storage_faults_detected: u64,
+    storage_fault_crashed: bool,
     resend_skipped: bool,
     resigned: bool,
     shortest_timeout: bool,
@@ -990,6 +1033,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a truncated record is never recovered on boot (the log stays bounded)"
             );
         }
+    }
+
+    fn storage_fault(&self, _node: NodeId, _error: &StorageError, decision: StorageFaultDecision) {
+        let mut st = self.state();
+        // Stage 6 has exactly one honest reaction; a different decision here
+        // is a driver bug until Stage 8's protocol-aware choices exist.
+        assert_always!(
+            decision == StorageFaultDecision::Crash,
+            "a storage fault is decided as a fail-stop crash"
+        );
+        st.storage_faults_detected += 1;
+        reach_once!(
+            st.storage_fault_crashed,
+            "a storage fault crashes the node (fail-stop)"
+        );
     }
 
     fn crashed(&self, _node: NodeId, seam: Seam) {

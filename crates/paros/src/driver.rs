@@ -29,7 +29,7 @@ use paros_core::{
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::Audit;
+use crate::audit::{Audit, StorageFaultDecision};
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
     ReadAck, ReplySender, RpcInbox, internal, message_to_proto, rpc_channel, wire_checksum,
@@ -190,6 +190,14 @@ pub const EV_CLIENT_REPLY_DROPPED: &str = "client_reply_dropped";
 /// Carries `node` and `ticks`. The driver-hook oracle uses it to prove the
 /// timeout-jitter BUGGIFY location is active.
 pub const EV_ELECTION_TIMEOUT_EXTREME: &str = "election_timeout_extreme";
+
+/// Tracing event: a [`NodeStorage`] call failed and the driver took its
+/// deliberate crash decision (see [`RunError::Storage`]). Carries `node`, the
+/// human-readable `error` (the typed [`StorageError`] travels on the
+/// [`Audit::storage_fault`] callback), and `decision` (`"crash"` — Stage 6's
+/// only reaction). Emitted at the instant of the decision, before the crash
+/// unwinds the incarnation.
+pub const EV_STORAGE_FAULT: &str = "storage_fault";
 
 /// Tracing event: this node flushed a `Ready` batch's durable writes. Carries
 /// `node`, `sync` (whether the batch required an fsync-before-send —
@@ -652,7 +660,7 @@ fn send_snapshot_offers<S, H, A>(
     audit: &A,
     snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
     sessions: &[SessionEntry],
-) -> SimulationResult<()>
+) -> Result<(), RunError>
 where
     S: NodeStorage,
     H: DriverHooks,
@@ -662,7 +670,8 @@ where
         if storage.applied_slot() != Some(offered_index) {
             return Err(SimulationError::InvalidState(
                 "application snapshot does not match offered chosen index".into(),
-            ));
+            )
+            .into());
         }
         let message = Message::InstallSnapshot {
             config_id,
@@ -847,7 +856,7 @@ fn drain_ready<S, H, A>(
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
-) -> SimulationResult<()>
+) -> Result<(), RunError>
 where
     S: NodeStorage,
     H: DriverHooks,
@@ -941,7 +950,7 @@ where
             snapshot_offers = snapshot_offer_count as u64,
             "crashed"
         );
-        return Err(seam_crash());
+        return Err(RunError::SeamCrash(Seam::AfterSyncBeforeSend));
     }
 
     // 2. Send messages — only after (1) is durable.
@@ -957,7 +966,7 @@ where
         })?;
         storage
             .apply(chosen_index, *slot, command)
-            .map_err(|e| storage_err(&e))?;
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         let vhash = command_hash(command);
         audit.applied(
             NodeId(self_id),
@@ -989,11 +998,11 @@ where
         if hooks.crash_at(Seam::AfterApplyBeforeSync) {
             audit.crashed(NodeId(self_id), Seam::AfterApplyBeforeSync);
             tracing::info!(node = self_id, seam = "after_apply_before_sync", "crashed");
-            return Err(seam_crash());
+            return Err(RunError::SeamCrash(Seam::AfterApplyBeforeSync));
         }
         storage
             .sync(paros_core::MustSync::Sync)
-            .map_err(|e| storage_err(&e))?;
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
 
     // Only now that the application state covering the dropped slots is
@@ -1068,14 +1077,14 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     self_id: u64,
     hooks: &H,
     audit: &A,
-) -> SimulationResult<()> {
+) -> Result<(), RunError> {
     let mut promise_changed = false;
     for op in writes {
         match op {
             WriteOp::SetPromise(ballot) => {
                 storage
                     .persist_ballot(*ballot)
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 promise_changed = true;
             }
             WriteOp::AppendAccepted {
@@ -1085,17 +1094,17 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             } => {
                 storage
                     .append_accepted(*slot, *ballot, command.clone())
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::SetChosenIndex(slot) => {
                 storage
                     .set_chosen_index(*slot)
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::Truncate { first, sealed } => {
                 storage
                     .truncate(*first, sealed)
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::InstallSnapshot {
                 chosen_index,
@@ -1105,7 +1114,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             } => {
                 storage
                     .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
         }
     }
@@ -1117,11 +1126,13 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     if !writes.is_empty() && hooks.crash_at(Seam::BeforeSync) {
         audit.crashed(NodeId(self_id), Seam::BeforeSync);
         tracing::info!(node = self_id, seam = "before_sync", "crashed");
-        return Err(seam_crash());
+        return Err(RunError::SeamCrash(Seam::BeforeSync));
     }
 
     if !writes.is_empty() {
-        storage.sync(must_sync).map_err(|e| storage_err(&e))?;
+        storage
+            .sync(must_sync)
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // Durability marker: whether this batch was fsync'd (a promise-raise or
         // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only
         // advance). The persist/send-seam animation renders it as a filled vs
@@ -1216,28 +1227,69 @@ fn surface_persisted<A: Audit>(
     }
 }
 
-/// Map a [`StorageError`] into a driver [`SimulationError`] so a durable-write
-/// fault propagates out of the node loop.
-fn storage_err(e: &StorageError) -> SimulationError {
-    SimulationError::InvalidState(format!("storage: {e}"))
+/// Map a [`StorageError`] into the driver's **deliberate crash decision**: a
+/// storage fault never lets the node keep running on state it does not durably
+/// have. The decision is reported through [`Audit::storage_fault`] (typed, at
+/// the instant it is made) and surfaced as [`EV_STORAGE_FAULT`], then
+/// [`RunError::Storage`] unwinds the incarnation. Production semantics: a
+/// storage fault is a process exit (crash-only); the sim's node loop matches
+/// the variant and routes to the crash/restart path instead.
+fn storage_fault_crash<A: Audit>(audit: &A, self_id: u64, e: StorageError) -> RunError {
+    audit.storage_fault(NodeId(self_id), &e, StorageFaultDecision::Crash);
+    tracing::warn!(node = self_id, error = %e, decision = "crash", "storage_fault");
+    RunError::Storage(e)
 }
 
-/// Marker payload of the error [`run_node`] returns when a [`Seam`] crash fires.
-/// Distinguishes a *simulated crash* (the caller should recover and re-run) from
-/// a genuine failure (which should propagate).
-const SEAM_CRASH_MARKER: &str = "paros:seam-crash";
-
-/// The error a crash seam raises to unwind the current node incarnation.
-fn seam_crash() -> SimulationError {
-    SimulationError::InvalidState(SEAM_CRASH_MARKER.to_string())
+/// Why [`run_node`] stopped, typed. The driver's *domain* outcomes — a crash it
+/// decided to take — are first-class variants a caller matches on; a moonpool
+/// [`SimulationError`] appears only wrapped in [`RunError::Infra`], for genuine
+/// provider/infrastructure failures. The simulation's error type never carries
+/// a protocol-layer decision.
+#[derive(Debug)]
+pub enum RunError {
+    /// A hook-injected crash at a durability [`Seam`] inside a `Ready` batch
+    /// (simulation only: production's `NoHooks` never fires). The caller
+    /// recovers by re-running [`run_node`], which rebuilds volatile state from
+    /// durable storage.
+    SeamCrash(Seam),
+    /// A [`NodeStorage`] call failed and the driver took its fail-stop crash
+    /// decision — never an incidental error propagation. In **production**
+    /// this is a crash-only process exit; recovery is the next boot. In
+    /// simulation the node loop recovers exactly like a seam crash: re-run
+    /// [`run_node`] against whatever the disk *actually* holds (the recovery
+    /// path must be correct for both outcomes of an ambiguous write; see
+    /// [`crate::WriteOutcome`]).
+    Storage(StorageError),
+    /// A provider/infrastructure failure (bind, listen, address parsing): the
+    /// only place a [`SimulationError`] escapes the driver, and a genuine
+    /// failure — never a recovery signal.
+    Infra(SimulationError),
 }
 
-/// Whether `e` is the marker [`run_node`] returns on a simulated seam crash (as
-/// opposed to a real failure). The node loop's owner re-runs `run_node` — which
-/// rebuilds volatile state from durable storage — to recover.
-#[must_use]
-pub fn is_seam_crash(e: &SimulationError) -> bool {
-    matches!(e, SimulationError::InvalidState(s) if s == SEAM_CRASH_MARKER)
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::SeamCrash(seam) => write!(f, "injected crash at durability seam {seam:?}"),
+            RunError::Storage(e) => write!(f, "storage fault, crashing: {e}"),
+            RunError::Infra(e) => write!(f, "infrastructure failure: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RunError::Storage(e) => Some(e),
+            RunError::Infra(e) => Some(e),
+            RunError::SeamCrash(_) => None,
+        }
+    }
+}
+
+impl From<SimulationError> for RunError {
+    fn from(e: SimulationError) -> Self {
+        RunError::Infra(e)
+    }
 }
 
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
@@ -1359,7 +1411,7 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
     storage: &mut S,
     self_id: u64,
     audit: &A,
-) -> SimulationResult<()> {
+) -> Result<(), RunError> {
     // Mark this incarnation coming up. The recovery recorder turns every `booted`
     // after a node's first into a *restart* event for the animation.
     tracing::info!(node = self_id, "booted");
@@ -1405,7 +1457,7 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
             if applied_slot.is_none_or(|applied| *slot > applied) {
                 storage
                     .apply(ci, *slot, command)
-                    .map_err(|e| storage_err(&e))?;
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 replayed_application = true;
             }
             let vhash = command_hash(command);
@@ -1430,7 +1482,7 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
     if replayed_application {
         storage
             .sync(paros_core::MustSync::Sync)
-            .map_err(|e| storage_err(&e))?;
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
     Ok(())
 }
@@ -1458,10 +1510,14 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
 ///
 /// # Errors
 ///
-/// Returns an error if the gRPC server fails to bind or listen on `local_addr`. May
-/// also return a simulated crash marker ([`is_seam_crash`]) if `hooks` fires at a
-/// durability seam — the caller recovers by re-running `run_node` with fresh
-/// storage.
+/// The exit is typed ([`RunError`]): [`RunError::SeamCrash`] when `hooks` fires
+/// at a durability seam (the caller recovers by re-running `run_node` with
+/// fresh storage); [`RunError::Storage`] when a [`NodeStorage`] call failed and
+/// the driver took its fail-stop crash decision — production treats it as a
+/// process exit (crash-only), the sim node loop recovers through the same
+/// restart path as a seam crash; [`RunError::Infra`] for genuine
+/// provider/infrastructure failures (bind, listen), the only exit that is not
+/// a deliberate crash and must propagate.
 #[tracing::instrument(skip_all)]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
@@ -1475,7 +1531,7 @@ pub async fn run_node<P, S, H, A>(
     shutdown: CancellationToken,
     hooks: &H,
     audit: &A,
-) -> SimulationResult<()>
+) -> Result<(), RunError>
 where
     P: Providers,
     S: NodeStorage,

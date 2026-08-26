@@ -1261,6 +1261,26 @@ impl Workload for ChainWorkload {
             time.sleep(Duration::from_millis(50)).await.ok();
         }
 
+        // Availability oracle (issue #19 E): the budget bounds storage faults a
+        // priori, and this independently re-derives — from world state, never
+        // from the budget's own bookkeeping — whether an unavailable run is
+        // *explainable* by the injected faults (a quorum of clean copies
+        // genuinely missing). Under the per-record budget no run is excusable,
+        // so an unavailable run with clean quorums everywhere is a real
+        // liveness bug, named as such beside the convergence failure.
+        let storage = crate::node::storage_fault_stats(ctx.state());
+        assert_always!(
+            converged || !storage.clean_quorum_everywhere,
+            "chain: an unavailable run is explained by injected storage faults"
+        );
+        // Liveness under the budget: faults were injected and the cluster
+        // still served and converged (invariant 4 — up to f failures,
+        // fail-stop storage faults included, keep the cluster available).
+        assert_sometimes!(
+            storage.injected > 0 && converged,
+            "storage: a run injects storage faults and still converges"
+        );
+
         if !converged {
             // Failure diagnostic (fires only on the red path): which node is
             // stuck, and where. `None` = the node did not answer the inspect
@@ -1344,6 +1364,7 @@ impl Workload for ChainWorkload {
             GateScope::Full
         };
         audit_world(ctx.state()).check_gates(scope);
+        crate::node::check_storage_gates(ctx.state(), scope);
         assert_always!(
             self.outcomes
                 .values()

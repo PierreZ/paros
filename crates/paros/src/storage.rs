@@ -9,23 +9,135 @@ use paros_core::{
     Ballot, Command, Config, ConfigId, HardState, MustSync, SessionEntry, Slot, Storage,
 };
 
-/// A durable-write failure. The read-side [`paros_core::Storage`] recovery port
-/// stays infallible, but every *write* is fallible **from day one** so a later
-/// storage-fault stage can inject `EIO` / torn-write / fsync failures through
-/// these signatures without a second trait redesign.
+/// The durable record a storage operation (and therefore a storage fault) hit.
+///
+/// Carried as **data** on every [`StorageError`] so Stage 7's detect-and-classify
+/// and Stage 8's crash-relevance decisions can *match* on the record identity,
+/// and so the simulation can correlate injected fault ↔ surfaced error ↔ node
+/// reaction without string parsing. New identities slot in as plain variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageRecord {
+    /// The durable cluster-configuration identity scalar.
+    ConfigId,
+    /// The promised-ballot scalar (the `HardState` promise).
+    Promise,
+    /// The accepted `(ballot, command)` entry at this slot.
+    Accepted(Slot),
+    /// The chosen-index (commit index) scalar.
+    ChosenIndex,
+    /// The truncation record (the durable compaction floor + sealed sessions).
+    Truncation,
+    /// The installed opaque application snapshot.
+    Snapshot,
+    /// The staged application transition at this slot (the apply seam).
+    Application(Slot),
+    /// The whole staged batch: an fsync flushes every record staged since the
+    /// last flush, so a failed fsync has no single-record identity.
+    Batch,
+}
+
+impl fmt::Display for StorageRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageRecord::ConfigId => write!(f, "config-id"),
+            StorageRecord::Promise => write!(f, "promise"),
+            StorageRecord::Accepted(slot) => write!(f, "accepted[{}]", slot.0),
+            StorageRecord::ChosenIndex => write!(f, "chosen-index"),
+            StorageRecord::Truncation => write!(f, "truncation"),
+            StorageRecord::Snapshot => write!(f, "snapshot"),
+            StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
+            StorageRecord::Batch => write!(f, "batch"),
+        }
+    }
+}
+
+/// Whether a failed write's effect reached stable storage.
+///
+/// This is the type-level hook for **ambiguity** (fsyncgate): an error report
+/// does not imply the data is absent, and a caller may resolve the ambiguity
+/// only by crashing and booting from whatever the disk *actually* holds — the
+/// recovery path must be correct for **both** outcomes of every
+/// [`Unknown`](WriteOutcome::Unknown) write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// The effect is known absent (the write never reached the device).
+    Lost,
+    /// Undecidable from here: the error was reported but the effect may be
+    /// durable anyway, or was reported clean elsewhere yet lost. Neither
+    /// "assume it landed" nor "assume it didn't" is safe.
+    Unknown,
+}
+
+impl fmt::Display for WriteOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WriteOutcome::Lost => write!(f, "lost"),
+            WriteOutcome::Unknown => write!(f, "outcome unknown"),
+        }
+    }
+}
+
+/// A durable-write failure, typed: the *fault kind* is the variant, the
+/// *record identity* and (for writes) the *durability outcome* are data.
+///
+/// The read-side [`paros_core::Storage`] recovery port stays infallible, but
+/// every *write* is fallible so the storage-fault stages can inject `EIO` /
+/// fsync / corruption faults through these signatures. `Display` stays
+/// human-readable; later stages add variants (Stage 7 grows sub-structure
+/// under [`Corruption`](StorageError::Corruption)) without reshaping these.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageError {
-    /// An I/O error (a lost/failed write, a failed fsync).
-    Io(String),
+    /// A write returned an I/O error (`EIO`). Per `outcome`, the caller may
+    /// not assume the data is absent.
+    Io {
+        /// The record the failed write was for.
+        record: StorageRecord,
+        /// Whether the write's effect is known lost or undecidable.
+        outcome: WriteOutcome,
+    },
+    /// An fsync failed. Per `outcome`, the staged batch may be durable anyway
+    /// (fsyncgate) or genuinely lost.
+    FsyncFailed {
+        /// The record identity the flush covered (usually
+        /// [`StorageRecord::Batch`]).
+        record: StorageRecord,
+        /// Whether the staged batch's durability is known lost or undecidable.
+        outcome: WriteOutcome,
+    },
     /// A durable record failed its integrity check (Stage 7 checksums).
-    Corruption(String),
+    Corruption {
+        /// The record that failed its integrity check.
+        record: StorageRecord,
+        /// Human-readable detail (Stage 7 replaces this with typed
+        /// sub-structure).
+        detail: String,
+    },
+}
+
+impl StorageError {
+    /// The record identity the fault hit.
+    #[must_use]
+    pub fn record(&self) -> StorageRecord {
+        match self {
+            StorageError::Io { record, .. }
+            | StorageError::FsyncFailed { record, .. }
+            | StorageError::Corruption { record, .. } => *record,
+        }
+    }
 }
 
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageError::Io(m) => write!(f, "storage io error: {m}"),
-            StorageError::Corruption(m) => write!(f, "storage corruption: {m}"),
+            StorageError::Io { record, outcome } => {
+                write!(f, "storage io error on {record} ({outcome})")
+            }
+            StorageError::FsyncFailed { record, outcome } => {
+                write!(f, "storage fsync failed on {record} ({outcome})")
+            }
+            StorageError::Corruption { record, detail } => {
+                write!(f, "storage corruption on {record}: {detail}")
+            }
         }
     }
 }

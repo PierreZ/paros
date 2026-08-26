@@ -164,6 +164,7 @@ impl Workload for ProposeClient {
         let world = audit_world(ctx.state());
         world.check_client_history(&self.history);
         world.check_gates(GateScope::Full);
+        crate::node::check_storage_gates(ctx.state(), GateScope::Full);
         world.check_final_convergence();
         Ok(())
     }
