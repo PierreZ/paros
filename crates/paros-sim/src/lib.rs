@@ -36,7 +36,7 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::choreography::SnapshotRecoveryWorkload;
-use crate::node::QuietNodeProcess;
+use crate::node::{NaiveWipeNodeProcess, QuietNodeProcess};
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
@@ -206,7 +206,11 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 ///   per-seed draws resolved at topology-build time — *before* every BUGGIFY
 ///   activation and workload draw on the counted stream — and added the
 ///   send-seam drop locations, so every seed's script moved once more. The
-///   whole corpus was re-verified green against the shifted stream.
+///   whole corpus was re-verified green against the shifted stream;
+/// - the Stage-6 storage-fault layer (#19) added the write-`EIO` and
+///   fsync-failure BUGGIFY sites, the seam-crash bias knob, and the
+///   storage-crash restart-delay knob, moving the stream again. The corpus
+///   was re-verified green against this shift too.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -583,6 +587,56 @@ pub fn run_network_seed(seed: u64) -> SimulationReport {
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()
+}
+
+/// The **amnesia red demo** (issue #19 item D): a fixed three-node cluster
+/// under the main campaign's attrition + driver chaos, where the first node
+/// that comes back through the restart path holding a raised durable promise
+/// is *wiped* and rejoins **naively** — as itself, with no protocol support.
+///
+/// This is proven unsafe (CTRL's takedown of Google's `MarkNonVoting`: a node
+/// that lost its promise can accept from an old leader while the new leader
+/// still counts that promise, letting a chosen value be overwritten), so the
+/// demo's contract is to go **red**: the cross-restart promise audit — the
+/// wipe evades the *storage* record, so `set_promise`'s in-core assert never
+/// sees it — must catch the reneged promise as an `assertion_violation`.
+/// [`AMNESIA_DEMO_SEED`] pins a witness; the nextest suite asserts it *stays*
+/// red. On every real campaign the wipe stays off (`prob_wipe = 0`): a
+/// snapshot restores the log, not the promise, and restoring redundancy is
+/// node replacement — #22's reconfiguration, not a rejoin.
+fn amnesia_demo_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(3, || Box::new(NaiveWipeNodeProcess))
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+}
+
+/// Deterministic witness seed for the amnesia red demo: replaying it through
+/// [`run_amnesia_demo_seed`] surfaces the reneged promise ("a node's promised
+/// ballot never decreases") as an `assertion_violation`. Recorded per the
+/// issue-#19 D contract — this is the book-material citation for why
+/// `prob_wipe` stays 0 outside targeted runs.
+pub const AMNESIA_DEMO_SEED: u64 = 0;
+
+/// Replay one amnesia red-demo seed (see [`amnesia_demo_builder`]'s contract:
+/// the interesting result is the violation, not a green run).
+#[must_use]
+pub fn run_amnesia_demo_seed(seed: u64) -> SimulationReport {
+    amnesia_demo_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Raw-seed hunt over the amnesia red demo, for re-deriving a witness seed
+/// after a harness change shifts seed meaning.
+#[must_use]
+pub fn amnesia_demo_hunt(iterations: usize) -> SimulationReport {
+    amnesia_demo_builder().set_iterations(iterations).run()
 }
 
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for
