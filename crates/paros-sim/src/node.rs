@@ -65,8 +65,10 @@ const P_FSYNC_FAIL: f64 = 0.01;
 /// Sub-roll on the fsync *lost* leg: the crash tore the batch instead of
 /// losing it whole — a prefix of the staged fresh appends reaches disk without
 /// identifiers (Stage 7's per-record torn durability; the `CrashTail` leg of
-/// the disentanglement table).
-const P_TORN_TAIL: f64 = 0.4;
+/// the disentanglement table). Biased toward tearing: the whole-loss leg is
+/// already the clean-crash model's default, so the lost fsync is the torn
+/// leg's one generator and must reach it reliably across a 256-seed sweep.
+const P_TORN_TAIL: f64 = 0.75;
 /// Per-boot firing probabilities of the Stage-7 rot BUGGIFY sites — each fault
 /// family its own independent location (per-seed activation × per-boot
 /// firing), modelling latent faults that surfaced while the node was down and
@@ -991,7 +993,10 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
         if !slots.is_empty() {
             let primary = pick(&slots);
             let id_faulty = sim_random::<f64>() < 0.25;
-            let block = sim_random::<f64>() < 0.25;
+            // The block sub-roll needs a contiguous clean run at the primary,
+            // which short (frequently truncated) logs often lack, so it rolls
+            // generously to stay reachable across a bounded sweep.
+            let block = sim_random::<f64>() < 0.4;
             let members: Vec<Slot> = if block {
                 slots
                     .iter()
