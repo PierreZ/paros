@@ -442,7 +442,16 @@ fn snapshot_recovery_builder() -> SimulationBuilder {
                 prob_graceful: 1.0,
                 prob_crash: 0.0,
                 prob_wipe: 0.0,
-                recovery_delay_ms: Some(30_000..30_001),
+                // The victim's downtime is the choreography's whole stage: the
+                // survivors must commit twelve proposals (a budget of up to
+                // 20s), get a Truncate decided, AND both apply it before this
+                // clock restarts the victim. 45s keeps real slack past the
+                // survivor budget — at 30s an explorer-perturbed timeline
+                // could race the restart past the survivors' compaction apply
+                // ("both survivors compact past the victim before restart",
+                // 4/33 timelines red on one root), a scenario-establishment
+                // failure, not a protocol one.
+                recovery_delay_ms: Some(45_000..45_001),
                 grace_period_ms: Some(1..2),
                 scope: AttritionScope::PerProcess,
             },
