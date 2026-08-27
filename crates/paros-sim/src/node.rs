@@ -62,12 +62,14 @@ const P_WRITE_EIO: f64 = 0.01;
 /// from the write site — the sweep must be able to select the two failure
 /// modes separately (same rule as the driver's two durability seams).
 const P_FSYNC_FAIL: f64 = 0.01;
-/// Sub-roll on the fsync *lost* leg: the crash tore the batch instead of
-/// losing it whole — a prefix of the staged fresh appends reaches disk without
+/// Coin on the fsync *lost* leg: the crash tore the batch instead of losing
+/// it whole — a prefix of the staged fresh appends reaches disk without
 /// identifiers (Stage 7's per-record torn durability; the `CrashTail` leg of
-/// the disentanglement table). Biased toward tearing: the whole-loss leg is
-/// already the clean-crash model's default, so the lost fsync is the torn
-/// leg's one generator and must reach it reliably across a 256-seed sweep.
+/// the disentanglement table). A plain seeded coin like the fsyncgate
+/// `persisted` decision, NOT its own BUGGIFY location: the *location* is the
+/// fsync failure; whole-loss vs torn is the world's outcome-shaping of that
+/// one fault, and per-seed location activation must not suppress the torn
+/// flavor (the whole-loss leg is already the clean-crash model's default).
 const P_TORN_TAIL: f64 = 0.75;
 /// Per-boot firing probabilities of the Stage-7 rot BUGGIFY sites — each fault
 /// family its own independent location (per-seed activation × per-boot
@@ -992,7 +994,11 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
         let slots = clean_slots(world);
         if !slots.is_empty() {
             let primary = pick(&slots);
-            let id_faulty = sim_random::<f64>() < 0.25;
+            // Generous coin: the identifier-lost row has its own per-verdict
+            // sometimes-gate, and the entry-rot events that draw this coin
+            // are budget-capped per run, so the sweep needs a fat coin to be
+            // certain of the composition within a bounded seed schedule.
+            let id_faulty = sim_random::<f64>() < 0.5;
             // The block sub-roll needs a contiguous clean run at the primary,
             // which short (frequently truncated) logs often lack, so it rolls
             // generously to stay reachable across a bounded sweep.
@@ -2079,7 +2085,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         {
             if persisted {
                 self.flush_stage()?;
-            } else if self.faults.active() && buggify_with_prob!(P_TORN_TAIL) {
+            } else if self.faults.active() && sim_random::<f64>() < P_TORN_TAIL {
                 // Stage 7's per-record torn durability, paired with the crash
                 // the driver is about to take on this error: a prefix of the
                 // batch's fresh appends lands unwitnessed, so the next boot
