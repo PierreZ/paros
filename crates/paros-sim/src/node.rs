@@ -23,9 +23,11 @@ use moonpool_sim::{
 use crate::audit::{AuditWorld, GateScope, NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, DriverHooks, HardState, MemStorage,
-    Message, MustSync, NodeId, NodeStorage, RunError, Seam, SessionEntry, Slot, Storage,
-    StorageError, StorageRecord, WriteOutcome, command_hash, parse_addr, run_node,
+    Ballot, BootReport, ClientId, ClientSeq, Command, Config, ConfigId, CorruptionKind,
+    CorruptionVerdict, DriverHooks, HardState, IdentState, LogRecord, LogVerdict, MemStorage,
+    Message, MetadataFault, MetainfoVerdict, MustSync, NodeId, NodeStorage, RecordState,
+    RecoveryCase, RunError, Seam, SessionEntry, Slot, Storage, StorageError, StorageRecord,
+    WriteOutcome, classify_log, command_hash, decide_metainfo, parse_addr, run_node,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -51,6 +53,65 @@ const P_WRITE_EIO: f64 = 0.01;
 /// from the write site — the sweep must be able to select the two failure
 /// modes separately (same rule as the driver's two durability seams).
 const P_FSYNC_FAIL: f64 = 0.01;
+
+/// Flag key for the **corruption fault surface** (issue #20 item D). Published
+/// by [`CorruptionNodeProcess`]: the world's per-record corruption sites
+/// (bit-flip, lost write, misdirected write, read-`EIO`, block runs, snapshot,
+/// metainfo-both, sealed ledger, fs-metadata) arm only under it, because their
+/// Stage-7 reaction — detect ⇒ crash, with recovery deferred to Stage 8 —
+/// permanently downs the node, which the main campaign's convergence contract
+/// cannot absorb. The dedicated corruption axis makes safety + detection
+/// claims only (asymmetric oracle: unavailable = pass, unsafe = fail). The
+/// *recoverable* corruption legs — a torn tail discarded at boot, a single
+/// metainfo copy repaired from its twin — stay on the main campaign, where
+/// recovery through them is part of the convergence deliverable.
+const CORRUPTION_FAULTS_KEY: &str = "paros-corruption-faults";
+
+/// Flag key for the **truncate-on-mismatch red demo** (issue #20 item F).
+/// When set, a node whose boot scan reaches a *fatal* corruption verdict on a
+/// log entry truncates from the faulty entry onward and keeps running instead
+/// of crashing — the exact bug CTRL Figure 2 found in both `ZooKeeper` and
+/// `LogCabin`. Proven unsafe (the truncating node can win an election with
+/// lagging peers and silently erase committed data cluster-wide), so the
+/// demo's contract is to go **red**: the tail-discard audit — a discarded
+/// record must never have been a reported durable accept, and must sit
+/// strictly above the certain head — catches the illegal truncation. Never
+/// set on a real campaign.
+const TRUNCATE_DEMO_KEY: &str = "paros-truncate-on-mismatch-demo";
+
+/// Per-`sync` firing probability of the **torn-tail** BUGGIFY site: the flush
+/// lands but the update's last record(s) are torn — entry or identifier
+/// partially written — and the reported fsync failure crashes the node
+/// through the Stage-6 path, pairing the crash-biasing with a world fault on
+/// the just-synced batch so the disentanglement table's `CrashTail` rows are
+/// reachable. Recovery (discard at the next boot scan) is genuine, so this
+/// site runs on the main campaign.
+const P_TORN_TAIL: f64 = 0.01;
+/// Per-**boot** firing probability of the single-metainfo-copy fault site
+/// (the repairable leg of the CTRL metainfo doctrine; main campaign). Boot is
+/// the metainfo's only read, so rot-since-last-write is drawn there — and a
+/// boot is a rare event, so the per-call rate is high enough for the repair
+/// path to saturate.
+const P_METAINFO_COPY: f64 = 0.05;
+/// Per-`sync` firing probabilities of the corruption-axis fault sites — one
+/// independent BUGGIFY location per family so per-seed activation composes.
+const P_ENTRY_BITFLIP: f64 = 0.012;
+const P_ENTRY_READ_EIO: f64 = 0.008;
+const P_ENTRY_LOST_WRITE: f64 = 0.008;
+const P_ENTRY_MISDIRECT: f64 = 0.008;
+const P_IDENT_FAULT: f64 = 0.006;
+const P_BLOCK_FAULT: f64 = 0.006;
+const P_SNAPSHOT_FAULT: f64 = 0.006;
+const P_LEDGER_FAULT: f64 = 0.004;
+/// Per-boot (like [`P_METAINFO_COPY`]), corruption axis only.
+const P_METAINFO_BOTH: f64 = 0.02;
+const P_METADATA_FAULT: f64 = 0.004;
+
+/// Maximum concurrently in-flight accept writes one fsync can cover — the
+/// `TigerBeetle` hardening cap on the crash-truncatable window
+/// ([`classify_log`]'s `max_inflight`). The torn-tail site tears at most two
+/// records, well inside it.
+const MAX_TORN_WINDOW: usize = 4;
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
@@ -90,6 +151,49 @@ impl Process for NaiveWipeNodeProcess {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         if ctx.state().get::<bool>(NAIVE_WIPE_KEY).is_none() {
             ctx.state().publish(NAIVE_WIPE_KEY, true);
+        }
+        NodeProcess.run(ctx).await
+    }
+}
+
+/// A paros node with the full corruption fault surface armed (issue #20 item
+/// D; see [`CORRUPTION_FAULTS_KEY`]). Used only by the dedicated corruption
+/// axis, whose oracle is asymmetric: detection and safety are asserted,
+/// availability is not (Stage 7's baseline is detect ⇒ crash).
+pub(crate) struct CorruptionNodeProcess;
+
+#[async_trait]
+impl Process for CorruptionNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if ctx.state().get::<bool>(CORRUPTION_FAULTS_KEY).is_none() {
+            ctx.state().publish(CORRUPTION_FAULTS_KEY, true);
+        }
+        NodeProcess.run(ctx).await
+    }
+}
+
+/// A paros node running the **truncate-on-mismatch red demo** (issue #20 item
+/// F; see [`TRUNCATE_DEMO_KEY`]): the corruption surface is armed AND the boot
+/// scan truncates on a fatal mismatch instead of crashing. The deliverable is
+/// the resulting `assertion_violation`, never a green run.
+pub(crate) struct TruncateDemoNodeProcess;
+
+#[async_trait]
+impl Process for TruncateDemoNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if ctx.state().get::<bool>(CORRUPTION_FAULTS_KEY).is_none() {
+            ctx.state().publish(CORRUPTION_FAULTS_KEY, true);
+        }
+        if ctx.state().get::<bool>(TRUNCATE_DEMO_KEY).is_none() {
+            ctx.state().publish(TRUNCATE_DEMO_KEY, true);
         }
         NodeProcess.run(ctx).await
     }
@@ -158,6 +262,13 @@ impl Process for NodeProcess {
             time: ctx.time().clone(),
             cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
             enabled: perturb,
+            // The corruption surface arms only on its dedicated axis (see
+            // CORRUPTION_FAULTS_KEY): its faults permanently down a node in
+            // Stage 7, which the main campaign's convergence contract cannot
+            // absorb. The recoverable legs (torn tail, metainfo repair) run
+            // wherever `enabled` is.
+            corruption: ctx.state().get::<bool>(CORRUPTION_FAULTS_KEY) == Some(true),
+            truncate_demo: ctx.state().get::<bool>(TRUNCATE_DEMO_KEY) == Some(true),
         };
         let naive_wipe_demo = ctx.state().get::<bool>(NAIVE_WIPE_KEY) == Some(true);
         // The per-iteration shared audit: pure observation, published beside the
@@ -218,7 +329,26 @@ impl Process for NodeProcess {
                 // boots from whatever the disk *actually* holds, which is how
                 // an ambiguous write's two possible outcomes both resolve.
                 // Its restart delay is its own independent BUGGIFY location.
+                //
+                // Stage 7 (issue #20): a *persistent* detected fault — a
+                // corrupted durable record or an fs-metadata fault, still on
+                // the disk — makes a retry futile: every reboot re-detects it
+                // and re-crashes. The honest baseline is fail-stop until
+                // operator attention (Stage 8 recovers instead), so the node
+                // parks until shutdown. The oracle for this leg is
+                // asymmetric: unavailable = pass, unsafe = fail.
                 Err(RunError::Storage(_)) => {
+                    let parked = {
+                        let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+                        guard.has_persistent_fault(&my_ip)
+                    };
+                    if parked {
+                        assert_reachable!(
+                            "storage: a corruption-downed node stays down (fail-stop)"
+                        );
+                        ctx.shutdown().cancelled().await;
+                        return Ok(());
+                    }
                     assert_reachable!("a storage-fault crash recovers through the restart path");
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {
@@ -232,6 +362,14 @@ impl Process for NodeProcess {
             }
         }
     }
+}
+
+/// Seeded uniform choice in `0..n` (for small `n`), from the iteration's RNG.
+fn roll_choice(n: u32) -> u32 {
+    assert!(n > 0, "a choice needs at least one option");
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let i = (sim_random::<f64>() * f64::from(n)) as u32;
+    i.min(n - 1)
 }
 
 /// One-shot disk wipe for the amnesia red demo: the first time a node with a
@@ -250,6 +388,7 @@ fn maybe_naive_wipe(world: &Arc<Mutex<StorageWorld>>, key: &str, node: u64) {
     if promised.is_some_and(|ballot| ballot > Ballot::default()) {
         guard.disks.remove(key);
         guard.marks.remove(key);
+        guard.overlays.remove(key);
         guard.wipe_spent = true;
         // Demo-only anchor: the wipe genuinely happened before the naive rejoin.
         assert_reachable!("amnesia demo: a wiped node rejoins naively");
@@ -305,6 +444,145 @@ pub(crate) enum InjectedFaultKind {
     FsyncFailed,
 }
 
+/// The corruption fault family an injection belongs to — one gate per family
+/// (issue #20 item D), correlated injection ↔ detection without string
+/// parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CorruptionFamily {
+    /// Bit flip / latent sector error on a persisted entry.
+    BitFlip,
+    /// `EIO` on read, degraded to zero-fill ⇒ mismatch.
+    ReadEio,
+    /// A lost entry write: absence where the identifier exists.
+    LostWrite,
+    /// A misdirected write: wrong-but-valid record, caught by identity.
+    Misdirected,
+    /// A fault on an entry's separate identifier record.
+    Identifier,
+    /// A single block fault hitting a contiguous run of entries.
+    BlockRun,
+    /// A torn tail paired with the Stage-6 fsync crash (the `CrashTail` leg).
+    TornTail,
+    /// The snapshot record — its own kind and its own gate (#71).
+    Snapshot,
+    /// The sealed-sessions ledger record.
+    Ledger,
+    /// One metainfo copy (repairable from its twin).
+    MetainfoCopy,
+    /// Both metainfo copies (fatal: the node cannot know what it promised).
+    MetainfoBoth,
+    /// A filesystem-metadata fault at file granularity (item E).
+    Metadata,
+}
+
+impl CorruptionFamily {
+    fn label(self) -> &'static str {
+        match self {
+            CorruptionFamily::BitFlip => "bit_flip",
+            CorruptionFamily::ReadEio => "read_eio",
+            CorruptionFamily::LostWrite => "lost_write",
+            CorruptionFamily::Misdirected => "misdirected",
+            CorruptionFamily::Identifier => "identifier",
+            CorruptionFamily::BlockRun => "block_run",
+            CorruptionFamily::TornTail => "torn_tail",
+            CorruptionFamily::Snapshot => "snapshot",
+            CorruptionFamily::Ledger => "ledger",
+            CorruptionFamily::MetainfoCopy => "metainfo_copy",
+            CorruptionFamily::MetainfoBoth => "metainfo_both",
+            CorruptionFamily::Metadata => "metadata",
+        }
+    }
+}
+
+/// One corruption injection's ground truth.
+///
+/// The injected ⇔ detected oracle (issue #20 item F) distinguishes
+/// *exercised* faults from *dormant* ones so it never overclaims: `detected`
+/// flips when the fault is read back and classified; an undetected injection
+/// is either dormant (its overlay part still planted, never read) or was
+/// retired by a clean re-write before any read (recovery re-writing a record
+/// makes the copy durably real again). The failure the oracle exists to catch
+/// — read back but NOT detected — is asserted impossible at the read site
+/// itself: no faulty record ever reaches the boot view.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CorruptionInjection {
+    pub(crate) node: u64,
+    pub(crate) family: CorruptionFamily,
+    pub(crate) detected: bool,
+}
+
+/// One faulted part of a log entry's on-disk pair, with the injection it
+/// belongs to (for the ledger's state transitions).
+#[derive(Clone, Copy, Debug)]
+struct PartFault {
+    state: RecordState,
+    kind: CorruptionKind,
+    inj: usize,
+}
+
+/// The read-back fault overlay for one accepted-log slot: what the entry and
+/// its identifier will *look like* at the next read. `None` reads back Valid.
+#[derive(Clone, Copy, Debug, Default)]
+struct EntryFault {
+    entry: Option<PartFault>,
+    ident: Option<(IdentState, usize)>,
+}
+
+/// One node's fault overlay: the semantic read outcomes the world will serve
+/// for each durable record class (#70/#71 — records, not bytes; every
+/// corruption-family member is a first-class read outcome at the seam).
+#[derive(Debug, Default)]
+struct FaultOverlay {
+    /// Per-slot entry/identifier faults.
+    entries: BTreeMap<u64, EntryFault>,
+    /// Per-copy metainfo (`HardState`) faults.
+    metainfo: [Option<(CorruptionKind, usize)>; 2],
+    /// Snapshot-record fault (its own corruption target, #71).
+    snapshot: Option<(CorruptionKind, usize)>,
+    /// Sealed-sessions ledger fault.
+    ledger: Option<(CorruptionKind, usize)>,
+    /// File-granularity fs-metadata fault (item E).
+    file: Option<(MetadataFault, usize)>,
+}
+
+impl FaultOverlay {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+            && self.metainfo.iter().all(Option::is_none)
+            && self.snapshot.is_none()
+            && self.ledger.is_none()
+            && self.file.is_none()
+    }
+}
+
+/// One targetable corruption, injectable in a single
+/// [`StorageWorld::corrupt`] call (issue #20 item D: `corrupt(node, record)`
+/// — #21's adversarial promise test is a single injection).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CorruptTarget {
+    /// The entry record at `slot` reads back as `state` (never `Valid`).
+    Entry {
+        slot: u64,
+        state: RecordState,
+        kind: CorruptionKind,
+    },
+    /// The identifier record at `slot` reads back as `state` (never `Valid`).
+    Ident { slot: u64, state: IdentState },
+    /// A single block fault: a contiguous run of `len` present entries
+    /// starting at `from` all read back mismatched.
+    EntryRun { from: u64, len: usize },
+    /// One metainfo copy fails its checksum (repairable from its twin).
+    MetainfoCopy { copy: u8, kind: CorruptionKind },
+    /// Both metainfo copies fail (fatal).
+    MetainfoBoth,
+    /// The snapshot record fails its checksum.
+    Snapshot { kind: CorruptionKind },
+    /// The sealed-sessions ledger record fails its checksum.
+    Ledger,
+    /// A file-granularity fs-metadata fault.
+    File { fault: MetadataFault },
+}
+
 /// The per-iteration durable-storage world: every node's durable records, keyed
 /// by IP. It is **protocol-blind** — it stores records, never knowing what is
 /// committed. It outlives process crashes (owned by the `StateHandle`), so a
@@ -334,6 +612,19 @@ struct StorageWorld {
     /// write was injected-lost and not yet re-written by a clean flush. These
     /// are what the budget counts.
     marks: BTreeMap<String, BTreeSet<u64>>,
+    /// Per-node corruption fault overlays (Stage 7): the semantic read
+    /// outcomes the next read of each record will serve.
+    overlays: BTreeMap<String, FaultOverlay>,
+    /// Ground truth of every corruption injection, in order (the injected ⇔
+    /// detected ledger, issue #20 item F).
+    corruptions: Vec<CorruptionInjection>,
+    /// Nodes carrying (or having carried) a *persistent* fault — one whose
+    /// Stage-7 detection permanently downs the node. Counted by the
+    /// corruption budget (at most `cluster_size − quorum` nodes, n ≥ 3) and
+    /// treated as unclean copies of every record they hold. Sticky:
+    /// conservatively never un-counted, even if a clean re-write later
+    /// retires the specific fault.
+    corruption_downed: BTreeSet<String>,
     /// The amnesia demo's single wipe budget (see [`NAIVE_WIPE_KEY`]).
     wipe_spent: bool,
 }
@@ -353,22 +644,38 @@ impl StorageWorld {
         self.cluster_size / 2 + 1
     }
 
-    /// Clean live copies of the accepted-log record at `slot`: cluster members
-    /// that are neither fault-marked for it nor truncated past it. A node the
-    /// world has never seen a flush from is a clean potential copy.
-    fn clean_copies(&self, slot: u64) -> usize {
-        let mut unclean: BTreeSet<&String> = BTreeSet::new();
+    /// Cluster members whose copy of the accepted-log record at `slot` cannot
+    /// be counted clean: fault-marked for it, truncated past it, holding a
+    /// corruption overlay on it, or persistently corruption-downed (their
+    /// whole disk is off the table at the next boot). A node the world has
+    /// never seen a flush from is a clean potential copy.
+    fn unclean_nodes(&self, slot: u64) -> BTreeSet<String> {
+        let mut unclean: BTreeSet<String> = BTreeSet::new();
         for (node, marks) in &self.marks {
             if marks.contains(&slot) {
-                unclean.insert(node);
+                unclean.insert(node.clone());
             }
         }
         for (node, disk) in &self.disks {
             if disk.first_slot.0 > slot {
-                unclean.insert(node);
+                unclean.insert(node.clone());
             }
         }
-        self.cluster_size.saturating_sub(unclean.len())
+        for (node, overlay) in &self.overlays {
+            if overlay.entries.contains_key(&slot) {
+                unclean.insert(node.clone());
+            }
+        }
+        unclean.extend(self.corruption_downed.iter().cloned());
+        unclean
+    }
+
+    /// Clean live copies of the accepted-log record at `slot` (both fault
+    /// layers — the Stage-6 lost-write marks and the Stage-7 corruption
+    /// overlays — feed the same budget arithmetic).
+    fn clean_copies(&self, slot: u64) -> usize {
+        self.cluster_size
+            .saturating_sub(self.unclean_nodes(slot).len())
     }
 
     /// Decide one injection under the budget. `accepted_slots` are the
@@ -472,6 +779,262 @@ impl StorageWorld {
             }
         }
     }
+
+    /// Whether `node` still carries a fault whose Stage-7 detection is
+    /// permanent — every future boot re-detects it and re-crashes, so the sim
+    /// node loop parks the node instead of hot-looping (fail-stop until
+    /// Stage 8's recovery exists).
+    fn has_persistent_fault(&self, node_key: &str) -> bool {
+        self.corruption_downed.contains(node_key)
+            && self.overlays.get(node_key).is_some_and(|o| !o.is_empty())
+    }
+
+    /// One corruption injection was read back and classified: transition its
+    /// ledger entry to detected (idempotent) and fire its family's coverage
+    /// gate — each family is its own reachability anchor (issue #20 item D).
+    fn mark_detected(&mut self, inj: usize) {
+        let Some(rec) = self.corruptions.get_mut(inj) else {
+            return;
+        };
+        if rec.detected {
+            return;
+        }
+        rec.detected = true;
+        tracing::info!(
+            node = rec.node,
+            family = rec.family.label(),
+            "storage_corruption_detected"
+        );
+        match rec.family {
+            CorruptionFamily::BitFlip => {
+                assert_reachable!("storage: a bit-flip surfaces as a detected checksum mismatch");
+            }
+            CorruptionFamily::ReadEio => {
+                assert_reachable!("storage: a read EIO is degraded to a checksum mismatch");
+            }
+            CorruptionFamily::LostWrite => {
+                assert_reachable!("storage: a lost write is detected by its surviving identifier");
+            }
+            CorruptionFamily::Misdirected => {
+                assert_reachable!("storage: a misdirected write is caught by the identity check");
+            }
+            CorruptionFamily::Identifier => {
+                assert_reachable!("storage: an identifier fault is detected apart from its entry");
+            }
+            CorruptionFamily::BlockRun => {
+                assert_reachable!("storage: a block fault on a contiguous entry run is detected");
+            }
+            CorruptionFamily::TornTail => {
+                assert_reachable!("storage: a torn tail is discarded as a crash artifact");
+            }
+            CorruptionFamily::Snapshot => {
+                assert_reachable!("storage: a corrupt snapshot is detected at its own checksum");
+            }
+            CorruptionFamily::Ledger => {
+                assert_reachable!("storage: a corrupt sealed-sessions ledger crashes the node");
+            }
+            CorruptionFamily::MetainfoCopy => {
+                assert_reachable!("storage: a lone bad metainfo copy is repaired from its twin");
+            }
+            CorruptionFamily::MetainfoBoth => {
+                assert_reachable!("storage: both metainfo copies faulty crashes the node");
+            }
+            CorruptionFamily::Metadata => {
+                assert_reachable!("storage: an fs-metadata fault reliably crashes the node");
+            }
+        }
+    }
+
+    /// Budget check for a fault whose Stage-7 detection permanently downs the
+    /// node. Node-granular (any such fault takes the whole disk off the table
+    /// at the next boot): permitted only in clusters of three or more, for at
+    /// most `cluster_size − quorum` distinct nodes, and only while every
+    /// accepted record the node holds keeps a clean quorum of live copies
+    /// without it. Registers the node in the sticky downed set when
+    /// permitted.
+    fn permit_permanent(&mut self, node_key: &str) -> bool {
+        if self.cluster_size < 3 {
+            return false;
+        }
+        let quorum = self.quorum();
+        let already = self.corruption_downed.contains(node_key);
+        let downs = self.corruption_downed.len() + usize::from(!already);
+        if downs > self.cluster_size - quorum {
+            return false;
+        }
+        if let Some(disk) = self.disks.get(node_key) {
+            for slot in disk.accepted.keys() {
+                let mut unclean = self.unclean_nodes(slot.0);
+                unclean.insert(node_key.to_string());
+                if self.cluster_size.saturating_sub(unclean.len()) < quorum {
+                    return false;
+                }
+            }
+        }
+        self.corruption_downed.insert(node_key.to_string());
+        true
+    }
+
+    /// Inject one targetable corruption — the single-call per-record API
+    /// (issue #20 item D: `corrupt(node, record)`; #21's adversarial promise
+    /// test is one call). Returns whether the budget and the disk's current
+    /// shape permitted it; ground truth is recorded on success.
+    fn corrupt(&mut self, node_key: &str, node: u64, target: CorruptTarget) -> bool {
+        if self.cluster_size == 0 || !self.disks.contains_key(node_key) {
+            return false;
+        }
+        // Feasibility against the disk's current shape, then the budget.
+        let (family, permanent) = match target {
+            CorruptTarget::Entry { slot, state, kind } => {
+                if state == RecordState::Valid || !self.has_slot(node_key, slot) {
+                    return false;
+                }
+                let family = match (state, kind) {
+                    (_, CorruptionKind::ReadIo) => CorruptionFamily::ReadEio,
+                    (RecordState::Absent, _) => CorruptionFamily::LostWrite,
+                    (RecordState::WrongIdentity, _) => CorruptionFamily::Misdirected,
+                    _ => CorruptionFamily::BitFlip,
+                };
+                (family, true)
+            }
+            CorruptTarget::Ident { slot, state } => {
+                if state == IdentState::Valid || !self.has_slot(node_key, slot) {
+                    return false;
+                }
+                (CorruptionFamily::Identifier, true)
+            }
+            CorruptTarget::EntryRun { from, len } => {
+                if len < 2 || !self.has_run(node_key, from, len) {
+                    return false;
+                }
+                (CorruptionFamily::BlockRun, true)
+            }
+            CorruptTarget::MetainfoCopy { copy, .. } => {
+                if copy > 1 || self.metainfo_copy_faulty(node_key, 1 - copy) {
+                    // The twin is already bad: repairing is impossible, and
+                    // that shape is MetainfoBoth's to inject.
+                    return false;
+                }
+                (CorruptionFamily::MetainfoCopy, false)
+            }
+            CorruptTarget::MetainfoBoth => (CorruptionFamily::MetainfoBoth, true),
+            CorruptTarget::Snapshot { .. } => (CorruptionFamily::Snapshot, true),
+            // The sealed-sessions ledger record exists (formatted) whether or
+            // not it holds records yet, so it is corruptible on any disk.
+            CorruptTarget::Ledger => (CorruptionFamily::Ledger, true),
+            CorruptTarget::File { .. } => (CorruptionFamily::Metadata, true),
+        };
+        if permanent && !self.permit_permanent(node_key) {
+            return false;
+        }
+        let inj = self.corruptions.len();
+        let overlay = self.overlays.entry(node_key.to_string()).or_default();
+        match target {
+            CorruptTarget::Entry { slot, state, kind } => {
+                overlay.entries.entry(slot).or_default().entry =
+                    Some(PartFault { state, kind, inj });
+            }
+            CorruptTarget::Ident { slot, state } => {
+                overlay.entries.entry(slot).or_default().ident = Some((state, inj));
+            }
+            CorruptTarget::EntryRun { from, len } => {
+                for slot in Self::run_slots(&self.disks[node_key], from, len) {
+                    overlay.entries.entry(slot).or_default().entry = Some(PartFault {
+                        state: RecordState::Mismatch,
+                        kind: CorruptionKind::ChecksumMismatch,
+                        inj,
+                    });
+                }
+            }
+            CorruptTarget::MetainfoCopy { copy, kind } => {
+                overlay.metainfo[usize::from(copy)] = Some((kind, inj));
+            }
+            CorruptTarget::MetainfoBoth => {
+                overlay.metainfo[0] = Some((CorruptionKind::ChecksumMismatch, inj));
+                overlay.metainfo[1] = Some((CorruptionKind::ChecksumMismatch, inj));
+            }
+            CorruptTarget::Snapshot { kind } => {
+                overlay.snapshot = Some((kind, inj));
+            }
+            CorruptTarget::Ledger => {
+                overlay.ledger = Some((CorruptionKind::ChecksumMismatch, inj));
+            }
+            CorruptTarget::File { fault } => {
+                overlay.file = Some((fault, inj));
+            }
+        }
+        tracing::info!(
+            node,
+            family = family.label(),
+            target = ?target,
+            "storage_corruption_injected"
+        );
+        self.corruptions.push(CorruptionInjection {
+            node,
+            family,
+            detected: false,
+        });
+        true
+    }
+
+    /// Tear the just-synced tail (the torn-tail generator): overlay the given
+    /// per-record states and record the ground truth. Always within budget —
+    /// the torn records are provably unacknowledged (the reported fsync
+    /// failure crashes the node before any message predicated on them is
+    /// sent) — but their copies still count as unclean via the overlay until
+    /// the boot scan discards them.
+    fn tear(&mut self, node_key: &str, node: u64, torn: &[(u64, RecordState, IdentState)]) {
+        let inj = self.corruptions.len();
+        let overlay = self.overlays.entry(node_key.to_string()).or_default();
+        for &(slot, entry, ident) in torn {
+            let fault = overlay.entries.entry(slot).or_default();
+            if entry != RecordState::Valid {
+                fault.entry = Some(PartFault {
+                    state: entry,
+                    kind: CorruptionKind::ChecksumMismatch,
+                    inj,
+                });
+            }
+            if ident != IdentState::Valid {
+                fault.ident = Some((ident, inj));
+            }
+        }
+        tracing::info!(node, torn = torn.len(), "storage_tail_torn");
+        self.corruptions.push(CorruptionInjection {
+            node,
+            family: CorruptionFamily::TornTail,
+            detected: false,
+        });
+    }
+
+    fn has_slot(&self, node_key: &str, slot: u64) -> bool {
+        self.disks
+            .get(node_key)
+            .is_some_and(|d| d.accepted.contains_key(&Slot(slot)))
+    }
+
+    /// The next `len` present slots starting at `from` — the "block" a single
+    /// block fault clobbers (CTRL injects per FS block and observes several
+    /// entries mismatch at once).
+    fn run_slots(disk: &NodeDisk, from: u64, len: usize) -> Vec<u64> {
+        disk.accepted
+            .range(Slot(from)..)
+            .take(len)
+            .map(|(slot, _)| slot.0)
+            .collect()
+    }
+
+    fn has_run(&self, node_key: &str, from: u64, len: usize) -> bool {
+        self.disks
+            .get(node_key)
+            .is_some_and(|d| Self::run_slots(d, from, len).len() == len)
+    }
+
+    fn metainfo_copy_faulty(&self, node_key: &str, copy: u8) -> bool {
+        self.overlays
+            .get(node_key)
+            .is_some_and(|o| o.metainfo[usize::from(copy)].is_some())
+    }
 }
 
 /// The BUGGIFY-side switchboard for the storage-fault sites: shares the driver
@@ -482,6 +1045,12 @@ struct StorageFaults<T> {
     time: T,
     cutoff: Duration,
     enabled: bool,
+    /// The Stage-7 corruption surface is armed (the dedicated corruption
+    /// axis; see [`CORRUPTION_FAULTS_KEY`]).
+    corruption: bool,
+    /// The truncate-on-mismatch red demo is armed (see
+    /// [`TRUNCATE_DEMO_KEY`]).
+    truncate_demo: bool,
 }
 
 impl<T: TimeProvider> StorageFaults<T> {
@@ -529,6 +1098,10 @@ struct DurableStorage<T> {
     /// The shared checker, fed the world's flush ground truth (see
     /// [`AuditWorld::note_flushed_ground_truth`]).
     checker: Arc<AuditWorld>,
+    /// The boot-time integrity scan's outcome, computed by `restore` (the
+    /// only durable read) and handed to the driver through
+    /// [`NodeStorage::boot_scan`] before the core reads a byte.
+    pending_boot: Result<BootReport, StorageError>,
     /// This incarnation's application state, including transitions staged for
     /// the next durability flush.
     application: ChainState,
@@ -550,9 +1123,307 @@ struct PendingApply {
     transition: AppliedTransition,
 }
 
+/// The boot-time integrity scan + verified seeding (issue #20 items B/C/E):
+/// read every durable record of `key` through its fault overlay, classify the
+/// evidence with the pure classifier, act on the verdicts — discard a
+/// crash-truncatable tail, repair a lone metainfo copy, surface anything else
+/// as the classified fatal error — and seed the boot view from **verified
+/// records only**. Also the injected ⇔ detected ledger's read site: every
+/// fault this scan reads back is marked detected in the world's ground truth.
+#[allow(clippy::too_many_lines)] // One linear scan: file → metainfo → ledger →
+// snapshot → log → seed, each step ordered before the seeding it protects.
+fn scan_and_seed(
+    guard: &mut StorageWorld,
+    key: &str,
+    node_id: u64,
+    boot: &mut MemStorage,
+    application: &mut ChainState,
+    truncate_demo: bool,
+    checker: &Arc<AuditWorld>,
+) -> Result<BootReport, StorageError> {
+    let mut report = BootReport::default();
+
+    // --- File-granularity fs-metadata faults (item E): no per-record witness
+    // exists to disentangle, so the verdict is reliably crash. A read-only
+    // store serves reads and fails at the write path instead.
+    if let Some((fault, inj)) = guard.overlays.get(key).and_then(|o| o.file) {
+        match fault {
+            MetadataFault::Missing | MetadataFault::WrongSize => {
+                guard.mark_detected(inj);
+                return Err(StorageError::Metadata { fault });
+            }
+            MetadataFault::ReadOnly => {}
+        }
+    }
+
+    // --- Metainfo copies (CTRL doctrine): one bad ⇒ use the other and repair
+    // it; both bad ⇒ crash — the node cannot know what it promised.
+    let copies = guard.overlays.get(key).map_or([None, None], |o| o.metainfo);
+    let copy_state = |c: Option<(CorruptionKind, usize)>| {
+        if c.is_some() {
+            RecordState::Mismatch
+        } else {
+            RecordState::Valid
+        }
+    };
+    match decide_metainfo(copy_state(copies[0]), copy_state(copies[1])) {
+        MetainfoVerdict::Clean => {}
+        MetainfoVerdict::RepairCopy(copy) => {
+            if let Some((_, inj)) = copies[usize::from(copy)] {
+                guard.mark_detected(inj);
+            }
+            if let Some(overlay) = guard.overlays.get_mut(key) {
+                overlay.metainfo[usize::from(copy)] = None;
+            }
+            report.metainfo_repaired = Some(copy);
+        }
+        MetainfoVerdict::Fatal => {
+            let mut kind = CorruptionKind::ChecksumMismatch;
+            for (copy_index, copy) in copies.iter().enumerate() {
+                if let Some((k, inj)) = *copy {
+                    if copy_index == 0 {
+                        kind = k;
+                    }
+                    guard.mark_detected(inj);
+                }
+            }
+            return Err(StorageError::Corruption {
+                record: StorageRecord::Metainfo(0),
+                kind,
+                verdict: CorruptionVerdict::Corrupted,
+            });
+        }
+    }
+
+    // --- The sealed-sessions ledger: atomic-rename discipline means a partial
+    // update was discarded on read, so a mismatch is always corruption.
+    if let Some((kind, inj)) = guard.overlays.get(key).and_then(|o| o.ledger) {
+        guard.mark_detected(inj);
+        return Err(StorageError::Corruption {
+            record: StorageRecord::Truncation,
+            kind,
+            verdict: CorruptionVerdict::Corrupted,
+        });
+    }
+
+    // --- The snapshot: a first-class corruption target with its own checksum
+    // (#71), likewise exempt from crash entanglement.
+    if let Some((kind, inj)) = guard.overlays.get(key).and_then(|o| o.snapshot) {
+        guard.mark_detected(inj);
+        return Err(StorageError::Corruption {
+            record: StorageRecord::Snapshot,
+            kind,
+            verdict: CorruptionVerdict::Corrupted,
+        });
+    }
+
+    // --- The accepted log: per-record evidence through the fault overlay,
+    // classified by the pure batching + hardening classifier.
+    let overlay_entries = guard
+        .overlays
+        .get(key)
+        .map(|o| o.entries.clone())
+        .unwrap_or_default();
+    let disk = guard
+        .disks
+        .get(key)
+        .expect("caller checked the disk exists");
+    let chosen_index = disk.hard_state.chosen_index;
+    let records: Vec<LogRecord> = disk
+        .accepted
+        .keys()
+        .map(|slot| {
+            let fault = overlay_entries.get(&slot.0).copied().unwrap_or_default();
+            LogRecord {
+                slot: *slot,
+                entry: fault.entry.map_or(RecordState::Valid, |p| p.state),
+                ident: fault.ident.map_or(IdentState::Valid, |(s, _)| s),
+            }
+        })
+        .collect();
+    // The scan read the whole log: every overlaid fault is now exercised and
+    // classified — mark its injection detected in the ground-truth ledger.
+    for fault in overlay_entries.values() {
+        if let Some(part) = fault.entry {
+            guard.mark_detected(part.inj);
+        }
+        if let Some((_, inj)) = fault.ident {
+            guard.mark_detected(inj);
+        }
+    }
+    match classify_log(&records, chosen_index, MAX_TORN_WINDOW) {
+        LogVerdict::Clean => {}
+        LogVerdict::DiscardTail { discard } => {
+            let slots: Vec<u64> = discard.iter().map(|(slot, _)| slot.0).collect();
+            discard_records(guard, key, &slots);
+            checker.note_tail_discard(node_id, &slots);
+            report.tail_discarded = discard;
+            report.certain_head = chosen_index;
+        }
+        LogVerdict::Fatal {
+            slot,
+            case,
+            verdict,
+        } => {
+            if truncate_demo {
+                // THE BUG (red demo, CTRL Figure 2): truncate from the first
+                // faulty entry onward and keep running, exactly as ZooKeeper
+                // and LogCabin did. The tail-discard audit must go red on it.
+                let first_faulty = overlay_entries.keys().next().copied().unwrap_or(slot.0);
+                let case_by_slot: BTreeMap<u64, RecoveryCase> = records
+                    .iter()
+                    .enumerate()
+                    .map(|(i, record)| {
+                        let successor = i + 1 < records.len();
+                        (
+                            record.slot.0,
+                            paros::decide(record.entry, record.ident, successor),
+                        )
+                    })
+                    .collect();
+                let slots: Vec<u64> = guard.disks[key]
+                    .accepted
+                    .range(Slot(first_faulty)..)
+                    .map(|(s, _)| s.0)
+                    .collect();
+                let demo_discard: Vec<(Slot, RecoveryCase)> = slots
+                    .iter()
+                    .map(|s| {
+                        (
+                            Slot(*s),
+                            case_by_slot.get(s).copied().unwrap_or(RecoveryCase::Clean),
+                        )
+                    })
+                    .collect();
+                discard_records(guard, key, &slots);
+                checker.note_tail_discard(node_id, &slots);
+                tracing::warn!(
+                    node = node_id,
+                    from = first_faulty,
+                    count = slots.len(),
+                    "truncate_on_mismatch_demo"
+                );
+                assert_reachable!("demo: a node truncates its log on a mismatch");
+                report.tail_discarded = demo_discard;
+                report.certain_head = chosen_index;
+            } else {
+                // The classified fatal verdict, typed for Stage 8: prefer the
+                // injected fault family recorded on the fatal record (it
+                // preserves the read-EIO distinction the evidence alone
+                // cannot).
+                match verdict {
+                    CorruptionVerdict::Undecidable => {
+                        assert_reachable!(
+                            "storage: a last-entry ambiguity is treated as corruption"
+                        );
+                    }
+                    CorruptionVerdict::Corrupted | CorruptionVerdict::CrashTail => {
+                        assert_reachable!("storage: a corruption below the tail crashes the node");
+                    }
+                }
+                if case == RecoveryCase::UnidentifiableEntry {
+                    assert_reachable!("storage: an entry and its identifier are both faulty");
+                }
+                let kind = overlay_entries
+                    .get(&slot.0)
+                    .and_then(|f| f.entry.map(|p| p.kind))
+                    .or_else(|| case.kind())
+                    .unwrap_or(CorruptionKind::ChecksumMismatch);
+                return Err(StorageError::Corruption {
+                    record: StorageRecord::Accepted(slot),
+                    kind,
+                    verdict,
+                });
+            }
+        }
+    }
+
+    // --- Seed the boot view from the surviving, verified records. Zero
+    // silent bad reads: nothing faulty may remain on any record class the
+    // boot view is about to serve (a read-only file fault is write-side and
+    // legitimately survives the scan).
+    if let Some(overlay) = guard.overlays.get(key) {
+        assert_always!(
+            overlay.entries.is_empty()
+                && overlay.snapshot.is_none()
+                && overlay.ledger.is_none()
+                && overlay.metainfo.iter().all(Option::is_none),
+            "storage: no faulty record ever reaches the boot view"
+        );
+    }
+    let disk = guard
+        .disks
+        .get(key)
+        .expect("caller checked the disk exists");
+    *application = disk.chain;
+    // Read-back pair of the flush ordering `sync` claims: a floor that
+    // reached the disk never outruns the chosen index that reached the disk
+    // (the flush applies the floor last, and a crash drops the whole stage
+    // together).
+    assert_always!(
+        disk.first_slot.0 == 0
+            || disk
+                .hard_state
+                .chosen_index
+                .is_some_and(|ci| disk.first_slot.0 <= ci.0 + 1),
+        "a restored floor never outruns the restored chosen index",
+        {
+            "floor" => disk.first_slot.0,
+            "chosen" => disk.hard_state.chosen_index.map_or(0, |c| c.0)
+        }
+    );
+    if disk.first_slot.0 > 0 {
+        assert_reachable!("a node reboots above a non-zero compaction floor");
+    }
+    // Seed the read view through the semantic ops (records, not a blob).
+    // Set the floor first so first_slot() reads it back on boot; the
+    // sealed ledger rides on the same op, exactly as a truncate
+    // persisted it.
+    let sealed: Vec<SessionEntry> = disk
+        .sealed
+        .iter()
+        .map(|(&(client, seq), &slot)| (client, seq, slot))
+        .collect();
+    let _ = boot.truncate(disk.first_slot, &sealed);
+    let _ = boot.persist_config_id(disk.hard_state.config_id);
+    let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
+    for (slot, (ballot, command)) in &disk.accepted {
+        let _ = boot.append_accepted(*slot, *ballot, command.clone());
+    }
+    if let Some(ci) = disk.hard_state.chosen_index {
+        let _ = boot.set_chosen_index(ci);
+    }
+    let _ = boot.sync(MustSync::Sync);
+    Ok(report)
+}
+
+/// Remove discarded records from the durable world: the disk drops them, the
+/// overlay parts covering them are consumed, and their lost-leg marks stay —
+/// the node no longer holds a copy, so the budget keeps counting it unclean
+/// until a genuine re-write (catch-up) lands one.
+fn discard_records(guard: &mut StorageWorld, key: &str, slots: &[u64]) {
+    if let Some(disk) = guard.disks.get_mut(key) {
+        for slot in slots {
+            disk.accepted.remove(&Slot(*slot));
+        }
+    }
+    if let Some(overlay) = guard.overlays.get_mut(key) {
+        for slot in slots {
+            overlay.entries.remove(slot);
+        }
+    }
+    guard
+        .marks
+        .entry(key.to_string())
+        .or_default()
+        .extend(slots.iter().copied());
+}
+
 impl<T: TimeProvider> DurableStorage<T> {
     /// Build storage for `config`, seeding the read view from any durable records
-    /// a prior boot of this node (same IP, same iteration) left in the world.
+    /// a prior boot of this node (same IP, same iteration) left in the world —
+    /// after the Stage-7 boot-time integrity scan verified them
+    /// (`scan_and_seed`): no faulty record ever reaches the boot view.
     fn restore(
         config: Config,
         world: Weak<Mutex<StorageWorld>>,
@@ -563,8 +1434,9 @@ impl<T: TimeProvider> DurableStorage<T> {
     ) -> Self {
         let mut boot = MemStorage::new(config);
         let mut application = ChainState::default();
+        let mut pending_boot: Result<BootReport, StorageError> = Ok(BootReport::default());
         if let Some(strong) = world.upgrade() {
-            let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             // Coverage: the recovery paths only matter if boots genuinely
             // re-read a prior incarnation's records (attrition + seam crashes
             // make this common across the sweep).
@@ -572,46 +1444,38 @@ impl<T: TimeProvider> DurableStorage<T> {
                 guard.disks.contains_key(&key),
                 "a node boots from a prior incarnation's durable records"
             );
-            if let Some(disk) = guard.disks.get(&key) {
-                application = disk.chain;
-                // Read-back pair of the flush ordering `sync` claims: a floor
-                // that reached the disk never outruns the chosen index that
-                // reached the disk (the flush applies the floor last, and a
-                // crash drops the whole stage together).
-                assert_always!(
-                    disk.first_slot.0 == 0
-                        || disk
-                            .hard_state
-                            .chosen_index
-                            .is_some_and(|ci| disk.first_slot.0 <= ci.0 + 1),
-                    "a restored floor never outruns the restored chosen index",
-                    {
-                        "floor" => disk.first_slot.0,
-                        "chosen" => disk.hard_state.chosen_index.map_or(0, |c| c.0)
+            if guard.disks.contains_key(&key) {
+                // Latent metainfo rot is drawn at read time — the metainfo is
+                // only ever *read* here, at boot, and every flush rewrites
+                // both copies, so boot is where rot since the last write
+                // surfaces. A lone bad copy (repairable) runs on any
+                // campaign; both-copies (fatal) is corruption-axis only.
+                // Each is its own independent BUGGIFY location.
+                if faults.active() {
+                    if buggify_with_prob!(P_METAINFO_COPY) {
+                        let copy = u8::from(sim_random::<f64>() < 0.5);
+                        guard.corrupt(
+                            &key,
+                            node_id,
+                            CorruptTarget::MetainfoCopy {
+                                copy,
+                                kind: CorruptionKind::ChecksumMismatch,
+                            },
+                        );
                     }
+                    if faults.corruption && buggify_with_prob!(P_METAINFO_BOTH) {
+                        guard.corrupt(&key, node_id, CorruptTarget::MetainfoBoth);
+                    }
+                }
+                pending_boot = scan_and_seed(
+                    &mut guard,
+                    &key,
+                    node_id,
+                    &mut boot,
+                    &mut application,
+                    faults.truncate_demo,
+                    &checker,
                 );
-                if disk.first_slot.0 > 0 {
-                    assert_reachable!("a node reboots above a non-zero compaction floor");
-                }
-                // Seed the read view through the semantic ops (records, not a blob).
-                // Set the floor first so first_slot() reads it back on boot; the
-                // sealed ledger rides on the same op, exactly as a truncate
-                // persisted it.
-                let sealed: Vec<SessionEntry> = disk
-                    .sealed
-                    .iter()
-                    .map(|(&(client, seq), &slot)| (client, seq, slot))
-                    .collect();
-                let _ = boot.truncate(disk.first_slot, &sealed);
-                let _ = boot.persist_config_id(disk.hard_state.config_id);
-                let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
-                for (slot, (ballot, command)) in &disk.accepted {
-                    let _ = boot.append_accepted(*slot, *ballot, command.clone());
-                }
-                if let Some(ci) = disk.hard_state.chosen_index {
-                    let _ = boot.set_chosen_index(ci);
-                }
-                let _ = boot.sync(MustSync::Sync);
             }
         }
         Self {
@@ -622,6 +1486,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             faults,
             checker,
             application,
+            pending_boot,
             staged_config_id: None,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
@@ -735,6 +1600,251 @@ impl<T: TimeProvider> DurableStorage<T> {
         permitted.then_some(persisted)
     }
 
+    /// BUGGIFY site 3 (Stage 7): the fsync **tears the tail** — the batch
+    /// reaches the disk but the update's last record(s) are only partially
+    /// written, and the reported fsync failure crashes the node through the
+    /// Stage-6 path. This pairs the crash-biasing with a world fault on the
+    /// just-synced batch, making every `CrashTail` row of the disentanglement
+    /// table reachable; the next boot's scan discards the torn suffix and the
+    /// node recovers, so the site runs on the main campaign.
+    ///
+    /// Returns `None` when the site did not fire (nothing flushed);
+    /// `Some(true)` when the stage flushed and a tail was torn (the caller
+    /// reports the fsync failure); `Some(false)` when the stage flushed but
+    /// no staged record qualified as a tearable tail (fired inert).
+    fn roll_torn_tail(&mut self) -> Result<Option<bool>, StorageError> {
+        if !self.faults.active() || !buggify_with_prob!(P_TORN_TAIL) {
+            return Ok(None);
+        }
+        let staged: Vec<u64> = self.staged_accepted.keys().map(|s| s.0).collect();
+        if staged.is_empty() {
+            return Ok(None);
+        }
+        let key = self.key.clone();
+        let node_id = self.node_id;
+        // Only a FIRST write of a slot can tear into a discardable artifact: a
+        // re-accept (P2c upsert) of a slot already reported durable leaves the
+        // prior record recoverable in a real append-only log — and the record
+        // was acknowledged, so discarding it is exactly the illegal truncation
+        // the audit rejects.
+        let pre_existing: BTreeSet<u64> = self
+            .with_world(|w| {
+                w.disks
+                    .get(&key)
+                    .map_or_else(BTreeSet::new, |d| d.accepted.keys().map(|s| s.0).collect())
+            })
+            .unwrap_or_default();
+        // The torn write reached the device: flush first, then tear the tail
+        // of what just landed.
+        self.flush_stage()?;
+        let torn = self.with_world(|w| {
+            let Some(disk) = w.disks.get(&key) else {
+                return false;
+            };
+            // A discardable tear must sit strictly above the durable chosen
+            // index (the classifier's certain head) and form the physical log
+            // suffix — anything else would classify as corruption and
+            // permanently down the node, which is not this site's contract.
+            let min_slot = disk.hard_state.chosen_index.map_or(0, |c| c.0 + 1);
+            let max_other = disk
+                .accepted
+                .keys()
+                .map(|s| s.0)
+                .filter(|s| !staged.contains(s))
+                .max();
+            let mut qualifying: Vec<u64> = staged
+                .iter()
+                .copied()
+                .filter(|s| *s >= min_slot && max_other.is_none_or(|m| *s > m))
+                .filter(|s| !pre_existing.contains(s))
+                .filter(|s| disk.accepted.contains_key(&Slot(*s)))
+                .collect();
+            qualifying.sort_unstable();
+            let take = 1 + usize::from(qualifying.len() >= 2 && sim_random::<f64>() < 0.35);
+            let torn_slots: Vec<u64> = qualifying.split_off(qualifying.len().saturating_sub(take));
+            if torn_slots.is_empty() {
+                return false;
+            }
+            // Budget + Stage-6 ground truth: the tear rides the fsync-failure
+            // ledger (the surfaced error IS an fsync failure, durable leg), so
+            // injected ↔ detected stays 1:1, and the per-record quorum budget
+            // hypothesizes the torn copies lost.
+            let fault = InjectedFault {
+                node: node_id,
+                record: StorageRecord::Batch,
+                kind: InjectedFaultKind::FsyncFailed,
+                persisted: true,
+            };
+            if !w.permit_and_record(&key, fault, &torn_slots) {
+                return false;
+            }
+            let mut torn: Vec<(u64, RecordState, IdentState)> = Vec::new();
+            for (i, slot) in torn_slots.iter().enumerate() {
+                let last = i + 1 == torn_slots.len();
+                // The three tail shapes a crash mid-update can leave; an
+                // earlier record of a two-record tear is the window opener.
+                let shape = if last {
+                    match roll_choice(3) {
+                        0 => (RecordState::Mismatch, IdentState::Absent),
+                        1 => (RecordState::Valid, IdentState::Absent),
+                        _ => (RecordState::Valid, IdentState::Mismatch),
+                    }
+                } else {
+                    (RecordState::Mismatch, IdentState::Absent)
+                };
+                torn.push((*slot, shape.0, shape.1));
+            }
+            w.tear(&key, node_id, &torn);
+            true
+        })?;
+        Ok(Some(torn))
+    }
+
+    /// The corruption-at-rest fault sites (issue #20 item D), rolled once per
+    /// durable flush — one independent BUGGIFY location per family, all armed
+    /// only on the corruption axis (their Stage-7 detection permanently downs
+    /// the node) and all riding the world's corruption budget.
+    // One roll per family, kept together so the per-flush injection pass is a
+    // single readable list of independent locations.
+    #[allow(clippy::too_many_lines)]
+    fn roll_corruption_sites(&mut self) {
+        if !self.faults.corruption || !self.faults.active() {
+            return;
+        }
+        let key = self.key.clone();
+        let node_id = self.node_id;
+        let _ = self.with_world(|w| {
+            if !w.disks.contains_key(&key) {
+                return;
+            }
+            let slots: Vec<u64> = w.disks[&key].accepted.keys().map(|s| s.0).collect();
+            let pick = |slots: &[u64], bias_tail: bool| -> Option<u64> {
+                if slots.is_empty() {
+                    return None;
+                }
+                if bias_tail && sim_random::<f64>() < 0.5 {
+                    return slots.last().copied();
+                }
+                let i = roll_choice(u32::try_from(slots.len()).unwrap_or(u32::MAX)) as usize;
+                slots.get(i.min(slots.len() - 1)).copied()
+            };
+            // Bit flip / latent sector error — biased toward the tail so the
+            // proven-fundamental last-entry ambiguity (Undecidable) is
+            // routinely reachable, not a lottery.
+            if buggify_with_prob!(P_ENTRY_BITFLIP)
+                && let Some(slot) = pick(&slots, true)
+            {
+                w.corrupt(
+                    &key,
+                    node_id,
+                    CorruptTarget::Entry {
+                        slot,
+                        state: RecordState::Mismatch,
+                        kind: CorruptionKind::ChecksumMismatch,
+                    },
+                );
+            }
+            // EIO on read: same mismatch evidence, its own fault family
+            // (zero-fill ⇒ mismatch — one detection path, one classification
+            // path).
+            if buggify_with_prob!(P_ENTRY_READ_EIO)
+                && let Some(slot) = pick(&slots, false)
+            {
+                w.corrupt(
+                    &key,
+                    node_id,
+                    CorruptTarget::Entry {
+                        slot,
+                        state: RecordState::Mismatch,
+                        kind: CorruptionKind::ReadIo,
+                    },
+                );
+            }
+            // Lost write: the entry reads back reserved where its identifier
+            // stands witness.
+            if buggify_with_prob!(P_ENTRY_LOST_WRITE)
+                && let Some(slot) = pick(&slots, false)
+            {
+                w.corrupt(
+                    &key,
+                    node_id,
+                    CorruptTarget::Entry {
+                        slot,
+                        state: RecordState::Absent,
+                        kind: CorruptionKind::LostWrite,
+                    },
+                );
+            }
+            // Misdirected write: wrong-but-valid record — the checksum
+            // passes, the identity check catches it.
+            if buggify_with_prob!(P_ENTRY_MISDIRECT)
+                && let Some(slot) = pick(&slots, false)
+            {
+                w.corrupt(
+                    &key,
+                    node_id,
+                    CorruptTarget::Entry {
+                        slot,
+                        state: RecordState::WrongIdentity,
+                        kind: CorruptionKind::Misdirected,
+                    },
+                );
+            }
+            // A fault on the physically separate identifier record —
+            // interior slots only: at the tail an identifier fault is
+            // indistinguishable from a crash artifact (that is the point of
+            // the persist-witness rule), so planting one there on a record
+            // that WAS acknowledged would make the honest classifier discard
+            // acknowledged data — a model lie, not a detector bug. Rot on the
+            // very newest identifier is the torn-tail site's shape instead,
+            // where the pairing with the fsync crash keeps the ledger honest.
+            if buggify_with_prob!(P_IDENT_FAULT)
+                && slots.len() >= 2
+                && let Some(slot) = pick(&slots[..slots.len() - 1], false)
+            {
+                let state = if sim_random::<f64>() < 0.5 {
+                    IdentState::Mismatch
+                } else {
+                    IdentState::Absent
+                };
+                w.corrupt(&key, node_id, CorruptTarget::Ident { slot, state });
+            }
+            // A single block fault clobbering a contiguous run of entries
+            // (Stage 8 must never assume faults are singletons). The run is
+            // clamped to what the log actually holds past the start — the
+            // chaos-window log is often only a handful of records deep.
+            if buggify_with_prob!(P_BLOCK_FAULT) && slots.len() >= 2 {
+                let start =
+                    roll_choice(u32::try_from(slots.len() - 1).unwrap_or(u32::MAX)) as usize;
+                let from = slots[start];
+                let len = (2 + roll_choice(3) as usize).min(slots.len() - start);
+                w.corrupt(&key, node_id, CorruptTarget::EntryRun { from, len });
+            }
+            // The snapshot record — its own kind and its own gate (#71).
+            if buggify_with_prob!(P_SNAPSHOT_FAULT) {
+                let kind = if sim_random::<f64>() < 0.5 {
+                    CorruptionKind::ChecksumMismatch
+                } else {
+                    CorruptionKind::ReadIo
+                };
+                w.corrupt(&key, node_id, CorruptTarget::Snapshot { kind });
+            }
+            // The sealed-sessions ledger record.
+            if buggify_with_prob!(P_LEDGER_FAULT) {
+                w.corrupt(&key, node_id, CorruptTarget::Ledger);
+            }
+            // File-granularity fs-metadata faults (item E).
+            if buggify_with_prob!(P_METADATA_FAULT) {
+                let fault = match roll_choice(3) {
+                    0 => MetadataFault::Missing,
+                    1 => MetadataFault::WrongSize,
+                    _ => MetadataFault::ReadOnly,
+                };
+                w.corrupt(&key, node_id, CorruptTarget::File { fault });
+            }
+        });
+    }
+
     /// Stage one record through the write-`EIO` fault site: on the persisted
     /// leg the record is staged *and* the whole stage flushes through (the
     /// effect is durable despite the reported error); on the lost leg nothing
@@ -764,7 +1874,11 @@ impl<T: TimeProvider> DurableStorage<T> {
 
     /// Flush the whole stage through to the durable world — the fsync. Also
     /// the persisted leg of an ambiguous fault: identical effect, error
-    /// reported anyway. Clean re-writes clear their lost-leg fault marks.
+    /// reported anyway. Clean re-writes clear their lost-leg fault marks and
+    /// retire the corruption overlay parts they cover.
+    // One linear flush: every step is ordered against its neighbors, and the
+    // overlay retirements sit beside the write that justifies each of them.
+    #[allow(clippy::too_many_lines)]
     fn flush_stage(&mut self) -> Result<(), StorageError> {
         let config_id = self.staged_config_id.take();
         let ballot = self.staged_ballot.take();
@@ -779,9 +1893,32 @@ impl<T: TimeProvider> DurableStorage<T> {
             .iter()
             .map(|(slot, (_ballot, command))| (slot.0, command_hash(command)))
             .collect();
+        let metainfo_rewritten = config_id.is_some() || ballot.is_some() || chosen.is_some();
+        let sealed_rewritten = !sealed.is_empty();
+        let snapshot_rewritten = snapshot.is_some() || !applies.is_empty();
         let key = self.key.clone();
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
+            // A clean re-write retires the corruption overlay it covers (the
+            // record is durably real again) — the injection ledger derives
+            // "cleared" from the part disappearing before any read. The
+            // metainfo copies are rewritten whole on every scalar update; the
+            // snapshot record is rewritten by installs and by application
+            // fsyncs; the ledger by new sealed records.
+            if let Some(overlay) = w.overlays.get_mut(&key) {
+                for slot in &flushed_slots {
+                    overlay.entries.remove(slot);
+                }
+                if metainfo_rewritten {
+                    overlay.metainfo = [None, None];
+                }
+                if sealed_rewritten {
+                    overlay.ledger = None;
+                }
+                if snapshot_rewritten {
+                    overlay.snapshot = None;
+                }
+            }
             let d = w.disks.entry(key.clone()).or_default();
             if let Some(config_id) = config_id {
                 d.hard_state.config_id = config_id;
@@ -839,6 +1976,12 @@ impl<T: TimeProvider> DurableStorage<T> {
             let new_floor = d.first_slot;
             if let Some(marks) = w.marks.get_mut(&key) {
                 marks.retain(|slot| *slot >= new_floor.0);
+            }
+            // A floor raise drops the records it covers, faults and all: the
+            // information migrated into the application snapshot, so the
+            // overlay parts below the floor are retired with the records.
+            if let Some(overlay) = w.overlays.get_mut(&key) {
+                overlay.entries.retain(|slot, _| *slot >= new_floor.0);
             }
         })?;
 
@@ -940,6 +2083,19 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             );
             return Ok(());
         }
+        // Item E: a read-only store serves reads and fails every fsync — a
+        // file-granularity metadata fault with no record witness, so the
+        // verdict is reliably crash (never attempted recovery).
+        let readonly = self.with_world(|w| {
+            w.overlays
+                .get(&self.key)
+                .and_then(|o| o.file)
+                .filter(|(fault, _)| *fault == MetadataFault::ReadOnly)
+        })?;
+        if let Some((fault, inj)) = readonly {
+            self.with_world(|w| w.mark_detected(inj))?;
+            return Err(StorageError::Metadata { fault });
+        }
         // BUGGIFY site 2: the fsync fails — only when the stage actually holds
         // something (an empty flush has nothing at stake). On the durable leg
         // the flush happens anyway before the error is reported (fsyncgate);
@@ -956,7 +2112,26 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                 outcome: WriteOutcome::Unknown,
             });
         }
-        self.flush_stage()
+        // BUGGIFY site 3 (Stage 7): the fsync lands the batch but tears the
+        // tail record(s); the reported failure crashes the node and the next
+        // boot scan disentangles the torn suffix.
+        match self.roll_torn_tail()? {
+            Some(true) => {
+                return Err(StorageError::FsyncFailed {
+                    record: StorageRecord::Batch,
+                    outcome: WriteOutcome::Unknown,
+                });
+            }
+            Some(false) => {
+                self.roll_corruption_sites();
+                return Ok(());
+            }
+            None => {}
+        }
+        self.flush_stage()?;
+        // Corruption at rest, drawn per durable flush (corruption axis only).
+        self.roll_corruption_sites();
+        Ok(())
     }
 
     fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
@@ -970,8 +2145,32 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
-    fn snapshot(&self) -> Vec<u8> {
-        self.application.encode()
+    fn boot_scan(&mut self) -> Result<BootReport, StorageError> {
+        self.pending_boot.clone()
+    }
+
+    fn snapshot(&self) -> Result<Vec<u8>, StorageError> {
+        // Serving a snapshot is a durable-record read: verify through the
+        // fault overlay first (a corrupt snapshot is detected here, at the
+        // would-be server, and never shipped to a peer).
+        let fault = self
+            .with_world(|w| {
+                let fault = w.overlays.get(&self.key).and_then(|o| o.snapshot);
+                if let Some((_, inj)) = fault {
+                    w.mark_detected(inj);
+                }
+                fault
+            })
+            .unwrap_or(None);
+        if let Some((kind, _)) = fault {
+            assert_reachable!("storage: a corrupt snapshot is caught before being served");
+            return Err(StorageError::Corruption {
+                record: StorageRecord::Snapshot,
+                kind,
+                verdict: CorruptionVerdict::Corrupted,
+            });
+        }
+        Ok(self.application.encode())
     }
 
     fn install_snapshot(
@@ -986,11 +2185,16 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         // (`chosen_index + 1`), and the serving peer's session ledger reach the
         // durable world on the next Sync flush, where the floor is applied last
         // so it never outruns the chosen index.
-        let installed =
-            ChainState::decode(&snapshot).map_err(|detail| StorageError::Corruption {
+        let installed = ChainState::decode(&snapshot).map_err(|detail| {
+            // A received snapshot that fails validation is a detected
+            // corruption of transferred bytes: classified, never installed.
+            tracing::warn!(node = self.node_id, detail, "snapshot_decode_rejected");
+            StorageError::Corruption {
                 record: StorageRecord::Snapshot,
-                detail,
-            })?;
+                kind: CorruptionKind::ChecksumMismatch,
+                verdict: CorruptionVerdict::Corrupted,
+            }
+        })?;
         assert_always!(
             installed.applied_slot() == Some(chosen_index),
             "chain: snapshot state matches its boundary"
@@ -1323,5 +2527,159 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
     assert_sometimes!(
         stats.fsync_lost,
         "storage: fsync failed and the batch was genuinely lost"
+    );
+    // The recoverable Stage-7 legs live on the main campaign: a torn tail is
+    // discarded at the next boot and the node converges anyway; a lone bad
+    // metainfo copy is repaired from its twin.
+    let audit = audit_world(handle);
+    let facts = audit.corruption_facts();
+    assert_sometimes!(
+        facts.tail_discarded,
+        "storage: a torn tail is discarded at boot and the node recovers"
+    );
+    assert_sometimes!(
+        facts.metainfo_repaired,
+        "storage: a metainfo copy is repaired at boot"
+    );
+}
+
+/// Per-family injected/detected facts folded from the world's corruption
+/// ledger (issue #20 item F). `detected` distinguishes exercised faults from
+/// dormant ones, so the oracle never overclaims.
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent sticky per-family facts.
+pub(crate) struct CorruptionStats {
+    pub(crate) injected: usize,
+    pub(crate) detected: usize,
+    pub(crate) bitflip: bool,
+    pub(crate) read_eio: bool,
+    pub(crate) lost_write: bool,
+    pub(crate) misdirected: bool,
+    pub(crate) identifier: bool,
+    pub(crate) block_run: bool,
+    pub(crate) torn_tail: bool,
+    pub(crate) snapshot: bool,
+    pub(crate) ledger: bool,
+    pub(crate) metainfo_copy: bool,
+    pub(crate) metainfo_both: bool,
+    pub(crate) metadata: bool,
+}
+
+/// Fold the corruption ledger's ground truth (empty world = no injections).
+pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
+    let world = storage_world(handle);
+    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut stats = CorruptionStats {
+        injected: guard.corruptions.len(),
+        ..CorruptionStats::default()
+    };
+    for injection in &guard.corruptions {
+        if !injection.detected {
+            continue;
+        }
+        stats.detected += 1;
+        match injection.family {
+            CorruptionFamily::BitFlip => stats.bitflip = true,
+            CorruptionFamily::ReadEio => stats.read_eio = true,
+            CorruptionFamily::LostWrite => stats.lost_write = true,
+            CorruptionFamily::Misdirected => stats.misdirected = true,
+            CorruptionFamily::Identifier => stats.identifier = true,
+            CorruptionFamily::BlockRun => stats.block_run = true,
+            CorruptionFamily::TornTail => stats.torn_tail = true,
+            CorruptionFamily::Snapshot => stats.snapshot = true,
+            CorruptionFamily::Ledger => stats.ledger = true,
+            CorruptionFamily::MetainfoCopy => stats.metainfo_copy = true,
+            CorruptionFamily::MetainfoBoth => stats.metainfo_both = true,
+            CorruptionFamily::Metadata => stats.metadata = true,
+        }
+    }
+    stats
+}
+
+/// The corruption axis's coverage gates (issue #20 items D/F), recorded once
+/// per run from that axis's workload `check()`: one gate per injected fault
+/// family (each must be injected AND read back — detection totality itself is
+/// asserted at the read sites), one per disentanglement verdict, and the
+/// fail-stop outcome. The "zero silent bad reads" safety half is an `always`
+/// at the boot-view seed point, not here.
+pub(crate) fn check_corruption_gates(handle: &StateHandle) {
+    let stats = corruption_stats(handle);
+    let facts = audit_world(handle).corruption_facts();
+    assert_sometimes!(
+        stats.injected > 0,
+        "storage: a corruption fault is injected"
+    );
+    assert_sometimes!(
+        stats.detected > 0,
+        "storage: an injected corruption is read back and detected"
+    );
+    assert_sometimes!(
+        stats.bitflip,
+        "storage: a bit-flip is injected and detected"
+    );
+    assert_sometimes!(
+        stats.read_eio,
+        "storage: a read EIO is injected and detected"
+    );
+    assert_sometimes!(
+        stats.lost_write,
+        "storage: a lost write is injected and detected"
+    );
+    assert_sometimes!(
+        stats.misdirected,
+        "storage: a misdirected write is injected and detected"
+    );
+    assert_sometimes!(
+        stats.identifier,
+        "storage: an identifier fault is injected and detected"
+    );
+    assert_sometimes!(
+        stats.block_run,
+        "storage: a block fault is injected and detected"
+    );
+    assert_sometimes!(
+        stats.torn_tail,
+        "storage: a torn tail is injected and detected"
+    );
+    assert_sometimes!(
+        stats.snapshot,
+        "storage: a snapshot corruption is injected and detected"
+    );
+    assert_sometimes!(
+        stats.ledger,
+        "storage: a ledger corruption is injected and detected"
+    );
+    assert_sometimes!(
+        stats.metainfo_copy,
+        "storage: a metainfo copy fault is injected and detected"
+    );
+    assert_sometimes!(
+        stats.metainfo_both,
+        "storage: a metainfo double fault is injected and detected"
+    );
+    assert_sometimes!(
+        stats.metadata,
+        "storage: an fs-metadata fault is injected and detected"
+    );
+    // Per-verdict outcomes, folded from the audit's typed stream.
+    assert_sometimes!(
+        facts.tail_discarded,
+        "storage: the crash-truncatable-tail verdict is exercised"
+    );
+    assert_sometimes!(
+        facts.corrupted_crash,
+        "storage: the corrupted verdict crashes a node"
+    );
+    assert_sometimes!(
+        facts.undecidable_crash,
+        "storage: the undecidable verdict crashes a node"
+    );
+    assert_sometimes!(
+        facts.metadata_crash,
+        "storage: an fs-metadata fault crashed a node"
+    );
+    assert_sometimes!(
+        facts.metainfo_repaired,
+        "storage: a metainfo repair avoids a crash"
     );
 }

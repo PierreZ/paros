@@ -38,6 +38,17 @@ pinned `REGRESSION_SEEDS`; they do **not** assert coverage saturation. So: to pr
 oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
+**Corruption axis (Stage 7, #20).** `sim-paros-chain` also runs a dedicated corruption-detection
+safety axis: the full per-record fault surface (bit-flip, lost write, misdirected write, read-EIO,
+block runs, snapshot/metainfo/ledger, fs-metadata) armed via `CorruptionNodeProcess`, with an
+asymmetric oracle — Stage 7 is detect ⇒ classified crash, so a corrupted node staying down is a
+pass; only a safety miss (a silent bad read, an illegal truncation, unexplained divergence) is a
+fail. The recoverable legs (torn tail discarded at boot, single metainfo-copy repair) run on the
+*main* campaign, where convergence through them is asserted. Hunt/replay:
+`sim-paros-hunt corruption|truncate-demo` and `replay-corruption|replay-truncate-demo <seed>`
+(the truncate-on-mismatch demo is a red demo: RED is the deliverable). The durable-record
+contract is `docs/analysis/storage/record-contract.md`; the classifier is `paros::corruption`.
+
 **Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
 target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
 introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided

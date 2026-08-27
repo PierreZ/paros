@@ -3,10 +3,10 @@
 //! visualization timeline for the browser contract.
 
 use paros_sim::{
-    AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome,
-    PROTOCOL_BOUNDS_COVERAGE_ITERATIONS, SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport,
-    explore, explore_network_safety, explore_protocol_bounds, explore_snapshot_recovery, run_seed,
-    run_seed_json,
+    AssertKind, CORRUPTION_COVERAGE_ITERATIONS, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS,
+    Outcome, PROTOCOL_BOUNDS_COVERAGE_ITERATIONS, SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS,
+    SimulationReport, explore, explore_corruption, explore_network_safety, explore_protocol_bounds,
+    explore_snapshot_recovery, run_seed, run_seed_json,
 };
 
 fn main() {
@@ -88,6 +88,7 @@ fn main() {
     run_protocol_bounds_axis();
     run_snapshot_recovery_axis();
     run_network_axis();
+    run_corruption_axis();
 
     // 3. A single seed, with its full message timeline for eyeballing.
     println!("\n--- single seed timeline ---");
@@ -178,6 +179,48 @@ fn run_snapshot_recovery_axis() {
         std::process::exit(1);
     }
     println!("  Graceful kill, truncation, restart, and snapshot recovery are green");
+}
+
+/// Stage-7 corruption detection (issue #20): detect ⇒ crash permanently downs
+/// a corrupted node, so this axis asserts safety + detection totality only —
+/// unavailable = pass, unsafe = fail — plus saturation of the per-family and
+/// per-verdict gates.
+fn run_corruption_axis() {
+    println!("\n--- Chain corruption-detection safety axis ---");
+    let corruption = explore_corruption(CORRUPTION_COVERAGE_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed; convergence_timeout={}",
+        corruption.iterations,
+        corruption.successful_runs,
+        corruption.failed_runs,
+        corruption.convergence_timeout,
+    );
+    if let Some(s) = &corruption.saturation {
+        println!(
+            "  signal {:?}: {}/{} reachability fired, plateau {}",
+            s.signal, s.sometimes_hit, s.sometimes_total, s.plateau_seeds,
+        );
+    }
+    if !corruption.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &corruption.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !corruption.assertion_violations.is_empty()
+        || corruption.failed_runs > 0
+        || !corruption.coverage_violations.is_empty()
+        || corruption.convergence_timeout
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", corruption.assertion_violations);
+        println!(
+            "  COVERAGE VIOLATIONS: {:?}",
+            corruption.coverage_violations
+        );
+        println!("  FAILING SEEDS: {:?}", corruption.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Corruption detection, classification, and fail-stop gates are green");
 }
 
 fn print_guidance(report: &SimulationReport) {

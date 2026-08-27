@@ -19,6 +19,7 @@
 
 use paros_core::{Ballot, Message, NodeId, Slot};
 
+use crate::corruption::RecoveryCase;
 use crate::hooks::Seam;
 use crate::storage::StorageError;
 
@@ -116,6 +117,27 @@ pub trait Audit {
     /// identity, and the durability outcome as data, so a checker can fold
     /// injected-vs-detected accounting into O(1) state without string parsing.
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {}
+
+    /// This node's boot-time integrity scan discarded a crash-truncatable log
+    /// tail (the [`CorruptionVerdict::CrashTail`](crate::CorruptionVerdict)
+    /// disentanglement verdict): `discarded` are the dropped slots with their
+    /// named recovery cases, `certain_head` the durable chosen index the
+    /// discard was checked against. The **only** path that ever drops durable
+    /// data on a mismatch — a checker can independently re-assert the bound
+    /// (every discarded slot strictly above `certain_head`, and never a slot
+    /// the cluster chose).
+    fn storage_tail_discarded(
+        &self,
+        node: NodeId,
+        discarded: &[(Slot, RecoveryCase)],
+        certain_head: Option<Slot>,
+    ) {
+    }
+
+    /// This node's boot-time integrity scan found exactly one bad metainfo
+    /// (`HardState`) copy and repaired it from its valid twin (`copy` is the
+    /// repaired index). Detection handled locally — no crash, no data loss.
+    fn storage_metainfo_repaired(&self, node: NodeId, copy: u8) {}
 
     /// This node dropped one outbound message at the send seam (hook-decided
     /// per-message loss, indistinguishable from network loss to the peers).

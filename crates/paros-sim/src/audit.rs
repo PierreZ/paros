@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, StorageError,
-    StorageFaultDecision, command_hash,
+    Audit, Ballot, CorruptionVerdict, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH,
+    RecoveryCase, Seam, Slot, StorageError, StorageFaultDecision, command_hash,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -148,11 +148,33 @@ impl AuditWorld {
         st.check_client_history();
     }
 
-    /// How many storage faults the drivers *detected* (one typed
-    /// [`Audit::storage_fault`] crash decision each). The workload's `check()`
-    /// correlates this against the storage world's injected ground truth.
+    /// How many Stage-6 write-path storage faults (`Io`/`FsyncFailed`) the
+    /// drivers *detected* (one typed [`Audit::storage_fault`] crash decision
+    /// each). The workload's `check()` correlates this 1:1 against the
+    /// storage world's injected ground truth. Stage-7 corruption and metadata
+    /// crashes are counted separately (their ledger is per-injection, not
+    /// 1:1-per-error: one boot scan can classify several faults).
     pub(crate) fn storage_faults_detected(&self) -> u64 {
         self.lock().storage_faults_detected
+    }
+
+    /// The Stage-7 corruption outcomes folded from the typed audit stream,
+    /// for the corruption axis's per-verdict coverage gates.
+    pub(crate) fn corruption_facts(&self) -> CorruptionFacts {
+        let st = self.lock();
+        st.corruption_facts
+    }
+
+    /// Ground-truth feed from the storage world's boot scan: these slots were
+    /// discarded under the crash-truncatable-tail verdict, so the durable
+    /// reference data no longer holds them — recovered-vs-persisted stays
+    /// checkable, with the discard as the one *explained* divergence (issue
+    /// #20 item F, the #71 explained-divergence form's first leg).
+    pub(crate) fn note_tail_discard(&self, node: u64, slots: &[u64]) {
+        let mut st = self.lock();
+        for &slot in slots {
+            st.persisted.remove(&(node, slot));
+        }
     }
 
     /// Ground-truth feed from the storage world (issue #19 C). A record can
@@ -229,6 +251,23 @@ impl AuditWorld {
             "a lagging node catches up to the cluster's chosen prefix"
         );
     }
+}
+
+/// Stage-7 corruption outcome facts, folded from the typed audit stream —
+/// independent sticky bits per outcome (the flag-set waiver as [`AuditState`]).
+#[derive(Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct CorruptionFacts {
+    /// A boot scan discarded a crash-truncatable tail.
+    pub(crate) tail_discarded: bool,
+    /// A boot scan repaired a lone bad metainfo copy.
+    pub(crate) metainfo_repaired: bool,
+    /// A `Corrupted`-verdict fault crashed a node.
+    pub(crate) corrupted_crash: bool,
+    /// An `Undecidable`-verdict fault crashed a node.
+    pub(crate) undecidable_crash: bool,
+    /// An fs-metadata fault crashed a node.
+    pub(crate) metadata_crash: bool,
 }
 
 /// One leader's deposed-heartbeat streak (#95): the ballot it is beating at,
@@ -383,9 +422,18 @@ struct AuditState {
     leadership_turnover: bool,
     crashed_before_sync: bool,
     crashed_after_sync: bool,
-    /// Typed storage-fault crash decisions folded in ([`Audit::storage_fault`]).
+    /// Typed Stage-6 write-path fault crash decisions folded in
+    /// ([`Audit::storage_fault`], `Io`/`FsyncFailed` only).
     storage_faults_detected: u64,
     storage_fault_crashed: bool,
+    /// Stage-7 outcome facts (see [`CorruptionFacts`]).
+    corruption_facts: CorruptionFacts,
+    /// Per `(node, slot)`: this node reported the accept durable through the
+    /// post-fsync audit stream — the acknowledgement basis (messages
+    /// predicated on the write leave only after that report). A boot-scan
+    /// tail discard must never name one of these: a discarded record must be
+    /// provably unacknowledged.
+    acked_accepts: BTreeSet<(u64, u64)>,
     resend_skipped: bool,
     resigned: bool,
     shortest_timeout: bool,
@@ -771,6 +819,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        // The post-fsync report is the acknowledgement basis: only after it
+        // may messages predicated on this write leave. A boot-scan tail
+        // discard must never name a record that reached this point.
+        st.acked_accepts.insert((node.0, slot.0));
     }
 
     fn truncated(&self, node: NodeId, first: Slot) {
@@ -1033,21 +1085,99 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a truncated record is never recovered on boot (the log stays bounded)"
             );
         }
+        // The explained-divergence leg (issue #20 item F, the first leg of
+        // the #71 form): recovery must read back every record the durable
+        // ground truth says the disk holds — a *missing* record is legal only
+        // when a detected-corruption outcome explains it, and the only such
+        // outcome that lets the node boot at all is the crash-truncatable
+        // tail discard, which removed the record from the reference data
+        // through [`AuditWorld::note_tail_discard`] before this check runs.
+        // The bound uses the *current* floor, not `boot_floor`: a reboot in
+        // the same simulated millisecond as a truncation would otherwise
+        // demand records the floor raise legitimately dropped. Using the
+        // newest floor only ever skips more slots, so the check stays sound.
+        let floor_now = st.floor.get(&node.0).map_or(0, |f| f.now);
+        let held: BTreeSet<u64> = accepted.iter().map(|&(slot, _, _)| slot.0).collect();
+        for (&(_, slot), _) in st.persisted.range((node.0, 0)..=(node.0, u64::MAX)) {
+            if slot >= floor_now {
+                assert_always!(
+                    held.contains(&slot),
+                    "storage: recovery reads back every unexplained durable record",
+                    { "node" => node.0, "slot" => slot }
+                );
+            }
+        }
     }
 
-    fn storage_fault(&self, _node: NodeId, _error: &StorageError, decision: StorageFaultDecision) {
+    fn storage_fault(&self, _node: NodeId, error: &StorageError, decision: StorageFaultDecision) {
         let mut st = self.state();
-        // Stage 6 has exactly one honest reaction; a different decision here
-        // is a driver bug until Stage 8's protocol-aware choices exist.
+        // Stages 6-7 have exactly one honest error reaction; a different
+        // decision here is a driver bug until Stage 8's protocol-aware
+        // choices exist.
         assert_always!(
             decision == StorageFaultDecision::Crash,
             "a storage fault is decided as a fail-stop crash"
         );
-        st.storage_faults_detected += 1;
+        match error {
+            StorageError::Io { .. } | StorageError::FsyncFailed { .. } => {
+                st.storage_faults_detected += 1;
+            }
+            StorageError::Corruption { verdict, .. } => {
+                // A crash-truncatable tail is *handled* (discarded at boot),
+                // never surfaced as an error: an error carrying that verdict
+                // means the detection layer crashed on data it proved safe to
+                // discard — or worse, discarded on data it did not prove.
+                assert_always!(
+                    *verdict != CorruptionVerdict::CrashTail,
+                    "storage: a crash-truncatable tail is never surfaced as a crash error"
+                );
+                match verdict {
+                    CorruptionVerdict::Undecidable => {
+                        st.corruption_facts.undecidable_crash = true;
+                    }
+                    _ => st.corruption_facts.corrupted_crash = true,
+                }
+            }
+            StorageError::Metadata { .. } => {
+                st.corruption_facts.metadata_crash = true;
+            }
+        }
         reach_once!(
             st.storage_fault_crashed,
             "a storage fault crashes the node (fail-stop)"
         );
+    }
+
+    fn storage_tail_discarded(
+        &self,
+        node: NodeId,
+        discarded: &[(Slot, RecoveryCase)],
+        certain_head: Option<Slot>,
+    ) {
+        let mut st = self.state();
+        st.corruption_facts.tail_discarded = true;
+        for &(slot, _case) in discarded {
+            // Never truncate on a mismatch (issue #20 invariant 2, the
+            // ZooKeeper/LogCabin bug): the only discardable record is a crash
+            // artifact the persist witness proves unacknowledged. These two
+            // asserts are the independent re-derivation of the classifier's
+            // hardening — and the truncate-on-mismatch red demo's tripwire.
+            assert_always!(
+                !st.acked_accepts.contains(&(node.0, slot.0)),
+                "storage: a discarded tail record was never a reported durable accept",
+                { "node" => node.0, "slot" => slot.0 }
+            );
+            assert_always!(
+                certain_head.is_none_or(|head| slot > head),
+                "storage: a tail discard stays strictly above the certain head",
+                { "node" => node.0, "slot" => slot.0 }
+            );
+        }
+    }
+
+    fn storage_metainfo_repaired(&self, _node: NodeId, _copy: u8) {
+        let mut st = self.state();
+        st.corruption_facts.metainfo_repaired = true;
     }
 
     fn crashed(&self, _node: NodeId, seam: Seam) {

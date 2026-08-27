@@ -61,6 +61,48 @@ fn amnesia_demo_stays_red() {
     );
 }
 
+/// The corruption-detection axis (issue #20): a short random-seed smoke
+/// through the full per-record fault surface — bit flips, lost writes,
+/// misdirected writes, read EIO, block runs, snapshot/metainfo/ledger and
+/// fs-metadata faults — asserting the safety and detection `always`s hold on
+/// every seed (zero silent bad reads, detect ⇒ classified crash, tail
+/// discards only ever of unacknowledged records). Saturation of the
+/// per-family gates is `cargo xtask sim`'s job, not this smoke's.
+#[test]
+fn corruption_detection_smoke() {
+    let report = paros_sim::corruption_hunt(SMOKE_ITERATIONS);
+    report.eprint();
+    assert!(
+        report.assertion_violations.is_empty(),
+        "corruption detection safety holds: {:?}; failing seeds (replay with run_corruption_seed): {:?}",
+        report.assertion_violations,
+        report.seeds_failing.iter().take(10).collect::<Vec<_>>(),
+    );
+    assert_eq!(report.failed_runs, 0, "no corruption-axis run failed");
+}
+
+/// The truncate-on-mismatch **red demo** stays red (issue #20 item F): a node
+/// whose boot scan finds a fatal corruption verdict truncates from the faulty
+/// entry onward instead of crashing — the CTRL Figure 2 bug found in both
+/// `ZooKeeper` and `LogCabin` — and the tail-discard audit must catch the
+/// illegal truncation (a discarded record that was a reported durable accept,
+/// or a discard reaching the certain head). If the demo ever comes back
+/// green, either the injection stopped reaching a fatal verdict or the audit
+/// went blind, and both are bugs.
+#[test]
+fn truncate_on_mismatch_demo_stays_red() {
+    let report = paros_sim::run_truncate_demo_seed(paros_sim::TRUNCATE_DEMO_SEED);
+    assert!(
+        report.assertion_violations.iter().any(|v| {
+            let text = format!("{v:?}");
+            text.contains("never a reported durable accept")
+                || text.contains("strictly above the certain head")
+        }),
+        "the truncate-on-mismatch demo must surface the illegal truncation; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {

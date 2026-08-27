@@ -36,7 +36,9 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::choreography::SnapshotRecoveryWorkload;
-use crate::node::{NaiveWipeNodeProcess, QuietNodeProcess};
+use crate::node::{
+    CorruptionNodeProcess, NaiveWipeNodeProcess, QuietNodeProcess, TruncateDemoNodeProcess,
+};
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
@@ -129,6 +131,15 @@ pub const COVERAGE_ITERATIONS: usize = 256;
 /// Cap for the network-swarm safety axis. This is likewise only a ceiling; its
 /// wider timing surface needs room to establish the unchanged 32-root plateau.
 pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
+/// Cap for the corruption-detection safety axis (issue #20). Permanent
+/// per-record faults ride a node-count budget, so families compete per seed
+/// and the per-family/per-verdict gates need seed volume to all fire.
+pub const CORRUPTION_COVERAGE_ITERATIONS: usize = 512;
+/// Cluster-size draw for the corruption axis: the permanent-fault budget
+/// needs `cluster_size − quorum ≥ 1`, so the n=1/n=2 quorum edges (where
+/// every corruption injection would be refused) are left to the main
+/// campaign.
+pub(crate) const CORRUPTION_CLUSTER_RANGE: std::ops::RangeInclusive<usize> = 3..=5;
 /// Small cap for the dedicated graceful lifecycle choreography. Its workload
 /// forces one ordered scenario per root, so it needs plateau headroom rather
 /// than the broad seed volume of the main and network axes.
@@ -210,7 +221,11 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// - the Stage-6 storage-fault layer (#19) added the write-`EIO` and
 ///   fsync-failure BUGGIFY sites, the seam-crash bias knob, and the
 ///   storage-crash restart-delay knob, moving the stream again. The corpus
-///   was re-verified green against this shift too.
+///   was re-verified green against this shift too;
+/// - the Stage-7 corruption-detection layer (#20) added the torn-tail and
+///   boot-time metainfo fault sites to every campaign (the corruption-axis
+///   family sites arm only there), moving the stream once more. The corpus
+///   was re-verified green against this shift as well.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -421,6 +436,92 @@ fn chain_builder() -> SimulationBuilder {
         .swarm_operations()
 }
 
+/// The corruption-detection safety axis (issue #20): the main campaign's
+/// attrition + driver chaos (attrition is the read-path driver — corruption
+/// surfaces at reboot) with the full per-record corruption surface armed
+/// through [`CorruptionNodeProcess`]. Stage 7's baseline is detect ⇒ crash,
+/// which permanently downs a corrupted node, so this axis makes **safety and
+/// detection** claims only (asymmetric oracle: unavailable = pass, unsafe =
+/// fail); convergence stays the main campaign's deliverable, where only the
+/// recoverable corruption legs (torn tail, metainfo repair) run.
+fn corruption_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .cluster(
+            LocalityConfig::new(CORRUPTION_CLUSTER_RANGE, 1, 1, 1),
+            || Box::new(CorruptionNodeProcess),
+        )
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::corruption()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+        .swarm_operations()
+}
+
+/// Coverage-stable sweep over the corruption-detection axis.
+#[must_use]
+pub fn explore_corruption(max_iterations: usize) -> SimulationReport {
+    corruption_builder()
+        .until_coverage_stable(32, max_iterations)
+        .run()
+}
+
+/// Raw-iteration corruption-axis sweep (red-seed hunting; no saturation gate).
+#[must_use]
+pub fn corruption_hunt(iterations: usize) -> SimulationReport {
+    corruption_builder().set_iterations(iterations).run()
+}
+
+/// Replay one corruption-axis seed deterministically.
+#[must_use]
+pub fn run_corruption_seed(seed: u64) -> SimulationReport {
+    corruption_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// The **truncate-on-mismatch red demo** (issue #20 item F): the corruption
+/// axis's fault surface on a fixed five-node cluster, with the boot scan's
+/// fatal-mismatch reaction flipped from crash to truncate-from-the-faulty-
+/// entry-onward — the exact bug CTRL Figure 2 found in `ZooKeeper` and
+/// `LogCabin`. Proven unsafe (the truncating node keeps running with committed
+/// data silently erased and can win an election with lagging peers), so the
+/// demo's contract is to go **red**: the tail-discard audit — "a discarded
+/// tail record was never a reported durable accept" / "a tail discard stays
+/// strictly above the certain head" — must catch the illegal truncation as an
+/// `assertion_violation`. [`TRUNCATE_DEMO_SEED`] pins a witness; the nextest
+/// suite asserts it *stays* red. Never armed on a real campaign.
+fn truncate_demo_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(5, || Box::new(TruncateDemoNodeProcess))
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::corruption()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+        .swarm_operations()
+}
+
+/// Replay one truncate-on-mismatch red-demo seed (the interesting result is
+/// the violation, not a green run).
+#[must_use]
+pub fn run_truncate_demo_seed(seed: u64) -> SimulationReport {
+    truncate_demo_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Raw-seed hunt over the truncate-on-mismatch red demo, for re-deriving a
+/// witness seed after a harness change shifts seed meaning.
+#[must_use]
+pub fn truncate_demo_hunt(iterations: usize) -> SimulationReport {
+    truncate_demo_builder().set_iterations(iterations).run()
+}
+
 /// Fixed-shape lifecycle axis: one graceful Moonpool reboot, no network or
 /// storage chaos, no operation swarm, and no buggified provider knobs.
 fn snapshot_recovery_builder() -> SimulationBuilder {
@@ -614,6 +715,20 @@ fn amnesia_demo_builder() -> SimulationBuilder {
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
 }
+
+/// Deterministic witness seed for the **truncate-on-mismatch red demo**
+/// (issue #20 item F): replaying it through [`run_truncate_demo_seed`]
+/// surfaces the illegal truncation — a node that truncated its log on a
+/// corruption mismatch instead of crashing — as an `assertion_violation`
+/// ("storage: a discarded tail record was never a reported durable accept").
+/// Recorded per the issue-#20 F contract: the book-material citation for why
+/// detect ⇒ crash, never truncate (CTRL Figure 2's `ZooKeeper`/`LogCabin`
+/// bug). Found by `sim-paros-hunt truncate-demo` (8 red of 60 seeds); after
+/// the illegal truncation the core's own boot assert ("the rebuilt next slot
+/// never falls inside the chosen prefix") also rejects the mutilated disk —
+/// the audit violations above are recorded first, so the demo's deliverable
+/// stands either way.
+pub const TRUNCATE_DEMO_SEED: u64 = 8_442_860_851_270_152_575;
 
 /// Deterministic witness seed for the amnesia red demo: replaying it through
 /// [`run_amnesia_demo_seed`] surfaces the reneged promise ("a node's promised

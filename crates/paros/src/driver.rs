@@ -199,6 +199,20 @@ pub const EV_ELECTION_TIMEOUT_EXTREME: &str = "election_timeout_extreme";
 /// unwinds the incarnation.
 pub const EV_STORAGE_FAULT: &str = "storage_fault";
 
+/// Tracing event: this node's boot-time integrity scan discarded a
+/// crash-truncatable log tail (issue #20 item C — the
+/// [`crate::CorruptionVerdict::CrashTail`] verdict). Carries `node`, `from`
+/// (the first discarded slot), `count`, `case` (the window opener's named
+/// recovery case), and `certain_head` (the durable chosen index the discard
+/// was checked against). The only path that ever drops durable data on a
+/// mismatch; everything else is detect ⇒ crash.
+pub const EV_TAIL_DISCARDED: &str = "storage_tail_discarded";
+
+/// Tracing event: this node's boot-time integrity scan repaired exactly one
+/// bad metainfo (`HardState`) copy from its valid twin (CTRL metainfo
+/// doctrine). Carries `node` and `copy` (the repaired copy's index).
+pub const EV_METAINFO_REPAIRED: &str = "storage_metainfo_repaired";
+
 /// Tracing event: this node flushed a `Ready` batch's durable writes. Carries
 /// `node`, `sync` (whether the batch required an fsync-before-send —
 /// [`MustSync::Sync`] — or a relaxed write), and `writes` (op count). Emitted once
@@ -673,12 +687,17 @@ where
             )
             .into());
         }
+        // A fallible durable read: a corrupt snapshot is detected here, at the
+        // serving node, and never shipped to a peer.
+        let snapshot = storage
+            .snapshot()
+            .map_err(|e| storage_fault_crash(audit, out.self_id, e))?;
         let message = Message::InstallSnapshot {
             config_id,
             from: NodeId(out.self_id),
             ballot,
             chosen_index: offered_index,
-            snapshot: Value(storage.snapshot()),
+            snapshot: Value(snapshot),
             // The at-most-once ledger travels beside the opaque bytes (#94):
             // the receiver seals it so its duplicate-suppression decisions for
             // the folded prefix match every peer's.
@@ -1561,9 +1580,37 @@ where
         vectored_writes: true,
     });
 
-    // The sans-IO core, bootstrapped from durable storage.
+    // Boot-time integrity scan, BEFORE the core reads a single byte of this
+    // storage (issue #20 item B): verify every durable record, discard a
+    // crash-truncatable tail, repair a lone bad metainfo copy — and crash on
+    // anything else. Zero silent bad reads: a record that fails verification
+    // never reaches `RawNode::new` below. The node identity comes from the
+    // static `Config`, so it is reportable even when the disk is bad.
+    let self_id = storage.initial_state().1.id.0;
+    let scan = storage
+        .boot_scan()
+        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    if let Some((&(from, case), _)) = scan.tail_discarded.split_first() {
+        let count = u64::try_from(scan.tail_discarded.len()).unwrap_or(u64::MAX);
+        audit.storage_tail_discarded(NodeId(self_id), &scan.tail_discarded, scan.certain_head);
+        tracing::info!(
+            node = self_id,
+            from = from.0,
+            count,
+            case = case.label(),
+            certain_head = scan
+                .certain_head
+                .map_or(-1_i64, |s| { i64::try_from(s.0).unwrap_or(i64::MAX) }),
+            "storage_tail_discarded"
+        );
+    }
+    if let Some(copy) = scan.metainfo_repaired {
+        audit.storage_metainfo_repaired(NodeId(self_id), copy);
+        tracing::info!(node = self_id, copy, "storage_metainfo_repaired");
+    }
+
+    // The sans-IO core, bootstrapped from durable (now verified) storage.
     let mut node = RawNode::new(&storage);
-    let self_id = node.config().id.0;
 
     replay_boot_state(&node, &mut storage, self_id, audit)?;
 
@@ -1814,10 +1861,16 @@ where
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
+                // The inspect probe reads the durable snapshot: a mismatch is
+                // a detected read fault, and the reaction is the same crash
+                // decision as any other storage fault (detect ⇒ crash).
+                let snapshot = storage
+                    .snapshot()
+                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.first_slot().0,
-                    snapshot: storage.snapshot(),
+                    snapshot,
                 });
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {

@@ -9,6 +9,8 @@ use paros_core::{
     Ballot, Command, Config, ConfigId, HardState, MustSync, SessionEntry, Slot, Storage,
 };
 
+use crate::corruption::{CorruptionKind, CorruptionVerdict, MetadataFault, RecoveryCase};
+
 /// The durable record a storage operation (and therefore a storage fault) hit.
 ///
 /// Carried as **data** on every [`StorageError`] so Stage 7's detect-and-classify
@@ -34,6 +36,12 @@ pub enum StorageRecord {
     /// The whole staged batch: an fsync flushes every record staged since the
     /// last flush, so a failed fsync has no single-record identity.
     Batch,
+    /// One of the two checksummed metainfo (`HardState`) copies, by copy index
+    /// (0 or 1). Only the Stage-7 detection layer names a copy — writes update
+    /// the metainfo through the scalar records above; reads verify both copies
+    /// and repair a single bad one from its twin (see
+    /// [`crate::corruption::decide_metainfo`]).
+    Metainfo(u8),
 }
 
 impl fmt::Display for StorageRecord {
@@ -47,6 +55,7 @@ impl fmt::Display for StorageRecord {
             StorageRecord::Snapshot => write!(f, "snapshot"),
             StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
             StorageRecord::Batch => write!(f, "batch"),
+            StorageRecord::Metainfo(copy) => write!(f, "metainfo[{copy}]"),
         }
     }
 }
@@ -104,24 +113,43 @@ pub enum StorageError {
         /// Whether the staged batch's durability is known lost or undecidable.
         outcome: WriteOutcome,
     },
-    /// A durable record failed its integrity check (Stage 7 checksums).
+    /// A durable record failed its integrity check — the **classified
+    /// verdict** the Stage-7 detection layer produces (issue #20 item B):
+    /// which record, which fault family surfaced it, and the crash-vs-
+    /// corruption disentanglement verdict. Stage 8's crash-relevance logic
+    /// pattern-matches on exactly this; nothing downstream parses strings or
+    /// rescans traces. The named [`RecoveryCase`] travels on the tracing
+    /// event beside this error.
     Corruption {
         /// The record that failed its integrity check.
         record: StorageRecord,
-        /// Human-readable detail (Stage 7 replaces this with typed
-        /// sub-structure).
-        detail: String,
+        /// The fault family the evidence points at.
+        kind: CorruptionKind,
+        /// The disentanglement verdict. Never
+        /// [`CorruptionVerdict::CrashTail`]: a crash-truncatable tail is
+        /// *handled* (discarded) by the boot scan, not surfaced as an error.
+        verdict: CorruptionVerdict,
+    },
+    /// A filesystem-metadata fault at file granularity (issue #20 item E):
+    /// store missing/unopenable, wrong size, or read-only. No per-record
+    /// witness exists to disentangle, so the reaction is **reliably crash**
+    /// — never attempt recovery on metadata, in Stage 8 either.
+    Metadata {
+        /// The file-level fault observed.
+        fault: MetadataFault,
     },
 }
 
 impl StorageError {
-    /// The record identity the fault hit.
+    /// The record identity the fault hit. A metadata fault is at file
+    /// granularity — the whole store — so it reports [`StorageRecord::Batch`].
     #[must_use]
     pub fn record(&self) -> StorageRecord {
         match self {
             StorageError::Io { record, .. }
             | StorageError::FsyncFailed { record, .. }
             | StorageError::Corruption { record, .. } => *record,
+            StorageError::Metadata { .. } => StorageRecord::Batch,
         }
     }
 }
@@ -135,14 +163,56 @@ impl fmt::Display for StorageError {
             StorageError::FsyncFailed { record, outcome } => {
                 write!(f, "storage fsync failed on {record} ({outcome})")
             }
-            StorageError::Corruption { record, detail } => {
-                write!(f, "storage corruption on {record}: {detail}")
+            StorageError::Corruption {
+                record,
+                kind,
+                verdict,
+            } => {
+                write!(f, "storage corruption on {record}: {kind} ({verdict})")
+            }
+            StorageError::Metadata { fault } => {
+                write!(f, "storage metadata fault: {fault}")
             }
         }
     }
 }
 
 impl std::error::Error for StorageError {}
+
+/// What the boot-time integrity scan did (issue #20 item B): the benign,
+/// *handled* outcomes the driver reports through the audit. A fatal outcome is
+/// never in here — it surfaces as the scan's [`StorageError`] instead.
+///
+/// The scan is the write-side flush ordering's read-back pair (the assertion
+/// doctrine's two-path rule): every durable record is verified on recovery,
+/// the crash-truncatable tail is discarded per the disentanglement rule, a
+/// single bad metainfo copy is repaired from its twin — and in Stage 7 any
+/// remaining faulty record crashes the node before a byte of it can reach
+/// [`paros_core`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BootReport {
+    /// Crash-truncatable tail records the scan discarded, in slot order, each
+    /// with its named recovery case. Discard is legal **only** under the
+    /// [`CorruptionVerdict::CrashTail`](crate::corruption::CorruptionVerdict)
+    /// verdict: the identifier's absence proves the update's fsync never
+    /// completed, so the record was never acknowledged to anyone.
+    pub tail_discarded: Vec<(Slot, RecoveryCase)>,
+    /// The durable chosen index the discard was checked against (the provably
+    /// certain head): every discarded slot is strictly above it. Reported so
+    /// the audit can re-assert the bound independently of the classifier.
+    pub certain_head: Option<Slot>,
+    /// A single bad metainfo (`HardState`) copy was rewritten from its valid
+    /// twin (CTRL metainfo doctrine); carries the repaired copy's index.
+    pub metainfo_repaired: Option<u8>,
+}
+
+impl BootReport {
+    /// Whether the scan found nothing to handle.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.tail_discarded.is_empty() && self.metainfo_repaired.is_none()
+    }
+}
 
 /// The write side of node storage: **semantic per-record ops**, not a whole-blob
 /// rewrite.
@@ -153,7 +223,67 @@ impl std::error::Error for StorageError {}
 /// through the matching method here, then [`sync`](NodeStorage::sync)s the batch
 /// **before** sending its messages (the persist-before-send rule). Every write
 /// returns [`Result`] so faults are injectable from the start.
+///
+/// # Durable-record contract (Stage 7, issue #20 item A)
+///
+/// A durable implementation must uphold the CLStore-equivalent record contract
+/// (`docs/analysis/storage/record-contract.md` is the full spec; the
+/// [`crate::corruption`] module is the classifier over its read-back
+/// evidence):
+///
+/// - **Every persisted record is checksummed**: each accepted entry, the
+///   snapshot, the metainfo (`HardState`: promise + chosen index + truncation
+///   floor + configuration identity), and the sealed-sessions ledger.
+/// - **Each log entry carries a physically separate identifier**
+///   `⟨slot, accepted_ballot, offset, cksum⟩` — atomically writable, itself
+///   checksummed — written *after* the entry, with **one** fsync covering
+///   both. The identifier is the entry's persist witness for
+///   crash-vs-corruption disentanglement, and its `offset` keeps one corrupt
+///   entry from ending the ability to parse subsequent entries.
+/// - **Identity lives inside the checksummed region and is re-derived on
+///   every read** (validate the checksum before touching any other field): a
+///   valid-checksum record answering for the wrong slot is a *misdirected*
+///   read/write, its own detected outcome.
+/// - **Absence is detectable**: every slot is formatted with a real,
+///   checksummed reserved record carrying its own slot identity, so all-zeros
+///   is always invalid — faulty, never "empty" — and a lost write can never
+///   masquerade as a never-written slot.
+/// - **Slot indices in the physical log are strictly increasing** — a parse-
+///   time backstop against block-aligned misdirects, on `slot` only, never on
+///   the accepted ballot (ballots are legitimately non-monotonic across slots
+///   in Multi-Paxos).
+/// - **The metainfo keeps two local checksummed copies**: one bad ⇒ read the
+///   other and repair; both bad ⇒ crash.
+///
+/// [`boot_scan`](NodeStorage::boot_scan) is where the contract is enforced on
+/// recovery; no bytes that fail verification may ever cross this trait into
+/// the core or the driver's protocol logic.
 pub trait NodeStorage: Storage {
+    /// Verify every durable record on recovery and disentangle crash artifacts
+    /// from corruption (issue #20 items B/C). Called by the driver **before**
+    /// the core reads a single byte of this storage:
+    ///
+    /// - a crash-truncatable tail (per [`crate::corruption::classify_log`]) is
+    ///   discarded and reported in the [`BootReport`];
+    /// - a single bad metainfo copy is repaired from its twin and reported;
+    /// - any remaining faulty record is fatal: the scan returns the classified
+    ///   [`StorageError::Corruption`] (or [`StorageError::Metadata`]) and the
+    ///   driver crashes the node — in Stage 7, detect ⇒ crash, never truncate.
+    ///
+    /// An unreadable record (`EIO` on read) is degraded to zero-fill-then-
+    /// mismatch and classified through the same channel, stamped
+    /// [`crate::corruption::CorruptionKind::ReadIo`].
+    ///
+    /// The default implementation reports a clean scan: correct for storages
+    /// with no durable medium to corrupt (the in-memory [`MemStorage`]); a
+    /// durable engine MUST override it.
+    ///
+    /// # Errors
+    /// Returns the classified [`StorageError`] for the first fault that is
+    /// neither a discardable crash artifact nor a repairable metainfo copy.
+    fn boot_scan(&mut self) -> Result<BootReport, StorageError> {
+        Ok(BootReport::default())
+    }
     /// Persist the durable cluster configuration identity.
     ///
     /// # Errors
@@ -212,7 +342,17 @@ pub trait NodeStorage: Storage {
     /// the bytes. The core never calls this — only the driver, when it fills a
     /// [`paros_core::Ready::snapshot_offers`] offer with bytes before sending an
     /// [`paros_core::Message::InstallSnapshot`].
-    fn snapshot(&self) -> Vec<u8>;
+    ///
+    /// Fallible because it is a durable-record **read**: the snapshot is a
+    /// first-class corruption target with its own checksum (#71), verified on
+    /// every read, and a mismatch surfaces here as the classified
+    /// [`StorageError::Corruption`] — corrupt snapshot bytes must never be
+    /// served to a peer.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the stored snapshot fails its integrity
+    /// check or cannot be read.
+    fn snapshot(&self) -> Result<Vec<u8>, StorageError>;
 
     /// Install an opaque application snapshot at `chosen_index`: set the durable
     /// commit index, raise the promise to at least `ballot`, record
@@ -335,13 +475,14 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    fn snapshot(&self) -> Result<Vec<u8>, StorageError> {
         // The default in-memory storage has no application state machine, so its
         // opaque "snapshot" is a deterministic marker of the chosen prefix. A real
         // application supplies a NodeStorage whose snapshot() folds its own state.
-        self.hard_state
+        Ok(self
+            .hard_state
             .chosen_index
-            .map_or_else(Vec::new, |ci| ci.0.to_le_bytes().to_vec())
+            .map_or_else(Vec::new, |ci| ci.0.to_le_bytes().to_vec()))
     }
 
     fn install_snapshot(

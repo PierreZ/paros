@@ -175,12 +175,25 @@ pub(crate) struct ChainWorkload {
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
     safety_only: bool,
+    corruption_axis: bool,
 }
 
 impl ChainWorkload {
     pub(crate) fn network_safety() -> Self {
         Self {
             safety_only: true,
+            ..Self::default()
+        }
+    }
+
+    /// The corruption axis (issue #20): safety-only — Stage 7's detect ⇒
+    /// crash permanently downs a corrupted node, so no convergence or
+    /// liveness claim is made (asymmetric oracle: unavailable = pass, unsafe
+    /// = fail) — plus the corruption detection gates.
+    pub(crate) fn corruption() -> Self {
+        Self {
+            safety_only: true,
+            corruption_axis: true,
             ..Self::default()
         }
     }
@@ -1365,6 +1378,9 @@ impl Workload for ChainWorkload {
         };
         audit_world(ctx.state()).check_gates(scope);
         crate::node::check_storage_gates(ctx.state(), scope);
+        if self.corruption_axis {
+            crate::node::check_corruption_gates(ctx.state());
+        }
         assert_always!(
             self.outcomes
                 .values()
