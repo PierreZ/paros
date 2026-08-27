@@ -751,6 +751,20 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
         .run()
 }
 
+/// Explore one known snapshot-recovery choreography root seed with the same
+/// timeline branching the campaign uses — the replay command for failures that
+/// live on explorer *continuation* timelines, which a bare
+/// [`run_snapshot_recovery_seed`] root replay never reaches.
+#[cfg(feature = "native")]
+#[must_use]
+pub fn explore_snapshot_recovery_seed(seed: u64, max_runs: u64) -> SimulationReport {
+    snapshot_recovery_builder()
+        .set_debug_seeds(vec![seed])
+        .enable_exploration(exploration_config(max_runs))
+        .until_coverage_stable(1, 1)
+        .run()
+}
+
 /// Run one seed and serialize the [`RunResult`] to JSON. Serializing a plain data
 /// struct cannot fail, but on the off chance it does the error is returned as a
 /// small JSON object instead of panicking.
