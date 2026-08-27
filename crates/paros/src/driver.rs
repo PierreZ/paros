@@ -1538,6 +1538,19 @@ where
     H: DriverHooks,
     A: Audit,
 {
+    // Stage 7: verify and classify every durable record BEFORE anything else —
+    // in particular before `RawNode::new` reads the store — so no corrupted
+    // bytes ever cross into protocol logic. A detected mismatch is the same
+    // deliberate crash decision as any other storage fault: typed on the
+    // audit, then `RunError::Storage` unwinds the incarnation. The scan itself
+    // may only discard a crash-truncatable tail or repair a `HardState` copy
+    // from its twin (see [`NodeStorage::boot_scan`]); it never truncates on a
+    // corruption verdict.
+    let boot_id = storage.initial_state().1.id.0;
+    storage
+        .boot_scan()
+        .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+
     // Every task spawned by this incarnation must stop when `run_node` exits,
     // including a durability-seam error that immediately starts a replacement
     // incarnation. This drop guard covers every `?` and return path.

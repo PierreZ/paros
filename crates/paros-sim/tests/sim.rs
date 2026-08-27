@@ -61,6 +61,28 @@ fn amnesia_demo_stays_red() {
     );
 }
 
+/// The truncate-on-mismatch **red demo** stays red (issue #20 item F, CTRL
+/// Figure 2): a node that truncates its log on a detected mismatch instead of
+/// crashing silently drops possibly-chosen records, and the audit's
+/// recovered-vs-persisted divergence leg — the only oracle a *silent* local
+/// truncation cannot evade — must catch the unexplained hole. This test
+/// asserts the *violation fires*: if the demo ever comes back green, either
+/// the injection stopped landing or the divergence leg went blind, and both
+/// are bugs. (Stage 7's baseline is detect ⇒ crash; a crash-truncatable tail
+/// is the only thing a scan may ever discard.)
+#[test]
+fn truncate_on_mismatch_demo_stays_red() {
+    let report = paros_sim::run_truncate_demo_seed(paros_sim::TRUNCATE_DEMO_SEED);
+    assert!(
+        report
+            .assertion_violations
+            .iter()
+            .any(|v| format!("{v:?}").contains("omits a persisted record")),
+        "the truncate-on-mismatch demo must surface the silent record loss; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {

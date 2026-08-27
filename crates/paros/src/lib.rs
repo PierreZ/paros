@@ -11,12 +11,17 @@
 //! and a `parosd` binary land here too, once the protocol stabilizes.
 
 mod audit;
+mod corruption;
 mod driver;
 mod grpc;
 mod hooks;
 mod storage;
 
 pub use audit::{Audit, NoAudit, StorageFaultDecision};
+pub use corruption::{
+    CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
+    classify_log, decide,
+};
 pub use driver::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED,
     EV_CRASHED, EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER,
@@ -30,7 +35,9 @@ pub use grpc::{
     ProposeAck, Read, ReadAck, proposal_checksum,
 };
 pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
-pub use storage::{MemStorage, NodeStorage, StorageError, StorageRecord, WriteOutcome};
+pub use storage::{
+    MemStorage, MetadataFault, NodeStorage, StorageError, StorageRecord, WriteOutcome,
+};
 
 pub use paros_core::{
     Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry, HardState,

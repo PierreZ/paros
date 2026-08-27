@@ -1201,9 +1201,18 @@ impl Workload for ChainWorkload {
         let mut converged = false;
         let mut last_probe: Vec<Option<ChainState>> = Vec::new();
         while time.now() < recovery_deadline && !shutdown.is_cancelled() {
-            let mut observed = Vec::with_capacity(server_count);
-            for client in &internal_clients {
-                let mut client = client.clone();
+            // A node terminally parked by a detected corruption (Stage 7's
+            // detect ⇒ crash baseline) never answers again — the availability
+            // cost the dead-node budget bounds. Convergence is demanded of
+            // every *live* node; the parked set's unavailability is separately
+            // asserted as explained (audit + storage gates).
+            let parked = crate::node::parked_nodes(ctx.state());
+            let live: Vec<usize> = (0..server_count)
+                .filter(|i| !parked.contains(&servers[*i]))
+                .collect();
+            let mut observed = Vec::with_capacity(live.len());
+            for &i in &live {
+                let mut client = internal_clients[i].clone();
                 let state = moonpool_sim::select! {
                     response = client.inspect(InspectRequest {}) => response
                         .ok()
@@ -1217,15 +1226,13 @@ impl Workload for ChainWorkload {
                     break;
                 }
             }
-            last_probe = (0..server_count)
-                .map(|i| observed.get(i).copied())
-                .collect();
+            last_probe = (0..live.len()).map(|i| observed.get(i).copied()).collect();
             // This is deliberately independent of `command_applied`: these are
             // live RPC reads of each application's opaque snapshot. A driver or
             // trace bug cannot manufacture agreement here. Different counts may
             // be ordinary catch-up; equal counts with different digests are an
             // immediate state-machine-safety violation.
-            if observed.len() == server_count {
+            if !observed.is_empty() && observed.len() == live.len() {
                 let reference = observed[0];
                 let equal_count = observed
                     .iter()
@@ -1279,6 +1286,13 @@ impl Workload for ChainWorkload {
         assert_sometimes!(
             storage.injected > 0 && converged,
             "storage: a run injects storage faults and still converges"
+        );
+        // The CTRL availability trade, measured: a corruption-parked node
+        // stays down (detect ⇒ crash) while the live quorum still converges.
+        let corruption = crate::node::corruption_stats(ctx.state());
+        assert_sometimes!(
+            corruption.parked > 0 && converged,
+            "storage: a corruption-parked node stays down and the cluster converges"
         );
 
         if !converged {
