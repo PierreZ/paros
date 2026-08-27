@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, StorageError,
-    StorageFaultDecision, command_hash,
+    StorageFaultDecision, StorageRecord, command_hash,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -148,11 +148,28 @@ impl AuditWorld {
         st.check_client_history();
     }
 
-    /// How many storage faults the drivers *detected* (one typed
+    /// How many Stage-6 write/fsync faults the drivers *detected* (one typed
     /// [`Audit::storage_fault`] crash decision each). The workload's `check()`
     /// correlates this against the storage world's injected ground truth.
     pub(crate) fn storage_faults_detected(&self) -> u64 {
         self.lock().storage_faults_detected
+    }
+
+    /// How many Stage-7 corruption/metadata detections the drivers surfaced
+    /// as typed crash decisions. Correlated 1:1 against the world's
+    /// corruption ledger by the workload's `check()`.
+    pub(crate) fn corruption_faults_detected(&self) -> u64 {
+        self.lock().corruption_crashes
+    }
+
+    /// A node was terminally parked by a detected persistent corruption
+    /// (detect ⇒ crash, stays down for the run). Convergence excuses exactly
+    /// these nodes — and only when the crash decision that explains the
+    /// unavailability was actually observed (the asymmetric oracle:
+    /// unavailable = pass, unsafe = fail — but *unexplained* unavailable is
+    /// still a failure).
+    pub(crate) fn note_storage_dead(&self, node: u64) {
+        self.lock().storage_dead.insert(node);
     }
 
     /// Ground-truth feed from the storage world (issue #19 C). A record can
@@ -201,7 +218,23 @@ impl AuditWorld {
             .copied()
             .chain(st.applied_max.keys().copied())
             .collect();
+        // Stage 7's asymmetric availability oracle: a node terminally parked
+        // by detect ⇒ crash is excused from convergence — but only when the
+        // crash decision explaining its unavailability was actually observed,
+        // and only for a minority (the world's dead-node budget, re-asserted
+        // in `check_storage_gates`). Unexplained unavailability stays a
+        // failure.
+        for node in &st.storage_dead {
+            assert_always!(
+                st.corruption_crashed_nodes.contains(node),
+                "storage: a node that stays down is explained by a detected corruption crash",
+                { "node" => *node }
+            );
+        }
         for node in cluster {
+            if st.storage_dead.contains(&node) {
+                continue;
+            }
             let prefix = st.applied_max.get(&node).copied();
             assert_always!(
                 prefix == Some(cluster_max),
@@ -383,9 +416,21 @@ struct AuditState {
     leadership_turnover: bool,
     crashed_before_sync: bool,
     crashed_after_sync: bool,
-    /// Typed storage-fault crash decisions folded in ([`Audit::storage_fault`]).
+    /// Typed Stage-6 write/fsync crash decisions folded in
+    /// ([`Audit::storage_fault`] with `Io`/`FsyncFailed`).
     storage_faults_detected: u64,
     storage_fault_crashed: bool,
+    /// Typed Stage-7 corruption/metadata crash decisions folded in.
+    corruption_crashes: u64,
+    corruption_crashed: bool,
+    /// Explanation state for the recovered-vs-persisted divergence leg (#71,
+    /// first leg): the accepted records — and the nodes — whose corruption
+    /// crash was actually observed. A boot missing a persisted record is
+    /// legal iff explained here (the peer-heal leg arrives in Stage 8).
+    corruption_crashed_records: BTreeSet<(u64, u64)>,
+    corruption_crashed_nodes: BTreeSet<u64>,
+    /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
+    storage_dead: BTreeSet<u64>,
     resend_skipped: bool,
     resigned: bool,
     shortest_timeout: bool,
@@ -1033,21 +1078,73 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a truncated record is never recovered on boot (the log stays bounded)"
             );
         }
+        // The #71 explained-divergence form, first leg (Stage 7): a recovered
+        // log missing a record this node durably persisted is legal iff a
+        // detected-corruption crash explains it. The one honest reaction that
+        // drops records without a crash — the truncate-on-mismatch bug class
+        // (CTRL Figure 2) — is exactly what this catches: a node that
+        // silently truncated on a mismatch reports a recovered log with an
+        // unexplained hole. The current floor (not the boot-instant one) is
+        // deliberate: a same-instant truncate+reboot only ever *excludes*
+        // legally-dropped records, and the divergence this leg hunts never
+        // raises the floor. Never weaken for unexplained divergence.
+        let reported: BTreeSet<u64> = accepted.iter().map(|&(slot, _, _)| slot.0).collect();
+        let floor_now = st.floor.get(&node.0).map_or(0, |f| f.now);
+        let missing: Vec<u64> = st
+            .persisted
+            .range((node.0, 0)..=(node.0, u64::MAX))
+            .map(|(&(_, slot), _)| slot)
+            .filter(|slot| *slot >= floor_now && !reported.contains(slot))
+            .collect();
+        for slot in missing {
+            let explained = st.corruption_crashed_records.contains(&(node.0, slot))
+                || st.corruption_crashed_nodes.contains(&node.0);
+            assert_always!(
+                explained,
+                "storage: a recovered log omits a persisted record only after a detected corruption crash",
+                { "node" => node.0, "slot" => slot }
+            );
+        }
     }
 
-    fn storage_fault(&self, _node: NodeId, _error: &StorageError, decision: StorageFaultDecision) {
+    fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {
         let mut st = self.state();
-        // Stage 6 has exactly one honest reaction; a different decision here
-        // is a driver bug until Stage 8's protocol-aware choices exist.
+        // Stages 6/7 have exactly one honest reaction; a different decision
+        // here is a driver bug until Stage 8's protocol-aware choices exist.
         assert_always!(
             decision == StorageFaultDecision::Crash,
             "a storage fault is decided as a fail-stop crash"
         );
-        st.storage_faults_detected += 1;
-        reach_once!(
-            st.storage_fault_crashed,
-            "a storage fault crashes the node (fail-stop)"
-        );
+        match error {
+            StorageError::Io { .. } | StorageError::FsyncFailed { .. } => {
+                st.storage_faults_detected += 1;
+                reach_once!(
+                    st.storage_fault_crashed,
+                    "a storage fault crashes the node (fail-stop)"
+                );
+            }
+            // Stage 7: a classified detection — detect ⇒ crash, and the crash
+            // is the explanation the divergence/convergence excuses key on.
+            StorageError::Corruption { record, .. } => {
+                st.corruption_crashes += 1;
+                if let StorageRecord::Accepted(slot) = record {
+                    st.corruption_crashed_records.insert((node.0, slot.0));
+                }
+                st.corruption_crashed_nodes.insert(node.0);
+                reach_once!(
+                    st.corruption_crashed,
+                    "storage: a detected corruption crashes the node"
+                );
+            }
+            StorageError::Metadata { .. } => {
+                st.corruption_crashes += 1;
+                st.corruption_crashed_nodes.insert(node.0);
+                reach_once!(
+                    st.corruption_crashed,
+                    "storage: a detected corruption crashes the node"
+                );
+            }
+        }
     }
 
     fn crashed(&self, _node: NodeId, seam: Seam) {

@@ -12,18 +12,23 @@
 //!        `sim-paros-hunt replay-amnesia <seed>` — the naive-wipe **red demo**
 //!        (issue #19 D): RED is the expected, correct result — the cross-restart
 //!        promise audit catching a wiped node's reneged promise.
+//!        `sim-paros-hunt replay-truncate <seed>` — the truncate-on-mismatch
+//!        **red demo** (issue #20 F): RED is the expected, correct result — the
+//!        recovered-vs-persisted divergence leg catching the silent record loss
+//!        of a node that truncated on a corruption verdict instead of crashing.
 
 use paros_sim::{
-    amnesia_demo_hunt, chain_smoke, explore_snapshot_recovery, network_hunt, protocol_bounds_hunt,
-    run_amnesia_demo_seed, run_chain_seed, run_network_seed, run_protocol_bounds_seed,
-    run_snapshot_recovery_seed,
+    amnesia_demo_hunt, chain_smoke, explore_snapshot_recovery, explore_snapshot_recovery_seed,
+    network_hunt, protocol_bounds_hunt, run_amnesia_demo_seed, run_chain_seed, run_network_seed,
+    run_protocol_bounds_seed, run_snapshot_recovery_seed, run_truncate_demo_seed,
+    truncate_demo_hunt,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "network".into());
 
     if let "replay-network" | "replay-main" | "replay-snapshot" | "replay-bounds"
-    | "replay-amnesia" = axis.as_str()
+    | "replay-amnesia" | "replay-truncate" | "explore-snapshot" = axis.as_str()
     {
         let seed = std::env::args()
             .nth(2)
@@ -33,8 +38,12 @@ fn main() {
         let report = match axis.as_str() {
             "replay-network" => run_network_seed(seed),
             "replay-snapshot" => run_snapshot_recovery_seed(seed),
+            // Root + explored continuation timelines: the replay command for
+            // choreography failures that live only on explorer branches.
+            "explore-snapshot" => explore_snapshot_recovery_seed(seed, 8),
             "replay-bounds" => run_protocol_bounds_seed(seed),
             "replay-amnesia" => run_amnesia_demo_seed(seed),
+            "replay-truncate" => run_truncate_demo_seed(seed),
             _ => run_chain_seed(seed),
         };
         if report.assertion_violations.is_empty() && report.failed_runs == 0 {
@@ -57,11 +66,12 @@ fn main() {
         "main" => chain_smoke(iterations),
         "snapshot" => explore_snapshot_recovery(iterations),
         "bounds" => protocol_bounds_hunt(iterations),
-        // Red demo axis: violations here are the deliverable, not a defect.
+        // Red demo axes: violations here are the deliverable, not a defect.
         "amnesia" => amnesia_demo_hunt(iterations),
+        "truncate" => truncate_demo_hunt(iterations),
         other => {
             eprintln!(
-                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', or 'amnesia')"
+                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'amnesia', or 'truncate')"
             );
             std::process::exit(2);
         }

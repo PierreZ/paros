@@ -28,7 +28,11 @@ const SURVIVOR_PROPOSALS: u64 = 12;
 const RPC_TIMEOUT: Duration = Duration::from_secs(1);
 const PRIME_BUDGET: Duration = Duration::from_secs(15);
 const SURVIVOR_BUDGET: Duration = Duration::from_secs(20);
-const RECOVERY_BUDGET: Duration = Duration::from_secs(45);
+// Must cover the attrition surface's fixed 45s victim downtime from the
+// moment compaction is accepted (which can be seconds after the kill), plus
+// the post-restart catch-up: the restart-wait deadline is `now +
+// RECOVERY_BUDGET` and must never undercut the scheduled restart.
+const RECOVERY_BUDGET: Duration = Duration::from_mins(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 struct OnDrop<F: FnOnce()> {

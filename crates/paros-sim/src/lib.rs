@@ -36,7 +36,7 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::choreography::SnapshotRecoveryWorkload;
-use crate::node::{NaiveWipeNodeProcess, QuietNodeProcess};
+use crate::node::{NaiveWipeNodeProcess, QuietNodeProcess, TruncateOnMismatchNodeProcess};
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
@@ -210,7 +210,12 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// - the Stage-6 storage-fault layer (#19) added the write-`EIO` and
 ///   fsync-failure BUGGIFY sites, the seam-crash bias knob, and the
 ///   storage-crash restart-delay knob, moving the stream again. The corpus
-///   was re-verified green against this shift too.
+///   was re-verified green against this shift too;
+/// - the Stage-7 corruption layer (#20) added the seven per-boot rot BUGGIFY
+///   sites (bit flip, lost write, misdirect, snapshot, promise copies,
+///   fs-metadata, read-`EIO`), their sub-rolls, and the torn-tail sub-roll on
+///   the fsync lost leg, moving the stream once more. The corpus was
+///   re-verified green against this shift as well.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
@@ -437,7 +442,16 @@ fn snapshot_recovery_builder() -> SimulationBuilder {
                 prob_graceful: 1.0,
                 prob_crash: 0.0,
                 prob_wipe: 0.0,
-                recovery_delay_ms: Some(30_000..30_001),
+                // The victim's downtime is the choreography's whole stage: the
+                // survivors must commit twelve proposals (a budget of up to
+                // 20s), get a Truncate decided, AND both apply it before this
+                // clock restarts the victim. 45s keeps real slack past the
+                // survivor budget — at 30s an explorer-perturbed timeline
+                // could race the restart past the survivors' compaction apply
+                // ("both survivors compact past the victim before restart",
+                // 4/33 timelines red on one root), a scenario-establishment
+                // failure, not a protocol one.
+                recovery_delay_ms: Some(45_000..45_001),
                 grace_period_ms: Some(1..2),
                 scope: AttritionScope::PerProcess,
             },
@@ -639,6 +653,58 @@ pub fn amnesia_demo_hunt(iterations: usize) -> SimulationReport {
     amnesia_demo_builder().set_iterations(iterations).run()
 }
 
+/// The **truncate-on-mismatch red demo** (issue #20 item F): a fixed
+/// three-node cluster under the main campaign's attrition + driver chaos,
+/// where one persisted accepted record is corrupted at the first qualifying
+/// reboot and the boot scan then reproduces the CTRL Figure 2 bug — found in
+/// both `ZooKeeper` and `LogCabin` — of truncating from the faulty entry onward
+/// instead of crashing, with the derived chosen index regressing alongside.
+///
+/// This is the exact bug class Stage 7's **never truncate on a mismatch**
+/// invariant forbids (a node that silently drops possibly-chosen records can
+/// win an election with lagging peers and erase committed data cluster-wide),
+/// so the demo's contract is to go **red**: the audit's recovered-vs-persisted
+/// divergence leg — a recovered log omitting a persisted record with no
+/// detected-corruption crash to explain it — must surface the silent loss as
+/// an `assertion_violation`. [`TRUNCATE_DEMO_SEED`] pins a witness; the
+/// nextest suite asserts it *stays* red. On every real campaign the boot scan
+/// crashes on a corruption verdict instead, and this flag stays off.
+fn truncate_demo_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(3, || Box::new(TruncateOnMismatchNodeProcess))
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+}
+
+/// Deterministic witness seed for the truncate-on-mismatch red demo:
+/// replaying it through [`run_truncate_demo_seed`] surfaces the silent record
+/// loss ("storage: a recovered log omits a persisted record only after a
+/// detected corruption crash") as an `assertion_violation`. Recorded per the
+/// issue-#20 F contract — the citation for why a mismatch may only ever crash
+/// (or discard a never-acked crash tail), never truncate.
+pub const TRUNCATE_DEMO_SEED: u64 = 0;
+
+/// Replay one truncate-on-mismatch red-demo seed (the interesting result is
+/// the violation, not a green run).
+#[must_use]
+pub fn run_truncate_demo_seed(seed: u64) -> SimulationReport {
+    truncate_demo_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Raw-seed hunt over the truncate-on-mismatch red demo, for re-deriving a
+/// witness seed after a harness change shifts seed meaning.
+#[must_use]
+pub fn truncate_demo_hunt(iterations: usize) -> SimulationReport {
+    truncate_demo_builder().set_iterations(iterations).run()
+}
+
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for
 /// smoke, planted-oracle proof, and deterministic seed replay.
 #[must_use]
@@ -679,6 +745,20 @@ pub fn replay_chain(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
 #[must_use]
 pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
     chain_builder()
+        .set_debug_seeds(vec![seed])
+        .enable_exploration(exploration_config(max_runs))
+        .until_coverage_stable(1, 1)
+        .run()
+}
+
+/// Explore one known snapshot-recovery choreography root seed with the same
+/// timeline branching the campaign uses — the replay command for failures that
+/// live on explorer *continuation* timelines, which a bare
+/// [`run_snapshot_recovery_seed`] root replay never reaches.
+#[cfg(feature = "native")]
+#[must_use]
+pub fn explore_snapshot_recovery_seed(seed: u64, max_runs: u64) -> SimulationReport {
+    snapshot_recovery_builder()
         .set_debug_seeds(vec![seed])
         .enable_exploration(exploration_config(max_runs))
         .until_coverage_stable(1, 1)
