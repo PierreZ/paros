@@ -765,6 +765,11 @@ impl StorageWorld {
                     CorruptionOutcome::CoDetected
                 };
                 first = false;
+                // A resolved member of a multi-record block fault proves the
+                // contiguous-run family was genuinely read back and detected.
+                if injection.block && outcome != CorruptionOutcome::DemoTruncated {
+                    self.s7.block_fault_detected = true;
+                }
             }
         }
     }
