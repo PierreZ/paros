@@ -13,7 +13,7 @@
 //! dependency-free) and holds each client reply until its slot commits
 //! (ack-on-commit), redirecting non-leader proposals.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -358,6 +358,12 @@ pub fn command_hash(command: &Command) -> u64 {
         // are nine bytes and start `0xff`), and every node hashes the same no-op to
         // the same digest, so per-slot prefix agreement stays checkable.
         Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
+        // Nine bytes starting 0xfd: disjoint from both encodings above.
+        Command::Control(Control::Snap { at_index }) => {
+            let mut bytes = vec![0xfd_u8];
+            bytes.extend_from_slice(&at_index.0.to_le_bytes());
+            value_hash(&bytes)
+        }
     }
 }
 
@@ -377,6 +383,9 @@ fn message_kind(m: &Message) -> &'static str {
         Message::CheckLeader { .. } => "check_leader",
         Message::Heartbeat { .. } => "heartbeat",
         Message::HeartbeatAck { .. } => "heartbeat_ack",
+        Message::SnapAck { .. } => "snap_ack",
+        Message::SnapChunkRequest { .. } => "snap_chunk_request",
+        Message::SnapChunkResponse { .. } => "snap_chunk_response",
         _ => "unknown",
     }
 }
@@ -458,6 +467,278 @@ struct ClientWaiters {
     /// `(client id, client seq, the held reply)` per slot.
     pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<ProposeAck>)>>,
     pending_reads: BTreeMap<u64, (u64, u64, ReplySender<ReadAck>)>,
+}
+
+/// The driver's **snapshot-point repair layer** (#101, CTRL §3.5). Volatile
+/// per-incarnation state beside the sans-IO core: consensus never depends on
+/// snapshot custody, so all of this lives in the driver.
+///
+/// - Every node advertises its latest recorded decided snapshot point to the
+///   leader once per tick ([`Message::SnapAck`]); the leader's set-based tally
+///   is what gates the `Truncate` coupling rule (truncation is proposed only
+///   once a quorum holds the covering point).
+/// - A node whose boot scan reported rotted chunks of its retained point
+///   pulls them from peers once per tick ([`Message::SnapChunkRequest`]);
+///   peers answer chunks they hold clean, stay silent about what they lack,
+///   and answer a point they have advanced past with the whole-blob
+///   [`Message::InstallSnapshot`] fallback.
+#[derive(Default)]
+struct SnapRepair {
+    /// Leader tally: decided snapshot point → nodes advertising custody of
+    /// it. Points only ever advance, so a stale entry is still a sound
+    /// coupling witness (any retained point at or past `up_to` covers a
+    /// `Truncate{up_to}`); the map grows one entry per decided marker.
+    acks: BTreeMap<u64, BTreeSet<u64>>,
+    /// This node's rotted chunks of its retained point, awaiting peer repair.
+    pending: BTreeMap<u64, BTreeSet<u32>>,
+    /// A `Snap` marker this leadership proposed and is still waiting to see
+    /// quorum custody for — dedupes marker proposals across compact retries.
+    marker_pending: Option<Slot>,
+}
+
+/// Answer one peer's chunk request (see [`SnapRepair`]): chunks of the shared
+/// point, silence for what this node lacks, or the whole-blob advanced
+/// fallback — guarded exactly like a snapshot offer (the served state must
+/// cover the advertised boundary).
+// The repair layer's full context is exactly these handles; bundling them
+// would only rename the same eight things.
+#[allow(clippy::too_many_arguments)]
+fn handle_snap_chunk_request<S, H, A>(
+    node: &RawNode,
+    storage: &S,
+    out: &Outbound,
+    hooks: &H,
+    audit: &A,
+    to: NodeId,
+    at: Slot,
+    chunks: &[u32],
+) where
+    S: NodeStorage,
+    H: DriverHooks,
+    A: Audit,
+{
+    let me = NodeId(out.self_id);
+    match storage.latest_snap_point() {
+        Some(point) if point == at => {
+            let served: Vec<(u32, Value)> = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    storage
+                        .read_snap_chunk(at, *chunk)
+                        .map(|bytes| (*chunk, Value(bytes)))
+                })
+                .collect();
+            if !served.is_empty() {
+                send_messages(
+                    out,
+                    hooks,
+                    audit,
+                    vec![(
+                        to,
+                        Message::SnapChunkResponse {
+                            from: me,
+                            at_index: at,
+                            chunks: served,
+                        },
+                    )],
+                );
+            }
+        }
+        Some(point) if point > at => {
+            // The advanced whole-blob fallback: this node no longer retains
+            // the requested point, so it serves its current snapshot instead,
+            // under the same guard as any snapshot offer — the opaque bytes
+            // must describe exactly the boundary the message names.
+            let Some(ci) = node.hard_state().chosen_index else {
+                return;
+            };
+            if node.app_repair().is_some() || storage.applied_slot() != Some(ci) {
+                return;
+            }
+            let ballot = node
+                .accepted()
+                .get(&ci)
+                .map_or(node.hard_state().max_promised_ballot, |(b, _)| *b);
+            audit.snap_advanced_fallback(me, to);
+            tracing::info!(node = out.self_id, to = to.0, "snap_advanced_fallback");
+            send_messages(
+                out,
+                hooks,
+                audit,
+                vec![(
+                    to,
+                    Message::InstallSnapshot {
+                        config_id: node.hard_state().config_id,
+                        from: me,
+                        ballot,
+                        chosen_index: ci,
+                        snapshot: Value(storage.snapshot()),
+                        sessions: node.session_ledger(),
+                    },
+                )],
+            );
+        }
+        // A point this node does not hold answers nothing: absence carries no
+        // information (CTRL Figure 6 Box B), and a node *behind* the requested
+        // point has nothing sound to say about it either.
+        _ => {}
+    }
+}
+
+/// Install repaired chunks from one peer's response, flush them durably, and
+/// — once the point is whole again — restore the application from it if the
+/// live state was lost below the floor (re-pointing the core's repair pump at
+/// the floor so the retained suffix re-emits in order).
+fn handle_snap_chunk_response<S, A>(
+    node: &mut RawNode,
+    storage: &mut S,
+    snap: &mut SnapRepair,
+    audit: &A,
+    self_id: u64,
+    at: Slot,
+    chunks: &[(u32, Value)],
+) -> Result<(), RunError>
+where
+    S: NodeStorage,
+    A: Audit,
+{
+    let Some(pending) = snap.pending.get_mut(&at.0) else {
+        return Ok(());
+    };
+    let mut installed = 0_u64;
+    let mut bytes = 0_u64;
+    for (chunk, payload) in chunks {
+        if !pending.contains(chunk) {
+            continue;
+        }
+        let clean = storage
+            .write_snap_chunk(at, *chunk, &payload.0)
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+        pending.remove(chunk);
+        installed += 1;
+        bytes += u64::try_from(payload.0.len()).unwrap_or(u64::MAX);
+        let _ = clean;
+    }
+    if installed == 0 {
+        return Ok(());
+    }
+    let complete = pending.is_empty();
+    if complete {
+        snap.pending.remove(&at.0);
+    }
+    // Flush the chunk installs durably before reporting them (and before the
+    // restore below stages the recovered application state).
+    storage
+        .sync(paros_core::MustSync::Sync)
+        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    let blob_bytes = storage.snap_chunk_count(at).map_or(0, |count| {
+        u64::from(count) * crate::storage::SNAP_CHUNK_BYTES as u64
+    });
+    audit.snap_chunk_repaired(NodeId(self_id), at, installed, bytes, blob_bytes);
+    tracing::info!(
+        node = self_id,
+        at = at.0,
+        chunks = installed,
+        bytes,
+        blob_bytes,
+        "snap_chunk_repaired"
+    );
+    if complete
+        && let Some(point) = storage
+            .restore_from_snap_point()
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?
+    {
+        storage
+            .sync(paros_core::MustSync::Sync)
+            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+        audit.snap_point_restored(NodeId(self_id), point);
+        tracing::info!(node = self_id, at = point.0, "snap_point_restored");
+        // The application jumped to the point (= floor - 1); re-point the
+        // core's repair pump at the floor so the retained decided suffix
+        // re-emits in order through the ordinary committed seam.
+        if node.app_repair().is_some() {
+            node.open_app_repair(node.first_slot());
+        }
+    }
+    Ok(())
+}
+
+/// Per-tick snapshot-repair upkeep (see [`SnapRepair`]): custody
+/// advertisement toward the leader, the leader's own tally and marker
+/// bookkeeping, and the chunk-repair pull.
+fn snap_repair_tick<S, H, A>(
+    node: &RawNode,
+    storage: &S,
+    out: &Outbound,
+    hooks: &H,
+    audit: &A,
+    snap: &mut SnapRepair,
+) where
+    S: NodeStorage,
+    H: DriverHooks,
+    A: Audit,
+{
+    let me = NodeId(out.self_id);
+    let latest = storage.latest_snap_point();
+    if node.is_leader() {
+        // The leader is its own first custodian, and a marker stops being
+        // outstanding once a quorum advertises the point it created.
+        if let Some(point) = latest {
+            snap.acks.entry(point.0).or_default().insert(out.self_id);
+        }
+        let quorum = node.config().peers.len() / 2 + 1;
+        if let Some(marker) = snap.marker_pending
+            && snap
+                .acks
+                .get(&marker.0)
+                .is_some_and(|holders| holders.len() >= quorum)
+        {
+            snap.marker_pending = None;
+        }
+    } else {
+        snap.marker_pending = None;
+        if let (Some(point), Some(leader)) = (latest, node.leader())
+            && leader != me
+        {
+            send_messages(
+                out,
+                hooks,
+                audit,
+                vec![(
+                    leader,
+                    Message::SnapAck {
+                        from: me,
+                        at_index: point,
+                    },
+                )],
+            );
+        }
+    }
+    // The chunk pull: once per tick, ask every peer for the still-missing
+    // chunks of the retained point. Pending chunks of a point this store has
+    // advanced past are obsolete — the newer point covers everything.
+    snap.pending
+        .retain(|at, chunks| latest == Some(Slot(*at)) && !chunks.is_empty());
+    if let Some((&at, chunks)) = snap.pending.iter().next() {
+        let wanted: Vec<u32> = chunks.iter().copied().collect();
+        let requests: Vec<(NodeId, Message)> = node
+            .config()
+            .peers
+            .iter()
+            .filter(|peer| **peer != me)
+            .map(|peer| {
+                (
+                    *peer,
+                    Message::SnapChunkRequest {
+                        from: me,
+                        at_index: Slot(at),
+                        chunks: wanted.clone(),
+                    },
+                )
+            })
+            .collect();
+        send_messages(out, hooks, audit, requests);
+    }
 }
 
 /// The driver's outbound side: everything needed to put one message on the wire —
@@ -969,6 +1250,7 @@ where
     //    surface them to the oracles and ack any clients waiting on each slot
     //    (ack-on-commit: a held reply fires only now that its slot is chosen).
     let chosen_index = node.hard_state().chosen_index;
+    let mut snap_markers: Vec<Slot> = Vec::new();
     for (slot, command) in &committed {
         let chosen_index = chosen_index.ok_or_else(|| {
             SimulationError::InvalidState("committed command without chosen prefix".into())
@@ -976,6 +1258,27 @@ where
         storage
             .apply(chosen_index, *slot, command)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+        // A decided snapshot point (#101): the marker's boundary state is the
+        // application state at exactly this instant of the contiguous walk,
+        // so the point is captured here, mid-loop, and flushed with the
+        // batch's application fsync below. The point is recorded at the
+        // marker's *own slot* — a marker minted by `propose_snap_marker`
+        // carries the identical `at_index`, and a hand-built mismatch is
+        // external input (never asserted, only noted).
+        if let Command::Control(Control::Snap { at_index }) = command {
+            if at_index != slot {
+                tracing::warn!(
+                    node = self_id,
+                    slot = slot.0,
+                    at_index = at_index.0,
+                    "snap_marker_index_mismatch"
+                );
+            }
+            storage
+                .record_snapshot(*slot)
+                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+            snap_markers.push(*slot);
+        }
         let vhash = command_hash(command);
         audit.applied(
             NodeId(self_id),
@@ -1012,6 +1315,14 @@ where
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    }
+
+    // The decided snapshot points captured above are durable with the
+    // application fsync; only now are they reported (never claiming a point a
+    // crash-before-sync would discard).
+    for at in &snap_markers {
+        audit.snap_recorded(NodeId(self_id), *at);
+        tracing::info!(node = self_id, at = at.0, "snap_recorded");
     }
 
     // Only now that the application state covering the dropped slots is
@@ -1492,6 +1803,7 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
     }
     audit.recovered(NodeId(self_id), promised, &records);
     let mut replayed_application = false;
+    let mut replayed_snap_points: Vec<Slot> = Vec::new();
     let mut repair_from: Option<Slot> = None;
     if let Some(ci) = node.hard_state().chosen_index {
         let applied_slot = storage.applied_slot();
@@ -1535,6 +1847,17 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
                     storage
                         .apply(ci, slot, command)
                         .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+                    // A freshly replayed `Snap` marker re-captures its decided
+                    // point (#101): the application state at this walk instant
+                    // is the boundary state, exactly as in the live apply
+                    // loop. An already-applied marker is skipped — its point
+                    // flushed with the same batch as its apply.
+                    if let Command::Control(Control::Snap { .. }) = command {
+                        storage
+                            .record_snapshot(slot)
+                            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+                        replayed_snap_points.push(slot);
+                    }
                     replayed_application = true;
                 }
                 let vhash = command_hash(command);
@@ -1561,6 +1884,10 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    }
+    for at in &replayed_snap_points {
+        audit.snap_recorded(NodeId(self_id), *at);
+        tracing::info!(node = self_id, at = at.0, "snap_recorded");
     }
     if let Some(from) = repair_from {
         let below_floor = from < node.first_slot();
@@ -1745,6 +2072,17 @@ where
     // keyed by their read-index ctx.
     let mut waiters = ClientWaiters::default();
     let mut next_read_ctx: u64 = 0;
+    // The snapshot-point repair layer (#101): the boot scan's rotted-chunk
+    // classification arms the chunk pull; everything else fills in per tick.
+    let mut snap = SnapRepair::default();
+    for (at, chunk) in storage.faulty_snap_chunks() {
+        snap.pending.entry(at.0).or_default().insert(chunk);
+    }
+    for (&at, chunks) in &snap.pending {
+        let count = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
+        audit.snap_chunks_reported(NodeId(self_id), Slot(at), count);
+        tracing::info!(node = self_id, at, chunks = count, "snap_chunks_reported");
+    }
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
     let mut last_role = node.role();
@@ -1889,7 +2227,47 @@ where
                         "prepare_below_floor"
                     );
                 }
-                node.step(msg);
+                // Snapshot-repair traffic is driver-terminal (#101): handled
+                // here, never stepped into the core — consensus state must
+                // not depend on snapshot custody.
+                let snap_handled = match &msg {
+                    Message::SnapAck { from, at_index } => {
+                        if node.is_leader() && node.config().peers.contains(from) {
+                            snap.acks.entry(at_index.0).or_default().insert(from.0);
+                        }
+                        true
+                    }
+                    Message::SnapChunkRequest {
+                        from,
+                        at_index,
+                        chunks,
+                    } => {
+                        handle_snap_chunk_request(
+                            &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
+                        );
+                        true
+                    }
+                    Message::SnapChunkResponse {
+                        at_index, chunks, ..
+                    } => {
+                        let at = *at_index;
+                        let chunks = chunks.clone();
+                        handle_snap_chunk_response(
+                            &mut node,
+                            &mut storage,
+                            &mut snap,
+                            audit,
+                            self_id,
+                            at,
+                            &chunks,
+                        )?;
+                        true
+                    }
+                    _ => false,
+                };
+                if !snap_handled {
+                    node.step(msg);
+                }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
@@ -1900,17 +2278,65 @@ where
                 // command into the next slot, decided by ordinary Paxos and
                 // forwarded to every node, each of which truncates lazily when it
                 // applies that slot. A non-leader redirects (like `propose`).
-                let ack = match node.propose_control(Control::Truncate { up_to: Slot(req.up_to) }) {
-                    ProposeResult::NotLeader(hint) => CompactAck {
-                        leader: hint.map(|n| n.0),
+                //
+                // The coupling rule (#101, CTRL §3.5): a `Truncate{up_to}` is
+                // proposed only once a quorum holds the decided snapshot at
+                // (or past) `up_to` — that is what makes chunk repair sound
+                // once the log below the floor is gone. A request no decided
+                // point covers first seeds a `Snap` marker and answers
+                // `accepted: false`; the client's retry finds the point once
+                // the quorum's custody advertisements land. Proposal-side
+                // policy only — the acceptor paths stay fully opaque.
+                let ack = if node.is_leader() {
+                    let quorum = node.config().peers.len() / 2 + 1;
+                    let covered = snap
+                        .acks
+                        .iter()
+                        .filter(|(_, holders)| holders.len() >= quorum)
+                        .map(|(&point, _)| point)
+                        .max();
+                    let propose_marker = |node: &mut RawNode, snap: &mut SnapRepair| {
+                        if snap.marker_pending.is_none()
+                            && let ProposeResult::Accepted(slot) = node.propose_snap_marker()
+                        {
+                            snap.marker_pending = Some(slot);
+                            tracing::info!(node = self_id, at = slot.0, "snap_marker_proposed");
+                        }
+                    };
+                    if let Some(point) = covered {
+                        let up_to = Slot(req.up_to.min(point));
+                        let _ = node.propose_control(Control::Truncate { up_to });
+                        tracing::info!(
+                            node = self_id,
+                            requested = req.up_to,
+                            up_to = up_to.0,
+                            point,
+                            "truncate_coupled_to_snap_point"
+                        );
+                        if req.up_to > point {
+                            // The request outruns the covered prefix: seed the
+                            // next point so a later compact can go further.
+                            propose_marker(&mut node, &mut snap);
+                        }
+                        CompactAck {
+                            leader: Some(self_id),
+                            accepted: true,
+                            first_slot: node.first_slot().0,
+                        }
+                    } else {
+                        propose_marker(&mut node, &mut snap);
+                        CompactAck {
+                            leader: Some(self_id),
+                            accepted: false,
+                            first_slot: node.first_slot().0,
+                        }
+                    }
+                } else {
+                    CompactAck {
+                        leader: node.leader().map(|n| n.0),
                         accepted: false,
                         first_slot: node.first_slot().0,
-                    },
-                    _ => CompactAck {
-                        leader: Some(self_id),
-                        accepted: true,
-                        first_slot: node.first_slot().0,
-                    },
+                    }
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
@@ -1942,6 +2368,9 @@ where
                     tracing::info!(node = self_id, "leadership_resigned");
                     node.step_down();
                 }
+                // Snapshot-point repair upkeep (#101): custody advertisement,
+                // the leader's coupling tally, and the chunk-repair pull.
+                snap_repair_tick(&node, &storage, &out, hooks, audit, &mut snap);
                 ticks += 1;
                 // Expire parked reads whose confirmation is overdue (lost acks, a
                 // minority-partitioned leader that never steps down): answer a

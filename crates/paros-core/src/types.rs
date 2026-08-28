@@ -82,6 +82,27 @@ pub enum Control {
         /// The last slot the application permits dropping (inclusive).
         up_to: Slot,
     },
+    /// A **decided snapshot point** (CTRL §3.5's `snap` marker): when this
+    /// slot enters a node's contiguous chosen prefix, the node snapshots its
+    /// application state *at this slot's boundary* — independent execution,
+    /// identical results, because the marker is applied at the same index
+    /// everywhere. That identity is what makes chunk-level snapshot repair
+    /// sound: byte-wise identical snapshots can be repaired chunk by chunk
+    /// from any peer, where self-chosen snapshot points could only ever ship
+    /// whole blobs.
+    ///
+    /// `at_index` is the slot the proposing leader allocated for the marker.
+    /// Paxos never moves an accepted command between slots, so a *decided*
+    /// marker always sits at `at_index` (the apply seam may assert it); the
+    /// field makes the decided snapshot point self-describing wherever the
+    /// command travels. Its partner rule — `Truncate{up_to}` is only proposed
+    /// once a quorum has reported snapshotting at `up_to` — is proposal-side
+    /// driver policy, never an acceptor-side check: the consensus paths treat
+    /// this command as opaquely as any other.
+    Snap {
+        /// The log index the marker snapshots at (its own decided slot).
+        at_index: Slot,
+    },
     /// A **no-op**: decides the slot without doing anything at apply time.
     ///
     /// The gap filler. A new leader re-proposes every slot its promise quorum
@@ -148,6 +169,10 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             mix(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => mix(OFFSET, &[2]),
+        Command::Control(Control::Snap { at_index }) => {
+            let hash = mix(OFFSET, &[3]);
+            mix(hash, &at_index.0.to_le_bytes())
+        }
     }
 }
 

@@ -194,6 +194,46 @@ pub enum Message {
         sessions: Vec<SessionEntry>,
     },
 
+    // ---- Snapshot-point repair (driver-terminal; CTRL §3.5 chunk repair) ----
+    /// Follower → leader: "I have durably recorded the decided snapshot at
+    /// `at_index`." The leader tallies these for the `Truncate`-coupling rule
+    /// (truncation is proposed only once a quorum has snapshotted at the
+    /// index). **Driver-terminal**: the driver's snapshot-repair layer owns
+    /// it end to end; [`crate::RawNode::step`] ignores it — consensus state
+    /// never depends on snapshot custody.
+    SnapAck {
+        /// The acknowledging node.
+        from: NodeId,
+        /// The decided snapshot point recorded (the `Snap` marker's slot).
+        at_index: Slot,
+    },
+    /// A node with rotted chunks of its decided snapshot → its peers: "send me
+    /// chunks `chunks` of the snapshot at `at_index`." Byte-wise snapshot
+    /// identity (the `Snap` marker) is what makes the answer verifiable.
+    /// Driver-terminal, like [`Message::SnapAck`].
+    SnapChunkRequest {
+        /// The requesting node.
+        from: NodeId,
+        /// The decided snapshot point whose chunks are needed.
+        at_index: Slot,
+        /// The chunk indexes needed (the driver's fixed chunk size).
+        chunks: Vec<u32>,
+    },
+    /// A peer holding the identical decided snapshot → the requester: the
+    /// requested chunks' bytes. A peer *lacking* the snapshot stays silent
+    /// (absence answers nothing — CTRL Figure 6 Box B); a peer holding only a
+    /// more advanced snapshot answers with a whole-blob
+    /// [`Message::InstallSnapshot`] instead (the unchanged fallback).
+    /// Driver-terminal, like [`Message::SnapAck`].
+    SnapChunkResponse {
+        /// The serving peer.
+        from: NodeId,
+        /// The decided snapshot point the chunks belong to.
+        at_index: Slot,
+        /// `(chunk index, chunk bytes)` for each chunk this peer holds clean.
+        chunks: Vec<(u32, Value)>,
+    },
+
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
     /// "Have I heard from a leader recently?" — drives leader election / a
     /// ballot bump when it fires.
@@ -265,7 +305,10 @@ impl Message {
             | Self::HeartbeatAck { config_id, .. } => Some(*config_id),
             Self::CatchUpRequest { .. }
             | Self::CatchUpResponse { .. }
-            | Self::CheckLeader { .. } => None,
+            | Self::CheckLeader { .. }
+            | Self::SnapAck { .. }
+            | Self::SnapChunkRequest { .. }
+            | Self::SnapChunkResponse { .. } => None,
         }
     }
 }

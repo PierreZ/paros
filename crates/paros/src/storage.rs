@@ -11,6 +11,23 @@ use paros_core::{
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 
+/// Fixed chunk size for decided-snapshot-point storage and repair (#101).
+///
+/// A compile-time constant, deliberately not a tunable: chunk identities
+/// `(snap index, chunk#)` are only meaningful because every node slices the
+/// byte-identical decided snapshot the same way, so the size must be
+/// cluster-consistent. CTRL uses 4 KiB chunks; this stays small so the
+/// simulation's application snapshots genuinely span several chunks and the
+/// repair-cost metric (a chunk repair ships ~one chunk, never the blob) is
+/// observable at sim scale.
+pub const SNAP_CHUNK_BYTES: usize = 64;
+
+/// How many [`SNAP_CHUNK_BYTES`] chunks a snapshot blob of `len` bytes spans.
+#[must_use]
+pub fn snap_chunk_count(len: usize) -> u32 {
+    u32::try_from(len.div_ceil(SNAP_CHUNK_BYTES)).unwrap_or(u32::MAX)
+}
+
 /// The durable record a storage operation (and therefore a storage fault) hit.
 ///
 /// Carried as **data** on every [`StorageError`] so Stage 7's detect-and-classify
@@ -31,6 +48,9 @@ pub enum StorageRecord {
     Truncation,
     /// The installed opaque application snapshot.
     Snapshot,
+    /// One chunk of the retained decided snapshot point (#101):
+    /// `(marker slot, chunk index)`.
+    SnapChunk(Slot, u32),
     /// The staged application transition at this slot (the apply seam).
     Application(Slot),
     /// The whole staged batch: an fsync flushes every record staged since the
@@ -51,6 +71,9 @@ impl fmt::Display for StorageRecord {
             StorageRecord::ChosenIndex => write!(f, "chosen-index"),
             StorageRecord::Truncation => write!(f, "truncation"),
             StorageRecord::Snapshot => write!(f, "snapshot"),
+            StorageRecord::SnapChunk(at, chunk) => {
+                write!(f, "snap-chunk[{}#{chunk}]", at.0)
+            }
             StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
             StorageRecord::Batch => write!(f, "batch"),
             StorageRecord::Store => write!(f, "store"),
@@ -322,7 +345,87 @@ pub trait NodeStorage: Storage {
     /// the bytes. The core never calls this — only the driver, when it fills a
     /// [`paros_core::Ready::snapshot_offers`] offer with bytes before sending an
     /// [`paros_core::Message::InstallSnapshot`].
+    ///
+    /// **Determinism contract (#101):** the returned bytes must be a
+    /// deterministic function of the applied prefix — two nodes whose
+    /// applications have applied the same command sequence must produce
+    /// byte-identical snapshots. Decided snapshot points
+    /// ([`Control::Snap`](paros_core::Control::Snap)) rely on exactly this:
+    /// identical bytes are what make chunk-level repair from any peer sound.
     fn snapshot(&self) -> Vec<u8>;
+
+    // ---- decided snapshot points (#101, CTRL §3.5) --------------------------
+
+    /// Record the current application state as the **decided snapshot point**
+    /// at `at` (the applied [`Control::Snap`](paros_core::Control::Snap)
+    /// marker's slot). Called by the driver at the instant the marker applies,
+    /// when the application state *is* the boundary state, and staged/flushed
+    /// like every other durable write. Only the latest point is retained.
+    ///
+    /// The default is a no-op for storages without decided-point support.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
+        let _ = at;
+        Ok(())
+    }
+
+    /// The latest decided snapshot point this store retains, if any.
+    fn latest_snap_point(&self) -> Option<Slot> {
+        None
+    }
+
+    /// How many [`SNAP_CHUNK_BYTES`] chunks the retained point at `at` spans
+    /// (`None` when `at` is not the retained point).
+    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
+        let _ = at;
+        None
+    }
+
+    /// Read one clean chunk of the retained point at `at`. `None` means this
+    /// store cannot serve it — wrong point, out of range, or the chunk is
+    /// rotted — and per CTRL Box B the caller stays silent about it.
+    fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
+        let _ = (at, chunk);
+        None
+    }
+
+    /// Install one repaired chunk of the retained point at `at`, verifying and
+    /// persisting it. Returns whether the point is now fully clean. A write
+    /// for a point this store no longer retains is a no-op `Ok(false)`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn write_snap_chunk(
+        &mut self,
+        at: Slot,
+        chunk: u32,
+        bytes: &[u8],
+    ) -> Result<bool, StorageError> {
+        let _ = (at, chunk, bytes);
+        Ok(false)
+    }
+
+    /// The retained point's chunks the boot scan classified rotted — value
+    /// lost, identity `(point, chunk#)` known: the recoverable class the
+    /// driver repairs from peers chunk by chunk.
+    fn faulty_snap_chunks(&self) -> Vec<(Slot, u32)> {
+        Vec::new()
+    }
+
+    /// If the live application state is lost or behind while the retained
+    /// point is fully clean and covers the compaction floor (`point ==
+    /// floor - 1`), restore the application from the point and return the
+    /// point's slot. `Ok(None)` when not applicable — the application is
+    /// already at or past the point, the point is incomplete, or it does not
+    /// cover the floor.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
+        Ok(None)
+    }
 
     /// Install an opaque application snapshot at `chosen_index`: set the durable
     /// commit index, raise the promise to at least `ballot`, record
@@ -385,6 +488,8 @@ pub struct MemStorage {
     /// Sealed at-most-once ledger records for truncated slots, keyed by
     /// `(client, seq)` (see [`NodeStorage::truncate`]).
     sealed: BTreeMap<(paros_core::ClientId, paros_core::ClientSeq), Slot>,
+    /// The latest decided snapshot point (#101): `(marker slot, blob)`.
+    snap_point: Option<(Slot, Vec<u8>)>,
 }
 
 impl MemStorage {
@@ -397,6 +502,7 @@ impl MemStorage {
             config,
             first: Slot(0),
             sealed: BTreeMap::new(),
+            snap_point: None,
         }
     }
 
@@ -481,6 +587,65 @@ impl NodeStorage for MemStorage {
 
     fn applied_slot(&self) -> Option<Slot> {
         self.hard_state.chosen_index
+    }
+
+    fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
+        self.snap_point = Some((at, self.snapshot()));
+        Ok(())
+    }
+
+    fn latest_snap_point(&self) -> Option<Slot> {
+        self.snap_point.as_ref().map(|(at, _)| *at)
+    }
+
+    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
+        self.snap_point
+            .as_ref()
+            .filter(|(point, _)| *point == at)
+            .map(|(_, blob)| snap_chunk_count(blob.len()))
+    }
+
+    fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
+        let (point, blob) = self.snap_point.as_ref()?;
+        if *point != at {
+            return None;
+        }
+        let start = usize::try_from(chunk).ok()?.checked_mul(SNAP_CHUNK_BYTES)?;
+        if start >= blob.len() {
+            return None;
+        }
+        let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
+        Some(blob[start..end].to_vec())
+    }
+
+    fn write_snap_chunk(
+        &mut self,
+        at: Slot,
+        chunk: u32,
+        bytes: &[u8],
+    ) -> Result<bool, StorageError> {
+        let Some((point, blob)) = self.snap_point.as_mut() else {
+            return Ok(false);
+        };
+        if *point != at {
+            return Ok(false);
+        }
+        let Some(start) = usize::try_from(chunk)
+            .ok()
+            .and_then(|c| c.checked_mul(SNAP_CHUNK_BYTES))
+        else {
+            return Ok(false);
+        };
+        if start >= blob.len() {
+            return Ok(false);
+        }
+        let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
+        if bytes.len() != end - start {
+            return Ok(false);
+        }
+        blob[start..end].copy_from_slice(bytes);
+        // In-memory chunks cannot rot; a write leaves the point fully clean.
+        Ok(true)
     }
 }
 
@@ -652,6 +817,60 @@ pub fn storage_contract_suite<S: NodeStorage>(
         s.sealed_sessions(),
         vec![(ClientId(7), ClientSeq(2), Slot(3))],
         "the install sealed the peer's ledger"
+    );
+
+    // A decided snapshot point (#101): recorded at its marker slot, retained
+    // across a reopen, chunked at the fixed size, and chunk reads reassemble
+    // exactly the blob the point captured.
+    let mut s = fresh();
+    for slot in 0..=2u64 {
+        s.append_accepted(Slot(slot), ballot(1), user(20 + slot, 0x50))
+            .expect("point append");
+    }
+    s.set_chosen_index(Slot(2)).expect("point index");
+    for slot in 0..=2u64 {
+        s.apply(Slot(2), Slot(slot), &user(20 + slot, 0x50))
+            .expect("point apply");
+    }
+    let blob = s.snapshot();
+    s.record_snapshot(Slot(2)).expect("record point");
+    s.sync(MustSync::Sync).expect("sync point");
+    let mut s = reopen(s);
+    assert_eq!(
+        s.latest_snap_point(),
+        Some(Slot(2)),
+        "the decided point survives a reopen"
+    );
+    let chunks = s
+        .snap_chunk_count(Slot(2))
+        .expect("the retained point reports its chunk count");
+    assert_eq!(
+        chunks,
+        snap_chunk_count(blob.len()),
+        "the chunk count matches the fixed chunk size"
+    );
+    let mut reassembled = Vec::new();
+    for chunk in 0..chunks {
+        reassembled.extend(
+            s.read_snap_chunk(Slot(2), chunk)
+                .expect("a clean chunk reads back"),
+        );
+    }
+    assert_eq!(reassembled, blob, "chunks reassemble the exact blob");
+    assert!(
+        s.read_snap_chunk(Slot(3), 0).is_none(),
+        "a point this store does not retain answers nothing"
+    );
+    // A chunk write round-trips (repair installs the identical bytes).
+    let first = s.read_snap_chunk(Slot(2), 0).expect("first chunk");
+    s.write_snap_chunk(Slot(2), 0, &first)
+        .expect("chunk write succeeds");
+    s.sync(MustSync::Sync).expect("sync chunk write");
+    let s = reopen(s);
+    assert_eq!(
+        s.read_snap_chunk(Slot(2), 0),
+        Some(first),
+        "a written chunk reads back identically"
     );
 }
 

@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, Seam, Slot, StorageError,
-    StorageFaultDecision, StorageRecord, command_hash,
+    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam,
+    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -507,6 +507,14 @@ struct AuditState {
     repair_stepdown_seen: bool,
     app_repair_seen: bool,
     app_repair_below_floor_seen: bool,
+    /// #101: decided snapshot points each node has durably recorded — the
+    /// per-node custody facts the truncation-coupling check reads.
+    snap_points: BTreeMap<u64, BTreeSet<u64>>,
+    snap_recorded_seen: bool,
+    snap_chunks_reported_seen: bool,
+    snap_chunk_repaired_seen: bool,
+    snap_fallback_seen: bool,
+    snap_restore_seen: bool,
     resend_skipped: bool,
     resigned: bool,
     shortest_timeout: bool,
@@ -568,6 +576,13 @@ impl AuditState {
         assert_sometimes!(n >= 5, "a run drives a five-node cluster");
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
+        // The #101 coupling's other half: compaction implies a decided
+        // snapshot point was recorded first, so this saturates wherever the
+        // compaction gate does.
+        assert_sometimes!(
+            self.snap_recorded_seen,
+            "storage: a decided snapshot point is recorded"
+        );
         assert_sometimes!(
             self.snapshot_installed,
             "a below-floor node recovers via snapshot transfer"
@@ -908,6 +923,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             reach_once!(
                 st.compacted,
                 "a node truncates its log prefix behind the chosen index"
+            );
+            // The #101 coupling, checked at the cluster level: a `Truncate`
+            // is only ever proposed once a quorum has durably recorded the
+            // covering decided snapshot point, so by the time ANY node
+            // applies it, that point is already in the shared audit's custody
+            // map. Deliberately not per-node: a node with an open application
+            // repair advances consensus (and its floor) while its own marker
+            // emission is deferred to the repair pump, and an
+            // install-recovered node never applies the folded marker at all —
+            // both legitimately truncate on points *others* recorded. A
+            // truncation no node's recorded point covers evaded the coupling
+            // policy.
+            let covered = st
+                .snap_points
+                .values()
+                .flatten()
+                .any(|point| point + 1 >= first.0);
+            assert_always!(
+                covered,
+                "storage: a truncation is covered by a recorded snapshot point",
+                { "node" => node.0, "first" => first.0 }
             );
         }
         st.check_below_all_floors(now);
@@ -1438,6 +1474,61 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a new leader gap-fills a hole its promise quorum never reported"
             );
         }
+    }
+
+    fn snap_recorded(&self, node: NodeId, at: Slot) {
+        let mut st = self.state();
+        st.snap_points.entry(node.0).or_default().insert(at.0);
+        reach_once!(
+            st.snap_recorded_seen,
+            "storage: a decided snapshot point is recorded at its marker slot"
+        );
+    }
+
+    fn snap_chunks_reported(&self, _node: NodeId, _at: Slot, _chunks: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.snap_chunks_reported_seen,
+            "storage: rotted snapshot chunks are reported for peer repair"
+        );
+    }
+
+    fn snap_chunk_repaired(
+        &self,
+        _node: NodeId,
+        _at: Slot,
+        chunks: u64,
+        bytes: u64,
+        blob_bytes: u64,
+    ) {
+        let mut st = self.state();
+        // The CTRL §5.2 chunk-repair cost metric: an install ships at most the
+        // chunks it names — never the whole blob riding along.
+        assert_always!(
+            bytes <= chunks.saturating_mul(SNAP_CHUNK_BYTES as u64),
+            "storage: a chunk repair ships at most the chunks it installs",
+            { "chunks" => chunks, "bytes" => bytes, "blob_bytes" => blob_bytes }
+        );
+        reach_once!(
+            st.snap_chunk_repaired_seen,
+            "storage: a rotted snapshot chunk is repaired from a peer"
+        );
+    }
+
+    fn snap_advanced_fallback(&self, _node: NodeId, _to: NodeId) {
+        let mut st = self.state();
+        reach_once!(
+            st.snap_fallback_seen,
+            "storage: a chunk request is answered with the advanced whole snapshot"
+        );
+    }
+
+    fn snap_point_restored(&self, _node: NodeId, _at: Slot) {
+        let mut st = self.state();
+        reach_once!(
+            st.snap_restore_seen,
+            "storage: a lost application state is restored from the decided snapshot point"
+        );
     }
 
     fn prepare_below_floor(&self, _node: NodeId, _from_slot: Slot, _floor: Slot) {

@@ -4,14 +4,24 @@ use paros::{Command, Control, Slot};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-const SNAPSHOT_VERSION: u8 = 1;
-const SNAPSHOT_LEN: usize = 1 + 8 + 8;
+/// Version 2 (#101): the state carries per-lane block digests beside the
+/// running chain hash, so a snapshot blob genuinely spans several
+/// [`paros::SNAP_CHUNK_BYTES`] chunks and chunk-level repair is observable.
+const SNAPSHOT_VERSION: u8 = 2;
+/// Fixed digest-lane count. Command `i` folds into lane `i % CHAIN_LANES`, so
+/// the whole array is a deterministic function of the applied prefix.
+pub(crate) const CHAIN_LANES: usize = 32;
+const SNAPSHOT_LEN: usize = 1 + 8 + 8 + 8 * CHAIN_LANES;
 
 /// The complete application value checked across replicas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ChainState {
     pub(crate) applied_count: u64,
     pub(crate) chain_hash: u64,
+    /// Per-lane digests (see [`CHAIN_LANES`]): the snapshot body that makes
+    /// the blob multi-chunk. Deterministic in the applied prefix, like
+    /// everything else here.
+    pub(crate) lanes: [u64; CHAIN_LANES],
 }
 
 impl Default for ChainState {
@@ -19,6 +29,7 @@ impl Default for ChainState {
         Self {
             applied_count: 0,
             chain_hash: FNV_OFFSET,
+            lanes: [FNV_OFFSET; CHAIN_LANES],
         }
     }
 }
@@ -33,9 +44,15 @@ impl ChainState {
         let cmd_hash = fnv1a(&encoded);
         let mut chained = self.chain_hash.to_le_bytes().to_vec();
         chained.extend_from_slice(&encoded);
+        let lane = usize::try_from(self.applied_count).unwrap_or(0) % CHAIN_LANES;
+        let mut lanes = self.lanes;
+        let mut lane_bytes = lanes[lane].to_le_bytes().to_vec();
+        lane_bytes.extend_from_slice(&encoded);
+        lanes[lane] = fnv1a(&lane_bytes);
         let next = Self {
             applied_count: self.applied_count.saturating_add(1),
             chain_hash: fnv1a(&chained),
+            lanes,
         };
         AppliedTransition {
             next,
@@ -49,6 +66,9 @@ impl ChainState {
         bytes.push(SNAPSHOT_VERSION);
         bytes.extend_from_slice(&self.applied_count.to_le_bytes());
         bytes.extend_from_slice(&self.chain_hash.to_le_bytes());
+        for lane in self.lanes {
+            bytes.extend_from_slice(&lane.to_le_bytes());
+        }
         bytes
     }
 
@@ -72,9 +92,19 @@ impl ChainState {
                 .try_into()
                 .map_err(|_| "invalid chain-hash encoding")?,
         );
+        let mut lanes = [0_u64; CHAIN_LANES];
+        for (i, lane) in lanes.iter_mut().enumerate() {
+            let start = 17 + 8 * i;
+            *lane = u64::from_le_bytes(
+                bytes[start..start + 8]
+                    .try_into()
+                    .map_err(|_| "invalid lane encoding")?,
+            );
+        }
         Ok(Self {
             applied_count,
             chain_hash,
+            lanes,
         })
     }
 }
@@ -105,6 +135,7 @@ fn command_kind(command: &Command) -> &'static str {
         Command::User(_) => "user",
         Command::Control(Control::Truncate { .. }) => "truncate",
         Command::Control(Control::Noop) => "noop",
+        Command::Control(Control::Snap { .. }) => "snap",
     }
 }
 
@@ -123,6 +154,12 @@ fn encode_command(command: &Command) -> Vec<u8> {
             bytes
         }
         Command::Control(Control::Noop) => vec![2],
+        Command::Control(Control::Snap { at_index }) => {
+            let mut bytes = Vec::with_capacity(9);
+            bytes.push(3);
+            bytes.extend_from_slice(&at_index.0.to_le_bytes());
+            bytes
+        }
     }
 }
 

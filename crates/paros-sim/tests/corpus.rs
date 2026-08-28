@@ -5,7 +5,8 @@
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    corpus_canonical_masks, run_bare_quorum_case, run_corpus_mask, run_snapshot_lifecycle_case,
+    chunk_corpus_canonical_masks, corpus_canonical_masks, run_bare_quorum_case, run_chunk_mask,
+    run_corpus_mask, run_snapshot_lifecycle_case,
 };
 
 fn assert_mask_green(mask: u16) {
@@ -76,6 +77,40 @@ fn snapshot_lifecycle_compound_reaches_all_paths() {
     assert!(
         report.assertion_violations.is_empty(),
         "lifecycle compound asserted all four recovery paths: {:?}",
+        report.assertion_violations
+    );
+}
+
+/// The #101 per-chunk mask corpus: every canonical mask over the decided
+/// snapshot point's chunks asserts its analytic outcome — an assemblable
+/// chunk (≥ 1 clean copy anywhere) is repaired from a peer on every holder
+/// (chunk repair is the only heal in these cases: the live states stay
+/// healthy, so the repair-cost metric is ~chunk, never the blob), and an
+/// unassemblable chunk stays faulty everywhere, never fabricated, while the
+/// cluster stays fully available.
+#[test]
+fn chunk_canonical_masks_assert_their_analytic_outcomes() {
+    for mask in chunk_corpus_canonical_masks() {
+        let report = run_chunk_mask(mask, false);
+        assert_eq!(report.failed_runs, 0, "chunk mask {mask:#017b} completed");
+        assert!(
+            report.assertion_violations.is_empty(),
+            "chunk mask {mask:#017b} asserted its analytic outcome: {:?}",
+            report.assertion_violations
+        );
+    }
+}
+
+/// One chunk mask compounded with a lost live snapshot on node 0: the node's
+/// below-floor recovery races the point restore against the whole-blob
+/// install, and either way converges without fabricating.
+#[test]
+fn chunk_mask_with_lost_live_snapshot_converges() {
+    let report = run_chunk_mask(0b10, true);
+    assert_eq!(report.failed_runs, 0, "chunk+live case completed");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "chunk+live case converged: {:?}",
         report.assertion_violations
     );
 }

@@ -36,8 +36,8 @@ pub use grpc::{
 };
 pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
 pub use storage::{
-    MemStorage, MetadataFault, NodeStorage, StorageError, StorageRecord, WriteOutcome,
-    storage_contract_suite,
+    MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
+    WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
 pub use paros_core::{
