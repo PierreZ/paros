@@ -12,7 +12,7 @@ mod replication;
 use std::collections::{BTreeMap, BTreeSet};
 
 use self::decide_apply::Proposing;
-use self::election::{Election, LeaderRecovery};
+use self::election::{Election, LeaderRecovery, RepairProbe};
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 use self::replication::HEARTBEAT_TICKS;
 use crate::message::Message;
@@ -30,6 +30,13 @@ pub const PROMISE_BATCH: usize = 64;
 
 /// Maximum recovered or gap-fill Phase-2 rounds started in one recovery pump.
 pub const LEADER_RECOVERY_BATCH: usize = 64;
+
+/// Election timeouts a leader's blocked repair probe may stay open before the
+/// leader resigns (CTRL §4.2): a leader that cannot finish recovery — e.g.
+/// partitioned from the only holder of a faulty slot's value — steps down so
+/// another node can try. Multiplies the driver-supplied randomized election
+/// timeout, so the effective window inherits its per-seed jitter.
+pub const REPAIR_TIMEOUT_ELECTIONS: u64 = 3;
 
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -131,6 +138,26 @@ pub struct RawNode {
     /// [`Storage::first_slot`]. Always `<= first_unchosen()`: only chosen slots
     /// are ever dropped.
     first_slot: Slot,
+    /// Recoverable **faulty entries** (Stage 8, CTRL): retained slots whose
+    /// accepted value was lost to storage corruption but whose identity
+    /// `(slot, accepted_ballot)` survived the boot scan
+    /// ([`Storage::faulty_entries`]). Reported as the Promise tri-state's third
+    /// answer (never as "nothing accepted here"), never served by catch-up, and
+    /// repaired in place: a fresh `Accept` at or above the promise, a learned
+    /// chosen value, or a snapshot install past the slot each clear the entry
+    /// (fill or replace-with-proven-identical — repair never deletes promised-
+    /// or accepted-ballot state). Disjoint from `accepted` at all times.
+    faulty: BTreeMap<Slot, Ballot>,
+    /// The **application repair cursor** (Stage 8): the first slot whose
+    /// decided command the driver's application still needs, when the boot
+    /// replay could not walk the whole chosen prefix (a faulty chosen record
+    /// blocked it, or the application snapshot was lost below the compaction
+    /// floor). While set, [`RawNode::advance_chosen_index`] defers surfacing
+    /// committed entries to [`RawNode::pump_app_repair`], which re-emits them
+    /// **in slot order from this cursor** so the application never applies out
+    /// of order; the node pulls the missing range via catch-up (or a snapshot,
+    /// when the cursor sits below the floor) each tick. `None` = fully healed.
+    app_repair: Option<Slot>,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
     // ---- `ready`, cleared by `advance`.
@@ -207,6 +234,33 @@ pub struct RawNode {
     proposer: BTreeMap<Slot, Proposing>,
     /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
     election: Option<Election>,
+    /// The leader's open **distributed commitment determination** (Stage 8,
+    /// CTRL): faulty slots the winning quorum could resolve neither as Case 1
+    /// (some `have`) nor Case 2 (a full Q1 of `none`). The leader keeps
+    /// querying stragglers at its ballot until each blocked slot resolves, and
+    /// resigns after a recovery timeout so another node can try (CTRL §4.2).
+    /// Leader-only, volatile.
+    repair_probe: Option<RepairProbe>,
+    /// Ticks the current `repair_probe` has been open. Reset when the probe
+    /// closes; drives the recovery-timeout resignation.
+    repair_elapsed: u64,
+    /// Monotone count of recovery-timeout step-downs this incarnation (a leader
+    /// resigning because it could not finish repairing its blocked slots).
+    repair_step_downs: u64,
+    /// Monotone count of local faulty records repaired in place this
+    /// incarnation (a fresh accept, a learned chosen value, or a snapshot
+    /// install clearing a `faulty` entry).
+    faulty_repaired: u64,
+    /// Cumulative payload bytes shipped into local repairs (the CTRL §5.2
+    /// repair-cost metric: a protocol-aware repair moves one entry, not the
+    /// log).
+    repair_bytes: u64,
+    /// Monotone count of blocked slots resolved as Case 1 (re-proposed from a
+    /// straggler's `have`) after the election closed.
+    repair_case1: u64,
+    /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
+    /// assembled from stragglers; decided `Noop`).
+    repair_case2: u64,
     /// Remaining bounded recovery work for the current leadership.
     leader_recovery: Option<LeaderRecovery>,
     /// The bounded chosen-prefix walk stopped with another contiguous slot ready.
@@ -360,13 +414,33 @@ impl RawNode {
                 inflight.insert((entry.client, entry.seq), *slot);
             }
         }
-        // Next free slot: one past the highest accepted entry, or (when the log
-        // is empty, e.g. fully truncated) one past the durable chosen index.
+        // The boot scan's recoverable faulty entries (Stage 8): value lost,
+        // identity known. They are *records this node accepted*, so they bound
+        // `next_slot` exactly like readable records; they are simply unreadable
+        // and reported as `faulty` instead of `have`. Nothing below the floor is
+        // retained, and a slot never appears in both maps.
+        let mut faulty: BTreeMap<Slot, Ballot> = BTreeMap::new();
+        for (slot, ballot) in storage.faulty_entries() {
+            if slot < first_slot {
+                continue;
+            }
+            assert!(
+                !accepted.contains_key(&slot),
+                "a faulty entry is never also a readable accepted record"
+            );
+            faulty.insert(slot, ballot);
+        }
+
+        // Next free slot: one past the highest accepted entry (readable or
+        // faulty), or (when the log is empty, e.g. fully truncated) one past
+        // the durable chosen index.
         let first_unchosen = hard_state.chosen_index.map_or(Slot(0), |ci| Slot(ci.0 + 1));
         let next_slot = accepted
             .keys()
-            .next_back()
-            .map_or(first_unchosen, |s| Slot(s.0 + 1));
+            .chain(faulty.keys())
+            .max()
+            .map_or(first_unchosen, |s| Slot(s.0 + 1))
+            .max(first_unchosen);
         // Trust-boundary re-assertion of the durable write ordering: a flushed
         // floor never outruns the flushed chosen index (only chosen slots are
         // truncated), and a durable chosen index implies its accept was flushed
@@ -386,6 +460,8 @@ impl RawNode {
             hard_state,
             accepted,
             first_slot,
+            faulty,
+            app_repair: None,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
             pending_committed: Vec::new(),
@@ -409,6 +485,13 @@ impl RawNode {
             read_rounds: Vec::new(),
             proposer: BTreeMap::new(),
             election: None,
+            repair_probe: None,
+            repair_elapsed: 0,
+            repair_step_downs: 0,
+            faulty_repaired: 0,
+            repair_bytes: 0,
+            repair_case1: 0,
+            repair_case2: 0,
             leader_recovery: None,
             chosen_advance_pending: false,
             resend_cursor: None,
@@ -448,6 +531,25 @@ impl RawNode {
                 .next()
                 .is_none_or(|s| *s >= self.first_slot),
             "no accepted record survives below the compaction floor"
+        );
+        assert!(
+            self.faulty
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot),
+            "no faulty entry survives below the compaction floor"
+        );
+        // The tri-state is a partition: a slot is readable, faulty, or absent —
+        // never two at once (O(N∩) structural check, so debug-only).
+        debug_assert!(
+            self.faulty.keys().all(|s| !self.accepted.contains_key(s)),
+            "the faulty set stays disjoint from the accepted log"
+        );
+        // The application repair cursor only ever points inside the chosen
+        // prefix (there is nothing decided to re-emit past it).
+        assert!(
+            self.app_repair.is_none_or(|s| s < self.first_unchosen()),
+            "the application repair cursor stays inside the chosen prefix"
         );
         assert!(
             self.chosen
@@ -508,6 +610,12 @@ impl RawNode {
                 "only a leader holds deferred recovery work"
             );
         }
+        if self.repair_probe.is_some() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds an open repair probe"
+            );
+        }
     }
 
     /// The single input entry point: every stimulus is a [`Message`], routed by
@@ -537,9 +645,10 @@ impl RawNode {
                 ballot,
                 from_slot,
                 accepted,
+                faulty,
                 next_from_slot,
                 ..
-            } => self.on_promise(from, ballot, from_slot, accepted, next_from_slot),
+            } => self.on_promise(from, ballot, from_slot, accepted, faulty, next_from_slot),
             Message::Accept {
                 from,
                 ballot,
@@ -604,8 +713,13 @@ impl RawNode {
         // applied, the honest answer is `Chosen` at its first slot, even while a
         // #94 duplicate of it sits chosen-but-unapplied at a later slot (that
         // slot will suppress to a no-op at apply, so a reply parked on it would
-        // hang to the client's deadline).
-        if let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq)) {
+        // hang to the client's deadline). While an application repair is open,
+        // the ledger's slots are chosen but not yet re-applied here, so the
+        // immediate `Chosen` ack would name a slot outside the applied prefix —
+        // fall through to the honest slower paths instead.
+        if self.app_repair.is_none()
+            && let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq))
+        {
             return ProposeResult::Chosen(at);
         }
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
@@ -730,7 +844,18 @@ impl RawNode {
         let Some(ci) = self.hard_state.chosen_index else {
             return self.first_slot;
         };
-        let highest_drop = up_to.min(ci);
+        let mut highest_drop = up_to.min(ci);
+        // An open application repair pins the floor: truncating at or past the
+        // repair cursor would drop the very records the catch-up heal is about
+        // to re-emit, converting a one-slot repair into a snapshot transfer (or
+        // an unrecoverable wait). The floor resumes rising once the repair
+        // closes; a decided `Truncate` is idempotent over-asking by design.
+        if let Some(pending) = self.app_repair {
+            let Some(cap) = pending.0.checked_sub(1) else {
+                return self.first_slot;
+            };
+            highest_drop = highest_drop.min(Slot(cap));
+        }
         let first = Slot(highest_drop.0 + 1).max(self.first_slot);
         if first <= self.first_slot {
             return self.first_slot;
@@ -752,6 +877,10 @@ impl RawNode {
             .collect();
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
+        // A faulty entry below the floor is superseded by the compacted state
+        // (only chosen slots are dropped, and truncation is decided over the
+        // applied prefix): custodianship moved into the application snapshot.
+        self.faulty = self.faulty.split_off(&first);
         self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         self.proposer.retain(|slot, _| *slot >= first);
         self.first_slot = first;
@@ -830,7 +959,63 @@ impl RawNode {
                 self.step(Message::CheckLeader { from: me });
             }
         }
+        self.tick_repair();
         self.assert_invariants();
+    }
+
+    /// Per-tick repair upkeep (Stage 8): drive the leader's open repair probe
+    /// (straggler re-query + the CTRL §4.2 recovery-timeout resignation) and
+    /// pull the application repair range from peers.
+    fn tick_repair(&mut self) {
+        // The leader's blocked-slot probe: re-send `Prepare` at our ballot to
+        // every peer that has not yet answered its full suffix, once per tick
+        // (the heartbeat cadence — a straggler that was down or partitioned
+        // when the campaign's Prepare went out only ever answers a re-send). A
+        // probe that stays blocked for a full recovery timeout resigns: another
+        // node — possibly one holding the missing copy — gets to try.
+        if self.role == NodeRole::Leader && self.repair_probe.is_some() {
+            self.repair_elapsed += 1;
+            let timeout = self
+                .election_timeout
+                .saturating_mul(REPAIR_TIMEOUT_ELECTIONS);
+            if self.election_timeout != 0 && self.repair_elapsed >= timeout {
+                self.repair_step_downs += 1;
+                self.become_follower(None);
+            } else {
+                let (ballot, from_slot, unanswered) = {
+                    let probe = self.repair_probe.as_ref().expect("checked above");
+                    let unanswered: Vec<NodeId> = self
+                        .config
+                        .peers
+                        .iter()
+                        .copied()
+                        .filter(|p| *p != self.config.id && !probe.answered.contains(p))
+                        .collect();
+                    (probe.ballot, probe.from_slot, unanswered)
+                };
+                for to in unanswered {
+                    self.pending_messages.push((
+                        to,
+                        Message::Prepare {
+                            config_id: self.hard_state.config_id,
+                            from: self.config.id,
+                            ballot,
+                            from_slot,
+                        },
+                    ));
+                }
+            }
+        }
+        // The application repair pull: ask every peer for the decided range
+        // from the cursor. A peer that still holds the slots serves a
+        // catch-up replay; one that truncated past them offers a snapshot.
+        // Once per tick — the same cadence heartbeat-driven catch-up uses.
+        if let Some(from_slot) = self.app_repair {
+            self.broadcast(&Message::CatchUpRequest {
+                from: self.config.id,
+                from_slot,
+            });
+        }
     }
 
     /// Re-broadcast a fair bounded page of this leader's in-flight `Accept`
@@ -946,6 +1131,70 @@ impl RawNode {
             return;
         }
         self.become_follower(None);
+    }
+
+    /// Open an **application repair** (Stage 8): the driver's boot replay could
+    /// not walk the whole chosen prefix — a faulty chosen record blocked it, or
+    /// the application snapshot was lost below the compaction floor — and the
+    /// application's durable prefix stops just below `from`. The core re-emits
+    /// every decided command from `from` onward, in slot order, through the
+    /// ordinary [`Ready::committed`](crate::Ready::committed) seam as the
+    /// missing values arrive (commit-replay catch-up, or a snapshot install
+    /// when `from` sits below the floor), and pulls them from peers each tick.
+    ///
+    /// A no-op when nothing is chosen or `from` already covers the prefix.
+    ///
+    /// # Panics
+    ///
+    /// If `from` lies past the contiguous chosen prefix — the driver may only
+    /// name a slot the durable chosen index already covers.
+    pub fn open_app_repair(&mut self, from: Slot) {
+        assert!(
+            from <= self.first_unchosen(),
+            "an application repair starts inside the chosen prefix"
+        );
+        if from >= self.first_unchosen() {
+            return;
+        }
+        self.app_repair = Some(from);
+        self.pump_app_repair();
+        self.assert_invariants();
+    }
+
+    /// Re-emit the next run of decided commands the open application repair can
+    /// serve: from the cursor, while each slot's value is present (readable in
+    /// `chosen`), bounded per batch. Stops at the floor (only a snapshot can
+    /// heal below it) or at the first still-missing value (catch-up will bring
+    /// it). Closes the repair when the cursor reaches the contiguous prefix
+    /// walk's frontier.
+    pub(crate) fn pump_app_repair(&mut self) {
+        let Some(mut cursor) = self.app_repair else {
+            return;
+        };
+        let end = self.first_unchosen();
+        let mut emitted = 0_usize;
+        while cursor < end && emitted < LEADER_RECOVERY_BATCH {
+            if cursor < self.first_slot {
+                // Below the floor the decided values are gone locally; only an
+                // InstallSnapshot can close this repair.
+                break;
+            }
+            let Some(command) = self.chosen.get(&cursor).cloned() else {
+                break;
+            };
+            // The apply seam's duplicate suppression is re-derived exactly as
+            // the contiguous walk derives it (the ledger already holds these
+            // decisions from the boot rebuild plus the heal-time patches).
+            let command = if self.duplicate_slots.contains(&cursor) {
+                Command::Control(Control::Noop)
+            } else {
+                command
+            };
+            self.pending_committed.push((cursor, command));
+            cursor = Slot(cursor.0 + 1);
+            emitted += 1;
+        }
+        self.app_repair = if cursor >= end { None } else { Some(cursor) };
     }
 
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
@@ -1077,6 +1326,45 @@ impl RawNode {
         self.quorum_lost_step_downs
     }
 
+    /// The recoverable faulty entries this node still holds (Stage 8): value
+    /// lost, identity known, reported in the Promise tri-state and repaired in
+    /// place. A read view for drivers/oracles.
+    #[must_use]
+    pub fn faulty_entries(&self) -> &BTreeMap<Slot, Ballot> {
+        &self.faulty
+    }
+
+    /// The open application repair cursor, if any (see
+    /// [`RawNode::open_app_repair`]).
+    #[must_use]
+    pub fn app_repair(&self) -> Option<Slot> {
+        self.app_repair
+    }
+
+    /// How many blocked slots the leader's open repair probe still holds (0
+    /// when no probe is open): faulty slots the promise quorum resolved neither
+    /// as Case 1 (`have`) nor Case 2 (a full Q1 of `none`), still waiting on
+    /// stragglers.
+    #[must_use]
+    pub fn blocked_repairs(&self) -> usize {
+        self.repair_probe.as_ref().map_or(0, |p| p.blocked.len())
+    }
+
+    /// Monotone repair counters this incarnation, for the driver's audit
+    /// report: `(faulty records repaired in place, Case-1 straggler
+    /// re-proposals, Case-2 straggler no-op fills, recovery-timeout
+    /// step-downs, repair payload bytes)`.
+    #[must_use]
+    pub fn repair_counters(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.faulty_repaired,
+            self.repair_case1,
+            self.repair_case2,
+            self.repair_step_downs,
+            self.repair_bytes,
+        )
+    }
+
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`
     /// is the first slot missing from the contiguous chosen prefix and `highest`
     /// is the highest slot above it this node already knows is chosen. `None` when
@@ -1090,6 +1378,19 @@ impl RawNode {
     /// frozen at `hole - 1` cluster-wide while higher slots keep being chosen.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
+        // An open application repair is the same shape of stall, routed through
+        // the same seam (Stage 8): decided slots sit above a prefix the
+        // application cannot advance past. `hole` is the repair cursor; the
+        // highest decided slot above it is at least the chosen index.
+        if let Some(hole) = self.app_repair {
+            let highest = self
+                .chosen
+                .range(hole..)
+                .next_back()
+                .map_or(hole, |(s, _)| *s)
+                .max(self.hard_state.chosen_index.unwrap_or(hole));
+            return Some((hole, highest));
+        }
         let hole = self.first_unchosen();
         // `hole` may itself be chosen while the bounded prefix walk is pending;
         // the driver drains that continuation before quiescence.

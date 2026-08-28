@@ -52,6 +52,16 @@ pub enum Message {
         from_slot: Slot,
         /// All accepted commands for slots `>= from_slot`. Empty if none.
         accepted: BTreeMap<Slot, (Ballot, Command)>,
+        /// The **tri-state's third answer** (Stage 8, CTRL): slots in this page's
+        /// range whose accepted value this acceptor *lost* to storage corruption
+        /// but whose identity `(slot, accepted_ballot)` survived. `faulty` means
+        /// silence toward the none-tally, never denial: the candidate must not
+        /// treat these slots as "nothing accepted here" (a unanimous-`none`
+        /// no-op fill over a misreported faulty copy is the CTRL Figure-2 bug
+        /// class), and must not count this acceptor toward the full-Q1-of-`none`
+        /// threshold at these slots. Disjoint from `accepted` by construction.
+        #[cfg_attr(feature = "serde", serde(default))]
+        faulty: BTreeMap<Slot, Ballot>,
         /// Cursor for the next bounded suffix page. `None` marks the terminal
         /// page; only then may the candidate count this acceptor in its Phase-1
         /// quorum.

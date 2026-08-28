@@ -324,6 +324,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     let _ = drain(&mut n);
     let camp = n.ballot();
     n.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
@@ -378,6 +379,7 @@ fn restart_rebuilds_state_from_hard_state() {
             quorum_system: crate::state::QuorumSystem::Majority,
         },
         first_slot: Slot(0),
+        faulty: Vec::new(),
     };
     let n = RawNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");

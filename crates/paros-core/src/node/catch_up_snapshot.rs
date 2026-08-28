@@ -60,10 +60,22 @@ impl RawNode {
             "catch-up is served from inside the chosen prefix"
         );
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
+        let mut expected = from_slot;
         for (slot, command) in self.chosen.range(from_slot..=ci) {
             if entries.len() >= CATCHUP_BATCH {
                 break;
             }
+            // Per-slot attribution (Stage 8): this node serves only what it can
+            // read. Its own faulty chosen record leaves a hole in `chosen`; the
+            // replay stops *at* the hole rather than skipping it — a response
+            // with a silent gap would let the requester's contiguous walk stall
+            // on a range this reply claimed to cover. Another peer (or a
+            // snapshot) serves past the hole; faulty means silence, not
+            // garbage.
+            if *slot != expected {
+                break;
+            }
+            expected = Slot(slot.0 + 1);
             // The choosing ballot is the ballot recorded for this slot in the
             // accepted log (a chosen value is recorded authoritatively there).
             let ballot = self.accepted.get(slot).map_or(self.ballot, |(b, _)| *b);
@@ -99,13 +111,19 @@ impl RawNode {
         sessions: Vec<SessionEntry>,
     ) {
         // Never go backward: a snapshot at or below our chosen prefix teaches us
-        // nothing and must not lower the floor or re-truncate live slots.
-        if self
-            .hard_state
-            .chosen_index
-            .is_some_and(|ci| chosen_index <= ci)
-        {
-            return;
+        // nothing and must not lower the floor or re-truncate live slots. The
+        // one exception (Stage 8): with an **application repair** open, a
+        // snapshot at exactly our chosen index is the below-floor heal — the
+        // opaque state it installs covers the very prefix whose decided values
+        // this node can no longer read, and installing it closes the repair
+        // without moving the chosen index anywhere.
+        if let Some(ci) = self.hard_state.chosen_index {
+            if chosen_index < ci {
+                return;
+            }
+            if chosen_index == ci && self.app_repair.is_none() {
+                return;
+            }
         }
         // Adopt the choosing ballot. `set_promise` only ever raises the promise
         // (it is a max), so even a far-behind node cannot regress its durable
@@ -122,6 +140,24 @@ impl RawNode {
         self.first_slot = first;
         self.accepted = self.accepted.split_off(&first);
         self.chosen = self.chosen.split_off(&first);
+        // Faulty entries in the folded prefix are healed by the install: their
+        // decided effects live in the opaque bytes now (the whole-blob repair).
+        self.faulty = self.faulty.split_off(&first);
+        // The snapshot's application state covers everything at or below its
+        // boundary, so an open application repair for that range is closed.
+        if self.app_repair.is_some_and(|cursor| cursor <= chosen_index) {
+            self.app_repair = None;
+        }
+        // A probe blocked below the boundary is resolved by the fold as well.
+        if let Some(probe) = self.repair_probe.as_mut() {
+            probe.blocked = probe.blocked.split_off(&first);
+            probe.best_have = probe.best_have.split_off(&first);
+            probe.faulty_reports = probe.faulty_reports.split_off(&first);
+            if probe.blocked.is_empty() {
+                self.repair_probe = None;
+                self.repair_elapsed = 0;
+            }
+        }
         self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         self.proposer.retain(|slot, _| *slot >= first);
         // The prefix jumped without the contiguous walk running, so nothing
