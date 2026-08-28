@@ -25,13 +25,22 @@
 //!        result — a rotted copy misreported as "nothing accepted here" lets a
 //!        unanimous-looking quorum no-op fill a chosen slot.
 //!        `sim-paros-hunt replay-faulty-none <seed>` — deterministic replay.
+//!        `sim-paros-hunt corpus [iterations]` — the #113 E1 mask corpus:
+//!        each seed draws a per-slot × per-node corruption mask and asserts
+//!        its analytically derived outcome (Correct vs `CorrectlyUnavailable`).
+//!        `sim-paros-hunt replay-corpus <seed>` — deterministic replay.
+//!        `sim-paros-hunt replay-corpus-mask <mask>` — one explicit mask.
+//!        `sim-paros-hunt replay-bare-quorum <seed>` / `replay-lifecycle
+//!        <seed>` — the bare-quorum lost-slot case and the §5.1.2
+//!        snapshot-lifecycle compound.
 
 use paros_sim::{
-    amnesia_demo_hunt, budget_off_hunt, chain_smoke, explore_chain_seed, explore_snapshot_recovery,
-    explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt,
-    run_amnesia_demo_seed, run_budget_off_seed, run_chain_seed, run_faulty_none_demo_seed,
-    run_network_seed, run_protocol_bounds_seed, run_snapshot_recovery_seed, run_truncate_demo_seed,
-    truncate_demo_hunt,
+    amnesia_demo_hunt, budget_off_hunt, chain_smoke, corpus_hunt, explore_chain_seed,
+    explore_snapshot_recovery, explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt,
+    protocol_bounds_hunt, run_amnesia_demo_seed, run_bare_quorum_case, run_budget_off_seed,
+    run_chain_seed, run_corpus_mask, run_corpus_seed, run_faulty_none_demo_seed, run_network_seed,
+    run_protocol_bounds_seed, run_snapshot_lifecycle_case, run_snapshot_recovery_seed,
+    run_truncate_demo_seed, truncate_demo_hunt,
 };
 
 fn main() {
@@ -39,6 +48,7 @@ fn main() {
 
     if let "replay-network" | "replay-main" | "replay-snapshot" | "replay-bounds"
     | "replay-amnesia" | "replay-truncate" | "replay-budget-off" | "replay-faulty-none"
+    | "replay-corpus" | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle"
     | "explore-snapshot" | "explore-main" = axis.as_str()
     {
         let seed = std::env::args()
@@ -60,6 +70,10 @@ fn main() {
             "replay-truncate" => run_truncate_demo_seed(seed),
             "replay-budget-off" => run_budget_off_seed(seed),
             "replay-faulty-none" => run_faulty_none_demo_seed(seed),
+            "replay-corpus" => run_corpus_seed(seed),
+            "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
+            "replay-bare-quorum" => run_bare_quorum_case(seed),
+            "replay-lifecycle" => run_snapshot_lifecycle_case(seed),
             _ => run_chain_seed(seed),
         };
         if report.assertion_violations.is_empty() && report.failed_runs == 0 {
@@ -83,13 +97,14 @@ fn main() {
         "snapshot" => explore_snapshot_recovery(iterations),
         "bounds" => protocol_bounds_hunt(iterations),
         "budget-off" => budget_off_hunt(iterations),
+        "corpus" => corpus_hunt(iterations),
         // Red demo axes: violations here are the deliverable, not a defect.
         "amnesia" => amnesia_demo_hunt(iterations),
         "truncate" => truncate_demo_hunt(iterations),
         "faulty-none" => faulty_none_demo_hunt(iterations),
         other => {
             eprintln!(
-                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'budget-off', 'amnesia', 'truncate', or 'faulty-none')"
+                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'budget-off', 'corpus', 'amnesia', 'truncate', or 'faulty-none')"
             );
             std::process::exit(2);
         }

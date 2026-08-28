@@ -16,6 +16,7 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod choreography;
+mod corpus;
 mod node;
 mod oracle;
 mod protocol_bounds;
@@ -849,6 +850,123 @@ pub fn run_faulty_none_demo_seed(seed: u64) -> SimulationReport {
 #[must_use]
 pub fn faulty_none_demo_hunt(iterations: usize) -> SimulationReport {
     faulty_none_demo_builder().set_iterations(iterations).run()
+}
+
+// --- the #113 CTRL evaluation corpus -----------------------------------------
+
+/// The corpus cluster: three scripted-lifecycle nodes, no swarm chaos (every
+/// fault is a targeted injection from the workload), the application-safety
+/// invariant continuously pumped. See `crate::corpus`.
+fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
+    SimulationBuilder::new()
+        // Like every other axis: the un-checksummed public replies (inspect,
+        // acks) have no per-message integrity protection, so a provider-level
+        // bit flip fabricates a *client observation*, not cluster state
+        // (moonpool#183 terrain). The corpus judges real states only.
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
+        .invariant(ChainAgreement::network())
+}
+
+/// The canonical E1 mask cases the nextest corpus runner enumerates: the
+/// exhaustive 2-slot × 3-node sub-grid (bits `node * 3 + slot`, slot ∈ {0, 1} —
+/// 64 masks, every recoverable/unrecoverable boundary shape over two slots),
+/// plus the full-grid corner cases: each slot lost on every node, each node
+/// fully rotted, and the everything-lost mask.
+#[must_use]
+pub fn corpus_canonical_masks() -> Vec<u16> {
+    let mut masks: Vec<u16> = Vec::new();
+    // Exhaustive over slots 0 and 1 on all three nodes (slot-2 bits clear):
+    // per node, bits {0, 1} of its 3-bit group.
+    for low in 0_u16..64 {
+        let mut mask = 0_u16;
+        for node in 0..3_u16 {
+            mask |= (low >> (node * 2) & 0b11) << (node * 3);
+        }
+        masks.push(mask);
+    }
+    // Full-grid corners.
+    for extra in [
+        0b001_001_001, // slot 0 lost everywhere
+        0b010_010_010, // slot 1 lost everywhere
+        0b100_100_100, // slot 2 lost everywhere
+        0b000_000_111, // node 0 fully rotted
+        0b111_000_000, // node 2 fully rotted
+        0b111_111_111, // everything lost
+        0b011_101_110, // mixed: every slot down to exactly one clean copy
+    ] {
+        if !masks.contains(&extra) {
+            masks.push(extra);
+        }
+    }
+    masks
+}
+
+/// Run one explicit E1 mask case deterministically (seeded by the mask itself,
+/// so a failing case names its own replay).
+#[must_use]
+pub fn run_corpus_mask(mask: u16) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Fixed(mask))
+        .set_iterations(1)
+        .set_debug_seeds(vec![u64::from(mask)])
+        .run()
+}
+
+/// Raw-volume E1 sampling: each seed draws its mask from the seeded RNG, so a
+/// hunt densely samples the full 512-case space. Replay with
+/// [`run_corpus_seed`].
+#[must_use]
+pub fn corpus_hunt(iterations: usize) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Seeded)
+        .set_iterations(iterations)
+        .run()
+}
+
+/// Replay one seeded E1 corpus case deterministically.
+#[must_use]
+pub fn run_corpus_seed(seed: u64) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Seeded)
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Run the bare-quorum lost-slot case (see `crate::corpus`): one slot decided
+/// by a bare quorum, then every copy of it rotted — the `faulty, faulty, none`
+/// Phase-1 tally that must WAIT, and the deterministic red target of CTRL
+/// §5.1.1's mutation (b) (a sub-Q1 `none` count no-op-filling a chosen slot).
+#[must_use]
+pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
+        .invariant(ChainAgreement::network())
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Run the §5.1.2 snapshot-lifecycle compound (see `crate::corpus`): log-only,
+/// snapshotted, and snapshotted-and-truncated nodes in one scripted run,
+/// reaching all four snapshot-recovery paths.
+#[must_use]
+pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
+        .invariant(ChainAgreement::network())
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
 }
 
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for

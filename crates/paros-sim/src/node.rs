@@ -209,6 +209,185 @@ impl Process for BudgetOffNodeProcess {
     }
 }
 
+/// A paros node for the **#113 evaluation corpus**: no BUGGIFY perturbation and
+/// no swarm fault sites (every fault is a scripted, targeted injection from the
+/// corpus workload), the per-record budget lifted (masks may exceed it, and the
+/// world records the unrecoverable ground truth the analytic derivation
+/// cross-checks), and a **scripted lifecycle** — the workload deterministically
+/// restarts, holds, and releases each node through the world's restart epochs.
+pub(crate) struct CorpusNodeProcess;
+
+#[async_trait]
+impl Process for CorpusNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        scripted_corpus_loop(ctx).await
+    }
+}
+
+/// The corpus node loop: [`NodeProcess`]'s recovery loop with the swarm fault
+/// sites dark and the crash/restart schedule owned by the corpus workload
+/// (via [`StorageWorld::restart_epochs`] / [`StorageWorld::held`]) instead of
+/// moonpool attrition. Dropping a `run_node` incarnation mid-await is a
+/// faithful clean crash: the staged, un-synced writes die with the handle and
+/// the incarnation guard cancels its spawned tasks.
+// One recovery loop with per-exit-kind handling, mirroring `NodeProcess::run`:
+// splitting the arms would scatter the crash/hold/restart contract it *is*.
+#[allow(clippy::too_many_lines)]
+async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
+    let my_ip = ctx.my_ip().to_string();
+    let mut ips: Vec<String> = ctx.topology().all_process_ips().to_vec();
+    ips.push(my_ip.clone());
+    ips.sort_by_key(|ip| ip.parse::<IpAddr>().ok());
+    ips.dedup();
+    let members = ips
+        .iter()
+        .enumerate()
+        .map(|(i, ip)| {
+            parse_addr(ip)
+                .map(|addr| (NodeId(u64::try_from(i).expect("node index fits u64")), addr))
+        })
+        .collect::<SimulationResult<Vec<_>>>()?;
+    let self_rank = NodeId(
+        u64::try_from(
+            ips.iter()
+                .position(|ip| ip == &my_ip)
+                .expect("self is a member"),
+        )
+        .expect("node index fits u64"),
+    );
+    let config = Config {
+        id: self_rank,
+        peers: members.iter().map(|(id, _)| *id).collect(),
+        ..Config::default()
+    };
+
+    let world = storage_world(ctx.state());
+    {
+        let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.set_cluster_size(members.len());
+        // The corpus's declared mode: masks may exceed the per-record budget,
+        // and every injection records the unrecoverable ground truth.
+        guard.budget_off = true;
+    }
+    // Every fault on this axis is a scripted injection: the swarm sites and
+    // the driver's BUGGIFY hooks stay dark so a case replays as choreographed.
+    let faults = StorageFaults {
+        time: ctx.time().clone(),
+        cutoff: Duration::ZERO,
+        enabled: false,
+    };
+    let hooks = BuggifyHooks::new(ctx.time().clone(), Duration::ZERO, false);
+    let checker = audit_world(ctx.state());
+    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
+
+    loop {
+        // Hold gate: a held node stays down between incarnations until the
+        // workload releases it. Terminal parking keeps its ordinary contract.
+        loop {
+            let (held, parked) = {
+                let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+                (guard.held.contains(&my_ip), guard.parked.contains(&my_ip))
+            };
+            if parked {
+                checker.note_storage_dead(self_rank.0);
+                tracing::info!(node = self_rank.0, "storage_parked");
+                return Ok(());
+            }
+            if !held {
+                break;
+            }
+            if ctx.shutdown().is_cancelled() {
+                return Ok(());
+            }
+            ctx.time().sleep(Duration::from_millis(10)).await.ok();
+        }
+        let boot_epoch = {
+            world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .restart_epochs
+                .get(&my_ip)
+                .copied()
+                .unwrap_or(0)
+        };
+        let storage = DurableStorage::restore(
+            config.clone(),
+            Arc::downgrade(&world),
+            my_ip.clone(),
+            self_rank.0,
+            faults.clone(),
+            checker.clone(),
+            DemoMode::default(),
+        );
+        let restart = scripted_restart_signal(ctx, &world, &my_ip, boot_epoch);
+        let exited = moonpool_sim::select! {
+            result = run_node(
+                ctx.providers().clone(),
+                storage,
+                parse_addr(&my_ip)?,
+                members.clone(),
+                ctx.shutdown().clone(),
+                &hooks,
+                &audit,
+            ) => Some(result),
+            () = restart => None,
+        };
+        match exited {
+            // Scripted restart: the incarnation was dropped mid-await — a
+            // clean crash — and the next loop pass re-restores (or waits held).
+            None => {
+                tracing::info!(node = self_rank.0, "corpus_scripted_restart");
+            }
+            Some(Err(RunError::SeamCrash(_))) => {}
+            Some(Err(RunError::Storage(_))) => {
+                let parked = world
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .parked
+                    .contains(&my_ip);
+                if parked {
+                    checker.note_storage_dead(self_rank.0);
+                    tracing::info!(node = self_rank.0, "storage_parked");
+                    return Ok(());
+                }
+            }
+            Some(Err(RunError::Infra(e))) => return Err(e),
+            Some(Ok(())) => return Ok(()),
+        }
+    }
+}
+
+/// Resolve when the workload bumps `ip`'s restart epoch past `boot_epoch`.
+/// Provider-time polling keeps the wake-up deterministic per seed.
+async fn scripted_restart_signal(
+    ctx: &SimContext,
+    world: &Arc<Mutex<StorageWorld>>,
+    ip: &str,
+    boot_epoch: u64,
+) {
+    loop {
+        let current = world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .restart_epochs
+            .get(ip)
+            .copied()
+            .unwrap_or(0);
+        if current > boot_epoch {
+            return;
+        }
+        if ctx.time().sleep(Duration::from_millis(10)).await.is_err() {
+            // Sleep only fails on teardown; let the run_node arm observe the
+            // shutdown instead of spinning.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 #[async_trait]
 impl Process for NodeProcess {
     fn name(&self) -> &'static str {
@@ -819,6 +998,15 @@ struct StorageWorld {
     /// and no post-truncation snapshot covering them (ground truth for the
     /// WAITED leg; only ever populated in budget-off runs).
     unrecoverable: BTreeSet<u64>,
+    /// Scripted lifecycle (the #113 corpus): per-node restart epochs. Bumping
+    /// one makes the corpus node loop drop its current incarnation — a clean
+    /// crash, staged un-synced writes dying with it — and re-restore from the
+    /// world. A paros-side stand-in for the explicit scripted-lifecycle API
+    /// tracked upstream as moonpool#182.
+    restart_epochs: BTreeMap<String, u64>,
+    /// Scripted lifecycle: nodes held down between incarnations until the
+    /// corpus workload releases them.
+    held: BTreeSet<String>,
 }
 
 impl StorageWorld {
@@ -2858,6 +3046,121 @@ pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.parked.clone()
+}
+
+// --- #113 corpus support: scripted lifecycle + targeted mask injection --------
+
+/// Bump `ip`'s restart epoch: the corpus node loop drops its live incarnation
+/// (a clean crash) and re-restores from the world's durable records.
+pub(crate) fn corpus_restart_node(handle: &StateHandle, ip: &str) {
+    let world = storage_world(handle);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.restart_epochs.entry(ip.to_string()).or_insert(0) += 1;
+}
+
+/// Hold `ip` down: drop its live incarnation now and keep it down until
+/// [`corpus_release_node`].
+pub(crate) fn corpus_hold_node(handle: &StateHandle, ip: &str) {
+    let world = storage_world(handle);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.held.insert(ip.to_string());
+    *guard.restart_epochs.entry(ip.to_string()).or_insert(0) += 1;
+}
+
+/// Release a held node: its next loop pass re-restores from the world.
+pub(crate) fn corpus_release_node(handle: &StateHandle, ip: &str) {
+    let world = storage_world(handle);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.held.remove(ip);
+}
+
+/// One node's durable evidence, for the corpus workloads' deterministic waits
+/// (world-truth probes: replication, floors, and the durable application
+/// state — the corpus still verifies final outcomes over live RPC reads).
+pub(crate) struct CorpusDiskProbe {
+    /// Retained accepted slots whose record reads back clean and witnessed.
+    pub(crate) clean_slots: BTreeSet<u64>,
+    /// The durable compaction floor.
+    pub(crate) floor: u64,
+    /// The durable application state's applied count.
+    pub(crate) applied_count: u64,
+    /// The durable application state's chain digest.
+    pub(crate) chain_hash: u64,
+}
+
+pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
+    let world = storage_world(handle);
+    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.disks.get(ip).map(|disk| CorpusDiskProbe {
+        clean_slots: disk
+            .accepted
+            .keys()
+            .filter(|slot| disk.slot_health(**slot).clean())
+            .map(|slot| slot.0)
+            .collect(),
+        floor: disk.first_slot.0,
+        applied_count: disk.chain.applied_count,
+        chain_hash: disk.chain.chain_hash,
+    })
+}
+
+/// Targeted E1 mask corruption of one accepted record — value lost, identity
+/// preserved (the recoverable class). Deliberately unbudgeted: the corpus axis
+/// runs budget-off, and the world records the unrecoverable ground truth the
+/// analytic mask derivation cross-checks. Returns whether a clean record was
+/// there to corrupt.
+pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, slot: u64) -> bool {
+    let world = storage_world(handle);
+    let checker = audit_world(handle);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(disk) = guard.disks.get_mut(ip) else {
+        return false;
+    };
+    if !disk.accepted.contains_key(&Slot(slot)) || !disk.slot_health(Slot(slot)).clean() {
+        return false;
+    }
+    disk.entry_health.insert(
+        Slot(slot),
+        SlotHealth {
+            entry: RecordHealth::Faulty,
+            id: WitnessStatus::Present,
+        },
+    );
+    guard.marks.entry(ip.to_string()).or_default().insert(slot);
+    guard.note_corruption(CorruptionInjection {
+        node,
+        record: StorageRecord::Accepted(Slot(slot)),
+        kind: CorruptionKind::BitFlip,
+        block: false,
+        outcome: CorruptionOutcome::Dormant,
+    });
+    guard.note_if_unrecoverable(slot, &checker);
+    true
+}
+
+/// Targeted corruption of one node's durable application snapshot. Slots the
+/// node had truncated past lose their only local custody, so each is
+/// re-evaluated against the world's unrecoverable ground truth.
+pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64) -> bool {
+    let world = storage_world(handle);
+    let checker = audit_world(handle);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(disk) = guard.disks.get_mut(ip) else {
+        return false;
+    };
+    disk.snapshot_health = RecordHealth::Faulty;
+    let floor = disk.first_slot.0;
+    guard.note_corruption(CorruptionInjection {
+        node,
+        record: StorageRecord::Snapshot,
+        kind: CorruptionKind::BitFlip,
+        block: false,
+        outcome: CorruptionOutcome::Dormant,
+    });
+    for slot in 0..floor {
+        guard.note_if_unrecoverable(slot, &checker);
+    }
+    true
 }
 
 /// Snapshot of the Stage-7 corruption ground truth, folded for `check()`.
