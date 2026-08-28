@@ -822,6 +822,18 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
         .chaos_duration(CHAOS_DURATION)
 }
 
+/// Deterministic witness seed for the faulty-as-none red demo: replaying it
+/// through [`run_faulty_none_demo_seed`] surfaces the CTRL §5.1.1 mutation's
+/// fatal consequence — a unanimous-looking `none` quorum no-op-filling (or
+/// re-allocating) a slot whose chosen value survived only on a rotted,
+/// misreported copy's peers — as "at most one value is ever chosen for a
+/// slot" / "chain: one state per applied index" `assertion_violation`s.
+/// Found by a 2,000-seed hunt (the raw-hunt budget's normal target), 3 reds;
+/// this is the one whose red is the pure protocol consequence. Recorded per
+/// the issue-#21 red-test contract: the citation for why `faulty` may never
+/// count toward the none-tally.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 982_873_060_504_772_201;
+
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
 #[must_use]

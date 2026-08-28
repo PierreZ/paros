@@ -112,6 +112,28 @@ fn budget_off_smoke_stays_safe() {
     );
 }
 
+/// The faulty-as-none **red demo** stays red (issue #21, CTRL §5.1.1's first
+/// known-fatal mutation): a boot scan that withholds a rotted record from the
+/// Promise tri-state lets the acceptor answer "nothing accepted here", and a
+/// promise quorum excluding the surviving clean copy then treats the slot as
+/// free — two values chosen for one slot. This test asserts the *violation
+/// fires*: if the demo ever comes back green, either the misreport stopped
+/// landing or the agreement oracles went blind, and both are bugs. (The real
+/// scan reports `faulty(slot, ballot)` instead — the rule this demo proves
+/// load-bearing.)
+#[test]
+fn faulty_as_none_demo_stays_red() {
+    let report = paros_sim::run_faulty_none_demo_seed(paros_sim::FAULTY_NONE_DEMO_SEED);
+    assert!(
+        report
+            .assertion_violations
+            .iter()
+            .any(|v| format!("{v:?}").contains("at most one value is ever chosen")),
+        "the faulty-as-none demo must surface the double-choose; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {
