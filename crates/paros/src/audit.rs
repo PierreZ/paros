@@ -168,6 +168,35 @@ pub trait Audit {
     /// double-apply, executed as a no-op instead. Reported once per batch with
     /// the number of suppressions the batch performed.
     fn duplicate_suppressed(&self, node: NodeId, count: u64) {}
+
+    /// This node booted with recoverable **faulty entries** (Stage 8): the
+    /// scan classified each record's value lost but its identity known, and
+    /// the node reports them through the Promise tri-state instead of
+    /// crashing. Reported once per boot, before [`Audit::recovered`], so the
+    /// divergence checks can key their explained-only rule on it.
+    fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {}
+
+    /// This node opened an **application repair** at boot: the replay could
+    /// not walk the whole chosen prefix (`below_floor` says whether the cursor
+    /// sits under the compaction floor — the snapshot-recovery path — or at a
+    /// faulty/missing chosen record the catch-up heal will re-learn).
+    fn app_repair_started(&self, node: NodeId, from: Slot, below_floor: bool) {}
+
+    /// Monotone repair-progress totals for this incarnation, reported when
+    /// they change: local faulty records repaired in place, Case-1 straggler
+    /// re-proposals, Case-2 straggler no-op fills, recovery-timeout
+    /// step-downs (CTRL §4.2), and cumulative repair payload bytes (the CTRL
+    /// §5.2 repair-cost metric).
+    fn repair_progress(
+        &self,
+        node: NodeId,
+        repaired: u64,
+        case1: u64,
+        case2: u64,
+        step_downs: u64,
+        bytes: u64,
+    ) {
+    }
 }
 
 /// Inert production audit: every observation is dropped.
