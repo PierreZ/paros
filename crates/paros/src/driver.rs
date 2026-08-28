@@ -668,10 +668,21 @@ where
 {
     for &(to, offered_index, ballot, config_id) in snapshot_offers {
         if storage.applied_slot() != Some(offered_index) {
-            return Err(SimulationError::InvalidState(
-                "application snapshot does not match offered chosen index".into(),
-            )
-            .into());
+            // An offered snapshot must describe exactly the application prefix
+            // the protocol message names. Stage 8 makes a mismatch a
+            // legitimate transient — an open application repair holds the
+            // applied prefix behind the chosen index — so the offer is
+            // *skipped*, never sent wrong and never fatal: the requester
+            // re-asks each beat and another peer (or this one, once healed)
+            // serves it. The core already withholds offers while its own
+            // repair is open; this driver-side guard covers any other
+            // application lag the core cannot see.
+            tracing::info!(
+                node = out.self_id,
+                offered = offered_index.0,
+                "snapshot_offer_skipped"
+            );
+            continue;
         }
         let message = Message::InstallSnapshot {
             config_id,

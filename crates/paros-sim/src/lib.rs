@@ -322,6 +322,17 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     // [(5300, 14501048987220660580)]; replay with `sim-paros-hunt
     // explore-main`) is the same shape, found in the same sweep.
     1_514_716_993_781_838_845,
+    // The snapshot-offer boundary-mismatch death (2026-08-28, CI's first
+    // sweep over the recover-or-wait flip): a peer's below-floor
+    // CatchUpRequest reached a node whose own application repair was open, so
+    // `applied_slot() != offered chosen index` — pre-Stage-8 a genuine
+    // invariant violation, now a legitimate transient — and the driver's
+    // guard killed the node with an Infra error. Dead nodes cascaded into a
+    // cluster-wide election storm (888 Prepares, no quorum to elect). Red on
+    // the fatal guard; green with the core withholding offers while its
+    // repair is open and the driver skipping (never sending, never dying on)
+    // a mismatched offer.
+    8_387_050_491_719_289_841,
 ];
 
 /// Network-swarm-axis witnesses, replayed via [`run_network_seed`].

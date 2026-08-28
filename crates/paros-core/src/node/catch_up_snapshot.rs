@@ -30,6 +30,15 @@ impl RawNode {
         // record the offer (the driver attaches the opaque application bytes and
         // sends the `InstallSnapshot`), bringing the peer up to our chosen prefix.
         if from_slot < self.first_slot {
+            // An open application repair means this node's own applied state
+            // does not cover its chosen index yet: it has no snapshot that
+            // matches the boundary an offer would advertise. Stay silent — the
+            // requester re-asks each beat, and another peer (or this one, once
+            // healed) serves it. Same per-slot-attribution shape as the faulty
+            // hole above: never serve what you cannot back.
+            if self.app_repair.is_some() {
+                return;
+            }
             // The offer carries the boundary slot's *choosing* ballot when the
             // log still holds it — a ballot with a real quorum behind it — not
             // this node's own promise, which one quorumless campaigner can
