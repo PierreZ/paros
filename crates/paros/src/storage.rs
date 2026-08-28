@@ -590,11 +590,27 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
 
     // A snapshot install: chosen index jumps, promise takes the max (never
-    // regresses), floor lands one past the boundary, sessions seal.
+    // regresses), floor lands one past the boundary, sessions seal. The blob
+    // comes from a *source* storage whose applied prefix genuinely covers the
+    // boundary, so an application-typed implementation's boundary checks hold.
+    let mut source = fresh();
+    for s in 0..=4u64 {
+        source
+            .append_accepted(Slot(s), ballot(1), user(10 + s, 0x40))
+            .expect("source append");
+    }
+    source.set_chosen_index(Slot(4)).expect("source index");
+    for s in 0..=4u64 {
+        source
+            .apply(Slot(4), Slot(s), &user(10 + s, 0x40))
+            .expect("source apply");
+    }
+    source.sync(MustSync::Sync).expect("source sync");
+    let blob = source.snapshot();
+
     let mut s = fresh();
     s.persist_ballot(ballot(9)).expect("high promise");
     s.sync(MustSync::Sync).expect("sync promise");
-    let blob = s.snapshot();
     s.install_snapshot(
         Slot(4),
         ballot(2),

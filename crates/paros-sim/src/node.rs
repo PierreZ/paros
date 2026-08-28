@@ -54,6 +54,23 @@ const NAIVE_WIPE_KEY: &str = "paros-naive-wipe-demo";
 /// Never set on a real campaign.
 const TRUNCATE_ON_MISMATCH_KEY: &str = "paros-truncate-on-mismatch-demo";
 
+/// Flag key for the **faulty-as-none red demo** (issue #21, CTRL §5.1.1's
+/// first known-fatal mutation): when set, the boot scan classifies a rotted
+/// record normally but *withholds* it from the tri-state — the acceptor then
+/// reports "nothing accepted here" for a slot whose value it lost, the CTRL
+/// Figure-2 bug class wearing a protocol hat. A promise quorum that excludes
+/// the record's surviving clean copy then sees a unanimous `none` and no-op
+/// fills a chosen slot: two values chosen for one slot. The demo's contract
+/// is to go **red** on the agreement oracles. Never set on a real campaign.
+const FAULTY_AS_NONE_KEY: &str = "paros-faulty-as-none-demo";
+
+/// Flag key for **budget-off** runs (issue #21/#71, the WAITED leg): the
+/// per-record clean-quorum budget on corruption injection is lifted, so every
+/// copy of a committed item can rot in one run. The CTRL guarantee then says
+/// the cluster must **wait** — correctly unavailable, never fabricating or
+/// losing data — and the WAITED gate proves the leg is genuinely exercised.
+const BUDGET_OFF_KEY: &str = "paros-budget-off";
+
 /// Per-call firing probability of the write-`EIO` BUGGIFY site (one location,
 /// per-seed activation × per-call firing; the record identity travels on the
 /// typed error, not on the location).
@@ -153,6 +170,45 @@ impl Process for TruncateOnMismatchNodeProcess {
     }
 }
 
+/// A paros node for the **faulty-as-none red demo** ([`FAULTY_AS_NONE_KEY`]):
+/// identical to [`NodeProcess`] except that the boot scan withholds its
+/// recoverable classification from the Promise tri-state — a rotted copy
+/// counts toward the none-tally. The deliverable is the resulting agreement
+/// `assertion_violation`, never a green run.
+pub(crate) struct FaultyAsNoneNodeProcess;
+
+#[async_trait]
+impl Process for FaultyAsNoneNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if ctx.state().get::<bool>(FAULTY_AS_NONE_KEY).is_none() {
+            ctx.state().publish(FAULTY_AS_NONE_KEY, true);
+        }
+        NodeProcess.run(ctx).await
+    }
+}
+
+/// A paros node for **budget-off** runs ([`BUDGET_OFF_KEY`]): the WAITED-leg
+/// campaign, where corruption may take every copy of a committed item.
+pub(crate) struct BudgetOffNodeProcess;
+
+#[async_trait]
+impl Process for BudgetOffNodeProcess {
+    fn name(&self) -> &'static str {
+        "paros-node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        if ctx.state().get::<bool>(BUDGET_OFF_KEY).is_none() {
+            ctx.state().publish(BUDGET_OFF_KEY, true);
+        }
+        NodeProcess.run(ctx).await
+    }
+}
+
 #[async_trait]
 impl Process for NodeProcess {
     fn name(&self) -> &'static str {
@@ -222,6 +278,13 @@ impl Process for NodeProcess {
         };
         let naive_wipe_demo = ctx.state().get::<bool>(NAIVE_WIPE_KEY) == Some(true);
         let truncate_demo = ctx.state().get::<bool>(TRUNCATE_ON_MISMATCH_KEY) == Some(true);
+        let faulty_none_demo = ctx.state().get::<bool>(FAULTY_AS_NONE_KEY) == Some(true);
+        if ctx.state().get::<bool>(BUDGET_OFF_KEY) == Some(true) {
+            world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .budget_off = true;
+        }
         // The per-iteration shared audit: pure observation, published beside the
         // storage world so every node folds its transitions into one incremental
         // checker. It never influences the driver — that is `hooks`' job.
@@ -267,6 +330,7 @@ impl Process for NodeProcess {
                 DemoMode {
                     truncate_on_mismatch: truncate_demo,
                     naive_wipe: naive_wipe_demo,
+                    faulty_as_none: faulty_none_demo,
                 },
             );
             match run_node(
@@ -414,6 +478,54 @@ fn maybe_demo_corrupt(world: &Arc<Mutex<StorageWorld>>, key: &str, node: u64) {
     // Demo-only anchor: the corruption genuinely landed before the buggy boot.
     assert_reachable!("truncate demo: a persisted record is corrupted before a reboot");
     tracing::info!(node, slot = slot.0, "demo_corrupt");
+}
+
+/// The **contract-suite workload** (issue #21 item F): runs the shared
+/// [`paros::storage_contract_suite`] against the world-backed [`DurableStorage`]
+/// inside one quiet simulation iteration, so the sim's storage fake can never
+/// drift from the trait contract [`paros::MemStorage`] pins. Faults are off —
+/// the suite drives the clean path both implementations must share; the budget
+/// logic stays outside the contract (#70).
+pub(crate) struct ContractSuiteWorkload;
+
+#[async_trait]
+impl moonpool_sim::Workload for ContractSuiteWorkload {
+    fn name(&self) -> &'static str {
+        "storage-contract-suite"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let world = storage_world(ctx.state());
+        world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_cluster_size(1);
+        let checker = audit_world(ctx.state());
+        let faults = StorageFaults {
+            time: ctx.time().clone(),
+            cutoff: Duration::ZERO,
+            enabled: false,
+        };
+        let config = Config {
+            id: NodeId(0),
+            peers: vec![NodeId(0)],
+            ..Config::default()
+        };
+        let mut instance = 0_u64;
+        paros::storage_contract_suite(|| {
+            instance += 1;
+            DurableStorage::restore(
+                config.clone(),
+                Arc::downgrade(&world),
+                format!("10.9.9.{instance}"),
+                100 + instance,
+                faults.clone(),
+                checker.clone(),
+                DemoMode::default(),
+            )
+        });
+        Ok(())
+    }
 }
 
 /// Get-or-create the singleton [`StorageWorld`] for this iteration. Get-then-
@@ -577,6 +689,20 @@ pub(crate) enum CorruptionOutcome {
     /// Read, classified crash-truncatable, and discarded locally (the one
     /// legal discard: the record was never acknowledged to anyone).
     DiscardedTail,
+    /// Stage 8: read, classified recoverable — identity known, value lost —
+    /// and **reported** into the protocol's tri-state instead of crashing.
+    /// The record stays faulty on disk until a clean re-write resolves it to
+    /// [`Recovered`](CorruptionOutcome::Recovered) (or truncation supersedes
+    /// it); a run may legally end with a report still standing (the WAITED
+    /// leg, or a run that simply ended first).
+    Reported,
+    /// Stage 8: the faulty record was genuinely re-written by a clean flush
+    /// (an in-place repair — a re-sent `Accept`, a learned chosen value, a
+    /// decided no-op) or superseded by truncation/snapshot custodianship.
+    Recovered,
+    /// Withheld from the tri-state by the faulty-as-none red demo — never
+    /// legal outside it; the agreement oracles are what catch it.
+    DemoMisreported,
     /// Silently truncated by the truncate-on-mismatch red demo — never legal
     /// outside it; the audit's divergence leg is what catches it.
     DemoTruncated,
@@ -611,6 +737,17 @@ struct Stage7Flags {
     corruption_below_tail: bool,
     last_entry_ambiguity: bool,
     identifier_lost: bool,
+    // --- Stage 8 (issue #21) sticky facts -----------------------------------
+    /// A recoverable rotted record was reported into the tri-state.
+    faulty_reported: bool,
+    /// A reported record was genuinely re-written by a clean flush.
+    record_recovered: bool,
+    /// A corrupted application snapshot was reset for local log replay
+    /// (floor = 0: CTRL's cheap path).
+    snapshot_reset_local: bool,
+    /// A corrupted application snapshot was reset under a truncated log
+    /// (recovery requires a peer's `InstallSnapshot`).
+    snapshot_reset_remote: bool,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -657,6 +794,15 @@ struct StorageWorld {
     parked_ids: BTreeSet<u64>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
+    /// Budget-off mode (issue #21, the WAITED leg): recoverable corruption may
+    /// take every copy of a record; each slot driven to zero readable copies
+    /// is recorded in `unrecoverable` and handed to the checker, which excuses
+    /// exactly that unavailability — and demands it be *correct* (safe).
+    budget_off: bool,
+    /// Slots with no readable copy anywhere — no clean log record on any node
+    /// and no post-truncation snapshot covering them (ground truth for the
+    /// WAITED leg; only ever populated in budget-off runs).
+    unrecoverable: BTreeSet<u64>,
 }
 
 impl StorageWorld {
@@ -737,6 +883,77 @@ impl StorageWorld {
     fn park(&mut self, key: &str, node: u64) {
         self.parked.insert(key.to_string());
         self.parked_ids.insert(node);
+    }
+
+    /// Whether a **recoverable** corruption of the accepted record at `slot`
+    /// on `node_key` is inside the per-record budget: the record must keep a
+    /// clean quorum of live copies (#70's rule, re-counted over live copies at
+    /// injection time). Budget-off lifts the bound — that is the WAITED leg's
+    /// whole point — and [`StorageWorld::note_if_unrecoverable`] records the
+    /// ground truth the oracles excuse against.
+    fn may_corrupt_record(&self, node_key: &str, slot: u64) -> bool {
+        if self.cluster_size == 0 {
+            return false;
+        }
+        if self.budget_off {
+            return true;
+        }
+        let already = self
+            .marks
+            .get(node_key)
+            .is_some_and(|marks| marks.contains(&slot));
+        self.clean_copies(slot)
+            .saturating_sub(usize::from(!already))
+            >= self.quorum()
+    }
+
+    /// Whether `slot` has **no readable copy anywhere**: every disk that holds
+    /// its accepted record holds it unhealthy or sits on a parked node, no
+    /// disk truncated past it with a healthy snapshot (the snapshot covers the
+    /// folded prefix), and no disk holds it clean. Ground truth for the WAITED
+    /// leg.
+    fn slot_unrecoverable(&self, slot: u64) -> bool {
+        for (key, disk) in &self.disks {
+            if self.parked.contains(key) {
+                continue;
+            }
+            if disk.first_slot.0 > slot && disk.snapshot_health == RecordHealth::Clean {
+                return false;
+            }
+            if disk.accepted.contains_key(&Slot(slot)) && disk.slot_health(Slot(slot)).clean() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// After a budget-off injection touched `slot`, record it unrecoverable if
+    /// no readable copy survives, handing the fact to `checker` so the wedge /
+    /// convergence oracles excuse exactly this slot (and the WAITED gate can
+    /// fire).
+    fn note_if_unrecoverable(&mut self, slot: u64, checker: &AuditWorld) {
+        if self.budget_off && !self.unrecoverable.contains(&slot) && self.slot_unrecoverable(slot) {
+            self.unrecoverable.insert(slot);
+            checker.note_unrecoverable(slot);
+            tracing::info!(slot, "slot_unrecoverable");
+        }
+    }
+
+    /// A clean flush (or truncation custodianship) genuinely resolved the
+    /// standing report on `(node, record)`.
+    fn note_recovered(&mut self, node: u64, record: StorageRecord) {
+        for injection in &mut self.corruptions {
+            if injection.node == node
+                && injection.record == record
+                && matches!(
+                    injection.outcome,
+                    CorruptionOutcome::Dormant | CorruptionOutcome::Reported
+                )
+            {
+                injection.outcome = CorruptionOutcome::Recovered;
+                self.s7.record_recovered = true;
+            }
+        }
     }
 
     /// Record one Stage-7 injection's ground truth.
@@ -957,7 +1174,7 @@ impl StorageWorld {
 /// terminally parks the node (detect ⇒ crash, and restarting cannot help), so
 /// each is gated on [`StorageWorld::may_park`]'s dead-node budget.
 #[allow(clippy::too_many_lines)] // one flat block per independent BUGGIFY location
-fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
+fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &AuditWorld) {
     let clean_slots = |world: &StorageWorld| -> Vec<Slot> {
         world.disks.get(key).map_or_else(Vec::new, |disk| {
             disk.accepted
@@ -998,22 +1215,31 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
     // Bit flip / latent sector error on one persisted entry — with sub-rolls
     // for a multi-record *block* fault (CTRL injects per FS block: a
     // contiguous run mismatches at once, and recovery must not assume faults
-    // are singletons) and for the identifier rotting with its entry.
-    if buggify_with_prob!(P_ENTRY_ROT) && world.may_park(key) {
+    // are singletons) and for the identifier rotting with its entry. Stage 8:
+    // a record whose identity survives is **recoverable** — the node reports
+    // it faulty and keeps running — so the gate is the per-record budget, not
+    // the dead-node budget. Only the identifier-lost sub-case (unidentifiable
+    // ⇒ crash) still needs to park, so it also needs the dead-node budget.
+    if buggify_with_prob!(P_ENTRY_ROT) {
         let slots = clean_slots(world);
-        if !slots.is_empty() {
-            let primary = pick(&slots);
+        let permitted: Vec<Slot> = slots
+            .iter()
+            .copied()
+            .filter(|slot| world.may_corrupt_record(key, slot.0))
+            .collect();
+        if !permitted.is_empty() {
+            let primary = pick(&permitted);
             // Generous coin: the identifier-lost row has its own per-verdict
             // sometimes-gate, and the entry-rot events that draw this coin
             // are budget-capped per run, so the sweep needs a fat coin to be
             // certain of the composition within a bounded seed schedule.
-            let id_faulty = sim_random::<f64>() < 0.5;
+            let id_faulty = sim_random::<f64>() < 0.5 && world.may_park(key);
             // The block sub-roll needs a contiguous clean run at the primary,
             // which short (frequently truncated) logs often lack, so it rolls
             // generously to stay reachable across a bounded sweep.
             let block = sim_random::<f64>() < 0.4;
             let members: Vec<Slot> = if block {
-                slots
+                permitted
                     .iter()
                     .copied()
                     .filter(|s| s.0 >= primary.0.saturating_sub(2) && *s <= primary)
@@ -1038,17 +1264,20 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                     CorruptionKind::BitFlip,
                     is_block,
                 );
+                world.note_if_unrecoverable(slot.0, checker);
             }
-            world.park(key, node);
+            if id_faulty {
+                // Unidentifiable record: the scan can only crash, terminally.
+                world.park(key, node);
+            }
         }
     }
     // A lost write: the entry reads back as its reserved record where the
     // identifier exists (absence made detectable by the reserved-record
-    // contract).
-    if buggify_with_prob!(P_LOST_WRITE) && world.may_park(key) {
+    // contract). Identity known ⇒ recoverable ⇒ per-record budget, no park.
+    if buggify_with_prob!(P_LOST_WRITE) {
         let slots = clean_slots(world);
-        if !slots.is_empty() {
-            let slot = pick(&slots);
+        if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
                 world,
                 slot,
@@ -1059,15 +1288,14 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 CorruptionKind::LostWrite,
                 false,
             );
-            world.park(key, node);
+            world.note_if_unrecoverable(slot.0, checker);
         }
     }
     // A misdirected write: valid checksum, wrong identity — the identity
-    // check inside the checksummed region catches it.
-    if buggify_with_prob!(P_MISDIRECT) && world.may_park(key) {
+    // check inside the checksummed region catches it. Recoverable likewise.
+    if buggify_with_prob!(P_MISDIRECT) {
         let slots = clean_slots(world);
-        if !slots.is_empty() {
-            let slot = pick(&slots);
+        if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
                 world,
                 slot,
@@ -1078,22 +1306,26 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 CorruptionKind::Misdirected,
                 false,
             );
-            world.park(key, node);
+            world.note_if_unrecoverable(slot.0, checker);
         }
     }
     // Snapshot corruption is its own kind and its own gate (#71) — a
-    // first-class target, not a byproduct of log-entry coverage.
+    // first-class target, not a byproduct of log-entry coverage. Stage 8
+    // recovers it (local log replay at floor 0, a peer's InstallSnapshot
+    // otherwise), so no park; a singleton under a truncated log has no peer
+    // to recover from, so budget-on skips that one unrecoverable shape.
     if buggify_with_prob!(P_SNAPSHOT_ROT)
         && world
             .disks
             .get(key)
             .is_some_and(|d| d.chain.applied_count > 0)
-        && world.may_park(key)
+        && (world.budget_off
+            || world.cluster_size > 1
+            || world.disks.get(key).is_some_and(|d| d.first_slot.0 == 0))
     {
         if let Some(disk) = world.disks.get_mut(key) {
             disk.snapshot_health = RecordHealth::Faulty;
         }
-        world.park(key, node);
         world.note_corruption(CorruptionInjection {
             node,
             record: StorageRecord::Snapshot,
@@ -1180,12 +1412,31 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
     }
 }
 
+/// Pick one budget-permitted rot target from `slots` (see
+/// [`roll_boot_rot`]'s `pick` bias: half the time the last retained slot).
+fn pick_permitted(world: &StorageWorld, key: &str, slots: &[Slot]) -> Option<Slot> {
+    let permitted: Vec<Slot> = slots
+        .iter()
+        .copied()
+        .filter(|slot| world.may_corrupt_record(key, slot.0))
+        .collect();
+    if permitted.is_empty() {
+        return None;
+    }
+    Some(if sim_random::<f64>() < 0.5 {
+        permitted[permitted.len() - 1]
+    } else {
+        permitted[usize::try_from(sim_random::<u64>()).unwrap_or(0) % permitted.len()]
+    })
+}
+
 /// This node's durable evidence as of one boot, collected under the world
 /// lock in `restore` and consumed by the boot scan.
 #[derive(Default)]
 struct BootEvidence {
-    /// Every retained accepted slot in order, with its record health.
-    records: Vec<(Slot, SlotHealth)>,
+    /// Every retained accepted slot in order, with its record health and its
+    /// accepted ballot (the identity a recoverable classification reports).
+    records: Vec<(Slot, SlotHealth, Ballot)>,
     promise: [RecordHealth; 2],
     chosen: RecordHealth,
     truncation: RecordHealth,
@@ -1200,6 +1451,9 @@ struct BootEvidence {
 struct DemoMode {
     truncate_on_mismatch: bool,
     naive_wipe: bool,
+    /// The faulty-as-none mutation (issue #21 red demo): classify normally,
+    /// report nothing — a rotted copy counts toward the none-tally.
+    faulty_as_none: bool,
 }
 
 impl BootEvidence {
@@ -1207,8 +1461,8 @@ impl BootEvidence {
         Self {
             records: disk
                 .accepted
-                .keys()
-                .map(|slot| (*slot, disk.slot_health(*slot)))
+                .iter()
+                .map(|(slot, (ballot, _command))| (*slot, disk.slot_health(*slot), *ballot))
                 .collect(),
             promise: disk.promise_health,
             chosen: disk.chosen_health,
@@ -1283,6 +1537,12 @@ struct DurableStorage<T> {
     /// Truncate-on-mismatch red-demo mode: the boot scan truncates on a
     /// corruption verdict instead of crashing (the CTRL Figure 2 bug).
     demo_truncate: bool,
+    /// Faulty-as-none red-demo mode: the scan classifies a recoverable record
+    /// but withholds it from the tri-state (counts toward the none-tally).
+    demo_faulty_none: bool,
+    /// The scan's recoverable classification, served to the core through
+    /// [`Storage::faulty_entries`].
+    faulty_list: Vec<(Slot, Ballot)>,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
     staged_config_id: Option<ConfigId>,
     staged_ballot: Option<Ballot>,
@@ -1323,8 +1583,11 @@ impl<T: TimeProvider> DurableStorage<T> {
             // the chaos window like every other injection — and never rolled
             // in either red demo, whose contracts each hinge on their own
             // single deterministic perturbation.
+            // The faulty-as-none demo *keeps* the rot sites: its single
+            // deliberate perturbation is the misreport at the scan, and it
+            // needs genuine rot to misreport.
             if faults.active() && !demo.truncate_on_mismatch && !demo.naive_wipe {
-                roll_boot_rot(&mut guard, &key, node_id);
+                roll_boot_rot(&mut guard, &key, node_id, &checker);
             }
             let guard = &*guard;
             // Coverage: the recovery paths only matter if boots genuinely
@@ -1395,6 +1658,8 @@ impl<T: TimeProvider> DurableStorage<T> {
             application,
             evidence,
             demo_truncate: demo.truncate_on_mismatch,
+            demo_faulty_none: demo.faulty_as_none,
+            faulty_list: Vec::new(),
             staged_config_id: None,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
@@ -1706,6 +1971,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             .map(|(slot, (_ballot, command))| (slot.0, command_hash(command)))
             .collect();
         let key = self.key.clone();
+        let node = self.node_id;
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
             let d = w.disks.entry(key.clone()).or_default();
@@ -1727,10 +1993,14 @@ impl<T: TimeProvider> DurableStorage<T> {
                 // health — genuine recovery, not the world healing anything.
                 d.promise_health = [RecordHealth::Clean; 2];
             }
+            let mut healed: Vec<Slot> = Vec::new();
             for (slot, record) in accepted {
                 // A clean flush re-writes the record and its identifier: any
-                // prior torn/rotted health for the slot is genuinely replaced.
-                d.entry_health.remove(&slot);
+                // prior torn/rotted health for the slot is genuinely replaced —
+                // this is the Stage-8 in-place repair landing on disk.
+                if d.entry_health.remove(&slot).is_some() {
+                    healed.push(slot);
+                }
                 d.accepted.insert(slot, record);
             }
             if let Some(c) = chosen {
@@ -1743,6 +2013,16 @@ impl<T: TimeProvider> DurableStorage<T> {
                 d.first_slot = d.first_slot.max(f);
                 d.accepted.retain(|s, _| *s >= d.first_slot);
                 let new_floor = d.first_slot;
+                // A fault mark dropped by the floor raise is superseded, not
+                // repaired: the record's information migrated into the applied
+                // application state (truncation is decided over the applied
+                // prefix) — resolve its report as recovered-by-custodianship.
+                healed.extend(
+                    d.entry_health
+                        .range(..new_floor)
+                        .map(|(slot, _)| *slot)
+                        .collect::<Vec<_>>(),
+                );
                 d.entry_health.retain(|s, _| *s >= new_floor);
                 d.truncation_health = RecordHealth::Clean;
             }
@@ -1777,6 +2057,15 @@ impl<T: TimeProvider> DurableStorage<T> {
             let new_floor = d.first_slot;
             if let Some(marks) = w.marks.get_mut(&key) {
                 marks.retain(|slot| *slot >= new_floor.0);
+            }
+            // Resolve the reports the flush genuinely healed (or truncation
+            // superseded), and the snapshot report once fresh application
+            // state landed (an install, or replayed applies).
+            for slot in healed {
+                w.note_recovered(node, StorageRecord::Accepted(slot));
+            }
+            if snapshot.is_some() || !applies.is_empty() {
+                w.note_recovered(node, StorageRecord::Snapshot);
             }
         })?;
 
@@ -1918,24 +2207,45 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                 });
             }
         }
-        // Snapshot corruption: its own kind and its own gate (#71).
-        if let Some(fault) = evidence.snapshot.integrity_fault() {
+        // Snapshot corruption: its own kind and its own gate (#71). Stage 8
+        // recovers instead of crashing — a snapshot is never discardable and
+        // all its data is committed by definition, so the node must never
+        // install or serve the garbage, and must recover the state: with the
+        // log intact from slot 0 the ordinary boot replay rebuilds it locally
+        // (CTRL's cheap path, with the core's duplicate-suppression decisions
+        // re-derived exactly); under a truncated log only a peer's
+        // `InstallSnapshot` covers the folded prefix, so the driver opens a
+        // below-floor application repair and the node *waits* on it — serving
+        // consensus for every slot it can read, applying nothing.
+        if evidence.snapshot.integrity_fault().is_some() {
+            let floor = self.boot.first_slot();
             let _ = self.with_world(|w| {
                 w.s7.snapshot_detected = true;
-                w.resolve_corruption(node, StorageRecord::Snapshot, CorruptionOutcome::Crashed);
+                if floor.0 == 0 {
+                    w.s7.snapshot_reset_local = true;
+                } else {
+                    w.s7.snapshot_reset_remote = true;
+                }
+                if let Some(disk) = w.disks.get_mut(&key) {
+                    disk.chain = ChainState::default();
+                    disk.snapshot_health = RecordHealth::Clean;
+                }
+                w.resolve_corruption(node, StorageRecord::Snapshot, CorruptionOutcome::Reported);
             });
-            return Err(StorageError::Corruption {
-                record: StorageRecord::Snapshot,
-                fault,
-                verdict: CorruptionVerdict::Corrupted,
-            });
+            self.application = ChainState::default();
+            tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
+            if floor.0 == 0 {
+                assert_reachable!("storage: a corrupted snapshot is rebuilt from the local log");
+            } else {
+                assert_reachable!("storage: a corrupted snapshot awaits a peer snapshot transfer");
+            }
         }
         // The log: reduce every retained record to its evidence booleans and
         // run the total classifier (batching rule + TigerBeetle hardening).
         let records: Vec<SlotRecord> = evidence
             .records
             .iter()
-            .map(|(slot, health)| SlotRecord {
+            .map(|(slot, health, _ballot)| SlotRecord {
                 slot: *slot,
                 entry_faulty: health.entry != RecordHealth::Clean,
                 identifier: health.id,
@@ -1943,8 +2253,16 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             .collect();
         let cases = classify_log(&records, MAX_TORN_TAIL);
         let mut discard: Vec<Slot> = Vec::new();
+        // Stage 8's crash-relevance split (the issue-#21 table): a record whose
+        // *identity* is known — the identifier survived, or the entry's own
+        // checksummed identity region did — is **recoverable**: reported into
+        // the tri-state, repaired in place, never a crash. A record whose
+        // identity is also lost is unidentifiable (the node cannot even ask
+        // peers the right question), and the abandoned-window undecidables
+        // break head-certainty likewise: those stay the Stage-7 crash.
+        let mut recover: Vec<(Slot, Ballot, RecoveryCase)> = Vec::new();
         let mut crashes: Vec<(Slot, SlotHealth, RecoveryCase)> = Vec::new();
-        for ((slot, case), (_, health)) in cases.iter().zip(evidence.records.iter()) {
+        for ((slot, case), (_, health, ballot)) in cases.iter().zip(evidence.records.iter()) {
             match case.verdict() {
                 None => {}
                 Some(CorruptionVerdict::CrashTail) => {
@@ -1953,10 +2271,38 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                 }
                 Some(CorruptionVerdict::Corrupted | CorruptionVerdict::Undecidable) => {
                     tracing::info!(node, slot = slot.0, case = case.label(), "boot_scan_case");
-                    crashes.push((*slot, *health, *case));
+                    match case {
+                        RecoveryCase::CorruptionBelowTail
+                        | RecoveryCase::IdentifierFaulty
+                        | RecoveryCase::LastEntryAmbiguity => recover.push((*slot, *ballot, *case)),
+                        _ => crashes.push((*slot, *health, *case)),
+                    }
                 }
             }
         }
+        // Family / per-verdict coverage flags fire at *classification* — the
+        // detection channels are exercised whether the reaction is a crash or
+        // a report (the message strings are Stage 7's, unchanged).
+        let _ = self.with_world(|w| {
+            for ((_slot, case), (_, health, _ballot)) in cases.iter().zip(evidence.records.iter())
+            {
+                if case.verdict().is_none() {
+                    continue;
+                }
+                match case {
+                    RecoveryCase::CorruptionBelowTail => w.s7.corruption_below_tail = true,
+                    RecoveryCase::LastEntryAmbiguity => w.s7.last_entry_ambiguity = true,
+                    RecoveryCase::IdentifierLostWithEntry => w.s7.identifier_lost = true,
+                    _ => {}
+                }
+                match health.entry {
+                    RecordHealth::Faulty => w.s7.bitflip_detected = true,
+                    RecordHealth::Lost => w.s7.lost_write_detected = true,
+                    RecordHealth::Misdirected => w.s7.misdirected_detected = true,
+                    RecordHealth::Clean => {}
+                }
+            }
+        });
         if let Some(&(slot, health, case)) = crashes.first() {
             if self.demo_truncate {
                 // THE BUG under demonstration: truncate on the mismatch
@@ -1965,23 +2311,11 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                 return Ok(());
             }
             let _ = self.with_world(|w| {
-                // Detection is certain and terminal: restarting cannot help a
-                // record that genuinely rotted (rot injection already parked
+                // Detection is certain and terminal for an unidentifiable
+                // record: restarting cannot help (rot injection already parked
                 // the node; classifier-derived verdicts park it here).
                 w.park(&key, node);
-                for (i, (crash_slot, crash_health, crash_case)) in crashes.iter().enumerate() {
-                    match crash_health.entry {
-                        RecordHealth::Faulty => w.s7.bitflip_detected = true,
-                        RecordHealth::Lost => w.s7.lost_write_detected = true,
-                        RecordHealth::Misdirected => w.s7.misdirected_detected = true,
-                        RecordHealth::Clean => {}
-                    }
-                    match crash_case {
-                        RecoveryCase::CorruptionBelowTail => w.s7.corruption_below_tail = true,
-                        RecoveryCase::LastEntryAmbiguity => w.s7.last_entry_ambiguity = true,
-                        RecoveryCase::IdentifierLostWithEntry => w.s7.identifier_lost = true,
-                        _ => {}
-                    }
+                for (i, (crash_slot, _crash_health, _crash_case)) in crashes.iter().enumerate() {
                     w.resolve_corruption(
                         node,
                         StorageRecord::Accepted(*crash_slot),
@@ -2003,6 +2337,50 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                     .unwrap_or(IntegrityFault::LostWrite),
                 verdict: case.verdict().unwrap_or(CorruptionVerdict::Corrupted),
             });
+        }
+        if !recover.is_empty() {
+            // The truncate-on-mismatch demo's bug fires on ANY corruption
+            // verdict, recoverable or not (that is the bug).
+            if self.demo_truncate {
+                let (slot, _b, _c) = recover[0];
+                self.demo_truncate_from(slot)?;
+                return Ok(());
+            }
+            let demo_misreport = self.demo_faulty_none;
+            let _ = self.with_world(|w| {
+                for (slot, _ballot, case) in &recover {
+                    if demo_misreport {
+                        // THE MUTATION under demonstration (CTRL §5.1.1's
+                        // known-fatal weakening): classify, then withhold —
+                        // the acceptor will answer "nothing accepted here".
+                        tracing::info!(node, slot = slot.0, "demo_faulty_as_none");
+                        w.resolve_corruption(
+                            node,
+                            StorageRecord::Accepted(*slot),
+                            CorruptionOutcome::DemoMisreported,
+                        );
+                    } else {
+                        w.s7.faulty_reported = true;
+                        tracing::info!(
+                            node,
+                            slot = slot.0,
+                            case = case.label(),
+                            "faulty_entry_reported"
+                        );
+                        w.resolve_corruption(
+                            node,
+                            StorageRecord::Accepted(*slot),
+                            CorruptionOutcome::Reported,
+                        );
+                    }
+                }
+            });
+            if !demo_misreport {
+                self.faulty_list = recover
+                    .iter()
+                    .map(|(slot, ballot, _case)| (*slot, *ballot))
+                    .collect();
+            }
         }
         if !discard.is_empty() {
             // The one legal discard: a crash-truncatable tail was never
@@ -2227,6 +2605,9 @@ impl<T: TimeProvider> Storage for DurableStorage<T> {
     fn sealed_sessions(&self) -> Vec<SessionEntry> {
         self.boot.sealed_sessions()
     }
+    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
+        self.faulty_list.clone()
+    }
 }
 
 /// Simulation hooks for driver decisions that process-level attrition cannot
@@ -2388,6 +2769,8 @@ pub(crate) struct StorageFaultStats {
     /// (`TigerBeetle`'s excuse-list doctrine — the bound is never trusted to be
     /// sufficient on its own).
     pub(crate) clean_quorum_everywhere: bool,
+    /// Whether this run lifted the corruption budget (the WAITED-leg axis).
+    pub(crate) budget_off: bool,
 }
 
 /// Fold the storage world's ground truth (empty world = no faults).
@@ -2401,6 +2784,7 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
         fsync_durable: false,
         fsync_lost: false,
         clean_quorum_everywhere: true,
+        budget_off: guard.budget_off,
     };
     for fault in &guard.injected {
         match (fault.kind, fault.persisted) {
@@ -2443,6 +2827,14 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
 /// (detect ⇒ crash, stays down). The workload's convergence probe skips
 /// exactly these — the availability cost Stage 7's baseline deliberately pays,
 /// bounded by the dead-node budget so the cluster keeps serving.
+/// Slots the budget-off run drove to zero readable copies (ground truth for
+/// the WAITED leg; empty on every budgeted campaign).
+pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
+    let world = storage_world(handle);
+    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.unrecoverable.clone()
+}
+
 pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2451,6 +2843,8 @@ pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
 
 /// Snapshot of the Stage-7 corruption ground truth, folded for `check()`.
 pub(crate) struct CorruptionStats {
+    /// Corruption injections recorded this run, in total.
+    pub(crate) injected: usize,
     /// Ledger entries whose read surfaced as the one typed crash decision.
     pub(crate) crashed: u64,
     /// Every ledger entry is accounted for: resolved, or legitimately dormant
@@ -2488,10 +2882,16 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
             CorruptionOutcome::CoDetected
             | CorruptionOutcome::Repaired
             | CorruptionOutcome::DiscardedTail
-            | CorruptionOutcome::DemoTruncated => {}
+            | CorruptionOutcome::DemoTruncated
+            // Stage 8: a standing report (a run may end mid-repair, or WAITED)
+            // and a genuinely re-written record are both fully accounted.
+            | CorruptionOutcome::Reported
+            | CorruptionOutcome::Recovered
+            | CorruptionOutcome::DemoMisreported => {}
         }
     }
     CorruptionStats {
+        injected: guard.corruptions.len(),
         crashed,
         accounted,
         parked: guard.parked.len(),
@@ -2520,10 +2920,19 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
         }
     );
     assert_always!(
-        stats.clean_quorum_everywhere,
+        stats.clean_quorum_everywhere || stats.budget_off,
         "storage: injected faults never cost a record its clean quorum of live copies"
     );
     check_corruption_gates(handle, &corruption, scope);
+    if scope == GateScope::SafetyOnly {
+        // The #71 compound gate, on the partition-bearing axis: corruption x
+        // partition x a lagging follower reached in one run (the network
+        // swarm IS the partition; lag is the audit's observed fact).
+        assert_sometimes!(
+            corruption.injected > 0 && audit_world(handle).lag_observed(),
+            "storage: corruption compounds with a partition and a lagging follower"
+        );
+    }
     if scope != GateScope::Full {
         return;
     }
@@ -2625,5 +3034,16 @@ fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats, sc
     assert_sometimes!(
         s7.identifier_lost,
         "storage: an identifier lost with its entry is classified"
+    );
+    // Stage 8 (issue #21): the recover-or-wait flip is genuinely exercised —
+    // rotted-but-identified records are *reported* (the node keeps serving)
+    // and genuinely *repaired* by the cluster, not merely classified.
+    assert_sometimes!(
+        s7.faulty_reported,
+        "storage: a rotted record is reported faulty and the node keeps serving"
+    );
+    assert_sometimes!(
+        s7.record_recovered,
+        "storage: a reported faulty record is repaired by the cluster"
     );
 }

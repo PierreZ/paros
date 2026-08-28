@@ -36,7 +36,10 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::choreography::SnapshotRecoveryWorkload;
-use crate::node::{NaiveWipeNodeProcess, QuietNodeProcess, TruncateOnMismatchNodeProcess};
+use crate::node::{
+    BudgetOffNodeProcess, FaultyAsNoneNodeProcess, NaiveWipeNodeProcess, QuietNodeProcess,
+    TruncateOnMismatchNodeProcess,
+};
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
     TimelineRecorder, build_result,
@@ -466,6 +469,19 @@ fn protocol_bounds_builder() -> SimulationBuilder {
         .workload_factory(|| Box::new(ProtocolBoundsWorkload))
 }
 
+/// Run the shared `NodeStorage` behavioral contract suite (issue #21 item F)
+/// against the simulation's world-backed storage, inside one quiet iteration.
+/// `MemStorage` runs the identical suite as a `paros` unit test; together they
+/// keep the fake and the trait contract from drifting apart.
+#[must_use]
+pub fn run_storage_contract_suite() -> SimulationReport {
+    SimulationBuilder::new()
+        .processes(1, || Box::new(ProtocolBoundsIdleProcess))
+        .workload_factory(|| Box::new(crate::node::ContractSuiteWorkload))
+        .set_iterations(1)
+        .run()
+}
+
 /// Run one deterministic seed and return its timeline. Driver decisions and
 /// clean-crash attrition are active; the same seed
 /// always produces the same [`RunResult`].
@@ -703,6 +719,92 @@ pub fn run_truncate_demo_seed(seed: u64) -> SimulationReport {
 #[must_use]
 pub fn truncate_demo_hunt(iterations: usize) -> SimulationReport {
     truncate_demo_builder().set_iterations(iterations).run()
+}
+
+/// The **budget-off** campaign (issue #21, the WAITED leg): the main
+/// campaign's chaos surfaces with the per-record corruption budget lifted, so
+/// every copy of a committed item can rot in one run. The CTRL guarantee then
+/// demands a *correct* wait: the safety oracles stay fully armed, the
+/// wedge/convergence gates are excused only by the world's ground truth ("no
+/// readable copy of this slot exists anywhere"), and the WAITED gate proves
+/// the leg is genuinely exercised — a sweep cannot go green having only ever
+/// recovered.
+fn budget_off_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
+            Box::new(BudgetOffNodeProcess)
+        })
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::budget_off()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+        .swarm_operations()
+}
+
+/// Raw-seed budget-off sweep (no saturation gate): the WAITED-leg hunting and
+/// evidence entry point.
+#[must_use]
+pub fn budget_off_hunt(iterations: usize) -> SimulationReport {
+    budget_off_builder().set_iterations(iterations).run()
+}
+
+/// Coverage-stable budget-off roots: saturates the WAITED/recovered pair.
+#[must_use]
+pub fn explore_budget_off(max_iterations: usize) -> SimulationReport {
+    budget_off_builder()
+        .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
+        .run()
+}
+
+/// Replay one budget-off seed deterministically.
+#[must_use]
+pub fn run_budget_off_seed(seed: u64) -> SimulationReport {
+    budget_off_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// The **faulty-as-none red demo** (issue #21, CTRL §5.1.1's first known-fatal
+/// mutation): a fixed three-node cluster under the main campaign's chaos where
+/// the boot scan classifies rotted records normally but *withholds* them from
+/// the Promise tri-state — the acceptor answers "nothing accepted here" for a
+/// slot whose value it lost. A promise quorum that excludes the record's
+/// surviving clean copy then sees a unanimous `none` and no-op-fills a chosen
+/// slot: two values chosen for one slot. The demo's contract is to go **red**
+/// on the agreement oracles ("at most one value is ever chosen for a slot" /
+/// the chain digests); if it ever comes back green on its witness seed, either
+/// the misreport stopped landing or the oracle went blind — both bugs. On
+/// every real campaign a rotted-but-identified record is reported `faulty`,
+/// which is exactly the rule this demo proves load-bearing.
+fn faulty_none_demo_builder() -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(3, || Box::new(FaultyAsNoneNodeProcess))
+        .link_latency(LinkLatencyConfig::default())
+        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
+        .invariant(ChainAgreement::network())
+        .enable_chaos(chaos_surfaces())
+        .chaos_duration(CHAOS_DURATION)
+}
+
+/// Replay one faulty-as-none red-demo seed (the interesting result is the
+/// violation, not a green run).
+#[must_use]
+pub fn run_faulty_none_demo_seed(seed: u64) -> SimulationReport {
+    faulty_none_demo_builder()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Raw-seed hunt over the faulty-as-none red demo, for deriving (or
+/// re-deriving) a witness seed.
+#[must_use]
+pub fn faulty_none_demo_hunt(iterations: usize) -> SimulationReport {
+    faulty_none_demo_builder().set_iterations(iterations).run()
 }
 
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for

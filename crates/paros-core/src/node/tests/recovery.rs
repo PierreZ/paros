@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// Keep every message except the ones that would let slot 3's round complete
+/// beyond the intended holders: the proposer's `Accepted` acks, every
+/// `Commit`, and (when `isolate_node2`) the `Accept` to node 2.
+fn keep_slot3_undecided(to: NodeId, m: &Message, isolate_node2: bool) -> bool {
+    match m {
+        Message::Commit { .. } => false,
+        Message::Accepted { .. } => to != NodeId(0),
+        Message::Accept { .. } => !(isolate_node2 && to == NodeId(2)),
+        _ => true,
+    }
+}
+
 /// Build a 3-node cluster with slots 0..=2 chosen everywhere, then reboot
 /// `victim` with the accepted records in `rotted` classified faulty (value
 /// lost, identity kept).
@@ -69,10 +81,7 @@ fn accept_repairs_a_faulty_slot_in_place() {
     let q = drain(&mut nodes[0]);
     // Deliver the Accept to node 1 but drop its ack and the commit, so node 1
     // holds an accepted-but-unchosen record at slot 3.
-    deliver_filtered(&mut nodes, q, |to, m| {
-        !(matches!(m, Message::Accepted { .. }) && to == NodeId(0))
-            && !matches!(m, Message::Commit { .. })
-    });
+    deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, false));
     assert!(nodes[1].accepted().contains_key(&Slot(3)));
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
@@ -106,11 +115,7 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
     let mut nodes = cluster_with_three_chosen();
     let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
     let q = drain(&mut nodes[0]);
-    deliver_filtered(&mut nodes, q, |to, m| {
-        !(matches!(m, Message::Accepted { .. }) && to == NodeId(0))
-            && !matches!(m, Message::Commit { .. })
-            && !(matches!(m, Message::Accept { .. }) && to == NodeId(2))
-    });
+    deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
     nodes[1] = RawNode::new(&storage);
@@ -145,11 +150,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
     let q = drain(&mut nodes[0]);
     // Only node 1 accepts slot 3; the round never completes.
-    deliver_filtered(&mut nodes, q, |to, m| {
-        !(matches!(m, Message::Accepted { .. }) && to == NodeId(0))
-            && !matches!(m, Message::Commit { .. })
-            && !(matches!(m, Message::Accept { .. }) && to == NodeId(2))
-    });
+    deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     // Node 0 reboots with its own copy of slot 3 rotted (it was the proposer's
     // self-accept), so the identity survives but the value is lost.
     let mut s0 = TestStorage::from_node(&nodes[0]);
@@ -194,11 +195,7 @@ fn recovery_timeout_steps_the_leader_down() {
     let mut nodes = cluster_with_three_chosen();
     let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
     let q = drain(&mut nodes[0]);
-    deliver_filtered(&mut nodes, q, |to, m| {
-        !(matches!(m, Message::Accepted { .. }) && to == NodeId(0))
-            && !matches!(m, Message::Commit { .. })
-            && !(matches!(m, Message::Accept { .. }) && to == NodeId(2))
-    });
+    deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut s0 = TestStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
     nodes[0] = RawNode::new(&s0);
@@ -371,7 +368,7 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
         for n in &mut nodes {
             n.tick();
         }
-        let q: Vec<_> = nodes.iter_mut().flat_map(|n| drain(n)).collect();
+        let q: Vec<_> = nodes.iter_mut().flat_map(drain).collect();
         deliver_all(&mut nodes, q);
     }
 

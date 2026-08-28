@@ -1424,6 +1424,9 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 /// accepted log starts at its floor, so the replay naturally covers only the
 /// retained prefix. A clean first boot has empty scalars/log, so this is a near
 /// no-op.
+// One linear boot replay: report → walk → repair; splitting it would scatter
+// the ordering contract between the three.
+#[allow(clippy::too_many_lines)]
 fn replay_boot_state<S: NodeStorage, A: Audit>(
     node: &mut RawNode,
     storage: &mut S,
