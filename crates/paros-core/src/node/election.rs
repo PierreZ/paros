@@ -14,6 +14,12 @@ pub(super) struct Election {
     /// Highest-ballot accepted command per slot seen across the promise quorum,
     /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
     pub(super) recovered: BTreeMap<Slot, (Ballot, Command)>,
+    /// The tri-state's third answer, per slot: which acceptor reported its copy
+    /// **faulty** (value lost, identity known) at what accepted ballot. A
+    /// faulty report is silence toward the none-tally, never denial: it blocks
+    /// the no-op gap fill at its slot until [`RawNode::slot_decidable`] finds a
+    /// full Q1 of qualifying reports (Stage 8, CTRL restatement R2/R3).
+    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
     /// Next suffix-page cursor expected from each non-terminal acceptor.
     pub(super) promise_next: BTreeMap<NodeId, Slot>,
 }
@@ -22,10 +28,89 @@ pub(super) struct Election {
 pub(super) struct LeaderRecovery {
     /// Highest-ballot command reported for each retained slot.
     pub(super) recovered: BTreeMap<Slot, Command>,
+    /// Slots the Phase-1 tally could not decide (Case 3: wait): neither
+    /// re-proposed nor no-op-filled by the pump; the open [`RepairProbe`]
+    /// resolves them as stragglers answer.
+    pub(super) blocked: BTreeSet<Slot>,
     /// Next slot to recover or fill.
     pub(super) cursor: Slot,
     /// One past the highest slot covered by the Phase-1 quorum.
     pub(super) end: Slot,
+}
+
+/// The leader's open **distributed commitment determination** (Stage 8): the
+/// faulty slots its winning promise quorum resolved neither as Case 1 (some
+/// `have`) nor Case 2 (a full Q1 of qualifying `none`). The leader keeps
+/// re-querying the peers that have not answered (their `Promise` pages arrive
+/// through the ordinary Phase-1 path, at the leader's own ballot) and decides
+/// each blocked slot the moment the tally allows; a probe that stays blocked
+/// for a full recovery timeout resigns the leadership (CTRL §4.2).
+pub(super) struct RepairProbe {
+    /// The leadership ballot the probe queries at.
+    pub(super) ballot: Ballot,
+    /// First slot the original Phase 1 covered (re-sent `Prepare`s echo it).
+    pub(super) from_slot: Slot,
+    /// Acceptors (incl. self) whose complete suffix answer has been merged.
+    pub(super) answered: BTreeSet<NodeId>,
+    /// Faulty reports per still-blocked slot: reporter → accepted ballot.
+    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
+    /// Highest-ballot `have` seen per still-blocked slot.
+    pub(super) best_have: BTreeMap<Slot, (Ballot, Command)>,
+    /// Slots still undecidable (Case 3: wait).
+    pub(super) blocked: BTreeSet<Slot>,
+    /// Next suffix-page cursor expected from each non-terminal straggler.
+    pub(super) promise_next: BTreeMap<NodeId, Slot>,
+}
+
+/// Whether a faulty-reported slot is decidable, and with what.
+///
+/// The unified CTRL restatement (R2/R3): let `threshold` be the highest
+/// reported `have` ballot at the slot (`None` when nothing was reported). A
+/// chosen value at or below `threshold` is value-identical to the best `have`
+/// (the P2c chain), and a value chosen *above* it would leave a record at
+/// ballot `> threshold` on some member of every Q2 — so the slot is decidable
+/// the moment a full Q1 of answered acceptors each reported either nothing
+/// (`none`) or a record at ballot `<= threshold`: quorum intersection then
+/// rules out any hidden chosen value. Decide the best `have` (Case 1) or
+/// `Noop` (Case 2, `threshold = None` degenerates to a full Q1 of `none`).
+/// Anything less is Case 3: wait.
+fn qualifying_answers(
+    answered: &BTreeSet<NodeId>,
+    reporters: Option<&BTreeMap<NodeId, Ballot>>,
+    threshold: Option<Ballot>,
+) -> usize {
+    let disqualified = reporters.map_or(0, |reporters| {
+        reporters
+            .iter()
+            .filter(|(node, ballot)| answered.contains(node) && Some(**ballot) > threshold)
+            .count()
+    });
+    answered.len().saturating_sub(disqualified)
+}
+
+/// A `Promise` page is useful only at the exact requested cursor, carries at
+/// most the advertised bound across both tri-state maps, keeps them disjoint,
+/// and advances its continuation past everything it reported.
+fn promise_page_shape_valid(
+    expected: Slot,
+    accepted: &BTreeMap<Slot, (Ballot, Command)>,
+    faulty: &BTreeMap<Slot, Ballot>,
+    from_slot: Slot,
+    next_from_slot: Option<Slot>,
+) -> bool {
+    let len = accepted.len() + faulty.len();
+    from_slot == expected
+        && len <= PROMISE_BATCH
+        && accepted.keys().all(|slot| *slot >= from_slot)
+        && faulty
+            .keys()
+            .all(|slot| *slot >= from_slot && !accepted.contains_key(slot))
+        && next_from_slot.is_none_or(|next| {
+            len == PROMISE_BATCH
+                && next > from_slot
+                && accepted.keys().next_back().is_none_or(|last| next > *last)
+                && faulty.keys().next_back().is_none_or(|last| next > *last)
+        })
 }
 
 impl RawNode {
@@ -55,12 +140,33 @@ impl RawNode {
         self.ballot = Ballot { round, node: me };
         self.set_promise(self.ballot);
 
-        let from_slot = self.first_unchosen();
+        // The campaign's recovery range starts at this node's first *faulty*
+        // slot when that sits below the contiguous prefix (Stage 8): a rotted
+        // chosen record leaves a hole this node may be the only one able to
+        // ask about — the Promise response IS the recovery query, so the
+        // node's own Phase 1 covers the hole and the quorum's reports heal it
+        // (see the prefix-heal step in `try_become_leader`).
+        let from_slot = self
+            .faulty
+            .keys()
+            .next()
+            .copied()
+            .map_or(self.first_unchosen(), |first_faulty| {
+                first_faulty.min(self.first_unchosen())
+            });
         let recovered: BTreeMap<Slot, (Ballot, Command)> = self
             .accepted
             .range(from_slot..)
             .map(|(s, v)| (*s, v.clone()))
             .collect();
+        // Seed the tri-state tally with this node's own faulty entries: a
+        // candidate is its own first acceptor, and its rotted copies must block
+        // the none-tally exactly like a peer's (never silently count as
+        // "nothing accepted here").
+        let mut faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
+        for (slot, ballot) in self.faulty.range(from_slot..) {
+            faulty_reports.entry(*slot).or_default().insert(me, *ballot);
+        }
         let mut promised_by = BTreeSet::new();
         promised_by.insert(me);
         self.election = Some(Election {
@@ -68,10 +174,13 @@ impl RawNode {
             from_slot,
             promised_by,
             recovered,
+            faulty_reports,
             promise_next: BTreeMap::new(),
         });
         self.proposer.clear();
         self.leader_recovery = None;
+        self.repair_probe = None;
+        self.repair_elapsed = 0;
         self.resend_cursor = None;
         // A campaign opens at a ballot this node itself just promised: the
         // fresh round is strictly above every round in the max above, so the
@@ -103,19 +212,27 @@ impl RawNode {
     }
 
     /// Candidate: collect a `Promise`, merging the reported accepted suffix
-    /// (highest ballot per slot wins).
+    /// (highest ballot per slot wins) and the tri-state faulty reports. A
+    /// **leader** with an open [`RepairProbe`] also lands here: a straggler's
+    /// late answer (or a re-queried peer's fresh one) is merged into the probe
+    /// and may resolve a blocked slot.
     pub(super) fn on_promise(
         &mut self,
         from: NodeId,
         ballot: Ballot,
         from_slot: Slot,
         accepted: BTreeMap<Slot, (Ballot, Command)>,
+        faulty: BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) {
         // Quorum sets are keyed by NodeId: an id outside the configured
         // membership must never inflate one (wire hygiene; peers are trusted
         // but a misrouted or misconfigured sender is not a quorum member).
         if !self.config.peers.contains(&from) {
+            return;
+        }
+        if self.role == NodeRole::Leader {
+            self.on_probe_promise(from, ballot, from_slot, &accepted, &faulty, next_from_slot);
             return;
         }
         let mut request_next = None;
@@ -127,17 +244,7 @@ impl RawNode {
                 return;
             }
             let expected = e.promise_next.get(&from).copied().unwrap_or(e.from_slot);
-            // A page is useful only at the exact requested cursor, carries at
-            // most the advertised bound, and advances its continuation.
-            let shape_valid = from_slot == expected
-                && accepted.len() <= PROMISE_BATCH
-                && accepted.keys().all(|slot| *slot >= from_slot)
-                && next_from_slot.is_none_or(|next| {
-                    accepted.len() == PROMISE_BATCH
-                        && next > from_slot
-                        && accepted.keys().next_back().is_none_or(|last| next > *last)
-                });
-            if !shape_valid {
+            if !promise_page_shape_valid(expected, &accepted, &faulty, from_slot, next_from_slot) {
                 return;
             }
             for (slot, (ab, command)) in accepted {
@@ -145,6 +252,9 @@ impl RawNode {
                 if supersedes {
                     e.recovered.insert(slot, (ab, command));
                 }
+            }
+            for (slot, fb) in faulty {
+                e.faulty_reports.entry(slot).or_default().insert(from, fb);
             }
             if let Some(next) = next_from_slot {
                 e.promise_next.insert(from, next);
@@ -170,6 +280,125 @@ impl RawNode {
             return;
         }
         self.try_become_leader();
+    }
+
+    /// Merge one straggler `Promise` page into the leader's open repair probe
+    /// and resolve any blocked slot the refreshed tally now decides.
+    fn on_probe_promise(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        from_slot: Slot,
+        accepted: &BTreeMap<Slot, (Ballot, Command)>,
+        faulty: &BTreeMap<Slot, Ballot>,
+        next_from_slot: Option<Slot>,
+    ) {
+        let mut request_next = None;
+        {
+            let Some(probe) = self.repair_probe.as_mut() else {
+                return;
+            };
+            if probe.ballot != ballot || probe.answered.contains(&from) {
+                return;
+            }
+            let expected = probe
+                .promise_next
+                .get(&from)
+                .copied()
+                .unwrap_or(probe.from_slot);
+            if !promise_page_shape_valid(expected, accepted, faulty, from_slot, next_from_slot) {
+                return;
+            }
+            // Only the still-blocked slots matter: everything else was decided
+            // or re-proposed when the election closed.
+            for (slot, (ab, command)) in accepted {
+                if probe.blocked.contains(slot)
+                    && probe.best_have.get(slot).is_none_or(|(rb, _)| ab > rb)
+                {
+                    probe.best_have.insert(*slot, (*ab, command.clone()));
+                }
+            }
+            for (slot, fb) in faulty {
+                if probe.blocked.contains(slot) {
+                    probe
+                        .faulty_reports
+                        .entry(*slot)
+                        .or_default()
+                        .insert(from, *fb);
+                }
+            }
+            if let Some(next) = next_from_slot {
+                probe.promise_next.insert(from, next);
+                request_next = Some(next);
+            } else {
+                probe.promise_next.remove(&from);
+                probe.answered.insert(from);
+            }
+        }
+        if let Some(next) = request_next {
+            self.pending_messages.push((
+                from,
+                Message::Prepare {
+                    config_id: self.hard_state.config_id,
+                    from: self.config.id,
+                    ballot,
+                    from_slot: next,
+                },
+            ));
+            return;
+        }
+        self.resolve_blocked_repairs();
+    }
+
+    /// Decide every blocked slot the current probe tally allows: Case 1
+    /// (re-propose the best `have`) or Case 2 (a full Q1 of qualifying answers
+    /// with no `have`: decide `Noop`). Closes the probe when nothing stays
+    /// blocked.
+    pub(super) fn resolve_blocked_repairs(&mut self) {
+        let quorum = self.quorum();
+        let mut decisions: Vec<(Slot, Command, bool)> = Vec::new();
+        {
+            let Some(probe) = self.repair_probe.as_mut() else {
+                return;
+            };
+            for slot in probe.blocked.clone() {
+                let have = probe.best_have.get(&slot);
+                let threshold = have.map(|(b, _)| *b);
+                let qualifying =
+                    qualifying_answers(&probe.answered, probe.faulty_reports.get(&slot), threshold);
+                if qualifying < quorum {
+                    continue;
+                }
+                let (command, is_have) = have.map_or_else(
+                    || (Command::Control(Control::Noop), false),
+                    |(_b, command)| (command.clone(), true),
+                );
+                probe.blocked.remove(&slot);
+                probe.best_have.remove(&slot);
+                probe.faulty_reports.remove(&slot);
+                decisions.push((slot, command, is_have));
+            }
+            if probe.blocked.is_empty() {
+                self.repair_probe = None;
+                self.repair_elapsed = 0;
+            }
+        }
+        for (slot, command, is_have) in decisions {
+            if self.chosen.contains_key(&slot) || slot < self.first_slot {
+                continue;
+            }
+            if is_have {
+                self.repair_case1 += 1;
+            } else {
+                self.repair_case2 += 1;
+            }
+            if let Command::User(entry) = &command
+                && !self.applied_elsewhere(entry, slot)
+            {
+                self.inflight.insert((entry.client, entry.seq), slot);
+            }
+            self.start_accept_round(slot, command);
+        }
     }
 
     /// Candidate -> Leader once a promise quorum holds: re-propose every
@@ -217,9 +446,15 @@ impl RawNode {
             .accepted
             .keys()
             .chain(e.recovered.keys())
+            .chain(e.faulty_reports.keys())
             .max()
             .copied();
-        self.next_slot = highest.map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)));
+        // The campaign range can reach below the contiguous prefix (a faulty
+        // chosen slot extends it), so the allocator clamps at the prefix: a
+        // below-prefix report never pulls `next_slot` into chosen territory.
+        self.next_slot = highest
+            .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
+            .max(self.first_unchosen());
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -242,6 +477,65 @@ impl RawNode {
         // reported it (an acceptor that truncated the range Nacks instead of
         // under-reporting — see the floor guard in `on_prepare`). Nothing was
         // reported, so nothing is chosen there and the slot is genuinely free.
+        // ---- Faulty-slot tally (Stage 8, CTRL): a slot some quorum member
+        // reported *faulty* is fair game for the pump only if the tally already
+        // rules out a hidden chosen value (see [`qualifying_answers`]): then a
+        // reported `have` re-proposes normally and an all-`none` slot no-op
+        // fills normally. Anything else is **blocked** — Case 3: wait — and
+        // moves to the repair probe, which keeps querying stragglers.
+        let quorum = self.quorum();
+        let mut blocked: BTreeSet<Slot> = BTreeSet::new();
+        let mut probe_have: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
+        let mut probe_faulty: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
+        for (slot, reporters) in &e.faulty_reports {
+            if self.chosen.contains_key(slot) {
+                // Already decided: the value re-replicates through the normal
+                // commit/catch-up paths, repairing the faulty copies in place.
+                continue;
+            }
+            let have = e.recovered.get(slot);
+            let threshold = have.map(|(b, _)| *b);
+            let qualifying = qualifying_answers(&e.promised_by, Some(reporters), threshold);
+            if qualifying >= quorum {
+                continue;
+            }
+            blocked.insert(*slot);
+            if let Some((b, command)) = have {
+                probe_have.insert(*slot, (*b, command.clone()));
+            }
+            probe_faulty.insert(*slot, reporters.clone());
+        }
+        // Faulty **chosen** slots — holes below the contiguous prefix — are
+        // healed from the quorum's merged reports rather than re-proposed: a
+        // chosen value's Q2 intersects this promise quorum, so the
+        // highest-ballot report at such a slot IS the chosen value (any
+        // accepted record above the choosing ballot carries it, P2c). A slot
+        // the tally could not clear (a faulty report above the best `have`)
+        // stays blocked and resolves through the probe like any other.
+        let prefix_heals: Vec<(Slot, Ballot, Command)> = e
+            .recovered
+            .range(..self.first_unchosen())
+            .filter(|(slot, _)| !blocked.contains(slot) && !self.chosen.contains_key(slot))
+            .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
+            .collect();
+        for (slot, ballot, command) in prefix_heals {
+            self.mark_chosen(slot, &command, ballot);
+        }
+        if blocked.is_empty() {
+            self.repair_probe = None;
+        } else {
+            self.repair_probe = Some(RepairProbe {
+                ballot: e.ballot,
+                from_slot: e.from_slot,
+                answered: e.promised_by.clone(),
+                faulty_reports: probe_faulty,
+                best_have: probe_have,
+                blocked: blocked.clone(),
+                promise_next: BTreeMap::new(),
+            });
+        }
+        self.repair_elapsed = 0;
+
         let recovery_start = self.first_unchosen();
         let recovered: BTreeMap<Slot, Command> = e
             .recovered
@@ -251,6 +545,7 @@ impl RawNode {
         self.election_gap_fills = 0;
         self.leader_recovery = Some(LeaderRecovery {
             recovered,
+            blocked,
             cursor: recovery_start,
             end: self.next_slot,
         });
@@ -317,6 +612,15 @@ impl RawNode {
             // continuation (especially in a single-node cluster), so each slot
             // is re-checked at the instant its round starts.
             if slot < self.first_slot || self.chosen.contains_key(&slot) {
+                continue;
+            }
+            // A blocked slot (Case 3: wait) is neither re-proposed nor
+            // no-op-filled here: the open repair probe owns its resolution.
+            if self
+                .leader_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.blocked.contains(&slot))
+            {
                 continue;
             }
             if is_gap {

@@ -175,12 +175,23 @@ pub(crate) struct ChainWorkload {
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
     safety_only: bool,
+    budget_off: bool,
 }
 
 impl ChainWorkload {
     pub(crate) fn network_safety() -> Self {
         Self {
             safety_only: true,
+            ..Self::default()
+        }
+    }
+
+    /// The budget-off (WAITED-leg) campaign's workload: the full main-campaign
+    /// drive, but an unavailable run is excused when — and only when — the
+    /// world's ground truth says a committed item has no readable copy left.
+    pub(crate) fn budget_off() -> Self {
+        Self {
+            budget_off: true,
             ..Self::default()
         }
     }
@@ -1343,10 +1354,22 @@ impl Workload for ChainWorkload {
                 q.len("election_timeout_extreme"),
             );
         }
-        assert_always!(
-            recovery_acked > 0 && converged,
-            "chain: cluster converged after chaos"
-        );
+        if self.budget_off {
+            // The WAITED leg: an unavailable budget-off run is legal iff the
+            // ground truth says a committed item genuinely lost every readable
+            // copy (or a record lost its clean quorum). Unexplained
+            // unavailability stays a failure, exactly like the main campaign.
+            let waited = !crate::node::unrecoverable_slots(ctx.state()).is_empty();
+            assert_always!(
+                (recovery_acked > 0 && converged) || waited || !storage.clean_quorum_everywhere,
+                "chain: an unavailable budget-off run is explained by an unrecoverable committed item"
+            );
+        } else {
+            assert_always!(
+                recovery_acked > 0 && converged,
+                "chain: cluster converged after chaos"
+            );
+        }
         let applied_hashes: BTreeSet<String> = ctx
             .observability()
             .snapshot(EV_APPLIED)
@@ -1374,6 +1397,8 @@ impl Workload for ChainWorkload {
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let scope = if self.safety_only {
             GateScope::SafetyOnly
+        } else if self.budget_off {
+            GateScope::BudgetOff
         } else {
             GateScope::Full
         };
@@ -1385,7 +1410,7 @@ impl Workload for ChainWorkload {
                 .all(|outcome| outcome.seq() < self.issued_count),
             "chain: retained outcome model is internally valid"
         );
-        if !self.safety_only {
+        if !self.safety_only && !self.budget_off {
             assert_always!(
                 self.final_state
                     .is_some_and(|state| self.outcomes.values().all(|outcome| {

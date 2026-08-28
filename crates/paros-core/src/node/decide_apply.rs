@@ -175,6 +175,42 @@ impl RawNode {
             // alone lets the retry hit the `applied_seq` fast path instead.
             self.inflight.insert((entry.client, entry.seq), slot);
         }
+        // A decision at a probe-blocked slot resolves it (Case 1 arriving
+        // through the commit path rather than a straggler's Promise).
+        if let Some(probe) = self.repair_probe.as_mut()
+            && probe.blocked.remove(&slot)
+        {
+            probe.best_have.remove(&slot);
+            probe.faulty_reports.remove(&slot);
+            if probe.blocked.is_empty() {
+                self.repair_probe = None;
+                self.repair_elapsed = 0;
+            }
+        }
+        // A slot healed *below* the contiguous prefix (an open application
+        // repair re-learning a faulty chosen record) never reaches the walk, so
+        // its at-most-once ledger fold happens here, min-slot-wins: the ledger
+        // may already hold this identity at a *higher* slot recorded while the
+        // lower record was unreadable, and the cluster-wide first-slot-wins
+        // decision must be restored before the repair pump replays either slot.
+        if slot < self.first_unchosen()
+            && let Command::User(entry) = command
+        {
+            let seqs = self.applied_seq.entry(entry.client).or_default();
+            match seqs.get(&entry.seq).copied() {
+                Some(first) if first < slot => {
+                    self.duplicate_slots.insert(slot);
+                }
+                Some(first) if first > slot => {
+                    self.duplicate_slots.insert(first);
+                    self.duplicate_slots.remove(&slot);
+                    seqs.insert(entry.seq, slot);
+                }
+                _ => {
+                    seqs.insert(entry.seq, slot);
+                }
+            }
+        }
         // The chosen/accepted coupling: a chosen slot always holds its
         // authoritative accepted record, at the same command (`serve_catchup`
         // and election recovery both read one map and trust the other).
@@ -264,7 +300,15 @@ impl RawNode {
                     }
                 }
             }
-            self.pending_committed.push((next, command));
+            // While an application repair is open, the driver's application sits
+            // below this walk's frontier: surfacing new committed entries now
+            // would apply them out of order. The repair pump re-emits every
+            // decided slot in order from its cursor instead (the walk's other
+            // effects — the durable chosen index, the dedup hand-off — proceed
+            // unchanged, so consensus keeps advancing while the tail heals).
+            if self.app_repair.is_none() {
+                self.pending_committed.push((next, command));
+            }
             next = Slot(next.0 + 1);
             advanced += 1;
         }
@@ -284,6 +328,9 @@ impl RawNode {
             advanced == LEADER_RECOVERY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
             "the walk consumes or bounds the contiguous chosen prefix"
         );
+        // An open application repair may now be able to advance (the walk can
+        // have made new decided slots visible to its cursor).
+        self.pump_app_repair();
         // A read round waiting on the apply condition (`chosen_index >= index`,
         // the fresh-leader fence) resolves exactly here. No-op on a follower.
         self.try_confirm_reads();

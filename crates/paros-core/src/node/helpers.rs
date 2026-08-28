@@ -37,6 +37,8 @@ impl RawNode {
         self.leader = leader;
         self.election = None;
         self.leader_recovery = None;
+        self.repair_probe = None;
+        self.repair_elapsed = 0;
         self.resend_cursor = None;
         self.proposer.clear();
         // Unconfirmed read rounds die with the leadership; already-confirmed

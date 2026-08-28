@@ -83,6 +83,57 @@ fn truncate_on_mismatch_demo_stays_red() {
     );
 }
 
+/// Item F (issue #21): the world-backed sim storage passes the same behavioral
+/// contract suite `MemStorage` passes as a `paros` unit test, so the fake can
+/// never drift from the `NodeStorage` trait contract.
+#[test]
+fn sim_storage_passes_the_contract_suite() {
+    let report = paros_sim::run_storage_contract_suite();
+    assert_eq!(report.failed_runs, 0, "the contract suite completed");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "the sim storage honors the NodeStorage contract: {:?}",
+        report.assertion_violations
+    );
+}
+
+/// A budget-off smoke (issue #21, the WAITED leg): a handful of seeds with the
+/// per-record corruption budget lifted. Safety must hold on every one — losing
+/// every copy of a committed item may stall the cluster (that is the correct
+/// wait), but must never lose or fabricate data.
+#[test]
+fn budget_off_smoke_stays_safe() {
+    let report = paros_sim::budget_off_hunt(10);
+    assert!(
+        report.assertion_violations.is_empty(),
+        "budget-off safety violated: {:?}; failing seeds: {:?}",
+        report.assertion_violations,
+        report.seeds_failing.iter().take(10).collect::<Vec<_>>(),
+    );
+}
+
+/// The faulty-as-none **red demo** stays red (issue #21, CTRL §5.1.1's first
+/// known-fatal mutation): a boot scan that withholds a rotted record from the
+/// Promise tri-state lets the acceptor answer "nothing accepted here", and a
+/// promise quorum excluding the surviving clean copy then treats the slot as
+/// free — two values chosen for one slot. This test asserts the *violation
+/// fires*: if the demo ever comes back green, either the misreport stopped
+/// landing or the agreement oracles went blind, and both are bugs. (The real
+/// scan reports `faulty(slot, ballot)` instead — the rule this demo proves
+/// load-bearing.)
+#[test]
+fn faulty_as_none_demo_stays_red() {
+    let report = paros_sim::run_faulty_none_demo_seed(paros_sim::FAULTY_NONE_DEMO_SEED);
+    assert!(
+        report
+            .assertion_violations
+            .iter()
+            .any(|v| format!("{v:?}").contains("at most one value is ever chosen")),
+        "the faulty-as-none demo must surface the double-choose; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {

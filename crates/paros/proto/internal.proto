@@ -93,6 +93,15 @@ message Promise {
   repeated SlotCommand accepted = 4;
   optional uint64 next_from_slot = 5;
   uint64 config_id = 6;
+  // Stage 8 tri-state: slots whose accepted value this acceptor lost to
+  // corruption but whose identity (slot, accepted ballot) survived.
+  repeated FaultySlot faulty = 7;
+}
+
+// One faulty-entry report inside a Promise page (Stage 8, CTRL).
+message FaultySlot {
+  uint64 slot = 1;
+  Ballot ballot = 2;
 }
 
 message Accept {

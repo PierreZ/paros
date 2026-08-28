@@ -675,6 +675,10 @@ enum ChainStream {
     Acked,
     /// `chain_snapshot_installed` — an application state jump.
     Snapshot,
+    /// `snapshot_reset_for_recovery` — Stage 8: a corrupted application
+    /// snapshot was reset, so the node's applied index legally restarts from
+    /// zero (a local log replay, or a wait for a peer `InstallSnapshot`).
+    Reset,
     /// `command_applied` — an ordinary application transition.
     Applied,
 }
@@ -701,6 +705,7 @@ pub(crate) struct ChainAgreement {
     fault_cursor: Cell<usize>,
     compacted_cursor: Cell<usize>,
     acked_cursor: Cell<usize>,
+    reset_cursor: Cell<usize>,
     checksum_rejected_cursor: Cell<usize>,
     submitted: RefCell<BTreeMap<String, u64>>,
     state_by_index: RefCell<BTreeMap<u64, String>>,
@@ -738,6 +743,7 @@ impl ChainAgreement {
             fault_cursor: Cell::new(0),
             compacted_cursor: Cell::new(0),
             acked_cursor: Cell::new(0),
+            reset_cursor: Cell::new(0),
             checksum_rejected_cursor: Cell::new(0),
             submitted: RefCell::new(BTreeMap::new()),
             state_by_index: RefCell::new(BTreeMap::new()),
@@ -809,6 +815,11 @@ impl ChainAgreement {
                 &self.snapshot_cursor,
             ),
             (
+                ChainStream::Reset,
+                "snapshot_reset_for_recovery",
+                &self.reset_cursor,
+            ),
+            (
                 ChainStream::Applied,
                 "command_applied",
                 &self.applied_cursor,
@@ -850,8 +861,19 @@ impl ChainAgreement {
                     .map_or(event.seq, |m| m.max(event.seq));
                 self.max_ack_seq.set(Some(seq));
             }
-            ChainStream::Snapshot | ChainStream::Applied => {}
+            ChainStream::Snapshot | ChainStream::Reset | ChainStream::Applied => {}
         }
+    }
+
+    /// Stage 8: a corrupted application snapshot was reset for recovery. The
+    /// node's applied index legally restarts from zero — the replay that
+    /// follows re-derives the *same* per-index states (the agreement check
+    /// keeps holding), it merely re-walks them.
+    fn observe_reset(&self, event: &TraceEvent) {
+        let Some(node) = event.u64("node") else {
+            return;
+        };
+        self.node_index.borrow_mut().remove(&node);
     }
 
     /// A snapshot install jumps the application state; it need not be
@@ -1015,6 +1037,7 @@ impl Invariant for ChainAgreement {
         for (stream, event) in self.merged(q) {
             match stream {
                 ChainStream::Snapshot => self.observe_snapshot(&event),
+                ChainStream::Reset => self.observe_reset(&event),
                 ChainStream::Applied => self.observe_applied(&event),
                 aux => self.observe_auxiliary(aux, &event),
             }
@@ -1031,6 +1054,7 @@ impl Invariant for ChainAgreement {
         self.fault_cursor.set(0);
         self.compacted_cursor.set(0);
         self.acked_cursor.set(0);
+        self.reset_cursor.set(0);
         self.checksum_rejected_cursor.set(0);
         self.submitted.get_mut().clear();
         self.state_by_index.get_mut().clear();

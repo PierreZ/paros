@@ -1,7 +1,17 @@
 use super::{
-    BTreeMap, Ballot, Command, Message, NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot, WriteOp,
-    command_fingerprint,
+    BTreeMap, Ballot, Command, Control, Message, NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot,
+    WriteOp, command_fingerprint,
 };
+
+/// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost metric:
+/// a protocol-aware repair moves one entry, not the log).
+fn command_payload_bytes(command: &Command) -> u64 {
+    match command {
+        Command::User(entry) => entry.value.0.len() as u64,
+        Command::Control(Control::Truncate { .. }) => 8,
+        Command::Control(Control::Noop) => 1,
+    }
+}
 
 impl RawNode {
     // ---- acceptor ---------------------------------------------------------
@@ -65,13 +75,34 @@ impl RawNode {
                 self.ballot >= ballot,
                 "the operating ballot follows a raised promise"
             );
-            let mut page = self.accepted.range(from_slot..);
-            let accepted: BTreeMap<Slot, (Ballot, Command)> = page
-                .by_ref()
-                .take(PROMISE_BATCH)
-                .map(|(s, v)| (*s, v.clone()))
-                .collect();
-            let next_from_slot = page.next().map(|(slot, _)| *slot);
+            // One bounded page over the slot-ordered union of readable records
+            // (`have`) and faulty entries (the tri-state's third answer, Stage
+            // 8): a rotted copy is reported as `faulty(ballot)` — silence
+            // toward the none-tally, never "nothing accepted here".
+            let mut readable = self.accepted.range(from_slot..).peekable();
+            let mut rotted = self.faulty.range(from_slot..).peekable();
+            let mut accepted: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
+            let mut faulty: BTreeMap<Slot, Ballot> = BTreeMap::new();
+            while accepted.len() + faulty.len() < PROMISE_BATCH {
+                let take_readable = match (readable.peek(), rotted.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (Some((ra, _)), Some((rf, _))) => ra < rf,
+                };
+                if take_readable {
+                    let (slot, record) = readable.next().expect("peeked");
+                    accepted.insert(*slot, record.clone());
+                } else {
+                    let (slot, fb) = rotted.next().expect("peeked");
+                    faulty.insert(*slot, *fb);
+                }
+            }
+            let next_from_slot = match (readable.peek(), rotted.peek()) {
+                (None, None) => None,
+                (Some((slot, _)), None) | (None, Some((slot, _))) => Some(**slot),
+                (Some((ra, _)), Some((rf, _))) => Some(*std::cmp::min(*ra, *rf)),
+            };
             self.pending_messages.push((
                 from,
                 Message::Promise {
@@ -80,6 +111,7 @@ impl RawNode {
                     ballot,
                     from_slot,
                     accepted,
+                    faulty,
                     next_from_slot,
                 },
             ));
@@ -183,6 +215,17 @@ impl RawNode {
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
         );
+        // A fresh record over a faulty entry is the in-place repair (Stage 8):
+        // fill or replace-with-proven-identical, never delete. An `Accept`
+        // lands at `>=` this node's promise (`>=` the lost record's ballot; at
+        // an equal ballot P2b makes the value identical), and a *chosen* value
+        // at any ballot is value-identical to whatever the lost record held if
+        // that record could have mattered (the P2c chain). Nothing here lowers
+        // the promise or rewinds the chosen index.
+        if self.faulty.remove(&slot).is_some() {
+            self.faulty_repaired += 1;
+            self.repair_bytes += command_payload_bytes(&command);
+        }
         self.accepted.insert(slot, (ballot, command.clone()));
         self.pending_writes.push(WriteOp::AppendAccepted {
             slot,

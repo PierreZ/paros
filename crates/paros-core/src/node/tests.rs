@@ -22,6 +22,8 @@ struct TestStorage {
     accepted: BTreeMap<Slot, (Ballot, Command)>,
     config: Config,
     first_slot: Slot,
+    /// Recoverable faulty entries the simulated boot scan classified (Stage 8).
+    faulty: Vec<(Slot, Ballot)>,
 }
 
 impl TestStorage {
@@ -35,6 +37,7 @@ impl TestStorage {
                 quorum_system: crate::state::QuorumSystem::Majority,
             },
             first_slot: Slot(0),
+            faulty: Vec::new(),
         }
     }
 
@@ -47,7 +50,18 @@ impl TestStorage {
             accepted: n.accepted().clone(),
             config: n.config().clone(),
             first_slot: n.first_slot(),
+            faulty: Vec::new(),
         }
+    }
+
+    /// Rot the accepted record at `slot`: the value is lost, the identity
+    /// `(slot, ballot)` survives — the boot scan's recoverable classification.
+    fn rot(&mut self, slot: Slot) {
+        let (ballot, _) = self
+            .accepted
+            .remove(&slot)
+            .expect("rot targets a persisted record");
+        self.faulty.push((slot, ballot));
     }
 }
 
@@ -63,6 +77,9 @@ impl Storage for TestStorage {
     }
     fn last_slot(&self) -> Slot {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
+    }
+    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
+        self.faulty.clone()
     }
 }
 
@@ -210,4 +227,5 @@ mod catch_up_snapshot;
 mod decide_apply;
 mod election;
 mod reads;
+mod recovery;
 mod replication;

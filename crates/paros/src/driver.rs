@@ -660,18 +660,28 @@ fn send_snapshot_offers<S, H, A>(
     audit: &A,
     snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
     sessions: &[SessionEntry],
-) -> Result<(), RunError>
-where
+) where
     S: NodeStorage,
     H: DriverHooks,
     A: Audit,
 {
     for &(to, offered_index, ballot, config_id) in snapshot_offers {
         if storage.applied_slot() != Some(offered_index) {
-            return Err(SimulationError::InvalidState(
-                "application snapshot does not match offered chosen index".into(),
-            )
-            .into());
+            // An offered snapshot must describe exactly the application prefix
+            // the protocol message names. Stage 8 makes a mismatch a
+            // legitimate transient — an open application repair holds the
+            // applied prefix behind the chosen index — so the offer is
+            // *skipped*, never sent wrong and never fatal: the requester
+            // re-asks each beat and another peer (or this one, once healed)
+            // serves it. The core already withholds offers while its own
+            // repair is open; this driver-side guard covers any other
+            // application lag the core cannot see.
+            tracing::info!(
+                node = out.self_id,
+                offered = offered_index.0,
+                "snapshot_offer_skipped"
+            );
+            continue;
         }
         let message = Message::InstallSnapshot {
             config_id,
@@ -700,7 +710,6 @@ where
             out.transmit(audit, to, &message);
         }
     }
-    Ok(())
 }
 
 /// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names
@@ -1023,7 +1032,7 @@ where
 
     if !snapshot_offers.is_empty() {
         let sessions = node.session_ledger();
-        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions)?;
+        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions);
     }
 
     ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
@@ -1330,6 +1339,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     last_role: &mut NodeRole,
     last_duplicates: &mut u64,
     last_quorum_lost: &mut u64,
+    last_repair: &mut (u64, u64, u64, u64, u64),
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
@@ -1346,6 +1356,23 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         *last_duplicates = duplicates;
         audit.duplicate_suppressed(NodeId(self_id), count);
         tracing::info!(node = self_id, count, "duplicate_suppressed");
+    }
+    // Surface any repair progress (Stage 8): in-place heals, straggler
+    // resolutions, recovery-timeout resignations, and the repair-cost bytes.
+    let repair = node.repair_counters();
+    if repair != *last_repair {
+        *last_repair = repair;
+        let (repaired, case1, case2, step_downs, bytes) = repair;
+        audit.repair_progress(NodeId(self_id), repaired, case1, case2, step_downs, bytes);
+        tracing::info!(
+            node = self_id,
+            repaired,
+            case1,
+            case2,
+            step_downs,
+            bytes,
+            "repair_progress"
+        );
     }
     // Surface any CheckQuorum step-down the batch's tick performed (#95).
     let quorum_lost = node.quorum_lost_step_downs();
@@ -1406,8 +1433,11 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 /// accepted log starts at its floor, so the replay naturally covers only the
 /// retained prefix. A clean first boot has empty scalars/log, so this is a near
 /// no-op.
+// One linear boot replay: report → walk → repair; splitting it would scatter
+// the ordering contract between the three.
+#[allow(clippy::too_many_lines)]
 fn replay_boot_state<S: NodeStorage, A: Audit>(
-    node: &RawNode,
+    node: &mut RawNode,
     storage: &mut S,
     self_id: u64,
     audit: &A,
@@ -1439,50 +1469,109 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
             "recovered"
         );
     }
-    audit.recovered(NodeId(self_id), promised, &records);
-    let mut replayed_application = false;
-    if let Some(ci) = node.hard_state().chosen_index {
-        let applied_slot = storage.applied_slot();
-        for (slot, (_b, stored)) in node.accepted().range(..=ci) {
-            // A #94 duplicate slot replays exactly as the live walk applied it:
-            // a no-op. The core re-derived `duplicate_slots` from the sealed
-            // sessions + the retained log in `RawNode::new`, so the substitution
-            // is deterministic across the restart.
-            let noop = Command::Control(Control::Noop);
-            let command = if node.duplicate_slots().contains(slot) {
-                &noop
-            } else {
-                stored
-            };
-            if applied_slot.is_none_or(|applied| *slot > applied) {
-                storage
-                    .apply(ci, *slot, command)
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-                replayed_application = true;
-            }
-            let vhash = command_hash(command);
-            audit.applied(
-                NodeId(self_id),
-                *slot,
-                vhash,
-                match command {
-                    Command::User(e) => Some((e.client.0, e.seq.0)),
-                    Command::Control(_) => None,
-                },
-            );
-            tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
+    // Stage 8: surface the scan's recoverable classification *before* the
+    // recovered-state report — the audit's explained-divergence rule keys on
+    // it (a recovered log may omit a persisted record only after a detected
+    // corruption crash or a reported-faulty event).
+    let faulty: Vec<(Slot, Ballot)> = node
+        .faulty_entries()
+        .iter()
+        .map(|(slot, ballot)| (*slot, *ballot))
+        .collect();
+    if !faulty.is_empty() {
+        audit.faulty_reported(NodeId(self_id), &faulty);
+        for (slot, ballot) in &faulty {
             tracing::info!(
                 node = self_id,
                 slot = slot.0,
-                applied_index = slot.0,
-                "log_applied"
+                around = ballot.round,
+                abnode = ballot.node.0,
+                "faulty_reported"
             );
+        }
+    }
+    audit.recovered(NodeId(self_id), promised, &records);
+    let mut replayed_application = false;
+    let mut repair_from: Option<Slot> = None;
+    if let Some(ci) = node.hard_state().chosen_index {
+        let applied_slot = storage.applied_slot();
+        let floor = node.first_slot();
+        let resume = applied_slot.map_or(Slot(0), |a| Slot(a.0.saturating_add(1)));
+        if resume < floor {
+            // The application prefix stops below the compaction floor (the
+            // snapshot state was lost): the log cannot replay the missing
+            // range — only a peer's InstallSnapshot can. Open the repair and
+            // apply nothing; consensus keeps serving every slot it can read.
+            repair_from = Some(resume);
+        } else {
+            for s in floor.0..=ci.0 {
+                let slot = Slot(s);
+                let record = node.accepted().get(&slot);
+                let Some((_b, stored)) = record else {
+                    if applied_slot.is_some_and(|applied| slot <= applied) {
+                        // The record rotted but its effect is already durable
+                        // in the application state, which is the authority for
+                        // its own prefix; the reported-faulty event explains
+                        // the emission gap to the oracles.
+                        continue;
+                    }
+                    // A chosen record this node cannot read, not yet applied:
+                    // the replay stops here — contiguity is the contract — and
+                    // the repair pump re-emits the healed range via catch-up.
+                    repair_from = Some(slot);
+                    break;
+                };
+                // A #94 duplicate slot replays exactly as the live walk applied
+                // it: a no-op. The core re-derived `duplicate_slots` from the
+                // sealed sessions + the retained log in `RawNode::new`, so the
+                // substitution is deterministic across the restart.
+                let noop = Command::Control(Control::Noop);
+                let command = if node.duplicate_slots().contains(&slot) {
+                    &noop
+                } else {
+                    stored
+                };
+                if applied_slot.is_none_or(|applied| slot > applied) {
+                    storage
+                        .apply(ci, slot, command)
+                        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+                    replayed_application = true;
+                }
+                let vhash = command_hash(command);
+                audit.applied(
+                    NodeId(self_id),
+                    slot,
+                    vhash,
+                    match command {
+                        Command::User(e) => Some((e.client.0, e.seq.0)),
+                        Command::Control(_) => None,
+                    },
+                );
+                tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
+                tracing::info!(
+                    node = self_id,
+                    slot = slot.0,
+                    applied_index = slot.0,
+                    "log_applied"
+                );
+            }
         }
     }
     if replayed_application {
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    }
+    if let Some(from) = repair_from {
+        let below_floor = from < node.first_slot();
+        node.open_app_repair(from);
+        audit.app_repair_started(NodeId(self_id), from, below_floor);
+        tracing::info!(
+            node = self_id,
+            from = from.0,
+            below_floor,
+            "app_repair_started"
+        );
     }
     Ok(())
 }
@@ -1578,7 +1667,7 @@ where
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&node, &mut storage, self_id, audit)?;
+    replay_boot_state(&mut node, &mut storage, self_id, audit)?;
 
     // Validate every origin before starting reconnecting-channel tasks. Once
     // channels exist, there are no fallible setup steps before their drop guard
@@ -1661,6 +1750,7 @@ where
     let mut last_role = node.role();
     let mut last_duplicates = node.duplicates_suppressed();
     let mut last_quorum_lost = node.quorum_lost_step_downs();
+    let mut last_repair = node.repair_counters();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -1722,7 +1812,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -1742,7 +1832,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1801,7 +1891,7 @@ where
                 }
                 node.step(msg);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -1823,7 +1913,7 @@ where
                     },
                 };
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1868,7 +1958,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

@@ -42,4 +42,17 @@ pub trait Storage {
     fn sealed_sessions(&self) -> Vec<SessionEntry> {
         Vec::new()
     }
+
+    /// The **recoverable faulty entries** the boot scan classified (Stage 8,
+    /// CTRL): retained log slots whose accepted *value* is lost but whose
+    /// identity — `(slot, accepted_ballot)` — survived (the identifier, or the
+    /// entry's own checksummed identity region). Read once at construction; the
+    /// core reports each as `faulty(ballot)` in its Promise tri-state (never as
+    /// "nothing accepted here" — the CTRL Figure-2 bug class) and repairs it in
+    /// place from peers. A record whose identity is *also* lost must not appear
+    /// here: it is unidentifiable and stays a crash at the scan. Defaults to
+    /// empty: a storage that cannot rot has nothing faulty.
+    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
+        Vec::new()
+    }
 }

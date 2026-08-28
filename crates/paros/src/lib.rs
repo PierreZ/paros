@@ -37,6 +37,7 @@ pub use grpc::{
 pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, StorageError, StorageRecord, WriteOutcome,
+    storage_contract_suite,
 };
 
 pub use paros_core::{
@@ -45,6 +46,8 @@ pub use paros_core::{
     QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value,
     WriteOp, command_fingerprint,
 };
+
+pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
 
 #[cfg(test)]
 mod tests {
@@ -92,6 +95,7 @@ mod tests {
                 ballot,
                 from_slot: Slot(5),
                 accepted,
+                faulty: BTreeMap::from([(Slot(6), ballot)]),
                 next_from_slot: None,
             },
             Message::Accept {

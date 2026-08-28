@@ -211,6 +211,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     let mut acc_high = BTreeMap::new();
     acc_high.insert(Slot(0), high.clone());
     n.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: camp,
@@ -220,6 +221,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     });
     assert!(!n.is_leader(), "one promise short of quorum");
     n.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(3),
         ballot: camp,
@@ -382,6 +384,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
         .collect();
 
     n.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
@@ -393,6 +396,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
     let _ = drain(&mut n);
 
     n.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: camp,
@@ -464,6 +468,7 @@ fn leader_recovery_is_split_across_ready_batches() {
             })
             .collect();
         n.step(Message::Promise {
+            faulty: BTreeMap::new(),
             config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: camp,
@@ -648,6 +653,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
@@ -675,6 +681,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,
@@ -826,6 +833,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b,
@@ -852,6 +860,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
     x.step(Message::Promise {
+        faulty: BTreeMap::new(),
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,

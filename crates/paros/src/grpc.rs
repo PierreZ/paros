@@ -121,6 +121,31 @@ fn command_from_proto(command: Option<internal::Command>) -> Result<Command, &'s
     }
 }
 
+fn faulty_slots_to_proto(entries: &BTreeMap<Slot, Ballot>) -> Vec<internal::FaultySlot> {
+    entries
+        .iter()
+        .map(|(slot, ballot)| internal::FaultySlot {
+            slot: slot.0,
+            ballot: Some(ballot_to_proto(*ballot)),
+        })
+        .collect()
+}
+
+fn faulty_slots_from_proto(
+    entries: Vec<internal::FaultySlot>,
+) -> Result<BTreeMap<Slot, Ballot>, &'static str> {
+    let mut decoded = BTreeMap::new();
+    for entry in entries {
+        if decoded
+            .insert(Slot(entry.slot), ballot_from_proto(entry.ballot)?)
+            .is_some()
+        {
+            return Err("duplicate faulty slot in message");
+        }
+    }
+    Ok(decoded)
+}
+
 fn slot_commands_to_proto(
     entries: &BTreeMap<Slot, (Ballot, Command)>,
 ) -> Vec<internal::SlotCommand> {
@@ -201,6 +226,7 @@ pub(crate) fn message_to_proto(
             ballot,
             from_slot,
             accepted,
+            faulty,
             next_from_slot,
         } => Kind::Promise(internal::Promise {
             config_id: config_id.0,
@@ -208,6 +234,7 @@ pub(crate) fn message_to_proto(
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
             accepted: slot_commands_to_proto(accepted),
+            faulty: faulty_slots_to_proto(faulty),
             next_from_slot: next_from_slot.map(|slot| slot.0),
         }),
         Message::Accept {
@@ -338,6 +365,7 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
             accepted: slot_commands_from_proto(message.accepted)?,
+            faulty: faulty_slots_from_proto(message.faulty)?,
             next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {

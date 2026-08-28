@@ -83,6 +83,10 @@ pub(crate) enum GateScope {
     SafetyOnly,
     /// Every protocol/driver gate the main campaign saturates on.
     Full,
+    /// The budget-off campaign (issue #21, the WAITED leg): safety plus the
+    /// recovered/waited pair — no full-liveness claim, since a run may
+    /// correctly end unavailable.
+    BudgetOff,
 }
 
 /// Fire a `reachable` gate the first time its sticky flag flips.
@@ -131,8 +135,24 @@ impl AuditWorld {
             st.any_ack_checked,
             "a committed write ack is checked against the acking node's applied prefix"
         );
-        if scope == GateScope::SafetyOnly {
-            return;
+        match scope {
+            GateScope::SafetyOnly => return,
+            GateScope::BudgetOff => {
+                // The #71 pair: a budget-off sweep must exercise BOTH legs of
+                // the CTRL guarantee — repair where a clean copy survives, and
+                // a *correct* wait where none does. Without the WAITED gate a
+                // sweep can go green having only ever recovered.
+                assert_sometimes!(
+                    st.repaired_seen,
+                    "recovery repaired a faulty record from a surviving clean copy"
+                );
+                assert_sometimes!(
+                    st.waited,
+                    "recovery correctly WAITED: no clean copy of a committed item remains"
+                );
+                return;
+            }
+            GateScope::Full => {}
         }
         st.check_protocol_gates();
         st.check_driver_hook_gates();
@@ -170,6 +190,29 @@ impl AuditWorld {
     /// still a failure).
     pub(crate) fn note_storage_dead(&self, node: u64) {
         self.lock().storage_dead.insert(node);
+    }
+
+    /// Ground truth from the storage world (budget-off runs only): `slot` has
+    /// no readable copy anywhere. The wedge and convergence oracles excuse
+    /// exactly this slot — a *correct* unavailability — and the WAITED gate
+    /// records that the leg was genuinely exercised.
+    pub(crate) fn note_unrecoverable(&self, slot: u64) {
+        self.lock().unrecoverable.insert(slot);
+    }
+
+    /// Whether any node has been observed lagging the cluster prefix (one leg
+    /// of the #71 compound corruption x partition x lag gate).
+    pub(crate) fn lag_observed(&self) -> bool {
+        !self.lock().lagged.is_empty()
+    }
+
+    /// Red-demo side door (faulty-as-none only): record the classification the
+    /// demo deliberately withholds from the protocol, so the *storage*
+    /// divergence legs stay explained and the surviving red is the mutation's
+    /// genuine protocol consequence — a unanimous-looking `none` no-op filling
+    /// a chosen slot.
+    pub(crate) fn note_reported_faulty(&self, node: u64, slot: u64) {
+        self.lock().reported_faulty.insert((node, slot));
     }
 
     /// Ground-truth feed from the storage world (issue #19 C). A record can
@@ -236,6 +279,20 @@ impl AuditWorld {
                 continue;
             }
             let prefix = st.applied_max.get(&node).copied();
+            // Stage 8's WAITED excuse: a node whose next needed slot (or any
+            // slot between it and the cluster maximum) has no readable copy
+            // anywhere is *correctly* held below the prefix — that is the
+            // guarantee, not a failure. Ground truth only (budget-off runs).
+            let next_needed = prefix.map_or(0, |p| p + 1);
+            let held_at_unrecoverable = st
+                .unrecoverable
+                .range(next_needed..=cluster_max)
+                .next()
+                .is_some();
+            if held_at_unrecoverable && prefix != Some(cluster_max) {
+                st.waited = true;
+                continue;
+            }
             assert_always!(
                 prefix == Some(cluster_max),
                 "every node converges to the cluster's chosen prefix at the end of the settle tail",
@@ -431,6 +488,25 @@ struct AuditState {
     corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     storage_dead: BTreeSet<u64>,
+    /// Stage 8: `(node, slot)` records the boot scan classified recoverable
+    /// and reported into the tri-state — the second explanation the
+    /// divergence and no-gaps checks accept (#71's explained-only rule).
+    reported_faulty: BTreeSet<(u64, u64)>,
+    /// Stage 8 ground truth (budget-off only): slots with no readable copy
+    /// anywhere. The wedge/convergence excuse — and the WAITED witness.
+    unrecoverable: BTreeSet<u64>,
+    /// The WAITED leg fired: the cluster correctly held position at an
+    /// unrecoverable committed item instead of fabricating or losing data.
+    waited: bool,
+    /// Repair progress observed (from [`Audit::repair_progress`]): in-place
+    /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
+    /// recovery-timeout resignations.
+    repaired_seen: bool,
+    case1_seen: bool,
+    case2_seen: bool,
+    repair_stepdown_seen: bool,
+    app_repair_seen: bool,
+    app_repair_below_floor_seen: bool,
     resend_skipped: bool,
     resigned: bool,
     shortest_timeout: bool,
@@ -666,13 +742,19 @@ impl AuditState {
             .snap_landings
             .get(&node)
             .is_some_and(|landings| landings.contains(&idx));
+        let next_now = self.frontier.get(&node).copied().unwrap_or(0);
+        // Stage 8: a boot replay may step over a rotted record whose effect is
+        // already durable in the application state — legal only when every
+        // skipped slot was reported faulty by this node (the explained jump).
+        let over_reported =
+            idx > next_now && (next_now..idx).all(|s| self.reported_faulty.contains(&(node, s)));
         let next = self.frontier.entry(node).or_insert(0);
         if idx == *next {
             *next += 1;
         } else if idx > *next {
             *next = idx + 1;
             assert_always!(
-                at_floor || at_snapshot,
+                at_floor || at_snapshot || over_reported,
                 "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor or a snapshot install)"
             );
         }
@@ -995,6 +1077,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         //    buggified sleep delay stretches ticks during the chaos window.
         // `None` is the empty applied prefix (conceptually slot -1), so every
         // real hole sits above it and must remain observable.
+        // The WAITED excuse (Stage 8, budget-off ground truth): a hole at a
+        // slot with no readable copy anywhere is *correct* unavailability —
+        // the CTRL guarantee explicitly demands the cluster hold position
+        // there. Excused by the world's ground truth only, never by the
+        // node's own claim; the wedge stays armed everywhere else, so an
+        // unhealed hole WITH a surviving clean copy is still a red run.
+        if st.unrecoverable.contains(&hole.0) {
+            st.waited = true;
+            return;
+        }
         let wedged = st.quiesced(now)
             && st
                 .cluster_applied_max
@@ -1098,7 +1190,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .collect();
         for slot in missing {
             let explained = st.corruption_crashed_records.contains(&(node.0, slot))
-                || st.corruption_crashed_nodes.contains(&node.0);
+                || st.corruption_crashed_nodes.contains(&node.0)
+                // Stage 8's second explanation: the record was classified
+                // recoverable and reported into the tri-state this boot —
+                // the peer-recovery path owns it now (#71: explained
+                // divergence only, never a blanket weakening).
+                || st.reported_faulty.contains(&(node.0, slot));
             assert_always!(
                 explained,
                 "storage: a recovered log omits a persisted record only after a detected corruption crash",
@@ -1263,6 +1360,64 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.duplicate_suppressed,
             "a re-chosen (client, seq) is suppressed at the apply seam (at-most-once)"
         );
+    }
+
+    fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
+        let mut st = self.state();
+        for &(slot, _ballot) in entries {
+            st.reported_faulty.insert((node.0, slot.0));
+        }
+    }
+
+    fn app_repair_started(&self, _node: NodeId, _from: Slot, below_floor: bool) {
+        let mut st = self.state();
+        if below_floor {
+            reach_once!(
+                st.app_repair_below_floor_seen,
+                "a node with a lost snapshot waits on a peer InstallSnapshot below its floor"
+            );
+        } else {
+            reach_once!(
+                st.app_repair_seen,
+                "a faulty chosen record stalls the apply seam and opens a repair"
+            );
+        }
+    }
+
+    fn repair_progress(
+        &self,
+        _node: NodeId,
+        repaired: u64,
+        case1: u64,
+        case2: u64,
+        step_downs: u64,
+        _bytes: u64,
+    ) {
+        let mut st = self.state();
+        if repaired > 0 {
+            reach_once!(
+                st.repaired_seen,
+                "a faulty record is repaired in place from the cluster"
+            );
+        }
+        if case1 > 0 {
+            reach_once!(
+                st.case1_seen,
+                "a blocked slot resolves as Case 1 from a straggler's clean copy"
+            );
+        }
+        if case2 > 0 {
+            reach_once!(
+                st.case2_seen,
+                "a blocked slot resolves as Case 2 with a full quorum of none"
+            );
+        }
+        if step_downs > 0 {
+            reach_once!(
+                st.repair_stepdown_seen,
+                "a leader that cannot finish recovery resigns (recovery timeout)"
+            );
+        }
     }
 
     fn recovery_batch(&self, _node: NodeId, started: u64, gap_fills: u64, remaining: u64) {

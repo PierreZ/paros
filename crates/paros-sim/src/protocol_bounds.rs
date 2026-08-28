@@ -140,6 +140,7 @@ impl Workload for ProtocolBoundsWorkload {
             entries_seen += accepted.len();
 
             candidate.step(Message::Promise {
+                faulty: std::collections::BTreeMap::new(),
                 config_id: ConfigId::default(),
                 from,
                 ballot: promised,
@@ -245,6 +246,7 @@ impl Workload for ProtocolBoundsWorkload {
         let gap_ballot = gapped.ballot();
         let _ = take_ready(&mut gapped);
         gapped.step(Message::Promise {
+            faulty: std::collections::BTreeMap::new(),
             config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: gap_ballot,
@@ -338,6 +340,7 @@ impl Workload for ProtocolBoundsWorkload {
         let proposal_ballot = proposer.ballot();
         let _ = take_ready(&mut proposer);
         proposer.step(Message::Promise {
+            faulty: std::collections::BTreeMap::new(),
             config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: proposal_ballot,
