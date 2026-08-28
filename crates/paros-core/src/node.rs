@@ -1015,6 +1015,23 @@ impl RawNode {
                 from: self.config.id,
                 from_slot,
             });
+        } else if let Some(first_faulty) = self
+            .faulty
+            .keys()
+            .next()
+            .copied()
+            .filter(|slot| *slot < self.first_unchosen())
+        {
+            // A faulty **chosen** record whose effect the application already
+            // holds still leaves a hole in the servable log (catch-up replay
+            // stops at it — per-slot attribution). Pull the decided range from
+            // peers so the record itself heals; a peer that has it chosen
+            // serves it, and this node's own next election covers it either
+            // way (the campaign range starts at the first faulty slot).
+            self.broadcast(&Message::CatchUpRequest {
+                from: self.config.id,
+                from_slot: first_faulty,
+            });
         }
     }
 

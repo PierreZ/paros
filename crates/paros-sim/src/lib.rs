@@ -305,6 +305,23 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     3_847_608_256_092_482_294,
     8_838_873_099_546_465_481,
     1_481_936_964_395_890_271,
+    // The Stage-8 faulty-chosen-slot livelock witness (2026-08-28, the first
+    // sancov sweep over the recover-or-wait flip): rot landed on a *chosen*
+    // record of the only node that knew slots 11..25 were decided (the leader
+    // learned them alone; followers held the accepts but never the commits).
+    // The node's application already covered the slot, so no repair opened —
+    // but the hole in its `chosen` map made `serve_catchup`'s per-slot
+    // attribution stop dead at slot 11 on every request, and its own next
+    // campaign started at `first_unchosen`, above the hole: four followers
+    // pulled the same dead range for 60 simulated seconds. Red on the
+    // prefix-blind campaign; green once the campaign range starts at the
+    // node's first faulty slot (the Promise response IS the recovery query),
+    // the win-time prefix heal takes the quorum's max-ballot report as the
+    // chosen value, and the tick pull covers below-prefix faulty records.
+    // Seed 9945920223948611129 (an explorer continuation, recipe
+    // [(5300, 14501048987220660580)]; replay with `sim-paros-hunt
+    // explore-main`) is the same shape, found in the same sweep.
+    1_514_716_993_781_838_845,
 ];
 
 /// Network-swarm-axis witnesses, replayed via [`run_network_seed`].

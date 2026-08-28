@@ -140,7 +140,20 @@ impl RawNode {
         self.ballot = Ballot { round, node: me };
         self.set_promise(self.ballot);
 
-        let from_slot = self.first_unchosen();
+        // The campaign's recovery range starts at this node's first *faulty*
+        // slot when that sits below the contiguous prefix (Stage 8): a rotted
+        // chosen record leaves a hole this node may be the only one able to
+        // ask about — the Promise response IS the recovery query, so the
+        // node's own Phase 1 covers the hole and the quorum's reports heal it
+        // (see the prefix-heal step in `try_become_leader`).
+        let from_slot = self
+            .faulty
+            .keys()
+            .next()
+            .copied()
+            .map_or(self.first_unchosen(), |first_faulty| {
+                first_faulty.min(self.first_unchosen())
+            });
         let recovered: BTreeMap<Slot, (Ballot, Command)> = self
             .accepted
             .range(from_slot..)
@@ -436,7 +449,12 @@ impl RawNode {
             .chain(e.faulty_reports.keys())
             .max()
             .copied();
-        self.next_slot = highest.map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)));
+        // The campaign range can reach below the contiguous prefix (a faulty
+        // chosen slot extends it), so the allocator clamps at the prefix: a
+        // below-prefix report never pulls `next_slot` into chosen territory.
+        self.next_slot = highest
+            .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
+            .max(self.first_unchosen());
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -486,6 +504,22 @@ impl RawNode {
                 probe_have.insert(*slot, (*b, command.clone()));
             }
             probe_faulty.insert(*slot, reporters.clone());
+        }
+        // Faulty **chosen** slots — holes below the contiguous prefix — are
+        // healed from the quorum's merged reports rather than re-proposed: a
+        // chosen value's Q2 intersects this promise quorum, so the
+        // highest-ballot report at such a slot IS the chosen value (any
+        // accepted record above the choosing ballot carries it, P2c). A slot
+        // the tally could not clear (a faulty report above the best `have`)
+        // stays blocked and resolves through the probe like any other.
+        let prefix_heals: Vec<(Slot, Ballot, Command)> = e
+            .recovered
+            .range(..self.first_unchosen())
+            .filter(|(slot, _)| !blocked.contains(slot) && !self.chosen.contains_key(slot))
+            .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
+            .collect();
+        for (slot, ballot, command) in prefix_heals {
+            self.mark_chosen(slot, &command, ballot);
         }
         if blocked.is_empty() {
             self.repair_probe = None;

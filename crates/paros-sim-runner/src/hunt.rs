@@ -27,7 +27,7 @@
 //!        `sim-paros-hunt replay-faulty-none <seed>` — deterministic replay.
 
 use paros_sim::{
-    amnesia_demo_hunt, budget_off_hunt, chain_smoke, explore_snapshot_recovery,
+    amnesia_demo_hunt, budget_off_hunt, chain_smoke, explore_chain_seed, explore_snapshot_recovery,
     explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt,
     run_amnesia_demo_seed, run_budget_off_seed, run_chain_seed, run_faulty_none_demo_seed,
     run_network_seed, run_protocol_bounds_seed, run_snapshot_recovery_seed, run_truncate_demo_seed,
@@ -39,7 +39,7 @@ fn main() {
 
     if let "replay-network" | "replay-main" | "replay-snapshot" | "replay-bounds"
     | "replay-amnesia" | "replay-truncate" | "replay-budget-off" | "replay-faulty-none"
-    | "explore-snapshot" = axis.as_str()
+    | "explore-snapshot" | "explore-main" = axis.as_str()
     {
         let seed = std::env::args()
             .nth(2)
@@ -52,6 +52,9 @@ fn main() {
             // Root + explored continuation timelines: the replay command for
             // choreography failures that live only on explorer branches.
             "explore-snapshot" => explore_snapshot_recovery_seed(seed, 8),
+            // Root + explored continuation timelines on the main campaign —
+            // the replay command for failures found on explorer branches.
+            "explore-main" => explore_chain_seed(seed, 8),
             "replay-bounds" => run_protocol_bounds_seed(seed),
             "replay-amnesia" => run_amnesia_demo_seed(seed),
             "replay-truncate" => run_truncate_demo_seed(seed),
