@@ -517,13 +517,22 @@ impl Storage for MemStorage {
 /// implementations behave identically on the clean path this suite drives.
 ///
 /// `fresh` must return an empty storage for the same single-node membership on
-/// every call.
+/// every call. `reopen` simulates a clean reboot of the same store: the reads
+/// the suite asserts are the *recovery port's* (the core reads durable state
+/// once, at construction), so every read-back goes through a reopen — an
+/// in-memory implementation may return the same handle, a world-backed one
+/// re-restores from its durable records.
 ///
 /// # Panics
 ///
 /// Panics on any contract violation.
 #[doc(hidden)]
-pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
+// One linear behavioral walk; splitting it would scatter the contract.
+#[allow(clippy::too_many_lines)]
+pub fn storage_contract_suite<S: NodeStorage>(
+    mut fresh: impl FnMut() -> S,
+    mut reopen: impl FnMut(S) -> S,
+) {
     use paros_core::{ClientId, ClientSeq, Entry, Value};
     let ballot = |round: u64| Ballot {
         round,
@@ -547,6 +556,7 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
         .expect("append 1");
     s.set_chosen_index(Slot(1)).expect("chosen index");
     s.sync(MustSync::Sync).expect("sync");
+    let mut s = reopen(s);
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.config_id, ConfigId(3), "config id round-trips");
     assert_eq!(hs.max_promised_ballot, ballot(4), "promise round-trips");
@@ -558,12 +568,16 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
         Some(ballot(4)),
         "an accepted record reads back"
     );
-    assert!(s.faulty_entries().is_empty(), "a clean store reports no rot");
+    assert!(
+        s.faulty_entries().is_empty(),
+        "a clean store reports no rot"
+    );
 
     // An append is an upsert-by-slot: the newer record replaces the older.
     s.append_accepted(Slot(1), ballot(5), user(3, 0xc))
         .expect("re-append 1");
     s.sync(MustSync::Sync).expect("sync upsert");
+    let mut s = reopen(s);
     assert_eq!(
         s.accepted(Slot(1)).map(|(b, _)| b),
         Some(ballot(5)),
@@ -574,6 +588,7 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
     s.truncate(Slot(1), &[(ClientId(7), ClientSeq(1), Slot(0))])
         .expect("truncate");
     s.sync(MustSync::Sync).expect("sync truncate");
+    let mut s = reopen(s);
     assert_eq!(s.first_slot(), Slot(1), "the floor rose");
     assert!(
         s.accepted(Slot(0)).is_none(),
@@ -587,6 +602,7 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
     // A floor never moves backward.
     s.truncate(Slot(0), &[]).expect("re-truncate lower");
     s.sync(MustSync::Sync).expect("sync no-op truncate");
+    let s = reopen(s);
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
 
     // A snapshot install: chosen index jumps, promise takes the max (never
@@ -619,6 +635,7 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
     )
     .expect("install");
     s.sync(MustSync::Sync).expect("sync install");
+    let s = reopen(s);
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.chosen_index, Some(Slot(4)), "the install set the index");
     assert_eq!(
@@ -626,7 +643,11 @@ pub fn storage_contract_suite<S: NodeStorage>(mut fresh: impl FnMut() -> S) {
         ballot(9),
         "an install never lowers the promise"
     );
-    assert_eq!(s.first_slot(), Slot(5), "the floor is one past the boundary");
+    assert_eq!(
+        s.first_slot(),
+        Slot(5),
+        "the floor is one past the boundary"
+    );
     assert_eq!(
         s.sealed_sessions(),
         vec![(ClientId(7), ClientSeq(2), Slot(3))],
@@ -661,12 +682,17 @@ mod tests {
     /// The simulation runs the same suite against its world-backed storage.
     #[test]
     fn mem_storage_passes_the_contract_suite() {
-        storage_contract_suite(|| {
-            MemStorage::new(Config {
-                id: NodeId(0),
-                peers: vec![NodeId(0)],
-                quorum_system: QuorumSystem::Majority,
-            })
-        });
+        storage_contract_suite(
+            || {
+                MemStorage::new(Config {
+                    id: NodeId(0),
+                    peers: vec![NodeId(0)],
+                    quorum_system: QuorumSystem::Majority,
+                })
+            },
+            // In-memory writes are immediately visible: a reboot is the same
+            // handle.
+            |s| s,
+        );
     }
 }

@@ -512,7 +512,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             ..Config::default()
         };
         let mut instance = 0_u64;
-        paros::storage_contract_suite(|| {
+        let fresh = || {
             instance += 1;
             DurableStorage::restore(
                 config.clone(),
@@ -523,7 +523,23 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 checker.clone(),
                 DemoMode::default(),
             )
-        });
+        };
+        // A reopen is a clean reboot of the same store: drop the handle and
+        // re-restore from the world's durable records under the same key.
+        let reopen = |old: DurableStorage<_>| {
+            let (key, node_id) = (old.key.clone(), old.node_id);
+            drop(old);
+            DurableStorage::restore(
+                config.clone(),
+                Arc::downgrade(&world),
+                key,
+                node_id,
+                faults.clone(),
+                checker.clone(),
+                DemoMode::default(),
+            )
+        };
+        paros::storage_contract_suite(fresh, reopen);
         Ok(())
     }
 }
@@ -2284,8 +2300,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         // detection channels are exercised whether the reaction is a crash or
         // a report (the message strings are Stage 7's, unchanged).
         let _ = self.with_world(|w| {
-            for ((_slot, case), (_, health, _ballot)) in cases.iter().zip(evidence.records.iter())
-            {
+            for ((_slot, case), (_, health, _ballot)) in cases.iter().zip(evidence.records.iter()) {
                 if case.verdict().is_none() {
                     continue;
                 }
@@ -2353,7 +2368,11 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                         // THE MUTATION under demonstration (CTRL §5.1.1's
                         // known-fatal weakening): classify, then withhold —
                         // the acceptor will answer "nothing accepted here".
+                        // The audit still learns the classification (the
+                        // side door), so the surviving red is the protocol
+                        // consequence, not a storage-divergence catch.
                         tracing::info!(node, slot = slot.0, "demo_faulty_as_none");
+                        self.checker.note_reported_faulty(node, slot.0);
                         w.resolve_corruption(
                             node,
                             StorageRecord::Accepted(*slot),

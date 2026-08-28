@@ -288,7 +288,11 @@ impl RawNode {
             if probe.ballot != ballot || probe.answered.contains(&from) {
                 return;
             }
-            let expected = probe.promise_next.get(&from).copied().unwrap_or(probe.from_slot);
+            let expected = probe
+                .promise_next
+                .get(&from)
+                .copied()
+                .unwrap_or(probe.from_slot);
             if !promise_page_shape_valid(expected, accepted, faulty, from_slot, next_from_slot) {
                 return;
             }
@@ -347,11 +351,8 @@ impl RawNode {
             for slot in probe.blocked.clone() {
                 let have = probe.best_have.get(&slot);
                 let threshold = have.map(|(b, _)| *b);
-                let qualifying = qualifying_answers(
-                    &probe.answered,
-                    probe.faulty_reports.get(&slot),
-                    threshold,
-                );
+                let qualifying =
+                    qualifying_answers(&probe.answered, probe.faulty_reports.get(&slot), threshold);
                 if qualifying < quorum {
                     continue;
                 }

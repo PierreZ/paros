@@ -206,6 +206,15 @@ impl AuditWorld {
         !self.lock().lagged.is_empty()
     }
 
+    /// Red-demo side door (faulty-as-none only): record the classification the
+    /// demo deliberately withholds from the protocol, so the *storage*
+    /// divergence legs stay explained and the surviving red is the mutation's
+    /// genuine protocol consequence — a unanimous-looking `none` no-op filling
+    /// a chosen slot.
+    pub(crate) fn note_reported_faulty(&self, node: u64, slot: u64) {
+        self.lock().reported_faulty.insert((node, slot));
+    }
+
     /// Ground-truth feed from the storage world (issue #19 C). A record can
     /// become durable through an *ambiguous* fault leg — the flush happened,
     /// but the driver crashed on the reported error before surfacing it — so
@@ -737,8 +746,8 @@ impl AuditState {
         // Stage 8: a boot replay may step over a rotted record whose effect is
         // already durable in the application state — legal only when every
         // skipped slot was reported faulty by this node (the explained jump).
-        let over_reported = idx > next_now
-            && (next_now..idx).all(|s| self.reported_faulty.contains(&(node, s)));
+        let over_reported =
+            idx > next_now && (next_now..idx).all(|s| self.reported_faulty.contains(&(node, s)));
         let next = self.frontier.entry(node).or_insert(0);
         if idx == *next {
             *next += 1;

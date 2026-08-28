@@ -1557,7 +1557,12 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
         let below_floor = from < node.first_slot();
         node.open_app_repair(from);
         audit.app_repair_started(NodeId(self_id), from, below_floor);
-        tracing::info!(node = self_id, from = from.0, below_floor, "app_repair_started");
+        tracing::info!(
+            node = self_id,
+            from = from.0,
+            below_floor,
+            "app_repair_started"
+        );
     }
     Ok(())
 }

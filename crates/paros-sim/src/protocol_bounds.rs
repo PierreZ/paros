@@ -140,7 +140,7 @@ impl Workload for ProtocolBoundsWorkload {
             entries_seen += accepted.len();
 
             candidate.step(Message::Promise {
-            faulty: std::collections::BTreeMap::new(),
+                faulty: std::collections::BTreeMap::new(),
                 config_id: ConfigId::default(),
                 from,
                 ballot: promised,

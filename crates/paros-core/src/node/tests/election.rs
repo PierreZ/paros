@@ -468,7 +468,7 @@ fn leader_recovery_is_split_across_ready_batches() {
             })
             .collect();
         n.step(Message::Promise {
-        faulty: BTreeMap::new(),
+            faulty: BTreeMap::new(),
             config_id: ConfigId::default(),
             from: NodeId(1),
             ballot: camp,

@@ -36,8 +36,7 @@ mod write;
 pub use message::Message;
 pub use node::{
     LEADER_RECOVERY_BATCH, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS,
-    RawNode, ReadIndexResult,
-    ReadState,
+    RawNode, ReadIndexResult, ReadState,
 };
 pub use ready::Ready;
 pub use state::{Config, HardState, QuorumSystem};

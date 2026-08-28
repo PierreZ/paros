@@ -30,8 +30,8 @@ use paros_sim::{
     amnesia_demo_hunt, budget_off_hunt, chain_smoke, explore_snapshot_recovery,
     explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt,
     run_amnesia_demo_seed, run_budget_off_seed, run_chain_seed, run_faulty_none_demo_seed,
-    run_network_seed, run_protocol_bounds_seed, run_snapshot_recovery_seed,
-    run_truncate_demo_seed, truncate_demo_hunt,
+    run_network_seed, run_protocol_bounds_seed, run_snapshot_recovery_seed, run_truncate_demo_seed,
+    truncate_demo_hunt,
 };
 
 fn main() {

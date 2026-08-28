@@ -65,7 +65,10 @@ fn promise_reports_faulty_tristate_never_none() {
         .expect("a promise was sent");
     let (accepted, faulty) = promise;
     assert!(!accepted.contains_key(&Slot(1)), "faulty is never `have`");
-    assert!(faulty.contains_key(&Slot(1)), "faulty is reported, not `none`");
+    assert!(
+        faulty.contains_key(&Slot(1)),
+        "faulty is reported, not `none`"
+    );
     assert!(accepted.contains_key(&Slot(0)));
     assert!(accepted.contains_key(&Slot(2)));
 }
@@ -98,7 +101,10 @@ fn accept_repairs_a_faulty_slot_in_place() {
         command: ucmd(1, 4, 40),
     };
     n.step(accept);
-    assert!(n.faulty_entries().is_empty(), "the faulty entry was repaired");
+    assert!(
+        n.faulty_entries().is_empty(),
+        "the faulty entry was repaired"
+    );
     assert!(n.accepted().contains_key(&Slot(3)));
     let (repaired, _c1, _c2, _sd, bytes) = n.repair_counters();
     assert_eq!(repaired, 1);
@@ -270,7 +276,10 @@ fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
         entries,
     });
     assert_eq!(n.app_repair(), None, "the repair closed");
-    assert!(n.faulty_entries().is_empty(), "the faulty record was healed");
+    assert!(
+        n.faulty_entries().is_empty(),
+        "the faulty record was healed"
+    );
     let ready = n.ready();
     let committed: Vec<Slot> = ready.committed().iter().map(|(s, _)| *s).collect();
     ready.advance();
