@@ -218,7 +218,11 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 ///   sites (bit flip, lost write, misdirect, snapshot, promise copies,
 ///   fs-metadata, read-`EIO`), their sub-rolls, and the torn-tail sub-roll on
 ///   the fsync lost leg, moving the stream once more. The corpus was
-///   re-verified green against this shift as well.
+///   re-verified green against this shift as well;
+/// - the Stage-8 recovery flip (#21) re-gated the recoverable rot families on
+///   the per-record budget (no more terminal parking), which changes which
+///   slots a seed's rot lands on and therefore each seed's downstream
+///   interleaving. The corpus was re-verified green against this shift too.
 ///
 /// Seed 53 was farmed under the nemesis's slot starvation, which no longer
 /// exists. Seed 11 was found after the executor bump and was a live reproduction
