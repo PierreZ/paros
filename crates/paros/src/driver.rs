@@ -660,8 +660,7 @@ fn send_snapshot_offers<S, H, A>(
     audit: &A,
     snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
     sessions: &[SessionEntry],
-) -> Result<(), RunError>
-where
+) where
     S: NodeStorage,
     H: DriverHooks,
     A: Audit,
@@ -711,7 +710,6 @@ where
             out.transmit(audit, to, &message);
         }
     }
-    Ok(())
 }
 
 /// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names
@@ -1034,7 +1032,7 @@ where
 
     if !snapshot_offers.is_empty() {
         let sessions = node.session_ledger();
-        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions)?;
+        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions);
     }
 
     ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
