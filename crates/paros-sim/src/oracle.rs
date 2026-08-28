@@ -677,7 +677,7 @@ enum ChainStream {
     Snapshot,
     /// `snapshot_reset_for_recovery` — Stage 8: a corrupted application
     /// snapshot was reset, so the node's applied index legally restarts from
-    /// zero (a local log replay, or a wait for a peer InstallSnapshot).
+    /// zero (a local log replay, or a wait for a peer `InstallSnapshot`).
     Reset,
     /// `command_applied` — an ordinary application transition.
     Applied,
