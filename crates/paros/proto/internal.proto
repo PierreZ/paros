@@ -199,12 +199,14 @@ message HeartbeatAck {
 message SnapAck {
   uint64 from = 1;
   uint64 at_index = 2;
+  uint64 config_id = 3;
 }
 
 message SnapChunkRequest {
   uint64 from = 1;
   uint64 at_index = 2;
   repeated uint32 chunks = 3;
+  uint64 config_id = 4;
 }
 
 message SnapChunk {
@@ -216,6 +218,7 @@ message SnapChunkResponse {
   uint64 from = 1;
   uint64 at_index = 2;
   repeated SnapChunk chunks = 3;
+  uint64 config_id = 4;
 }
 
 message InspectRequest {}

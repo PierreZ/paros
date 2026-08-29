@@ -24,10 +24,10 @@ use crate::audit::{AuditWorld, GateScope, NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, ClientId, ClientSeq, Command, Config, ConfigId, CorruptionVerdict, DriverHooks,
-    HardState, IntegrityFault, MemStorage, Message, MetadataFault, MustSync, NodeId, NodeStorage,
-    RecoveryCase, RunError, SNAP_CHUNK_BYTES, Seam, SessionEntry, Slot, SlotRecord, Storage,
-    StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log, command_hash,
-    parse_addr, run_node, snap_chunk_count,
+    DriverTunables, HardState, IntegrityFault, MemStorage, Message, MetadataFault, MustSync,
+    NodeId, NodeStorage, RecoveryCase, RunError, SNAP_CHUNK_BYTES, Seam, SessionEntry, Slot,
+    SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log,
+    command_hash, parse_addr, run_node, snap_chunk_count,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -335,6 +335,9 @@ async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
                 storage,
                 parse_addr(&my_ip)?,
                 members.clone(),
+                // Scripted corpus runs keep the production transport shape:
+                // every perturbation on this axis is a targeted injection.
+                DriverTunables::default(),
                 ctx.shutdown().clone(),
                 &hooks,
                 &audit,
@@ -475,6 +478,52 @@ impl Process for NodeProcess {
         let checker = audit_world(ctx.state());
         let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
 
+        // Driver transport tunables — born workload-buggified (prong 2): the
+        // defaults are production's constants, and an activated seed draws an
+        // extreme. A handful-sized peer queue makes mailbox overflow (the
+        // `dropped_at_mailbox` audit path) likely — a leader recovery page
+        // bursts up to 64 Accepts into it at once — while the extreme's floor
+        // stays at 4 so one tick's steady-state traffic (heartbeat ack +
+        // catch-up request + snap ack + an accepted) still fits: a queue that
+        // cannot hold one tick's worth deterministically starves whichever
+        // class is enqueued last *every* tick, which defeats eventual
+        // synchrony outright (witness seed 8560136109856440322: a capacity-1
+        // queue held each beat's heartbeat ack, so every catch-up request of
+        // a 62-second tail was dropped and the node wedged below a chosen
+        // gap). A one-message delivery batch maximizes framing pressure. Two
+        // independent knob locations; drawn once per node per seed, stable
+        // across this node's restarts.
+        let tunables = if perturb {
+            let defaults = DriverTunables::default();
+            let peer_queue_capacity =
+                buggify_knob!(defaults.peer_queue_capacity, 4_usize..17_usize);
+            // The batch extreme's floor keeps the per-peer throughput ceiling
+            // (~batch / delivery round trip, and an in-sim round trip can
+            // approach a whole tick under load) above the protocol's
+            // steady-state per-peer rate: a one-message batch capped delivery
+            // near 20 msg/s for the entire run — below what a leader's beat +
+            // accepts + commits need — which is a permanent partition in
+            // disguise, and 7/500 seeds wedged without ever converging
+            // (witness seed 4877033065878342564: an n=2 cluster that never
+            // chose a single slot in 67 s). Eight-to-32 still shrinks frames
+            // 2-8x against the default 64 without making the run unwinnable.
+            let delivery_batch = buggify_knob!(defaults.delivery_batch, 8_usize..33_usize);
+            if peer_queue_capacity != defaults.peer_queue_capacity {
+                // BUGGIFY pairing: the capacity extreme genuinely runs.
+                assert_reachable!("a node runs with an extreme peer-queue capacity");
+            }
+            if delivery_batch != defaults.delivery_batch {
+                // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
+                assert_reachable!("a node runs with an extreme delivery batch");
+            }
+            DriverTunables {
+                peer_queue_capacity,
+                delivery_batch,
+            }
+        } else {
+            DriverTunables::default()
+        };
+
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
         // drop the volatile node, rebuild storage from the (surviving) world, and
         // re-run — a faithful clean crash + recovery. Attrition (process kill) is
@@ -522,6 +571,7 @@ impl Process for NodeProcess {
                 storage,
                 parse_addr(&my_ip)?,
                 members.clone(),
+                tunables,
                 ctx.shutdown().clone(),
                 &hooks,
                 &audit,
@@ -574,6 +624,9 @@ impl Process for NodeProcess {
                     assert_reachable!("a storage-fault crash recovers through the restart path");
                     let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
                     if delay_ms > 0 {
+                        // BUGGIFY pairing: the storage-crash restart-delay knob
+                        // fired (the seam-crash twin above has its own gate).
+                        assert_reachable!("a storage-fault crash restarts after a buggified delay");
                         ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
                     }
                 }
@@ -1448,6 +1501,18 @@ impl StorageWorld {
 /// each is gated on [`StorageWorld::may_park`]'s dead-node budget.
 #[allow(clippy::too_many_lines)] // one flat block per independent BUGGIFY location
 fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &AuditWorld) {
+    // Rot density is workload-buggified config (prong 2): one per-boot knob
+    // multiplies every family's *firing* probability toward its extreme (a
+    // seed whose boots rot several families at once), capped so a probability
+    // stays a probability. Only the firing rates scale — the per-record
+    // clean-quorum budget and the budget-off axis semantics are untouched.
+    #[allow(clippy::cast_precision_loss)]
+    let density = buggify_knob!(1_u64, 2_u64..6_u64) as f64;
+    if density > 1.0 {
+        // BUGGIFY pairing: a boot genuinely rolled at the dense extreme.
+        assert_reachable!("storage: a boot rolls rot at buggified density");
+    }
+    let dense = |p: f64| (p * density).min(0.5);
     let clean_slots = |world: &StorageWorld| -> Vec<Slot> {
         world.disks.get(key).map_or_else(Vec::new, |disk| {
             disk.accepted
@@ -1493,7 +1558,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // it faulty and keeps running — so the gate is the per-record budget, not
     // the dead-node budget. Only the identifier-lost sub-case (unidentifiable
     // ⇒ crash) still needs to park, so it also needs the dead-node budget.
-    if buggify_with_prob!(P_ENTRY_ROT) {
+    if buggify_with_prob!(dense(P_ENTRY_ROT)) {
         let slots = clean_slots(world);
         let permitted: Vec<Slot> = slots
             .iter()
@@ -1548,7 +1613,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // A lost write: the entry reads back as its reserved record where the
     // identifier exists (absence made detectable by the reserved-record
     // contract). Identity known ⇒ recoverable ⇒ per-record budget, no park.
-    if buggify_with_prob!(P_LOST_WRITE) {
+    if buggify_with_prob!(dense(P_LOST_WRITE)) {
         let slots = clean_slots(world);
         if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
@@ -1566,7 +1631,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     }
     // A misdirected write: valid checksum, wrong identity — the identity
     // check inside the checksummed region catches it. Recoverable likewise.
-    if buggify_with_prob!(P_MISDIRECT) {
+    if buggify_with_prob!(dense(P_MISDIRECT)) {
         let slots = clean_slots(world);
         if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
@@ -1587,7 +1652,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // recovers it (local log replay at floor 0, a peer's InstallSnapshot
     // otherwise), so no park; a singleton under a truncated log has no peer
     // to recover from, so budget-on skips that one unrecoverable shape.
-    if buggify_with_prob!(P_SNAPSHOT_ROT)
+    if buggify_with_prob!(dense(P_SNAPSHOT_ROT))
         && world
             .disks
             .get(key)
@@ -1606,12 +1671,23 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
             block: false,
             outcome: CorruptionOutcome::Dormant,
         });
+        // Slots this node truncated past lose their local custody: re-derive
+        // the unrecoverable ground truth over the folded prefix (mirrors
+        // `corpus_corrupt_snapshot`; budget-off only — a budget-on run never
+        // permits the shape). Witness seed 3347125089641664560 (budget-off): a
+        // singleton lost its live snapshot AND a chunk of its only decided
+        // point, correctly WAITED forever — and was judged unexplained because
+        // this bookkeeping was missing on the swarm sites.
+        let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
+        for slot in 0..floor {
+            world.note_if_unrecoverable(slot, checker);
+        }
     }
     // HardState copy rot (CTRL metainfo doctrine): usually one copy — used and
     // repaired from its twin, no availability cost — and rarely both, which is
     // the one unrecoverable scalar loss (the node cannot know what it
     // promised, and no peer can tell it).
-    if buggify_with_prob!(P_PROMISE_ROT) && world.disks.contains_key(key) {
+    if buggify_with_prob!(dense(P_PROMISE_ROT)) && world.disks.contains_key(key) {
         let both = sim_random::<f64>() < 0.25;
         if both {
             if world.may_park(key) {
@@ -1658,7 +1734,10 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     }
     // A file-granularity FS-metadata fault: reliably crash, never recover
     // (item E) — the whole store is the record.
-    if buggify_with_prob!(P_META_FAULT) && world.disks.contains_key(key) && world.may_park(key) {
+    if buggify_with_prob!(dense(P_META_FAULT))
+        && world.disks.contains_key(key)
+        && world.may_park(key)
+    {
         let fault = match sim_random::<u64>() % 3 {
             0 => MetadataFault::Missing,
             1 => MetadataFault::WrongSize,
@@ -1682,7 +1761,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // byte-identical cluster-wide, so any peer can serve the chunk back. The
     // budget keeps a clean quorum of each chunk across the holders of the
     // same point (budget-off lifts it, like every other family).
-    if buggify_with_prob!(P_SNAP_CHUNK_ROT)
+    if buggify_with_prob!(dense(P_SNAP_CHUNK_ROT))
         && let Some((at, state)) = world.disks.get(key).and_then(|d| d.snap_point)
     {
         let chunks = snap_chunk_count(state.encode().len());
@@ -1717,6 +1796,14 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                         block: false,
                         outcome: CorruptionOutcome::Dormant,
                     });
+                    // The point is custody for the folded prefix: losing its
+                    // last clean copy of a chunk can strand every slot below
+                    // the floor. Re-derive the unrecoverable ground truth
+                    // (mirrors `corpus_corrupt_snap_chunk`; budget-off only).
+                    let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
+                    for slot in 0..floor {
+                        world.note_if_unrecoverable(slot, checker);
+                    }
                 }
             }
         }
@@ -1724,7 +1811,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // A transient EIO on the read path: collapses into the corruption channel
     // (one detection path), crashes the node once, and the retry — the next
     // boot — reads clean. The only Stage-7 family with no availability cost.
-    if buggify_with_prob!(P_READ_EIO) && world.disks.contains_key(key) {
+    if buggify_with_prob!(dense(P_READ_EIO)) && world.disks.contains_key(key) {
         let record = world
             .disks
             .get(key)
@@ -3284,6 +3371,11 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 Seam::BeforeSync => buggify_with_prob!(prob),
                 Seam::AfterSyncBeforeSend => buggify_with_prob!(prob),
                 Seam::AfterApplyBeforeSync => buggify_with_prob!(prob),
+                // The chunk-repair pipeline's two durability points (the only
+                // durable writes outside the Ready seam machinery), each its
+                // own independently selectable location.
+                Seam::BeforeChunkSync => buggify_with_prob!(prob),
+                Seam::AfterChunkRestoreBeforeSync => buggify_with_prob!(prob),
             };
         if fired && self.seam_crash_bias > 1.0 {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
@@ -3303,6 +3395,41 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
 
     fn shortest_election_timeout(&self) -> bool {
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn longest_election_timeout(&self) -> bool {
+        // Only consulted when the shortest hook stayed quiet, so the two
+        // jitter extremes are independent locations that never both apply.
+        let fired = self.active() && buggify_with_prob!(0.5);
+        if fired {
+            // BUGGIFY pairing: the high jitter extreme genuinely fires (the
+            // audit's `election_timeout_extreme` reach gate belongs to the
+            // shortest extreme).
+            assert_reachable!("the driver selects the longest valid election timeout");
+        }
+        fired
+    }
+
+    fn skip_snap_advertisement(&self) -> bool {
+        // Consulted only when an advertisement is due; skipping loses one
+        // custody beat toward the leader's truncation-coupling tally.
+        let fired = self.active() && buggify_with_prob!(0.5);
+        if fired {
+            // BUGGIFY pairing: the advertisement-pacing location fires.
+            assert_reachable!("the driver skips a snapshot custody advertisement");
+        }
+        fired
+    }
+
+    fn skip_chunk_pull(&self) -> bool {
+        // Consulted only when rotted chunks are pending; skipping delays the
+        // repair one beat and stretches the faulty window.
+        let fired = self.active() && buggify_with_prob!(0.5);
+        if fired {
+            // BUGGIFY pairing: the chunk-pull pacing location fires.
+            assert_reachable!("the driver skips a chunk-repair pull beat");
+        }
+        fired
     }
 
     fn drop_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
@@ -3339,6 +3466,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
                 buggify_with_prob!(0.10)
             }
+            // The pull direction of catch-up: a lost request starves the
+            // lagging node one beat; the next tick re-asks.
+            Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
+            // The snap-repair plane, one location per kind: a lost custody
+            // ack delays the leader's truncation-coupling tally; a lost chunk
+            // request/response stretches the faulty-chunk window one beat.
+            Message::SnapAck { .. } => buggify_with_prob!(0.10),
+            Message::SnapChunkRequest { .. } => buggify_with_prob!(0.10),
+            Message::SnapChunkResponse { .. } => buggify_with_prob!(0.10),
+            // Aggressive like the Nack location. Inert today — `CheckLeader`
+            // is a tick-injected self-event that never crosses the transport —
+            // but armed so a future remote leader probe is born chaos-covered.
+            Message::CheckLeader { .. } => buggify_with_prob!(0.25),
             _ => false,
         }
     }
@@ -3360,6 +3500,15 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
                 buggify_with_prob!(0.10)
             }
+            // A duplicated catch-up request must only cost a redundant reply.
+            Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
+            // The snap-repair plane must stay idempotent: the leader's custody
+            // tally is a set, and a re-delivered chunk response finds its
+            // chunks no longer pending. One location per kind keeps the two
+            // idempotency claims independently selectable.
+            Message::SnapAck { .. } => buggify_with_prob!(0.10),
+            Message::SnapChunkRequest { .. } => buggify_with_prob!(0.10),
+            Message::SnapChunkResponse { .. } => buggify_with_prob!(0.10),
             _ => false,
         }
     }

@@ -140,6 +140,17 @@ pub const SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS: usize = 32;
 /// Tiny cap for the deterministic protocol-bounds choreography. Every root
 /// drives the complete three-page suffix and 64/64/2 Ready sequence.
 pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
+/// Cap for the budget-off (WAITED-leg) exploration axis registered in the CI
+/// campaign. Its `GateScope::BudgetOff` pair — a repair from a surviving clean
+/// copy AND a correct WAIT at an unrecoverable committed item — must both
+/// fire; the adaptive sweep stops as soon as coverage plateaus.
+pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 128;
+/// Seeded-mask volume for the #113 E1 evaluation corpus in the CI campaign.
+/// Scripted and fast per seed; enough draws from the 512-mask space that both
+/// corpus gates (recoverable-converges and unrecoverable-waits) fire.
+pub const CORPUS_CI_ITERATIONS: usize = 64;
+/// Seeded-mask volume for the #101 per-chunk corpus in the CI campaign.
+pub const CHUNK_CORPUS_CI_ITERATIONS: usize = 32;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 /// Eight is enough to drive real branches while keeping the sancov gate suitable
 /// for CI; Moonpool stops earlier when a root discovers no new frontier.
@@ -870,16 +881,22 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// value is ever chosen for a slot").
 ///
 /// Re-hunted again when the boot read-back gained the completeness assert
-/// ("every retained slot below the chosen prefix has a durable record"): the
-/// previous witness `12343285557404141340` now dies at boot — its withheld
-/// record leaves a hole *below* the chosen prefix, which the core refuses
-/// before the misreport can reach a Promise (see
-/// `faulty_as_none_below_prefix_dies_at_boot`, which pins that fate). The
+/// ("every retained slot below the chosen prefix has a durable record") and
+/// the randomness expansion landed (repair-plane drop/duplicate locations,
+/// chunk-repair crash seams, pacing and longest-timeout hooks, transport
+/// tunable knobs, and the rot-density knob all move the seed schedule). The
+/// completeness assert retired the below-prefix flavor of the witness for
+/// good: a withheld record whose hole lands *below* the chosen prefix now
+/// dies at boot before the misreport can reach a Promise (see
+/// `faulty_as_none_below_prefix_dies_at_boot`, which pins that fate), so the
 /// mutation's fatal consequence needs the hole *above* the chosen prefix
 /// (accepted but not yet chosen), where no single node can tell the record
-/// ever existed. A fresh 2,000-seed hunt returned 2 reds, both carrying the
-/// pure agreement violation; this one's cascade is the richer trace.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 2_237_311_295_790_817_120;
+/// ever existed. On the combined stream the prior witnesses
+/// (`12343285557404141340`, `2237311295790817120`) replay green; a fresh
+/// 2,000-seed hunt returned 4 reds, of which this seed's red carries the
+/// pure agreement violation ("at most one value is ever chosen for a slot")
+/// with its full decided-value and one-state-per-index cascade.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 1_209_198_120_647_599_430;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).

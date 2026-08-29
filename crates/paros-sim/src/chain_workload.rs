@@ -12,8 +12,8 @@ use moonpool_sim::{
     buggify_knob, buggify_with_prob, sim::config_random_f64, swarm_op_enabled,
 };
 use paros::{
-    Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Slot,
-    parse_addr, proposal_checksum,
+    Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
+    Slot, parse_addr, proposal_checksum,
 };
 
 use crate::CHAOS_DURATION_MS;
@@ -28,7 +28,10 @@ const PAUSE: u8 = 4;
 const DUP_REPROPOSE: u8 = 5;
 const DUAL_SUBMIT: u8 = 6;
 const COMPACT_STORM: u8 = 7;
-const OP_COUNT: u8 = 8;
+/// The PUBLIC read-index RPC (the driver's leadership-confirmed linearizable
+/// read), as opposed to [`READ_STATE`]'s internal inspect probe.
+const READ_INDEX: u8 = 8;
+const OP_COUNT: u8 = 9;
 
 const EV_APPLIED: &str = "command_applied";
 
@@ -90,10 +93,10 @@ impl WeightProfile {
 
     fn weight(self, operation: u8) -> u64 {
         let weights = match self {
-            // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM
-            Self::ReadHeavy => [10, 5, 4, 52, 12, 5, 5, 7],
-            Self::WriteHeavy => [30, 12, 8, 8, 4, 14, 14, 10],
-            Self::Mixed => [20, 10, 9, 16, 10, 11, 11, 13],
+            // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX
+            Self::ReadHeavy => [10, 5, 4, 52, 12, 5, 5, 7, 14],
+            Self::WriteHeavy => [30, 12, 8, 8, 4, 14, 14, 10, 6],
+            Self::Mixed => [20, 10, 9, 16, 10, 11, 11, 13, 10],
         };
         weights[usize::from(operation)]
     }
@@ -135,13 +138,19 @@ struct AckedCommand {
     node: usize,
 }
 
+/// Sticky per-run coverage facts for the adversarial operations — a *flag
+/// set*, not a state machine: one independent bit per gate, each flipped once
+/// at its own transition (the `crate::audit` flag-set waiver).
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct AdversarialCoverage {
     duplicate_reproposed: bool,
     duplicate_across_leader_change: bool,
     dual_submitted: bool,
     compact_storm_modes: [bool; 3],
     payload_classes: [bool; 4],
+    read_index_executed: bool,
+    read_index_committed: bool,
 }
 
 struct OnDrop<F: FnOnce()> {
@@ -332,6 +341,12 @@ impl Workload for ChainWorkload {
         let mut successful_after_ambiguity = false;
         let mut live_states = BTreeMap::<u64, u64>::new();
         let mut acked_commands = Vec::<AckedCommand>::new();
+        // The highest read-index watermark this client has observed committed
+        // (`None` is the empty applied prefix, ordered below `Some(0)`). This
+        // client runs one operation at a time, so a later committed read
+        // starts after an earlier one completed: linearizability demands its
+        // watermark never move backwards.
+        let mut last_read_frontier: Option<u64> = None;
 
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
             let mut client = public_clients[target].clone();
@@ -601,6 +616,11 @@ impl Workload for ChainWorkload {
                     // is retried below.
                     let abandon = time.now() < Duration::from_millis(CHAOS_DURATION_MS)
                         && buggify_with_prob!(0.15);
+                    if abandon {
+                        // BUGGIFY pairing: the deliberate mid-flight
+                        // abandonment (the honest-ambiguity generator) fires.
+                        assert_reachable!("chain: a client abandons an in-flight observation");
+                    }
                     let proposal_deadline =
                         time.now() + Duration::from_millis(config.request_timeout_ms);
                     let mut attempt_target = chosen_target;
@@ -1049,6 +1069,98 @@ impl Workload for ChainWorkload {
                         }
                     }
                 }
+                READ_INDEX => {
+                    // The public linearizable read: the driver captures the
+                    // leader's applied watermark, confirms leadership with a
+                    // heartbeat-ack quorum round, and only then answers. A
+                    // timeout is Ambiguous — nothing is recorded or assumed.
+                    let seq = next_seq;
+                    next_seq = next_seq.saturating_add(1);
+                    if !self.adversarial.read_index_executed {
+                        assert_reachable!("chain: read-index operation executes");
+                        self.adversarial.read_index_executed = true;
+                    }
+                    let read_deadline =
+                        time.now() + Duration::from_millis(config.request_timeout_ms);
+                    let mut attempt_target = leader_hint.unwrap_or(target) % server_count;
+                    let outcome = loop {
+                        let remaining = read_deadline.saturating_sub(time.now());
+                        if remaining.is_zero() || shutdown.is_cancelled() {
+                            break None;
+                        }
+                        let mut client = public_clients[attempt_target].clone();
+                        let attempt = moonpool_sim::select! {
+                            response = client.read(Read { client: client_id, seq }) =>
+                                response.ok().map(tonic::Response::into_inner),
+                            _ = time.sleep(remaining) => None,
+                            () = shutdown.cancelled() => None,
+                        };
+                        match attempt {
+                            Some(ack) => {
+                                assert_always!(
+                                    ack.seq == seq,
+                                    "chain: read-index ack echoes request"
+                                );
+                                if ack.committed {
+                                    break Some(ack.read_index);
+                                }
+                                // Redirect: retry the hinted leader (or the
+                                // next node) inside the same deadline.
+                                attempt_target = ack
+                                    .leader
+                                    .and_then(|id| usize::try_from(id).ok())
+                                    .filter(|node| *node < server_count)
+                                    .unwrap_or((attempt_target + 1) % server_count);
+                            }
+                            // Transport error: try the next node.
+                            None => attempt_target = (attempt_target + 1) % server_count,
+                        }
+                        if time.sleep(Duration::from_millis(10)).await.is_err() {
+                            break None;
+                        }
+                    };
+                    if let Some(watermark) = outcome {
+                        tracing::info!(
+                            client_id,
+                            seq_id = seq,
+                            read_index = watermark
+                                .map_or(-1_i64, |wm| { i64::try_from(wm).unwrap_or(i64::MAX) }),
+                            "chain_read_index_acked"
+                        );
+                        // Per-client monotonicity: this client's committed
+                        // reads never observe a shrinking applied frontier.
+                        assert_always!(
+                            watermark >= last_read_frontier,
+                            "chain: a client's read-index watermarks never move backwards",
+                            {
+                                "previous" => last_read_frontier
+                                    .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
+                                "observed" => watermark
+                                    .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
+                            }
+                        );
+                        last_read_frontier = last_read_frontier.max(watermark);
+                        // Read-your-writes: every write this client saw acked
+                        // completed before this read began, so the confirmed
+                        // frontier must cover the highest acked slot.
+                        if let Some(acked) = max_acked_slot {
+                            assert_always!(
+                                watermark.is_some_and(|wm| wm >= acked),
+                                "chain: a read-index ack covers the client's acked writes",
+                                {
+                                    "max_acked_slot" => acked,
+                                    "observed" => watermark
+                                        .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
+                                }
+                            );
+                        }
+                        self.adversarial.read_index_committed = true;
+                    } else {
+                        // Ambiguous per convention: a timed-out read carries
+                        // no constraint and is never assumed to have missed.
+                        tracing::info!(client_id, seq_id = seq, "chain_read_index_ambiguous");
+                    }
+                }
                 READ_STATE => {
                     let mut client = internal_clients[target].clone();
                     if let Some(state) = moonpool_sim::select! {
@@ -1133,6 +1245,10 @@ impl Workload for ChainWorkload {
             assert_sometimes!(
                 self.adversarial.payload_classes[3],
                 "chain: a large payload is acknowledged"
+            );
+            assert_sometimes!(
+                self.adversarial.read_index_committed,
+                "chain: a committed read-index observes the applied frontier"
             );
         }
 
@@ -1337,10 +1453,17 @@ impl Workload for ChainWorkload {
         // *explainable* by the injected faults (a quorum of clean copies
         // genuinely missing). Under the per-record budget no run is excusable,
         // so an unavailable run with clean quorums everywhere is a real
-        // liveness bug, named as such beside the convergence failure.
+        // liveness bug, named as such beside the convergence failure. On the
+        // budget-off axis the WAITED ground truth is an equally honest
+        // explanation: a committed item with no readable copy anywhere holds
+        // the cluster correctly unavailable without ever marking an
+        // accepted-record quorum (snapshot + chunk rot strand the folded
+        // prefix — witness seed 3347125089641664560).
         let storage = crate::node::storage_fault_stats(ctx.state());
+        let waited_unrecoverable =
+            self.budget_off && !crate::node::unrecoverable_slots(ctx.state()).is_empty();
         assert_always!(
-            converged || !storage.clean_quorum_everywhere,
+            converged || !storage.clean_quorum_everywhere || waited_unrecoverable,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster

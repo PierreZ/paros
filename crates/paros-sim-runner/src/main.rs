@@ -3,10 +3,11 @@
 //! visualization timeline for the browser contract.
 
 use paros_sim::{
-    AssertKind, COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome,
-    PROTOCOL_BOUNDS_COVERAGE_ITERATIONS, SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport,
-    explore, explore_network_safety, explore_protocol_bounds, explore_snapshot_recovery, run_seed,
-    run_seed_json,
+    AssertKind, BUDGET_OFF_COVERAGE_ITERATIONS, CHUNK_CORPUS_CI_ITERATIONS, CORPUS_CI_ITERATIONS,
+    COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome, PROTOCOL_BOUNDS_COVERAGE_ITERATIONS,
+    SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport, chunk_corpus_hunt, corpus_hunt,
+    explore, explore_budget_off, explore_network_safety, explore_protocol_bounds,
+    explore_snapshot_recovery, run_seed, run_seed_json,
 };
 
 fn main() {
@@ -88,6 +89,8 @@ fn main() {
     run_protocol_bounds_axis();
     run_snapshot_recovery_axis();
     run_network_axis();
+    run_budget_off_axis();
+    run_corpus_axes();
 
     // 3. A single seed, with its full message timeline for eyeballing.
     println!("\n--- single seed timeline ---");
@@ -200,6 +203,94 @@ fn print_guidance(report: &SimulationReport) {
             bucket.msg, bucket.buckets_discovered, bucket.total_hits,
         );
     }
+}
+
+/// The budget-off (WAITED-leg) exploration axis: the main campaign's chaos with
+/// the per-record corruption budget lifted, so every copy of a committed item
+/// can rot in one run. Its `GateScope::BudgetOff` coverage pair — repair from a
+/// surviving clean copy AND a correct WAIT — saturates only here, so the axis
+/// must run in the registered campaign, not just the manual hunt binary.
+fn run_budget_off_axis() {
+    println!("\n--- Chain budget-off (WAITED-leg) axis ---");
+    let budget = explore_budget_off(BUDGET_OFF_COVERAGE_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed; convergence_timeout={}",
+        budget.iterations, budget.successful_runs, budget.failed_runs, budget.convergence_timeout,
+    );
+    if let Some(s) = &budget.saturation {
+        println!(
+            "  signal {:?}: {}/{} reachability fired, plateau {}",
+            s.signal, s.sometimes_hit, s.sometimes_total, s.plateau_seeds,
+        );
+    }
+    if !budget.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &budget.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !budget.assertion_violations.is_empty()
+        || budget.failed_runs > 0
+        || !budget.coverage_violations.is_empty()
+        || budget.convergence_timeout
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", budget.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", budget.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", budget.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Budget-off safety, WAITED, and repaired gates are green");
+}
+
+/// The two scripted evaluation corpora (#113 E1 masks, #101 chunk masks):
+/// seeded-mask sampling with the Stage-8 gates armed. Fast per seed — every
+/// fault is a targeted injection, not swarm chaos.
+fn run_corpus_axes() {
+    println!("\n--- CTRL E1 mask corpus axis ---");
+    let corpus = corpus_hunt(CORPUS_CI_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed",
+        corpus.iterations, corpus.successful_runs, corpus.failed_runs,
+    );
+    if !corpus.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &corpus.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !corpus.assertion_violations.is_empty()
+        || corpus.failed_runs > 0
+        || !corpus.coverage_violations.is_empty()
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", corpus.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", corpus.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", corpus.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  E1 mask corpus gate is green");
+
+    println!("\n--- CTRL chunk mask corpus axis ---");
+    let chunks = chunk_corpus_hunt(CHUNK_CORPUS_CI_ITERATIONS);
+    println!(
+        "{} seeds: {} ok, {} failed",
+        chunks.iterations, chunks.successful_runs, chunks.failed_runs,
+    );
+    if !chunks.coverage_violations.is_empty() {
+        println!("  coverage gates that never fired:");
+        for gate in &chunks.coverage_violations {
+            println!("    - {gate}");
+        }
+    }
+    if !chunks.assertion_violations.is_empty()
+        || chunks.failed_runs > 0
+        || !chunks.coverage_violations.is_empty()
+    {
+        println!("  SAFETY VIOLATIONS: {:?}", chunks.assertion_violations);
+        println!("  COVERAGE VIOLATIONS: {:?}", chunks.coverage_violations);
+        println!("  FAILING SEEDS: {:?}", chunks.seeds_failing);
+        std::process::exit(1);
+    }
+    println!("  Chunk mask corpus gate is green");
 }
 
 /// Network faults persist past Moonpool's cutoff in the pinned revision, so

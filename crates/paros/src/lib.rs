@@ -23,12 +23,13 @@ pub use corruption::{
     classify_log, decide,
 };
 pub use driver::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED,
-    EV_CRASHED, EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_LEADER,
-    EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_PERSIST,
-    EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED, EV_RESEND_SKIPPED,
-    EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED, EV_SNAPSHOT_MID_ELECTION,
-    EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError, command_hash, parse_addr, run_node,
+    DriverTunables, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED,
+    EV_COMPACTED, EV_CRASHED, EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED,
+    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED,
+    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
+    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError,
+    command_hash, parse_addr, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
@@ -173,6 +174,25 @@ mod tests {
                 from: NodeId(1),
                 ballot,
                 seq: 9,
+            },
+            // The driver-terminal snap-repair trio carries the configuration
+            // identity too (guarded by the driver on receipt, never asserted).
+            Message::SnapAck {
+                config_id,
+                from: NodeId(2),
+                at_index: Slot(4),
+            },
+            Message::SnapChunkRequest {
+                config_id,
+                from: NodeId(1),
+                at_index: Slot(4),
+                chunks: vec![0, 3],
+            },
+            Message::SnapChunkResponse {
+                config_id,
+                from: NodeId(0),
+                at_index: Slot(4),
+                chunks: vec![(0, Value(vec![1, 2])), (3, Value(vec![]))],
             },
         ]
     }

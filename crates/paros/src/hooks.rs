@@ -27,6 +27,19 @@ pub enum Seam {
     /// the state the boot replay's idempotent re-apply exists to heal, and the
     /// only durability seam process-level attrition cannot reach.
     AfterApplyBeforeSync,
+    /// Inside the chunk-repair pipeline: repaired snapshot chunks from a peer
+    /// are written but **before** their fsync. A crash here may lose any
+    /// staged, un-synced installs (a store with atomic per-chunk replace keeps
+    /// them); either way the reboot's scan re-derives the truth — still-faulty
+    /// chunks re-arm the per-tick pull, and a whole-but-unrestored point falls
+    /// back to the ordinary below-floor recovery path.
+    BeforeChunkSync,
+    /// Inside the chunk-repair pipeline: the now-whole snapshot point has been
+    /// restored into the application (staged) but **before** the restore's
+    /// fsync. A crash here loses the staged restore while keeping the durable,
+    /// fully clean chunks; the reboot lands below the floor again and recovers
+    /// through the ordinary peer `InstallSnapshot` path instead.
+    AfterChunkRestoreBeforeSync,
 }
 
 /// A client-facing reply the driver is about to send.
@@ -64,6 +77,29 @@ pub trait DriverHooks {
 
     /// Whether the next election timeout should use the shortest valid value.
     fn shortest_election_timeout(&self) -> bool {
+        false
+    }
+
+    /// Whether the next election timeout should use the **longest** valid
+    /// value — the other jitter extreme. Consulted only when
+    /// [`DriverHooks::shortest_election_timeout`] did not fire, so the two
+    /// extremes stay independent locations and never both apply to one draw.
+    fn longest_election_timeout(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip this beat's snapshot-custody advertisement
+    /// (`SnapAck` toward the leader). Always safe: the advertisement is
+    /// re-sent every tick, so a skipped beat only delays the leader's
+    /// truncation-coupling tally.
+    fn skip_snap_advertisement(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip this beat's chunk-repair pull (`SnapChunkRequest`
+    /// toward the peers). Always safe: the pull is re-issued every tick while
+    /// rotted chunks remain, so a skipped beat only delays the repair.
+    fn skip_chunk_pull(&self) -> bool {
         false
     }
 

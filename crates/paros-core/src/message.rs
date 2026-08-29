@@ -202,6 +202,11 @@ pub enum Message {
     /// it end to end; [`crate::RawNode::step`] ignores it — consensus state
     /// never depends on snapshot custody.
     SnapAck {
+        /// Durable cluster configuration identity. Snap repair is
+        /// driver-terminal, so the *driver* guards a mismatch on receipt
+        /// (ignore, never assert — wire input); the core never steps it.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// The acknowledging node.
         from: NodeId,
         /// The decided snapshot point recorded (the `Snap` marker's slot).
@@ -212,6 +217,10 @@ pub enum Message {
     /// identity (the `Snap` marker) is what makes the answer verifiable.
     /// Driver-terminal, like [`Message::SnapAck`].
     SnapChunkRequest {
+        /// Durable cluster configuration identity (driver-guarded on receipt,
+        /// like [`Message::SnapAck`]).
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// The requesting node.
         from: NodeId,
         /// The decided snapshot point whose chunks are needed.
@@ -226,6 +235,10 @@ pub enum Message {
     /// [`Message::InstallSnapshot`] instead (the unchanged fallback).
     /// Driver-terminal, like [`Message::SnapAck`].
     SnapChunkResponse {
+        /// Durable cluster configuration identity (driver-guarded on receipt,
+        /// like [`Message::SnapAck`]).
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
         /// The serving peer.
         from: NodeId,
         /// The decided snapshot point the chunks belong to.
@@ -289,8 +302,10 @@ pub enum Message {
 
 impl Message {
     /// Return the durable configuration identity carried by a ballot-bearing
-    /// protocol message. Local triggers and configuration-neutral catch-up
-    /// requests/responses carry no identity.
+    /// protocol message or by the driver-terminal snapshot-repair kinds (whose
+    /// mismatches the *driver* guards on receipt — the core never asserts on
+    /// them because it never processes them). Local triggers and
+    /// configuration-neutral catch-up requests/responses carry no identity.
     #[must_use]
     pub fn config_id(&self) -> Option<ConfigId> {
         match self {
@@ -302,13 +317,13 @@ impl Message {
             | Self::Commit { config_id, .. }
             | Self::InstallSnapshot { config_id, .. }
             | Self::Heartbeat { config_id, .. }
-            | Self::HeartbeatAck { config_id, .. } => Some(*config_id),
+            | Self::HeartbeatAck { config_id, .. }
+            | Self::SnapAck { config_id, .. }
+            | Self::SnapChunkRequest { config_id, .. }
+            | Self::SnapChunkResponse { config_id, .. } => Some(*config_id),
             Self::CatchUpRequest { .. }
             | Self::CatchUpResponse { .. }
-            | Self::CheckLeader { .. }
-            | Self::SnapAck { .. }
-            | Self::SnapChunkRequest { .. }
-            | Self::SnapChunkResponse { .. } => None,
+            | Self::CheckLeader { .. } => None,
         }
     }
 }

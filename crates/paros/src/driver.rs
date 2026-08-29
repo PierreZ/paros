@@ -60,6 +60,34 @@ const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
 /// a chatty heartbeat/catch-up round from creating one h2 frame per message.
 const GRPC_DELIVERY_BATCH: usize = 64;
 
+/// Per-node driver transport tunables — **born workload-buggified config**
+/// (AGENTS.md prong 2): plain data the harness layer randomizes per seed, FDB
+/// knob style, while production takes [`DriverTunables::default()`] and is
+/// bit-identical to the old constants. Both values must be at least 1 (a
+/// zero-capacity mpsc channel panics at construction).
+#[derive(Clone, Copy, Debug)]
+pub struct DriverTunables {
+    /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this
+    /// is deliberately bounded and lossy: the consensus driver never waits for
+    /// network I/O, and current heartbeats/resends repair anything dropped
+    /// here. The extreme (a handful of slots) makes mailbox overflow —
+    /// [`Audit::dropped_at_mailbox`] — a likely event instead of a rare one.
+    pub peer_queue_capacity: usize,
+    /// Maximum Paxos messages packed into one protobuf/gRPC request. The
+    /// extreme (one per request) maximizes h2 framing pressure and the
+    /// batcher's keep-the-newest overflow shedding.
+    pub delivery_batch: usize,
+}
+
+impl Default for DriverTunables {
+    fn default() -> Self {
+        Self {
+            peer_queue_capacity: GRPC_PEER_QUEUE_CAPACITY,
+            delivery_batch: GRPC_DELIVERY_BATCH,
+        }
+    }
+}
+
 /// Run one synchronous cleanup action on every exit path from its scope.
 struct OnDrop<F: FnOnce()> {
     action: Option<F>,
@@ -144,10 +172,11 @@ pub const EV_RECOVERED: &str = "recovered";
 pub const EV_BOOTED: &str = "booted";
 
 /// Tracing event: this node crashed at a durability seam inside a `Ready` batch
-/// (a `buggify`-injected [`Seam`] crash). Carries `node` and `seam`
-/// (`"before_sync"` — the whole un-synced batch is lost — or
+/// or the chunk-repair pipeline (a `buggify`-injected [`Seam`] crash). Carries
+/// `node` and `seam` (`"before_sync"` — the whole un-synced batch is lost —
 /// `"after_sync_before_send"` — the writes are durable but the batch's messages
-/// never left). After-sync events also carry `snapshot_offers`, the number of
+/// never left — `"after_apply_before_sync"`, `"before_chunk_sync"`, or
+/// `"after_chunk_restore_before_sync"`). After-sync events also carry `snapshot_offers`, the number of
 /// snapshot transfers dropped with the batch. Provider-generic but inert in production, where
 /// [`NoHooks`](crate::NoHooks) never fires. Purely observational; the crash
 /// animation reads it to mark the persist/send seam a node died on.
@@ -536,6 +565,7 @@ fn handle_snap_chunk_request<S, H, A>(
                     vec![(
                         to,
                         Message::SnapChunkResponse {
+                            config_id: node.hard_state().config_id,
                             from: me,
                             at_index: at,
                             chunks: served,
@@ -589,10 +619,14 @@ fn handle_snap_chunk_request<S, H, A>(
 /// — once the point is whole again — restore the application from it if the
 /// live state was lost below the floor (re-pointing the core's repair pump at
 /// the floor so the retained suffix re-emits in order).
-fn handle_snap_chunk_response<S, A>(
+// The repair layer's full context is exactly these handles (see
+// `handle_snap_chunk_request`); bundling them would only rename them.
+#[allow(clippy::too_many_arguments)]
+fn handle_snap_chunk_response<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
     snap: &mut SnapRepair,
+    hooks: &H,
     audit: &A,
     self_id: u64,
     at: Slot,
@@ -600,6 +634,7 @@ fn handle_snap_chunk_response<S, A>(
 ) -> Result<(), RunError>
 where
     S: NodeStorage,
+    H: DriverHooks,
     A: Audit,
 {
     let Some(pending) = snap.pending.get_mut(&at.0) else {
@@ -626,6 +661,15 @@ where
     if complete {
         snap.pending.remove(&at.0);
     }
+    // Crash seam: the repaired chunks are staged but not yet flushed — the
+    // only durable-write pipeline outside `drain_ready`'s seam machinery. A
+    // crash here loses the staged installs whole; the reboot's scan still
+    // reports the chunks faulty and the per-tick pull re-runs the repair.
+    if hooks.crash_at(Seam::BeforeChunkSync) {
+        audit.crashed(NodeId(self_id), Seam::BeforeChunkSync);
+        tracing::info!(node = self_id, seam = "before_chunk_sync", "crashed");
+        return Err(RunError::SeamCrash(Seam::BeforeChunkSync));
+    }
     // Flush the chunk installs durably before reporting them (and before the
     // restore below stages the recovered application state).
     storage
@@ -648,6 +692,19 @@ where
             .restore_from_snap_point()
             .map_err(|e| storage_fault_crash(audit, self_id, e))?
     {
+        // Crash seam: the application restore is staged (the chunks above are
+        // already durable) but its fsync has not happened. A crash here loses
+        // the staged restore only; the reboot lands below the floor with a
+        // clean point and recovers through a peer's `InstallSnapshot` instead.
+        if hooks.crash_at(Seam::AfterChunkRestoreBeforeSync) {
+            audit.crashed(NodeId(self_id), Seam::AfterChunkRestoreBeforeSync);
+            tracing::info!(
+                node = self_id,
+                seam = "after_chunk_restore_before_sync",
+                "crashed"
+            );
+            return Err(RunError::SeamCrash(Seam::AfterChunkRestoreBeforeSync));
+        }
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
@@ -686,7 +743,10 @@ fn snap_repair_tick<S, H, A>(
         if let Some(point) = latest {
             snap.acks.entry(point.0).or_default().insert(out.self_id);
         }
-        let quorum = node.config().peers.len() / 2 + 1;
+        let quorum = node
+            .config()
+            .quorum_system
+            .quorum_size(node.config().peers.len());
         if let Some(marker) = snap.marker_pending
             && snap
                 .acks
@@ -700,18 +760,26 @@ fn snap_repair_tick<S, H, A>(
         if let (Some(point), Some(leader)) = (latest, node.leader())
             && leader != me
         {
-            send_messages(
-                out,
-                hooks,
-                audit,
-                vec![(
-                    leader,
-                    Message::SnapAck {
-                        from: me,
-                        at_index: point,
-                    },
-                )],
-            );
+            // The advertisement is due: consult the pacing hook only now, when
+            // skipping has an observable effect (a lost beat of the leader's
+            // custody tally, re-sent next tick).
+            if hooks.skip_snap_advertisement() {
+                tracing::info!(node = out.self_id, "snap_advertisement_skipped");
+            } else {
+                send_messages(
+                    out,
+                    hooks,
+                    audit,
+                    vec![(
+                        leader,
+                        Message::SnapAck {
+                            config_id: node.hard_state().config_id,
+                            from: me,
+                            at_index: point,
+                        },
+                    )],
+                );
+            }
         }
     }
     // The chunk pull: once per tick, ask every peer for the still-missing
@@ -720,6 +788,12 @@ fn snap_repair_tick<S, H, A>(
     snap.pending
         .retain(|at, chunks| latest == Some(Slot(*at)) && !chunks.is_empty());
     if let Some((&at, chunks)) = snap.pending.iter().next() {
+        // The pull is due: consult the pacing hook only now (skipping delays
+        // the repair one beat; the pull re-issues every tick it is due).
+        if hooks.skip_chunk_pull() {
+            tracing::info!(node = out.self_id, "chunk_pull_skipped");
+            return;
+        }
         let wanted: Vec<u32> = chunks.iter().copied().collect();
         let requests: Vec<(NodeId, Message)> = node
             .config()
@@ -730,6 +804,7 @@ fn snap_repair_tick<S, H, A>(
                 (
                     *peer,
                     Message::SnapChunkRequest {
+                        config_id: node.hard_state().config_id,
                         from: me,
                         at_index: Slot(at),
                         chunks: wanted.clone(),
@@ -881,11 +956,16 @@ fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
 /// Feed bounded unary batches over one reconnecting h2 channel per peer. While
 /// a batch is in flight, new protocol messages accumulate for the next batch;
 /// on failure Paxos heartbeats/resends repair anything lost with that RPC.
+// The parameters are one delivery lane's complete wiring (client, clocks,
+// lifecycle, queue, batch shape, and the audit identity for drop reports);
+// a bundle would only rename the same eight things.
+#[allow(clippy::too_many_arguments)]
 async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
     mut messages: tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    batch_limit: usize,
     audit: A,
     self_id: u64,
     to: NodeId,
@@ -907,7 +987,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
             }
         };
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &mut messages, &audit, self_id, to);
+        let (batch, next) = delivery_batch(first, &mut messages, batch_limit, &audit, self_id, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -925,6 +1005,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
 fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &mut tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    batch_limit: usize,
     audit: &A,
     self_id: u64,
     to: NodeId,
@@ -933,7 +1014,14 @@ fn delivery_batch<A: Audit>(
     // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
     // protocol's current heartbeat, Accept resend, and catch-up paths repair
     // them. Keep the newest batch so recovery signals can overtake old ballots.
-    while messages.len() >= GRPC_DELIVERY_BATCH {
+    // The shed threshold stays at the *default* batch depth even when the
+    // buggified `batch_limit` is smaller: shedding detects a stale backlog,
+    // and tying it to a one-message batch turns "drop stale traffic" into
+    // "drop everything but the newest message on every drain" — a determinist
+    // starvation of whole message classes that no repair path can outrun (an
+    // adversary dropping every message of one kind forever defeats eventual
+    // synchrony, which the knob's extreme must not do).
+    while messages.len() >= batch_limit.max(GRPC_DELIVERY_BATCH) {
         let Ok(newer) = messages.try_recv() else {
             break;
         };
@@ -947,11 +1035,11 @@ fn delivery_batch<A: Audit>(
         );
         first = newer;
     }
-    let mut batch = Vec::with_capacity(GRPC_DELIVERY_BATCH);
+    let mut batch = Vec::with_capacity(batch_limit);
     let mut batch_bytes = first.encoded_len();
     batch.push(wire_message(first));
     let mut carried = None;
-    while batch.len() < GRPC_DELIVERY_BATCH {
+    while batch.len() < batch_limit {
         let Ok(message) = messages.try_recv() else {
             break;
         };
@@ -1672,6 +1760,15 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
             "election_timeout_extreme"
         );
         ELECTION_TIMEOUT_BASE
+    } else if hooks.longest_election_timeout() {
+        // The other jitter extreme: the highest value the honest draw below
+        // could produce. Consulted only when the shortest hook stayed quiet,
+        // so the two extremes remain independent locations. Its BUGGIFY
+        // pairing gate fires in the sim hook implementation (the audit's
+        // `election_timeout_extreme` reach gate is the shortest extreme's).
+        let ticks = ELECTION_TIMEOUT_BASE * 2 - 1;
+        tracing::info!(node = self_id, ticks, "election_timeout_extreme");
+        ticks
     } else {
         providers
             .random()
@@ -1969,6 +2066,10 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
 /// driver resolves it here. It must be consistent across the cluster and agree
 /// with the `Config` the node read from `storage`.
 ///
+/// `tunables` is the driver's per-node transport shape ([`DriverTunables`]):
+/// production passes [`DriverTunables::default()`] (the historical constants);
+/// the sim harness buggifies it per seed, FDB knob style.
+///
 /// `hooks` controls the driver-level crash seams and rare-but-valid policy
 /// alternatives. Production passes [`NoHooks`](crate::NoHooks), whose default
 /// methods are inert.
@@ -1990,13 +2091,16 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
 #[tracing::instrument(skip_all)]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
-// shared state.
-#[allow(clippy::too_many_lines)]
+// shared state. The parameters are the node's complete wiring (providers,
+// storage, addressing, tunables, lifecycle, hooks, audit) — a bundle would
+// only rename the same eight things.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_node<P, S, H, A>(
     providers: P,
     mut storage: S,
     local_addr: String,
     members: Vec<(NodeId, String)>,
+    tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
     audit: &A,
@@ -2073,7 +2177,7 @@ where
             let channel = ReconnectingChannel::new(&providers, addr, grpc_channel_config());
             peer_channels.push(channel.clone());
             let client = ParosInternalClient::with_origin(channel, origin);
-            let (regular_tx, regular_rx) = tokio::sync::mpsc::channel(GRPC_PEER_QUEUE_CAPACITY);
+            let (regular_tx, regular_rx) = tokio::sync::mpsc::channel(tunables.peer_queue_capacity);
             let (snapshot_tx, snapshot_rx) =
                 tokio::sync::mpsc::channel(GRPC_SNAPSHOT_QUEUE_CAPACITY);
             providers
@@ -2085,6 +2189,7 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         regular_rx,
+                        tunables.delivery_batch,
                         audit.clone(),
                         self_id,
                         id,
@@ -2100,6 +2205,7 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         snapshot_rx,
+                        tunables.delivery_batch,
                         audit.clone(),
                         self_id,
                         id,
@@ -2294,37 +2400,60 @@ where
                 // Snapshot-repair traffic is driver-terminal (#101): handled
                 // here, never stepped into the core — consensus state must
                 // not depend on snapshot custody.
+                // A snap-repair message naming a foreign configuration is
+                // ignored (guarded, never asserted — wire input): custody and
+                // chunk bytes are only meaningful within one configuration.
                 let snap_handled = match &msg {
-                    Message::SnapAck { from, at_index } => {
-                        if node.is_leader() && node.config().peers.contains(from) {
+                    Message::SnapAck {
+                        config_id,
+                        from,
+                        at_index,
+                    } => {
+                        if *config_id == node.hard_state().config_id
+                            && node.is_leader()
+                            && node.config().peers.contains(from)
+                        {
                             snap.acks.entry(at_index.0).or_default().insert(from.0);
                         }
                         true
                     }
                     Message::SnapChunkRequest {
+                        config_id,
                         from,
                         at_index,
                         chunks,
                     } => {
-                        handle_snap_chunk_request(
-                            &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
-                        );
+                        if *config_id == node.hard_state().config_id {
+                            handle_snap_chunk_request(
+                                &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
+                            );
+                        }
                         true
                     }
                     Message::SnapChunkResponse {
-                        at_index, chunks, ..
+                        config_id,
+                        from,
+                        at_index,
+                        chunks,
                     } => {
-                        let at = *at_index;
-                        let chunks = chunks.clone();
-                        handle_snap_chunk_response(
-                            &mut node,
-                            &mut storage,
-                            &mut snap,
-                            audit,
-                            self_id,
-                            at,
-                            &chunks,
-                        )?;
+                        // Membership-checked like a SnapAck: only a cluster
+                        // member's chunk bytes are installed.
+                        if *config_id == node.hard_state().config_id
+                            && node.config().peers.contains(from)
+                        {
+                            let at = *at_index;
+                            let chunks = chunks.clone();
+                            handle_snap_chunk_response(
+                                &mut node,
+                                &mut storage,
+                                &mut snap,
+                                hooks,
+                                audit,
+                                self_id,
+                                at,
+                                &chunks,
+                            )?;
+                        }
                         true
                     }
                     _ => false,
@@ -2352,7 +2481,10 @@ where
                 // the quorum's custody advertisements land. Proposal-side
                 // policy only — the acceptor paths stay fully opaque.
                 let ack = if node.is_leader() {
-                    let quorum = node.config().peers.len() / 2 + 1;
+                    let quorum = node
+                        .config()
+                        .quorum_system
+                        .quorum_size(node.config().peers.len());
                     let covered = snap
                         .acks
                         .iter()

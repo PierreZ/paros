@@ -349,24 +349,33 @@ pub(crate) fn message_to_proto(
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
         }),
-        Message::SnapAck { from, at_index } => Kind::SnapAck(internal::SnapAck {
+        Message::SnapAck {
+            config_id,
+            from,
+            at_index,
+        } => Kind::SnapAck(internal::SnapAck {
+            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
         }),
         Message::SnapChunkRequest {
+            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkRequest(internal::SnapChunkRequest {
+            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks.clone(),
         }),
         Message::SnapChunkResponse {
+            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkResponse(internal::SnapChunkResponse {
+            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks
@@ -477,15 +486,18 @@ pub(crate) fn message_from_proto(
             seq: message.seq,
         }),
         Kind::SnapAck(message) => Ok(Message::SnapAck {
+            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
         }),
         Kind::SnapChunkRequest(message) => Ok(Message::SnapChunkRequest {
+            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message.chunks,
         }),
         Kind::SnapChunkResponse(message) => Ok(Message::SnapChunkResponse {
+            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message
