@@ -91,6 +91,11 @@ fn command_to_proto(command: &Command) -> internal::Command {
                     internal::control_command::Kind::Truncate(internal::Truncate { up_to: up_to.0 })
                 }
                 Control::Noop => internal::control_command::Kind::Noop(internal::Noop {}),
+                Control::Snap { at_index } => {
+                    internal::control_command::Kind::Snap(internal::Snap {
+                        at_index: at_index.0,
+                    })
+                }
             };
             internal::command::Kind::Control(internal::ControlCommand { kind: Some(kind) })
         }
@@ -115,6 +120,9 @@ fn command_from_proto(command: Option<internal::Command>) -> Result<Command, &'s
                     up_to: Slot(truncate.up_to),
                 },
                 internal::control_command::Kind::Noop(_) => Control::Noop,
+                internal::control_command::Kind::Snap(snap) => Control::Snap {
+                    at_index: Slot(snap.at_index),
+                },
             };
             Ok(Command::Control(control))
         }
@@ -341,12 +349,42 @@ pub(crate) fn message_to_proto(
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
         }),
+        Message::SnapAck { from, at_index } => Kind::SnapAck(internal::SnapAck {
+            from: from.0,
+            at_index: at_index.0,
+        }),
+        Message::SnapChunkRequest {
+            from,
+            at_index,
+            chunks,
+        } => Kind::SnapChunkRequest(internal::SnapChunkRequest {
+            from: from.0,
+            at_index: at_index.0,
+            chunks: chunks.clone(),
+        }),
+        Message::SnapChunkResponse {
+            from,
+            at_index,
+            chunks,
+        } => Kind::SnapChunkResponse(internal::SnapChunkResponse {
+            from: from.0,
+            at_index: at_index.0,
+            chunks: chunks
+                .iter()
+                .map(|(index, bytes)| internal::SnapChunk {
+                    index: *index,
+                    bytes: bytes.0.clone(),
+                })
+                .collect(),
+        }),
         _ => return Err("unsupported Paxos message variant"),
     };
     Ok(internal::ConsensusMessage { kind: Some(kind) })
 }
 
 /// Validate and convert one typed protobuf message into the core domain type.
+// One arm per wire variant; splitting the decode table would scatter it.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn message_from_proto(
     message: internal::ConsensusMessage,
 ) -> Result<Message, &'static str> {
@@ -437,6 +475,24 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             seq: message.seq,
+        }),
+        Kind::SnapAck(message) => Ok(Message::SnapAck {
+            from: NodeId(message.from),
+            at_index: Slot(message.at_index),
+        }),
+        Kind::SnapChunkRequest(message) => Ok(Message::SnapChunkRequest {
+            from: NodeId(message.from),
+            at_index: Slot(message.at_index),
+            chunks: message.chunks,
+        }),
+        Kind::SnapChunkResponse(message) => Ok(Message::SnapChunkResponse {
+            from: NodeId(message.from),
+            at_index: Slot(message.at_index),
+            chunks: message
+                .chunks
+                .into_iter()
+                .map(|chunk| (chunk.index, Value(chunk.bytes)))
+                .collect(),
         }),
     }
 }

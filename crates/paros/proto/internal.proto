@@ -39,6 +39,9 @@ message ConsensusMessage {
     CheckLeader check_leader = 10;
     Heartbeat heartbeat = 11;
     HeartbeatAck heartbeat_ack = 12;
+    SnapAck snap_ack = 13;
+    SnapChunkRequest snap_chunk_request = 14;
+    SnapChunkResponse snap_chunk_response = 15;
   }
 }
 
@@ -59,10 +62,18 @@ message Truncate {
 
 message Noop {}
 
+// A decided snapshot point (CTRL's `snap` marker): every node snapshots at
+// this marker's slot when it applies it, so the snapshots are byte-identical
+// cluster-wide and chunk-level repair is sound.
+message Snap {
+  uint64 at_index = 1;
+}
+
 message ControlCommand {
   oneof kind {
     Truncate truncate = 1;
     Noop noop = 2;
+    Snap snap = 3;
   }
 }
 
@@ -182,6 +193,29 @@ message HeartbeatAck {
   Ballot ballot = 2;
   uint64 seq = 3;
   uint64 config_id = 4;
+}
+
+// Driver-terminal snapshot-repair traffic (never enters consensus).
+message SnapAck {
+  uint64 from = 1;
+  uint64 at_index = 2;
+}
+
+message SnapChunkRequest {
+  uint64 from = 1;
+  uint64 at_index = 2;
+  repeated uint32 chunks = 3;
+}
+
+message SnapChunk {
+  uint32 index = 1;
+  bytes bytes = 2;
+}
+
+message SnapChunkResponse {
+  uint64 from = 1;
+  uint64 at_index = 2;
+  repeated SnapChunk chunks = 3;
 }
 
 message InspectRequest {}

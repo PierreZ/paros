@@ -8,7 +8,7 @@ use super::{
 fn command_payload_bytes(command: &Command) -> u64 {
     match command {
         Command::User(entry) => entry.value.0.len() as u64,
-        Command::Control(Control::Truncate { .. }) => 8,
+        Command::Control(Control::Truncate { .. } | Control::Snap { .. }) => 8,
         Command::Control(Control::Noop) => 1,
     }
 }
@@ -159,7 +159,22 @@ impl RawNode {
             }
             self.set_promise(ballot);
             let vhash = command_fingerprint(&command);
-            self.record_accepted(slot, ballot, command);
+            // An accept landing *inside* the durable chosen prefix with no
+            // servable chosen record is the in-place repair of a faulty chosen
+            // record (the only way the slot can be missing from `chosen` below
+            // `chosen_index`). Learn it as chosen, exactly as a boot rebuild
+            // would (an accepted record at or below the chosen index carries
+            // the chosen value — the P2c chain). Recording it as accepted
+            // alone was a real deadlock: clearing `faulty` disarmed the
+            // catch-up pull and every later election campaigns from above the
+            // prefix, so nothing ever refilled the slot and `serve_catchup`
+            // stopped at it forever — freezing any follower whose own prefix
+            // needs it.
+            if slot < self.first_unchosen() && !self.chosen.contains_key(&slot) {
+                self.mark_chosen(slot, &command, ballot);
+            } else {
+                self.record_accepted(slot, ballot, command);
+            }
             // The `Accepted` reply's durability claim: the promise sits exactly
             // at the accepted ballot, and the matching `AppendAccepted` write is
             // in this same batch (persist-before-send seals it).

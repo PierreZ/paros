@@ -917,6 +917,13 @@ impl ChainAgreement {
         };
         let mut per_node = self.node_index.borrow_mut();
         let expected = per_node.get(&node).copied().unwrap_or(0).saturating_add(1);
+        if index != expected {
+            eprintln!(
+                "CONTIG-DIAG node={node} index={index} expected={expected} slot={:?} kind={:?}",
+                event.u64("slot"),
+                event.str("kind"),
+            );
+        }
         assert_always!(index == expected, "chain: applies are contiguous per node");
         per_node.insert(node, index);
         drop(per_node);
@@ -944,7 +951,12 @@ impl ChainAgreement {
         drop(commands);
 
         let kind = event.str("kind").unwrap_or("unknown");
-        let proposed = kind == "noop"
+        // The was-proposed claim guards *client* commands: a control command
+        // is minted inside the system — a leader's `Noop` gap fill, a `Snap`
+        // marker, or a `Truncate` clamped by the #101 coupling to the covered
+        // snapshot point — so only a `user` entry must trace back to a
+        // submission.
+        let proposed = kind != "user"
             || self
                 .submitted
                 .borrow()

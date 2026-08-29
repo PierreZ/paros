@@ -16,6 +16,7 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod choreography;
+mod corpus;
 mod node;
 mod oracle;
 mod protocol_bounds;
@@ -333,6 +334,34 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     // repair is open and the driver skipping (never sending, never dying on)
     // a mismatched offer.
     8_387_050_491_719_289_841,
+    // The healed-record servable-hole deadlock (2026-08-28, the #101 10k raw
+    // hunt): a node booted with one chosen record faulty (`chosen` hole below
+    // its durable index), a repairing leader's in-place Accept then cleared
+    // `faulty` — and parked before its Commit landed. With `faulty` empty the
+    // tick pull disarmed, the node's own election campaigned from *above* the
+    // prefix, and `serve_catchup` stopped at the hole forever: the one
+    // follower that needed the slot froze, costing the two-live-node cluster
+    // convergence. Red on the heal that only repaired `accepted`; green with
+    // `on_accept` restoring the chosen record for an accept landing inside
+    // the durable chosen prefix (exactly what a boot rebuild derives).
+    7_574_167_469_645_450_888,
+    // The promise-copy accumulation crash-loop (2026-08-28, same hunt): two
+    // independent single-copy promise rots landed on opposite copies, building
+    // the terminal both-lost shape outside the park-guarded `both` branch —
+    // the node then crash-looped on every boot (unknowable promise), never
+    // parking, inflating typed-crash detections past the injection ledger and
+    // never answering the convergence probe. Red on the unguarded single-copy
+    // site; green with the twin-clean guard plus the boot arm parking
+    // terminally (defense in depth, one crash decision, 1:1 accounting).
+    5_774_843_980_006_710_362,
+    // The mark-then-truncate-then-park budget hole (2026-08-28, same hunt): a
+    // lost-write mark landed while every node was clean, one peer then
+    // truncated past the slot (pruning it from its accepted map), and its
+    // later park skipped the slot check entirely — leaving the marked record
+    // one clean live copy. Red on `may_park`'s accepted-map-only walk; green
+    // with the cluster-wide marked-slot re-check under the availability
+    // re-derivation's own formula.
+    2_295_340_131_120_414_025,
 ];
 
 /// Network-swarm-axis witnesses, replayed via [`run_network_seed`].
@@ -832,7 +861,14 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// this is the one whose red is the pure protocol consequence. Recorded per
 /// the issue-#21 red-test contract: the citation for why `faulty` may never
 /// count toward the none-tally.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 982_873_060_504_772_201;
+///
+/// Re-hunted for the #101 stream shift (the `Control::Snap` coupling, the
+/// snap-chunk rot site, and the chain-state lane extension all move the seed
+/// schedule): the original witness `982873060504772201` replays green on the
+/// shifted stream, and a fresh 2,000-seed hunt returned 33 reds, of which
+/// this seed's red is the single pure agreement violation ("at most one
+/// value is ever chosen for a slot").
+pub const FAULTY_NONE_DEMO_SEED: u64 = 12_343_285_557_404_141_340;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
@@ -849,6 +885,185 @@ pub fn run_faulty_none_demo_seed(seed: u64) -> SimulationReport {
 #[must_use]
 pub fn faulty_none_demo_hunt(iterations: usize) -> SimulationReport {
     faulty_none_demo_builder().set_iterations(iterations).run()
+}
+
+// --- the #113 CTRL evaluation corpus -----------------------------------------
+
+/// The corpus cluster: three scripted-lifecycle nodes, no swarm chaos (every
+/// fault is a targeted injection from the workload), the application-safety
+/// invariant continuously pumped. See `crate::corpus`.
+fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
+    SimulationBuilder::new()
+        // Like every other axis: the un-checksummed public replies (inspect,
+        // acks) have no per-message integrity protection, so a provider-level
+        // bit flip fabricates a *client observation*, not cluster state
+        // (moonpool#183 terrain). The corpus judges real states only.
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
+        .invariant(ChainAgreement::network())
+}
+
+/// The canonical E1 mask cases the nextest corpus runner enumerates: the
+/// exhaustive 2-slot × 3-node sub-grid (bits `node * 3 + slot`, slot ∈ {0, 1} —
+/// 64 masks, every recoverable/unrecoverable boundary shape over two slots),
+/// plus the full-grid corner cases: each slot lost on every node, each node
+/// fully rotted, and the everything-lost mask.
+#[must_use]
+pub fn corpus_canonical_masks() -> Vec<u16> {
+    let mut masks: Vec<u16> = Vec::new();
+    // Exhaustive over slots 0 and 1 on all three nodes (slot-2 bits clear):
+    // per node, bits {0, 1} of its 3-bit group.
+    for low in 0_u16..64 {
+        let mut mask = 0_u16;
+        for node in 0..3_u16 {
+            mask |= (low >> (node * 2) & 0b11) << (node * 3);
+        }
+        masks.push(mask);
+    }
+    // Full-grid corners.
+    for extra in [
+        0b001_001_001, // slot 0 lost everywhere
+        0b010_010_010, // slot 1 lost everywhere
+        0b100_100_100, // slot 2 lost everywhere
+        0b000_000_111, // node 0 fully rotted
+        0b111_000_000, // node 2 fully rotted
+        0b111_111_111, // everything lost
+        0b011_101_110, // mixed: every slot down to exactly one clean copy
+    ] {
+        if !masks.contains(&extra) {
+            masks.push(extra);
+        }
+    }
+    masks
+}
+
+/// Run one explicit E1 mask case deterministically (seeded by the mask itself,
+/// so a failing case names its own replay).
+#[must_use]
+pub fn run_corpus_mask(mask: u16) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Fixed(mask))
+        .set_iterations(1)
+        .set_debug_seeds(vec![u64::from(mask)])
+        .run()
+}
+
+/// Raw-volume E1 sampling: each seed draws its mask from the seeded RNG, so a
+/// hunt densely samples the full 512-case space. Replay with
+/// [`run_corpus_seed`].
+#[must_use]
+pub fn corpus_hunt(iterations: usize) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Seeded)
+        .set_iterations(iterations)
+        .run()
+}
+
+/// Replay one seeded E1 corpus case deterministically.
+#[must_use]
+pub fn run_corpus_seed(seed: u64) -> SimulationReport {
+    corpus_builder(corpus::MaskSource::Seeded)
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Run the bare-quorum lost-slot case (see `crate::corpus`): one slot decided
+/// by a bare quorum, then every copy of it rotted — the `faulty, faulty, none`
+/// Phase-1 tally that must WAIT, and the deterministic red target of CTRL
+/// §5.1.1's mutation (b) (a sub-Q1 `none` count no-op-filling a chosen slot).
+#[must_use]
+pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
+        .invariant(ChainAgreement::network())
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Run the §5.1.2 snapshot-lifecycle compound (see `crate::corpus`): log-only,
+/// snapshotted, and snapshotted-and-truncated nodes in one scripted run,
+/// reaching all four snapshot-recovery paths.
+#[must_use]
+pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
+        .invariant(ChainAgreement::network())
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// The #101 per-chunk mask corpus builder (see `crate::corpus`).
+fn chunk_corpus_builder(
+    source: corpus::ChunkMaskSource,
+    rot_live_node0: bool,
+) -> SimulationBuilder {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::CORPUS_NODES, || {
+            Box::new(crate::node::CorpusNodeProcess)
+        })
+        .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
+        .invariant(ChainAgreement::network())
+}
+
+/// The canonical #101 chunk-mask cases (bit index `node * 5 + chunk` over the
+/// five-chunk decided-point blob): the no-rot sanity case, single-copy and
+/// two-copy losses (repair from the survivors), a per-node cross pattern, a
+/// whole node's point lost, a chunk lost everywhere (must stay faulty, never
+/// fabricated), and everything lost.
+#[must_use]
+pub fn chunk_corpus_canonical_masks() -> Vec<u32> {
+    vec![
+        0,
+        1 << 0,
+        (1 << 0) | (1 << 5),
+        (1 << 0) | (1 << 5) | (1 << 10),
+        0b11111,
+        (1 << 0) | (1 << 6) | (1 << 12),
+        (1 << 2) | (1 << 7) | (1 << 12) | (1 << 3) | (1 << 9),
+        0x7FFF,
+    ]
+}
+
+/// Run one explicit #101 chunk-mask case deterministically (seeded by the
+/// mask). `rot_live_node0` additionally rots node 0's live snapshot, driving
+/// the point-restore / whole-blob race on top of the chunk repair.
+#[must_use]
+pub fn run_chunk_mask(mask: u32, rot_live_node0: bool) -> SimulationReport {
+    chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), rot_live_node0)
+        .set_iterations(1)
+        .set_debug_seeds(vec![u64::from(mask)])
+        .run()
+}
+
+/// Raw-volume chunk-mask sampling: each seed draws its mask from the seeded
+/// RNG. Replay with [`run_chunk_corpus_seed`].
+#[must_use]
+pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
+    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
+        .set_iterations(iterations)
+        .run()
+}
+
+/// Replay one seeded chunk-mask corpus case deterministically.
+#[must_use]
+pub fn run_chunk_corpus_seed(seed: u64) -> SimulationReport {
+    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
 }
 
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for

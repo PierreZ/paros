@@ -197,6 +197,40 @@ pub trait Audit {
         bytes: u64,
     ) {
     }
+
+    /// This node durably recorded the decided snapshot point at `at` — the
+    /// applied [`Control::Snap`](paros_core::Control::Snap) marker's slot
+    /// (#101). Reported after the recording batch's fsync.
+    fn snap_recorded(&self, node: NodeId, at: Slot) {}
+
+    /// This node's boot scan classified `chunks` rotted chunks of its
+    /// retained decided snapshot at `at` — value lost, identity known: the
+    /// chunk-repair layer pulls them from peers.
+    fn snap_chunks_reported(&self, node: NodeId, at: Slot, chunks: u64) {}
+
+    /// This node installed `chunks` repaired chunks of the decided snapshot
+    /// at `at`, received from a peer: `bytes` chunk payload against the
+    /// point's `blob_bytes` — the CTRL §5.2 chunk-repair cost (a chunk repair
+    /// ships chunks, never the blob).
+    fn snap_chunk_repaired(
+        &self,
+        node: NodeId,
+        at: Slot,
+        chunks: u64,
+        bytes: u64,
+        blob_bytes: u64,
+    ) {
+    }
+
+    /// This node answered a chunk request for a point it no longer retains
+    /// with its full, more advanced snapshot (`Message::InstallSnapshot`) —
+    /// the unchanged whole-blob fallback.
+    fn snap_advanced_fallback(&self, node: NodeId, to: NodeId) {}
+
+    /// This node restored its lost application state locally from its own
+    /// (chunk-repaired) decided snapshot point at `at`, instead of a
+    /// whole-blob transfer.
+    fn snap_point_restored(&self, node: NodeId, at: Slot) {}
 }
 
 /// Inert production audit: every observation is dropped.

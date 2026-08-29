@@ -698,6 +698,14 @@ impl RawNode {
             } => {
                 self.on_heartbeat_ack(from, ballot, seq);
             }
+            // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
+            // driver's repair layer owns these end to end and normally
+            // intercepts them before `step`. Consensus state never depends on
+            // snapshot custody, so a message that does reach the core is
+            // deliberately ignored rather than an error.
+            Message::SnapAck { .. }
+            | Message::SnapChunkRequest { .. }
+            | Message::SnapChunkResponse { .. } => {}
         }
         self.assert_invariants();
     }
@@ -751,6 +759,22 @@ impl RawNode {
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
         self.start_accept_round(slot, Command::Control(control));
+        self.assert_invariants();
+        ProposeResult::Accepted(slot)
+    }
+
+    /// Leader entry point for a **decided snapshot point** (#101, CTRL §3.5):
+    /// propose a [`Control::Snap`] marker into the next slot, with `at_index`
+    /// bound to exactly that slot **by construction** — Paxos never moves an
+    /// accepted command between slots, so a decided marker always describes
+    /// its own position. A non-leader returns [`ProposeResult::NotLeader`].
+    pub fn propose_snap_marker(&mut self) -> ProposeResult {
+        if self.role != NodeRole::Leader {
+            return ProposeResult::NotLeader(self.leader);
+        }
+        let slot = self.next_slot;
+        self.next_slot = Slot(slot.0 + 1);
+        self.start_accept_round(slot, Command::Control(Control::Snap { at_index: slot }));
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }

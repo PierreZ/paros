@@ -373,23 +373,55 @@ impl Workload for ChainWorkload {
             }
         };
         let compact_once = |target: usize, up_to: u64| {
-            let mut client = public_clients[target].clone();
+            let clients = public_clients.clone();
             let time = time.clone();
             async move {
-                moonpool_sim::select! {
-                    response = client.compact(Compact { up_to }) => match response {
-                        Ok(response) => {
-                            let ack = response.into_inner();
-                            if ack.accepted {
-                                CompactResult::Accepted { leader: ack.leader }
-                            } else {
-                                CompactResult::Rejected { leader: ack.leader }
+                let mut client = clients[target].clone();
+                // The #101 coupling makes compaction a two-phase dance: the
+                // first ask usually seeds the `Snap` marker and answers
+                // `accepted: false`; once a quorum advertises the decided
+                // point, a retry gets the `Truncate` proposed. A few
+                // beat-spaced retries at the same leader complete the dance
+                // within one workload operation, keeping truncation pressure
+                // (and everything downstream of raised floors) at its
+                // pre-coupling cadence.
+                let mut attempt_target = target;
+                for _attempt in 0..4_u8 {
+                    let outcome = moonpool_sim::select! {
+                        response = client.compact(Compact { up_to }) => match response {
+                            Ok(response) => {
+                                let ack = response.into_inner();
+                                if ack.accepted {
+                                    CompactResult::Accepted { leader: ack.leader }
+                                } else {
+                                    CompactResult::Rejected { leader: ack.leader }
+                                }
+                            }
+                            Err(_) => CompactResult::Ambiguous,
+                        },
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => CompactResult::Ambiguous,
+                    };
+                    match outcome {
+                        CompactResult::Rejected { leader: Some(next) }
+                            if usize::try_from(next).is_ok_and(|next| next == attempt_target) =>
+                        {
+                            // Same leader, not yet coupled: give the marker a
+                            // beat to decide and the custody acks to land.
+                            if time.sleep(Duration::from_millis(60)).await.is_err() {
+                                return outcome;
                             }
                         }
-                        Err(_) => CompactResult::Ambiguous,
-                    },
-                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => CompactResult::Ambiguous,
+                        CompactResult::Rejected { leader: Some(next) } => {
+                            let Ok(next) = usize::try_from(next) else {
+                                return outcome;
+                            };
+                            attempt_target = next;
+                            client = clients[attempt_target % clients.len()].clone();
+                        }
+                        terminal => return terminal,
+                    }
                 }
+                CompactResult::Ambiguous
             }
         };
 
@@ -1353,6 +1385,76 @@ impl Workload for ChainWorkload {
                 q.len("msg_received"),
                 q.len("election_timeout_extreme"),
             );
+            let kind_count = |name: &str, kind: &str| -> usize {
+                q.snapshot(name)
+                    .iter()
+                    .filter(|e| e.str("kind") == Some(kind))
+                    .count()
+            };
+            eprintln!(
+                "  SNAP-DIAG offers={} offers_skipped={} installs={} install_sent={} cu_req_sent={} cu_resp_sent={} cu_req_recv={} cu_resp_recv={} hb_sent={} hb_recv={} snap_ack_sent={} chunk_req_sent={} chunk_resp_sent={} compacted={} coupled={} chosen_gap={} gap_filled={} below_floor={}",
+                q.len("snapshot_offered"),
+                q.len("snapshot_offer_skipped"),
+                q.len("snapshot_installed"),
+                kind_count("msg_sent", "install_snapshot"),
+                kind_count("msg_sent", "catchup_request"),
+                kind_count("msg_sent", "catchup_response"),
+                kind_count("msg_received", "catchup_request"),
+                kind_count("msg_received", "catchup_response"),
+                kind_count("msg_sent", "heartbeat"),
+                kind_count("msg_received", "heartbeat"),
+                kind_count("msg_sent", "snap_ack"),
+                kind_count("msg_sent", "snap_chunk_request"),
+                kind_count("msg_sent", "snap_chunk_response"),
+                q.len("compacted"),
+                q.len("truncate_coupled_to_snap_point"),
+                q.len("chosen_gap"),
+                q.len("election_gap_filled"),
+                q.len("prepare_below_floor"),
+            );
+            for gap in q.snapshot("chosen_gap").iter().rev().take(3) {
+                eprintln!(
+                    "  GAP-DIAG t={}ms node={:?} hole={:?} above={:?}",
+                    gap.time_ms,
+                    gap.u64("node"),
+                    gap.u64("hole"),
+                    gap.u64("above"),
+                );
+            }
+            for name in ["booted", "crashed", "storage_fault", "recovered"] {
+                for ev in q.snapshot(name).iter().rev().take(6) {
+                    eprintln!(
+                        "  EV-DIAG {name} t={}ms node={:?} kind={:?} slot={:?} error={:?} decision={:?}",
+                        ev.time_ms,
+                        ev.u64("node"),
+                        ev.str("kind"),
+                        ev.u64("slot"),
+                        ev.str("error"),
+                        ev.str("decision"),
+                    );
+                }
+            }
+            for lead in q.snapshot("leader_elected").iter().rev().take(3) {
+                eprintln!(
+                    "  LEADER-DIAG t={}ms node={:?}",
+                    lead.time_ms,
+                    lead.u64("node"),
+                );
+            }
+            for ip_index in 1..=9_u64 {
+                let ip = format!("10.0.1.{ip_index}");
+                if let Some(probe) = crate::node::corpus_disk_probe(ctx.state(), &ip) {
+                    eprintln!(
+                        "  DISK-DIAG {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
+                        probe.floor,
+                        probe.applied_count,
+                        probe.snap_point,
+                        probe.faulty_chunks,
+                        probe.clean_slots.first().copied().unwrap_or(0),
+                        probe.clean_slots.last().copied().unwrap_or(0),
+                    );
+                }
+            }
         }
         if self.budget_off {
             // The WAITED leg: an unavailable budget-off run is legal iff the
