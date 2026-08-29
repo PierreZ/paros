@@ -571,11 +571,29 @@ struct AuditState {
     shortest_timeout: bool,
     dropped_accept: bool,
     dropped_election: bool,
+    dropped_commit: bool,
+    dropped_accepted: bool,
+    dropped_heartbeat: bool,
+    dropped_repair: bool,
+    dropped_catchup_request: bool,
+    dropped_snap_ack: bool,
+    dropped_snap_chunk_request: bool,
+    dropped_snap_chunk_response: bool,
+    dropped_check_leader: bool,
     crashed_after_apply: bool,
+    crashed_before_chunk_sync: bool,
+    crashed_after_chunk_restore: bool,
     duplicated_any: bool,
     duplicated_quorum_kind: bool,
+    duplicated_commit: bool,
+    duplicated_repair: bool,
+    duplicated_catchup_request: bool,
+    duplicated_snap_ack: bool,
+    duplicated_snap_chunk_request: bool,
+    duplicated_snap_chunk_response: bool,
     reply_dropped: bool,
     propose_reply_dropped: bool,
+    read_reply_dropped: bool,
     dedup_after_dropped_reply: bool,
 }
 
@@ -690,6 +708,22 @@ impl AuditState {
             "the driver drops an election message at the send seam"
         );
         assert_sometimes!(
+            self.dropped_commit,
+            "the driver drops a commit at the send seam"
+        );
+        assert_sometimes!(
+            self.dropped_accepted,
+            "the driver drops an accepted ack at the send seam"
+        );
+        assert_sometimes!(
+            self.dropped_heartbeat,
+            "the driver drops a heartbeat at the send seam"
+        );
+        assert_sometimes!(
+            self.dropped_repair,
+            "the driver drops a repair message at the send seam"
+        );
+        assert_sometimes!(
             self.crashed_after_apply,
             "the driver crashes after applying a batch and before its application fsync"
         );
@@ -700,6 +734,14 @@ impl AuditState {
         assert_sometimes!(
             self.duplicated_quorum_kind,
             "the driver duplicates a quorum-counting message at the send seam"
+        );
+        assert_sometimes!(
+            self.duplicated_commit,
+            "the driver duplicates a commit at the send seam"
+        );
+        assert_sometimes!(
+            self.duplicated_repair,
+            "the driver duplicates a repair message at the send seam"
         );
         assert_sometimes!(
             self.reply_dropped,
@@ -1699,6 +1741,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after applying a batch and before its application fsync"
                 );
             }
+            Seam::BeforeChunkSync => {
+                reach_once!(
+                    st.crashed_before_chunk_sync,
+                    "the driver crashes before syncing repaired snapshot chunks"
+                );
+            }
+            Seam::AfterChunkRestoreBeforeSync => {
+                reach_once!(
+                    st.crashed_after_chunk_restore,
+                    "the driver crashes after a snap-point restore and before its sync"
+                );
+            }
         }
     }
 
@@ -1715,6 +1769,63 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 reach_once!(
                     st.dropped_election,
                     "the driver drops an election message at the send seam"
+                );
+            }
+            Message::Commit { .. } => {
+                reach_once!(
+                    st.dropped_commit,
+                    "the driver drops a commit at the send seam"
+                );
+            }
+            Message::Accepted { .. } => {
+                reach_once!(
+                    st.dropped_accepted,
+                    "the driver drops an accepted ack at the send seam"
+                );
+            }
+            Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => {
+                reach_once!(
+                    st.dropped_heartbeat,
+                    "the driver drops a heartbeat at the send seam"
+                );
+            }
+            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+                reach_once!(
+                    st.dropped_repair,
+                    "the driver drops a repair message at the send seam"
+                );
+            }
+            Message::CatchUpRequest { .. } => {
+                reach_once!(
+                    st.dropped_catchup_request,
+                    "the driver drops a catch-up request at the send seam"
+                );
+            }
+            Message::SnapAck { .. } => {
+                reach_once!(
+                    st.dropped_snap_ack,
+                    "the driver drops a snap custody ack at the send seam"
+                );
+            }
+            Message::SnapChunkRequest { .. } => {
+                reach_once!(
+                    st.dropped_snap_chunk_request,
+                    "the driver drops a snap chunk request at the send seam"
+                );
+            }
+            Message::SnapChunkResponse { .. } => {
+                reach_once!(
+                    st.dropped_snap_chunk_response,
+                    "the driver drops a snap chunk response at the send seam"
+                );
+            }
+            // Inert today: `CheckLeader` never crosses the transport (it is a
+            // tick-injected self-event), so this reach gate creates no slot
+            // until a future remote probe makes the drop arm live.
+            Message::CheckLeader { .. } => {
+                reach_once!(
+                    st.dropped_check_leader,
+                    "the driver drops a check-leader at the send seam"
                 );
             }
             _ => {}
@@ -1738,6 +1849,48 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "the driver duplicates a quorum-counting message at the send seam"
             );
         }
+        match msg {
+            Message::Commit { .. } => {
+                reach_once!(
+                    st.duplicated_commit,
+                    "the driver duplicates a commit at the send seam"
+                );
+            }
+            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+                reach_once!(
+                    st.duplicated_repair,
+                    "the driver duplicates a repair message at the send seam"
+                );
+            }
+            Message::CatchUpRequest { .. } => {
+                reach_once!(
+                    st.duplicated_catchup_request,
+                    "the driver duplicates a catch-up request at the send seam"
+                );
+            }
+            // The snap plane's idempotency witnesses: a duplicated custody ack
+            // meets the leader's set-based tally; a duplicated chunk response
+            // finds its chunks no longer pending.
+            Message::SnapAck { .. } => {
+                reach_once!(
+                    st.duplicated_snap_ack,
+                    "the driver duplicates a snap custody ack at the send seam"
+                );
+            }
+            Message::SnapChunkRequest { .. } => {
+                reach_once!(
+                    st.duplicated_snap_chunk_request,
+                    "the driver duplicates a snap chunk request at the send seam"
+                );
+            }
+            Message::SnapChunkResponse { .. } => {
+                reach_once!(
+                    st.duplicated_snap_chunk_response,
+                    "the driver duplicates a snap chunk response at the send seam"
+                );
+            }
+            _ => {}
+        }
     }
 
     fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
@@ -1748,6 +1901,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         if matches!(reply, paros::Reply::Propose | paros::Reply::ProposeDedup) {
             st.propose_reply_dropped = true;
+        }
+        if matches!(reply, paros::Reply::Read) {
+            reach_once!(
+                st.read_reply_dropped,
+                "a confirmed read reply is dropped at the reply seam"
+            );
         }
     }
     fn snapshot_offered(&self, _node: NodeId, _offers: u64) {

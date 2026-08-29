@@ -139,15 +139,18 @@ fn faulty_as_none_demo_stays_red() {
 /// *below* the chosen prefix, the boot read-back's completeness assert ("every
 /// retained slot below the chosen prefix has a durable record") refuses the
 /// node before the misreport can reach a Promise — crash beats corruption. The
-/// pinned seed is the demo's previous double-choose witness, retired by that
-/// assert: its misreporting node now dies at boot (visible as the node.rs
-/// completeness panic on stderr; moonpool tolerates the death like attrition)
-/// and the surviving pair runs clean. If this seed ever goes red again, the
-/// boot completeness assert stopped refusing the below-prefix misreport — the
-/// double-choose it used to witness is back.
+/// pinned seed deterministically reaches that refusal twice on the current
+/// stream (visible as the node.rs completeness panic on stderr; moonpool
+/// tolerates the death like attrition) and the survivors run clean. (The
+/// original pin, `12343285557404141340`, was the demo's pre-assert
+/// double-choose witness; the randomness-expansion stream shift moved its rot
+/// off the refusing shape, so this seed — re-scanned from the shifted stream —
+/// carries the pin now.) If this seed ever goes red, the boot completeness
+/// assert stopped refusing the below-prefix misreport — the double-choose it
+/// guards against is back.
 #[test]
 fn faulty_as_none_below_prefix_dies_at_boot() {
-    let report = paros_sim::run_faulty_none_demo_seed(12_343_285_557_404_141_340);
+    let report = paros_sim::run_faulty_none_demo_seed(3);
     assert!(
         report.assertion_violations.is_empty(),
         "a boot-refused misreport must never reach the agreement oracles; got: {:?}",

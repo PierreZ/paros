@@ -44,7 +44,9 @@ introduced. Do not run larger hunts unless the user explicitly requests one; cov
 saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume.
 
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
-operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`.
+operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,
+`DUP_REPROPOSE=5`, `DUAL_SUBMIT=6`, `COMPACT_STORM=7`, `READ_INDEX=8` (the public
+leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
@@ -120,9 +122,10 @@ separation; #81 removed the message-class nemesis, which mixed them):
   be **born that way**, as data a workload can buggify, not as a constant buried in core or driver
   code, so per-seed swarm variation composes without either layer knowing about it.
 
-The driver's provider-generic `DriverHooks` also exposes the two durability seams process-level
-attrition cannot reach: before fsync and after fsync/before send. Give each seam its own BUGGIFY
-location; treating both as one location prevents the sweep from independently selecting the two
+The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
+attrition cannot reach — five today: `BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync`,
+and the chunk-repair pair `BeforeChunkSync` / `AfterChunkRestoreBeforeSync`. Give each seam its
+own BUGGIFY location; sharing one location prevents the sweep from independently selecting the
 distinct failure modes.
 
 **Audit doctrine — observation, never perturbation.** The mirror image of the `DriverHooks` rule.
