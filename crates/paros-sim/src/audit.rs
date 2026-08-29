@@ -587,10 +587,14 @@ impl AuditState {
             self.snapshot_installed,
             "a below-floor node recovers via snapshot transfer"
         );
-        assert_sometimes!(
-            self.snapshot_mid_election,
-            "a snapshot lands during a live election"
-        );
+        // The #88 mid-election install window is anchored by the `reach_once!`
+        // in [`AuditWorld::snapshot_mid_election`], not demanded per sweep:
+        // #101 made whole-blob installs structurally rare (a below-floor node
+        // with a clean covering point restores locally, and rotted chunks
+        // repair chunk-wise), so the install x live-election coincidence is a
+        // leg the swarm is no longer *certain* to visit. Per the assertion
+        // doctrine such a leg anchors exploration when hit and never fails
+        // coverage (same shape as the block-fault family gate).
         // CheckQuorum (#95) is actually exercised: some seed isolates a leader
         // from its ack quorum long enough that it demotes itself (the n=2
         // regime plus attrition is the reliable generator).
