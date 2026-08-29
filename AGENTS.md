@@ -158,9 +158,10 @@ substitutes for the other:
   compound conditions, assert positive *and* negative space, pair each property across two code
   paths (e.g. the write-side flush ordering vs. the boot read-back). `RawNode::assert_invariants`
   is the dedicated cross-field checker (ordering chain, role/election couplings, floor bounds,
-  chosen-gap contract), called at boot and at every public mutating entry point — keep it O(1)/
-  O(log n) per check so it can stay unconditional; an O(N) structural check goes behind
-  `debug_assert!` instead. Public functions that assert need a `# Panics` doc section (clippy
+  chosen-gap contract), called at boot and at every public mutating entry point — cheap checks
+  stay O(1)/O(log n); O(N) structural checks are *also* hard `assert!` (owner's call: no
+  `debug_assert!` anywhere in this project — the state maps are small and crash beats corruption
+  in release too). Public functions that assert need a `# Panics` doc section (clippy
   pedantic enforces it). This adds no deps and no conditional compilation, so the "core is never
   buggified" rule is untouched.
 - **Sim layers use moonpool macros, never plain `assert!`.** In `paros-sim`, a violation should
@@ -184,10 +185,13 @@ application state. The application owns compaction of its own state. What paros 
 *log*, and it drops the log prefix two ways, both keeping the bytes opaque:
 
 - **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, or the
-  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below). A client
+  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, the
+  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below), or the
+  `Snap{at_index}` marker that decides a snapshot point (#101). A client
   asks the **leader** to truncate (the `Compact` RPC → `RawNode::propose_control`); the leader
-  decides `Truncate` into a slot by ordinary consensus, and every node truncates *lazily* when it
+  proposes `Truncate` only once a quorum advertises custody of a decided snapshot point covering
+  it (otherwise it seeds a `Snap` marker and answers `accepted: false` — clients can be refused
+  and retry), decides it by ordinary consensus, and every node truncates *lazily* when it
   applies that slot (`RawNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
   forwarded by normal replication + catch-up. The consensus/acceptor paths treat `Command` fully
   opaquely (exactly as Compartmentalized Paxos treats a `Noop`); only the replica/apply path
@@ -201,7 +205,12 @@ application state. The application owns compaction of its own state. What paros 
   `max(promise, ballot)` (its durable promise never regresses), and installs via
   `NodeStorage::install_snapshot()`. paros transfers and tracks the boundary slot; it never
   interprets the bytes. "No compaction" was never "no snapshot transfer": the *application* produces
-  the snapshot, paros ships it.
+  the snapshot, paros ships it — and, since #101, also *retains* it: a decided `Snap` point's blob
+  is kept durably (the `NodeStorage` custody surface: `record_snapshot`/`read_snap_chunk`/
+  `write_snap_chunk`/`restore_from_snap_point`), advertised to peers, and healed chunk-by-chunk
+  through a driver-terminal repair plane (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never
+  enter `RawNode`); a node can restore its application from a decided point it holds. The bytes
+  stay opaque throughout — paros ships, stores, and checksums them, never reads them.
 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) is still
 out of scope: a snapshot restores the log, not the promise, so a naive rejoin can regress the
