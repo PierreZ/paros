@@ -580,8 +580,8 @@ impl RawNode {
             "no faulty entry survives below the compaction floor"
         );
         // The tri-state is a partition: a slot is readable, faulty, or absent —
-        // never two at once (O(N∩) structural check, so debug-only).
-        debug_assert!(
+        // never two at once (O(N∩) structural check, always-on by choice).
+        assert!(
             self.faulty.keys().all(|s| !self.accepted.contains_key(s)),
             "the faulty set stays disjoint from the accepted log"
         );
@@ -611,9 +611,9 @@ impl RawNode {
                 .is_none_or(|s| *s >= self.first_slot),
             "no duplicate marker survives below the compaction floor"
         );
-        // Floor-bound structural checks that need a full scan stay debug-only
-        // (`inflight` is keyed by client identity, so its slots are unordered).
-        debug_assert!(
+        // Floor-bound structural check needing a full scan (`inflight` is
+        // keyed by client identity, so its slots are unordered).
+        assert!(
             self.inflight.values().all(|s| *s >= self.first_slot),
             "no in-flight dedup mapping survives below the compaction floor"
         );
@@ -658,8 +658,8 @@ impl RawNode {
                 // Every in-flight round runs at the leadership ballot: rounds
                 // are opened only by this leader, and every promise-raising
                 // path that could strand one demotes (clearing `proposer`)
-                // first. O(N) structural, so debug-only.
-                debug_assert!(
+                // first. O(N) structural, always-on by choice.
+                assert!(
                     self.proposer.values().all(|p| p.ballot == self.ballot),
                     "a leader's in-flight rounds all run at its own ballot"
                 );

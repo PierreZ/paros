@@ -108,9 +108,9 @@ impl RawNode {
             // send carries the matching raise. Scoped to the raise — a
             // same-ballot page continuation re-sends no write, because the
             // raise's own earlier batch already persisted it. O(N) scan of the
-            // batch, so debug-only.
+            // batch, always-on by choice.
             if raises_promise {
-                debug_assert!(
+                assert!(
                     self.pending_writes
                         .iter()
                         .any(|op| matches!(op, WriteOp::SetPromise(b) if *b == ballot)),
@@ -207,9 +207,9 @@ impl RawNode {
             );
             // The durability claim behind the reply, paired with its write: the
             // batch flushed before this send carries the matching append
-            // (persist-before-send seals it). O(N) scan of the batch, so
-            // debug-only.
-            debug_assert!(
+            // (persist-before-send seals it). O(N) scan of the batch, always-on
+            // by choice.
+            assert!(
                 self.pending_writes
                     .iter()
                     .any(|op| matches!(op, WriteOp::AppendAccepted { slot: s, .. } if *s == slot)),

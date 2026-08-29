@@ -241,7 +241,7 @@ impl RawNode {
             self.accepted.contains_key(&slot),
             "a chosen slot holds its authoritative accepted record"
         );
-        debug_assert!(
+        assert!(
             self.accepted.get(&slot).map(|(_, c)| c) == Some(command),
             "a chosen slot's accepted record carries the chosen command"
         );

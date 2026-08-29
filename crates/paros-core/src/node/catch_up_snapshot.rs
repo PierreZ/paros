@@ -155,7 +155,7 @@ impl RawNode {
         // such records before they reach `applied_seq` or the durable install.
         sessions.retain(|(_, _, slot)| *slot <= chosen_index);
         // Past the validation boundary the fact may be re-asserted.
-        debug_assert!(
+        assert!(
             sessions.iter().all(|(_, _, slot)| *slot <= chosen_index),
             "a merged session record stays inside the snapshot boundary"
         );

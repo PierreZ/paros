@@ -659,7 +659,7 @@ impl RawNode {
                 recovery.cursor >= recovery.end,
                 "a closed recovery drained its range"
             );
-            debug_assert!(
+            assert!(
                 recovery.recovered.range(recovery.cursor..).next().is_none(),
                 "a closed recovery leaves no recovered slot unvisited"
             );
