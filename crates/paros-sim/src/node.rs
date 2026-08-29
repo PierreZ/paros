@@ -110,6 +110,28 @@ const P_SNAP_CHUNK_ROT: f64 = 0.05;
 /// leader's recovery page size).
 const MAX_TORN_TAIL: usize = 64;
 
+/// Derive a deterministic index in `0..len` from one counted `sim_random`
+/// draw, reducing in `u64` space **before** narrowing to `usize`.
+///
+/// Narrowing first (`usize::try_from(sim_random::<u64>()).unwrap_or(0) %
+/// len`) is a platform trap: `usize` is 32 bits on `wasm32`, so the
+/// conversion fails for almost every draw and the pick collapses to index 0
+/// in the browser — the same seed then rots *different records* natively vs
+/// in wasm, breaking the demo's byte-identical replay contract (seed 4 was
+/// the witness: `Misdirected accepted[4]` native vs `accepted[0]` browser,
+/// diverging the whole downstream schedule). Reducing modulo `len` first
+/// keeps the result identical on every pointer width — and bit-identical to
+/// what 64-bit native always computed, so no pinned seed moves.
+///
+/// # Panics
+///
+/// Panics if `len` is zero (a programmer error: pick from a non-empty set).
+fn sim_random_index(len: usize) -> usize {
+    assert!(len > 0, "sim_random_index: empty selection set");
+    let len_u64 = u64::try_from(len).unwrap_or(u64::MAX);
+    usize::try_from(sim_random::<u64>() % len_u64).unwrap_or(0)
+}
+
 /// A paros node in the simulation.
 pub struct NodeProcess;
 
@@ -1225,6 +1247,10 @@ impl StorageWorld {
             {
                 injection.outcome = CorruptionOutcome::Recovered;
                 self.s7.record_recovered = true;
+                // Surface the heal for the wasm demo's CTRL view: this record's
+                // standing corruption report was genuinely resolved (a clean
+                // re-flush from peer repair, or truncation custodianship).
+                tracing::info!(node, record = %record, "corruption_healed");
             }
         }
     }
@@ -1464,7 +1490,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
         if sim_random::<f64>() < 0.5 {
             slots[slots.len() - 1]
         } else {
-            slots[usize::try_from(sim_random::<u64>()).unwrap_or(0) % slots.len()]
+            slots[sim_random_index(slots.len())]
         }
     };
     let mark_entry = |world: &mut StorageWorld, slot: Slot, health: SlotHealth, kind, block| {
@@ -1757,7 +1783,7 @@ fn pick_permitted(world: &StorageWorld, key: &str, slots: &[Slot]) -> Option<Slo
     Some(if sim_random::<f64>() < 0.5 {
         permitted[permitted.len() - 1]
     } else {
-        permitted[usize::try_from(sim_random::<u64>()).unwrap_or(0) % permitted.len()]
+        permitted[sim_random_index(permitted.len())]
     })
 }
 
@@ -2087,7 +2113,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             if fresh.is_empty() {
                 return;
             }
-            let count = 1 + usize::try_from(sim_random::<u64>()).unwrap_or(0) % fresh.len();
+            let count = 1 + sim_random_index(fresh.len());
             // The same per-record budget as every other injection: never leave
             // a record without a clean quorum of live copies.
             let quorum = w.quorum();

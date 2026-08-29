@@ -298,6 +298,21 @@ pub const EV_DUPLICATE_SUPPRESSED: &str = "duplicate_suppressed";
 /// leader this bounds is the feeder of #94's stale-suffix interleaving.
 pub const EV_QUORUM_LOST: &str = "leader_quorum_lost";
 
+/// Tracing event: a client read entered the read-index protocol on this node —
+/// the leader captured its read index and opened the heartbeat-ack confirmation
+/// round ([`RawNode::read_index`] returned `Pending`). Carries `node` and `ctx`
+/// (the driver's correlation token, matched by [`EV_READ_CONFIRMED`]). Purely
+/// observational: the wasm demo reads it to place a read at the commit barrier.
+pub const EV_READ_REQUESTED: &str = "read_requested";
+
+/// Tracing event: a parked read's confirmation round completed and the reply is
+/// being served ([`ReadState`] surfaced through `Ready::read_states`). Carries
+/// `node`, `ctx`, `read_index` (the confirmed watermark the read observes —
+/// absent for an empty prefix) and `served_index` (the serve-time chosen index,
+/// at or past the read index). Purely observational: the wasm demo reads it to
+/// show the read completing once applied >= read index.
+pub const EV_READ_CONFIRMED: &str = "read_confirmed";
+
 /// Tracing event: a client proposal was answered by the **dedup fast path** —
 /// the `(client, seq)` was already applied here, so the reply fired immediately
 /// instead of being parked on a slot ([`ProposeResult::Chosen`]). Carries `node`
@@ -762,69 +777,7 @@ impl Outbound {
     /// messages a proposer attempted, independently of delivery.
     fn transmit<A: Audit>(&self, audit: &A, to: NodeId, msg: &Message) {
         audit.sent(NodeId(self.self_id), to, msg);
-        let kind = message_kind(msg);
-        // An `Accept` is the only message that carries a *proposal*, so it is the
-        // only one whose command hash the trace needs: it is what lets an oracle
-        // check the Phase-2 half of P2b — one ballot proposes at most one command
-        // per slot — a claim no other event can show, because the anomaly it
-        // guards against (#67) puts two commands for one `(ballot, slot)` on the
-        // wire without either ever being accepted or chosen.
-        match msg {
-            Message::Accept {
-                config_id,
-                ballot,
-                slot,
-                command,
-                ..
-            } => tracing::info!(
-                node = self.self_id,
-                to = to.0,
-                kind,
-                bround = ballot.round,
-                bnode = ballot.node.0,
-                slot = slot.0,
-                vhash = command_hash(command),
-                config_id = config_id.0,
-                "msg_sent"
-            ),
-            _ => match message_route(msg) {
-                Some((_, config_id, ballot, Some(slot))) => tracing::info!(
-                    node = self.self_id,
-                    to = to.0,
-                    kind,
-                    bround = ballot.round,
-                    bnode = ballot.node.0,
-                    slot = slot.0,
-                    config_id = config_id.0,
-                    "msg_sent"
-                ),
-                // A beat from a leader whose chosen prefix is still empty: there is
-                // no slot to report, and reporting a bare `0` would put back on the
-                // trace exactly the sentinel #56 took off the wire.
-                Some((_, config_id, ballot, None)) => tracing::info!(
-                    node = self.self_id,
-                    to = to.0,
-                    kind,
-                    bround = ballot.round,
-                    bnode = ballot.node.0,
-                    config_id = config_id.0,
-                    "msg_sent"
-                ),
-                None => {
-                    if let Some(config_id) = msg.config_id() {
-                        tracing::info!(
-                            node = self.self_id,
-                            to = to.0,
-                            kind,
-                            config_id = config_id.0,
-                            "msg_sent"
-                        );
-                    } else {
-                        tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent");
-                    }
-                }
-            },
-        }
+        trace_msg_sent(self.self_id, to, msg);
         if let Some(queues) = self.peer_queues.get(&to) {
             let Ok(message) = message_to_proto(msg) else {
                 tracing::warn!(
@@ -847,6 +800,101 @@ impl Outbound {
                 );
             }
         }
+    }
+}
+
+/// Surface one outbound protocol send as a `msg_sent` trace event, with the
+/// per-kind fields the oracles and the wasm demo read.
+fn trace_msg_sent(self_id: u64, to: NodeId, msg: &Message) {
+    let kind = message_kind(msg);
+    // An `Accept` is the only message that carries a *proposal*, so it is the
+    // only one whose command hash the trace needs: it is what lets an oracle
+    // check the Phase-2 half of P2b — one ballot proposes at most one command
+    // per slot — a claim no other event can show, because the anomaly it
+    // guards against (#67) puts two commands for one `(ballot, slot)` on the
+    // wire without either ever being accepted or chosen.
+    match msg {
+        Message::Accept {
+            config_id,
+            ballot,
+            slot,
+            command,
+            ..
+        } => tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind,
+            bround = ballot.round,
+            bnode = ballot.node.0,
+            slot = slot.0,
+            vhash = command_hash(command),
+            config_id = config_id.0,
+            "msg_sent"
+        ),
+        // The catch-up pair carries no ballot, but the wasm demo needs the
+        // requested range and the replayed span to animate commit-replay
+        // catch-up, so those ride on the send event.
+        Message::CatchUpRequest { from_slot, .. } => tracing::info!(
+            node = self_id,
+            to = to.0,
+            kind,
+            from_slot = from_slot.0,
+            "msg_sent"
+        ),
+        Message::CatchUpResponse { entries, .. } => {
+            if let (Some(first), Some(last)) = (entries.keys().next(), entries.keys().next_back()) {
+                tracing::info!(
+                    node = self_id,
+                    to = to.0,
+                    kind,
+                    first = first.0,
+                    last = last.0,
+                    count = entries.len() as u64,
+                    "msg_sent"
+                );
+            } else {
+                // An empty response is "I hold nothing you need" — worth a
+                // leg on the timeline, but there is no range to report.
+                tracing::info!(node = self_id, to = to.0, kind, "msg_sent");
+            }
+        }
+        _ => match message_route(msg) {
+            Some((_, config_id, ballot, Some(slot))) => tracing::info!(
+                node = self_id,
+                to = to.0,
+                kind,
+                bround = ballot.round,
+                bnode = ballot.node.0,
+                slot = slot.0,
+                config_id = config_id.0,
+                "msg_sent"
+            ),
+            // A beat from a leader whose chosen prefix is still empty: there is
+            // no slot to report, and reporting a bare `0` would put back on the
+            // trace exactly the sentinel #56 took off the wire.
+            Some((_, config_id, ballot, None)) => tracing::info!(
+                node = self_id,
+                to = to.0,
+                kind,
+                bround = ballot.round,
+                bnode = ballot.node.0,
+                config_id = config_id.0,
+                "msg_sent"
+            ),
+            None => {
+                if let Some(config_id) = msg.config_id() {
+                    tracing::info!(
+                        node = self_id,
+                        to = to.0,
+                        kind,
+                        config_id = config_id.0,
+                        "msg_sent"
+                    );
+                } else {
+                    tracing::info!(node = self_id, to = to.0, kind, "msg_sent");
+                }
+            }
+        },
     }
 }
 
@@ -1356,6 +1404,27 @@ where
         if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
             let read_index = node.hard_state().chosen_index;
             audit.read_confirmed(NodeId(self_id), read_index);
+            match (state.index, read_index) {
+                (Some(index), Some(served)) => tracing::info!(
+                    node = self_id,
+                    ctx = state.ctx,
+                    read_index = index.0,
+                    served_index = served.0,
+                    "read_confirmed"
+                ),
+                (None, Some(served)) => tracing::info!(
+                    node = self_id,
+                    ctx = state.ctx,
+                    served_index = served.0,
+                    "read_confirmed"
+                ),
+                // An empty-prefix read: nothing chosen yet, nothing to report
+                // beyond the confirmation itself (mirrors the #56 rule — an
+                // empty prefix is not slot 0).
+                (_, None) => {
+                    tracing::info!(node = self_id, ctx = state.ctx, "read_confirmed");
+                }
+            }
             if hooks.drop_client_reply(Reply::Read) {
                 audit.client_reply_dropped(NodeId(self_id), Reply::Read);
                 tracing::info!(node = self_id, reply = "read", "client_reply_dropped");
@@ -2165,6 +2234,7 @@ where
                         let _ = reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
                     }
                     ReadIndexResult::Pending => {
+                        tracing::info!(node = self_id, ctx = next_read_ctx, "read_requested");
                         waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
                         next_read_ctx += 1;
                     }

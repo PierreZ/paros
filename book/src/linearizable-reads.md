@@ -281,3 +281,35 @@ which is now pinned, and the core tests
 `a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied` and
 `a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies` pin the
 mechanism on both call sites.
+
+## Watch it live
+
+The read path above, on one real seeded run. Each frame is one client read:
+the request reaches the leader (grey), the leader runs its heartbeat-ack
+**confirmation round** (cyan, out to the quorum and back), and the answer
+(green) leaves only once the applied prefix covers the dashed amber **read
+index** line — the commit barrier. The narration says how long each read
+waited there.
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=read&seed=0"
+  title="paros: linearizable reads at the commit barrier (seed 0)"
+  style="width:100%;height:720px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+A second embed with a different seed. Runs vary with the chaos drawn: under
+leader churn a read may cycle through redirects for hundreds of milliseconds,
+or time out entirely — returning *nothing* rather than something stale — and
+the narration reports what each read in this run actually did:
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=read&seed=183"
+  title="paros: a read across a leader change (seed 183)"
+  style="width:100%;height:720px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+Same seed, same run, byte for byte, here and in CI: the demo replays
+`run_seed(seed)` in your browser and draws the recorded `reads` and
+`read_confirms` streams of the `RunResult`; `?dump` shows the raw JSON.

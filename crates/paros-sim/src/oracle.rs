@@ -26,7 +26,8 @@ use moonpool_sim::{
 };
 use paros::{
     EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_LEADERSHIP_RESIGNED,
-    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_RECOVERED, EV_SYNCED,
+    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_READ_CONFIRMED, EV_RECOVERED,
+    EV_SNAPSHOT_INSTALLED, EV_STORAGE_FAULT, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -35,6 +36,20 @@ use serde::Serialize;
 const EV_ISSUED: &str = "client_issued";
 const EV_ACKED: &str = "client_acknowledged";
 const EV_FAILED: &str = "client_failed";
+/// The workload's client-read lifecycle events (see `crate::workload`).
+const EV_READ_ISSUED: &str = "client_read_issued";
+const EV_READ_ACKED: &str = "client_read_acknowledged";
+const EV_READ_FAILED: &str = "client_read_failed";
+/// Sim-storage ground-truth streams (see `crate::node`): injected fail-stop
+/// faults, injected corruptions, boot-scan classifications, and the Stage-8
+/// recovery outcomes.
+const EV_DISK_FAULT_INJECTED: &str = "storage_fault_injected";
+const EV_CORRUPTION_INJECTED: &str = "corruption_injected";
+const EV_BOOT_SCAN_CASE: &str = "boot_scan_case";
+const EV_CORRUPTION_HEALED: &str = "corruption_healed";
+const EV_STORAGE_PARKED: &str = "storage_parked";
+const EV_SNAPSHOT_RESET: &str = "snapshot_reset_for_recovery";
+const EV_SLOT_UNRECOVERABLE: &str = "slot_unrecoverable";
 
 /// Node A — the client.
 const NODE_A: u8 = 0;
@@ -217,6 +232,172 @@ pub struct RecoveredShot {
     pub vhash: u64,
 }
 
+/// A "this node durably truncated its log prefix" marker, from `compacted`
+/// events. Drives the truncation-floor marker in the log columns.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactShot {
+    /// Simulated time the truncation was durable, in milliseconds.
+    pub time_ms: u64,
+    /// The node that truncated.
+    pub node: u64,
+    /// The new compaction floor: the first slot still retained.
+    pub first: u64,
+}
+
+/// A "this node installed an opaque application snapshot from a peer" marker,
+/// from `snapshot_installed` events. Drives the snapshot block replacing the
+/// truncated prefix in a laggard's log column.
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotShot {
+    /// Simulated time the install was durable, in milliseconds.
+    pub time_ms: u64,
+    /// The node that installed the snapshot.
+    pub node: u64,
+    /// The commit index the snapshot brought the node up to.
+    pub chosen_index: u64,
+    /// The new compaction floor above the installed snapshot.
+    pub first: u64,
+}
+
+/// One commit-replay catch-up leg (send-side): a lagging node asking for its
+/// missing decided range, or a peer replaying it. From the `msg_sent` events of
+/// kind `catchup_request` / `catchup_response`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatchupShot {
+    /// Simulated time the leg was sent, in milliseconds.
+    pub time_ms: u64,
+    /// Sending node id.
+    pub from: u8,
+    /// Receiving node id.
+    pub to: u8,
+    /// `request` (a laggard asking) or `response` (a peer replaying).
+    pub kind: String,
+    /// Request: first slot the requester still needs.
+    pub from_slot: Option<u64>,
+    /// Response: first slot replayed (absent on an empty response).
+    pub first: Option<u64>,
+    /// Response: last slot replayed (absent on an empty response).
+    pub last: Option<u64>,
+    /// Response: number of decided entries replayed.
+    pub count: u64,
+}
+
+/// One client read's lifecycle, from the workload's `client_read_issued` /
+/// `client_read_acknowledged` / `client_read_failed` events. Drives the read
+/// marker waiting at the commit barrier.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadShot {
+    /// Workload client this read belongs to.
+    pub client: u64,
+    /// Request sequence number (unique per client only).
+    pub seq: u64,
+    /// Simulated time the read was issued, in milliseconds.
+    pub issued_ms: u64,
+    /// Simulated time it terminally resolved (ack or failure), in milliseconds.
+    pub done_ms: u64,
+    /// The applied watermark the read observed (absent for an empty prefix or a
+    /// failed read).
+    pub read_index: Option<u64>,
+    /// How many node attempts (redirect cycling) the read took.
+    pub attempts: u64,
+    /// Whether the read was served (`delivered`) or timed out (`dropped`).
+    pub outcome: Outcome,
+}
+
+/// A "this leader confirmed and served a read-index round" marker, from
+/// `read_confirmed` events: the heartbeat-ack quorum round completed and the
+/// applied prefix covered the captured index.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadConfirmShot {
+    /// Simulated time the read was served, in milliseconds.
+    pub time_ms: u64,
+    /// The leader that served it.
+    pub node: u64,
+    /// The confirmed read index (absent for an empty prefix).
+    pub read_index: Option<u64>,
+    /// The serve-time chosen index, at or past `read_index`.
+    pub served_index: Option<u64>,
+}
+
+/// One injected fail-stop disk fault (Stage 6 ground truth), from the sim
+/// storage world's `storage_fault_injected` events. The node itself only ever
+/// sees the ambiguous `StorageError`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskFaultShot {
+    /// Simulated time the fault fired, in milliseconds.
+    pub time_ms: u64,
+    /// The node whose disk misbehaved.
+    pub node: u64,
+    /// The record the fault landed on (e.g. `accepted[3]`, `batch`).
+    pub record: String,
+    /// `write_eio` or `fsync_failed`.
+    pub kind: String,
+    /// fsyncgate ambiguity: whether the write actually reached the medium.
+    pub persisted: bool,
+}
+
+/// The driver's deliberate storage-fault crash decision, from `storage_fault`
+/// events: a `NodeStorage` call failed (or the boot scan detected corruption)
+/// and the node crashed rather than continue on bad state.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageCrashShot {
+    /// Simulated time of the crash decision, in milliseconds.
+    pub time_ms: u64,
+    /// The node that crashed.
+    pub node: u64,
+    /// The human-readable storage error that triggered it.
+    pub error: String,
+}
+
+/// One injected silent-corruption event (Stage 7 ground truth), from the sim
+/// storage world's `corruption_injected` events.
+#[derive(Debug, Clone, Serialize)]
+pub struct CorruptionShot {
+    /// Simulated time the rot was injected, in milliseconds.
+    pub time_ms: u64,
+    /// The node whose durable record rotted.
+    pub node: u64,
+    /// The record it landed on (e.g. `accepted[3]`, `promise`, `snapshot`).
+    pub record: String,
+    /// The corruption family (e.g. `BitFlip`, `LostWrite`, `Misdirected`).
+    pub kind: String,
+}
+
+/// One boot-scan classification (Stage 7/8), from `boot_scan_case` events: a
+/// checksum mismatch (or absence) was detected on read and classified before
+/// any corrupted bytes could reach protocol logic.
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectionShot {
+    /// Simulated time of the boot scan, in milliseconds.
+    pub time_ms: u64,
+    /// The node whose boot scan flagged the record.
+    pub node: u64,
+    /// The slot the flagged record belongs to.
+    pub slot: u64,
+    /// The classified recovery case label.
+    pub case: String,
+}
+
+/// One protocol-aware recovery outcome (Stage 8 / CTRL), merged from the
+/// `corruption_healed` / `storage_parked` / `snapshot_reset_for_recovery` /
+/// `slot_unrecoverable` streams.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairShot {
+    /// Simulated time of the outcome, in milliseconds.
+    pub time_ms: u64,
+    /// The node concerned (absent for the cluster-wide `unrecoverable` fact).
+    pub node: Option<u64>,
+    /// `healed` (a standing corruption report resolved via peer repair),
+    /// `parked` (the node waits rather than fabricate), `reset` (a rotted
+    /// application snapshot legally restarts the applied index), or
+    /// `unrecoverable` (world ground truth: no readable copy exists anywhere).
+    pub kind: String,
+    /// The record concerned, when the stream names one.
+    pub record: Option<String>,
+    /// The slot concerned, when the stream names one.
+    pub slot: Option<u64>,
+}
+
 /// The full result of one seeded run: every message leg plus headline counters
 /// the UI shows alongside the animation.
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +429,28 @@ pub struct RunResult {
     /// Durable accepted records read back on (re)boot, in time order — the durable
     /// state that survives a crash.
     pub recovered: Vec<RecoveredShot>,
+    /// Durable log truncations (compaction-floor raises), in time order.
+    pub compactions: Vec<CompactShot>,
+    /// Snapshot installs (a below-floor node recovering via a peer's opaque
+    /// application snapshot), in time order.
+    pub snapshots: Vec<SnapshotShot>,
+    /// Commit-replay catch-up legs (request + response, send-side), in time order.
+    pub catchups: Vec<CatchupShot>,
+    /// Client read lifecycles (read-index protocol, client side), in issue order.
+    pub reads: Vec<ReadShot>,
+    /// Leader-side read-index confirmations, in time order.
+    pub read_confirms: Vec<ReadConfirmShot>,
+    /// Injected fail-stop disk faults (Stage 6 ground truth), in time order.
+    pub disk_faults: Vec<DiskFaultShot>,
+    /// Driver storage-fault crash decisions, in time order.
+    pub storage_crashes: Vec<StorageCrashShot>,
+    /// Injected silent corruptions (Stage 7 ground truth), in time order.
+    pub corruptions: Vec<CorruptionShot>,
+    /// Boot-scan corruption detections/classifications, in time order.
+    pub detections: Vec<DetectionShot>,
+    /// Protocol-aware recovery outcomes (heal / park / reset / unrecoverable),
+    /// in time order.
+    pub repairs: Vec<RepairShot>,
     /// Proposals that completed successfully.
     pub delivered: u32,
     /// Proposals dropped / timed out.
@@ -277,6 +480,16 @@ impl RunResult {
             restarts: Vec::new(),
             syncs: Vec::new(),
             recovered: Vec::new(),
+            compactions: Vec::new(),
+            snapshots: Vec::new(),
+            catchups: Vec::new(),
+            reads: Vec::new(),
+            read_confirms: Vec::new(),
+            disk_faults: Vec::new(),
+            storage_crashes: Vec::new(),
+            corruptions: Vec::new(),
+            detections: Vec::new(),
+            repairs: Vec::new(),
             delivered: 0,
             dropped: 0,
             ticks: 0,
@@ -284,6 +497,15 @@ impl RunResult {
             sim_duration_ms: 0,
         }
     }
+}
+
+/// One terminal client-read acknowledgement, before pairing with its issue.
+#[derive(Clone)]
+struct RawReadAck {
+    key: (u64, u64),
+    time_ms: u64,
+    read_index: Option<u64>,
+    attempts: u64,
 }
 
 /// Raw timeline the recorder accumulates from the trace.
@@ -295,6 +517,12 @@ pub(crate) struct RecorderData {
     acked: Vec<((u64, u64), u64)>,
     /// `((client_id, seq_id), sim_time_ms)` for each failed proposal.
     failed: Vec<((u64, u64), u64)>,
+    /// `((client_id, seq_id), sim_time_ms)` for each issued read.
+    read_issued: Vec<((u64, u64), u64)>,
+    /// Terminal read acknowledgements, with the observed watermark.
+    read_acked: Vec<RawReadAck>,
+    /// `((client_id, seq_id), sim_time_ms)` for each failed read.
+    read_failed: Vec<((u64, u64), u64)>,
     /// Number of logical-clock ticks observed.
     ticks: u64,
 }
@@ -336,8 +564,28 @@ impl Invariant for TimelineRecorder {
         d.issued = collect_seq(q, EV_ISSUED);
         d.acked = collect_seq(q, EV_ACKED);
         d.failed = collect_seq(q, EV_FAILED);
+        d.read_issued = collect_seq(q, EV_READ_ISSUED);
+        d.read_acked = collect_read_acks(q);
+        d.read_failed = collect_seq(q, EV_READ_FAILED);
         d.ticks = u64::try_from(q.len(EV_NODE_TICK)).unwrap_or(u64::MAX);
     }
+}
+
+/// Pull the terminal read acknowledgements (`client_read_acknowledged`), with
+/// the observed watermark (`read_index`; absent = the empty applied prefix) and
+/// the redirect-cycling attempt count.
+fn collect_read_acks(q: &dyn TraceQuery) -> Vec<RawReadAck> {
+    q.snapshot(EV_READ_ACKED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(RawReadAck {
+                key: (e.u64("client_id").unwrap_or(0), e.u64("seq_id")?),
+                time_ms: e.time_ms,
+                read_index: e.u64("read_index"),
+                attempts: e.u64("attempts").unwrap_or(1),
+            })
+        })
+        .collect()
 }
 
 /// One captured inter-node message leg (a send or a receive), before sends and
@@ -365,6 +613,10 @@ pub(crate) struct ProtocolData {
     chosen: Vec<ChosenShot>,
     leaders: Vec<LeaderShot>,
     applied: Vec<AppliedShot>,
+    compactions: Vec<CompactShot>,
+    snapshots: Vec<SnapshotShot>,
+    catchups: Vec<CatchupShot>,
+    read_confirms: Vec<ReadConfirmShot>,
     cluster: BTreeSet<u64>,
 }
 
@@ -456,6 +708,75 @@ fn collect_applied(q: &dyn TraceQuery) -> Vec<AppliedShot> {
                 time_ms: e.time_ms,
                 node: e.u64("node")?,
                 slot: e.u64("slot")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the durable-truncation markers from the `compacted` stream.
+fn collect_compactions(q: &dyn TraceQuery) -> Vec<CompactShot> {
+    q.snapshot(EV_COMPACTED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(CompactShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                first: e.u64("first")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the snapshot-install markers from the `snapshot_installed` stream.
+fn collect_snapshots(q: &dyn TraceQuery) -> Vec<SnapshotShot> {
+    q.snapshot(EV_SNAPSHOT_INSTALLED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(SnapshotShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                chosen_index: e.u64("chosen_index")?,
+                first: e.u64("first")?,
+            })
+        })
+        .collect()
+}
+
+/// Pull the commit-replay catch-up legs from the `msg_sent` stream (the
+/// catch-up pair carries no ballot, so `collect_legs` skips it by design).
+fn collect_catchups(q: &dyn TraceQuery) -> Vec<CatchupShot> {
+    q.snapshot(EV_MSG_SENT)
+        .into_iter()
+        .filter_map(|e| {
+            let kind = match e.str("kind")? {
+                "catchup_request" => "request",
+                "catchup_response" => "response",
+                _ => return None,
+            };
+            Some(CatchupShot {
+                time_ms: e.time_ms,
+                from: u8::try_from(e.u64("node")?).ok()?,
+                to: u8::try_from(e.u64("to")?).ok()?,
+                kind: kind.to_string(),
+                from_slot: e.u64("from_slot"),
+                first: e.u64("first"),
+                last: e.u64("last"),
+                count: e.u64("count").unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// Pull the leader-side read confirmations from the `read_confirmed` stream.
+fn collect_read_confirms(q: &dyn TraceQuery) -> Vec<ReadConfirmShot> {
+    q.snapshot(EV_READ_CONFIRMED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(ReadConfirmShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                read_index: e.u64("read_index"),
+                served_index: e.u64("served_index"),
             })
         })
         .collect()
@@ -565,6 +886,153 @@ impl Invariant for RecoveryRecorder {
     }
 }
 
+/// Raw storage-fault timeline the [`StorageRecorder`] accumulates: the injected
+/// fail-stop faults and corruptions (sim ground truth), the driver's typed
+/// crash decisions, the boot-scan detections, and the Stage-8 recovery
+/// outcomes. All used as-is by `build_result`.
+#[derive(Default)]
+pub(crate) struct StorageData {
+    disk_faults: Vec<DiskFaultShot>,
+    storage_crashes: Vec<StorageCrashShot>,
+    corruptions: Vec<CorruptionShot>,
+    detections: Vec<DetectionShot>,
+    repairs: Vec<RepairShot>,
+}
+
+/// Pull the injected fail-stop faults from the `storage_fault_injected` stream.
+fn collect_disk_faults(q: &dyn TraceQuery) -> Vec<DiskFaultShot> {
+    q.snapshot(EV_DISK_FAULT_INJECTED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(DiskFaultShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                record: e.str("record").unwrap_or("?").to_string(),
+                kind: e.str("kind")?.to_string(),
+                persisted: e.bool("persisted").unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// Pull the driver's storage-fault crash decisions from the `storage_fault`
+/// stream.
+fn collect_storage_crashes(q: &dyn TraceQuery) -> Vec<StorageCrashShot> {
+    q.snapshot(EV_STORAGE_FAULT)
+        .into_iter()
+        .filter_map(|e| {
+            Some(StorageCrashShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                error: e.str("error").unwrap_or("?").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Pull the injected corruptions from the `corruption_injected` stream.
+fn collect_corruptions(q: &dyn TraceQuery) -> Vec<CorruptionShot> {
+    q.snapshot(EV_CORRUPTION_INJECTED)
+        .into_iter()
+        .filter_map(|e| {
+            Some(CorruptionShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                record: e.str("record").unwrap_or("?").to_string(),
+                kind: e.str("kind").unwrap_or("?").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Pull the boot-scan detections from the `boot_scan_case` stream.
+fn collect_detections(q: &dyn TraceQuery) -> Vec<DetectionShot> {
+    q.snapshot(EV_BOOT_SCAN_CASE)
+        .into_iter()
+        .filter_map(|e| {
+            Some(DetectionShot {
+                time_ms: e.time_ms,
+                node: e.u64("node")?,
+                slot: e.u64("slot")?,
+                case: e.str("case").unwrap_or("?").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Merge the Stage-8 recovery-outcome streams into one time-ordered list.
+fn collect_repairs(q: &dyn TraceQuery) -> Vec<RepairShot> {
+    let mut repairs: Vec<RepairShot> = Vec::new();
+    for e in q.snapshot(EV_CORRUPTION_HEALED) {
+        repairs.push(RepairShot {
+            time_ms: e.time_ms,
+            node: e.u64("node"),
+            kind: "healed".to_string(),
+            record: e.str("record").map(str::to_string),
+            slot: None,
+        });
+    }
+    for e in q.snapshot(EV_STORAGE_PARKED) {
+        repairs.push(RepairShot {
+            time_ms: e.time_ms,
+            node: e.u64("node"),
+            kind: "parked".to_string(),
+            record: None,
+            slot: None,
+        });
+    }
+    for e in q.snapshot(EV_SNAPSHOT_RESET) {
+        repairs.push(RepairShot {
+            time_ms: e.time_ms,
+            node: e.u64("node"),
+            kind: "reset".to_string(),
+            record: None,
+            slot: e.u64("floor"),
+        });
+    }
+    for e in q.snapshot(EV_SLOT_UNRECOVERABLE) {
+        repairs.push(RepairShot {
+            time_ms: e.time_ms,
+            node: None,
+            kind: "unrecoverable".to_string(),
+            record: None,
+            slot: e.u64("slot"),
+        });
+    }
+    repairs.sort_by_key(|r| r.time_ms);
+    repairs
+}
+
+/// The storage-fault recorder: mirrors [`RecoveryRecorder`] for the Stage 6–8
+/// streams the disk-fault / corruption / CTRL visualizations need. Injections
+/// are the simulator's ground truth; detections and crash decisions are the
+/// node's own observable reactions — surfacing both is what lets the demo show
+/// "every injection was caught".
+pub(crate) struct StorageRecorder {
+    data: Arc<Mutex<StorageData>>,
+}
+
+impl StorageRecorder {
+    pub(crate) fn new(data: Arc<Mutex<StorageData>>) -> Self {
+        Self { data }
+    }
+}
+
+impl Invariant for StorageRecorder {
+    fn name(&self) -> &'static str {
+        "storage_recorder"
+    }
+
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let mut d = self.data.lock().unwrap_or_else(PoisonError::into_inner);
+        d.disk_faults = collect_disk_faults(q);
+        d.storage_crashes = collect_storage_crashes(q);
+        d.corruptions = collect_corruptions(q);
+        d.detections = collect_detections(q);
+        d.repairs = collect_repairs(q);
+    }
+}
+
 /// The protocol-timeline recorder: mirrors [`TimelineRecorder`], but captures the
 /// inter-node Paxos messages and the node-state / chosen streams the single-decree
 /// visualization needs (the client recorder above stays focused on client events).
@@ -591,6 +1059,10 @@ impl Invariant for ProtocolRecorder {
         d.chosen = collect_chosen(q);
         d.leaders = collect_leaders(q);
         d.applied = collect_applied(q);
+        d.compactions = collect_compactions(q);
+        d.snapshots = collect_snapshots(q);
+        d.catchups = collect_catchups(q);
+        d.read_confirms = collect_read_confirms(q);
         d.cluster = q
             .snapshot(EV_BOOTED)
             .iter()
@@ -1143,11 +1615,49 @@ fn build_shots(
     (shots, delivered, dropped, longest_rtt_ms)
 }
 
+/// Pair each issued read with its terminal event into [`ReadShot`]s, in issue
+/// order (mirrors [`build_shots`] for writes).
+fn build_reads(data: &RecorderData) -> Vec<ReadShot> {
+    let acks: BTreeMap<(u64, u64), &RawReadAck> =
+        data.read_acked.iter().map(|a| (a.key, a)).collect();
+    let fails: BTreeMap<(u64, u64), u64> = data.read_failed.iter().copied().collect();
+    let mut issued = data.read_issued.clone();
+    issued.sort_by_key(|&(_, t)| t);
+    issued
+        .into_iter()
+        .map(|((client, seq), issued_ms)| {
+            if let Some(ack) = acks.get(&(client, seq)) {
+                ReadShot {
+                    client,
+                    seq,
+                    issued_ms,
+                    done_ms: ack.time_ms,
+                    read_index: ack.read_index,
+                    attempts: ack.attempts,
+                    outcome: Outcome::Delivered,
+                }
+            } else {
+                let done_ms = fails.get(&(client, seq)).copied().unwrap_or(issued_ms);
+                ReadShot {
+                    client,
+                    seq,
+                    issued_ms,
+                    done_ms: done_ms.max(issued_ms.saturating_add(MIN_DROP_SPAN_MS)),
+                    read_index: None,
+                    attempts: 0,
+                    outcome: Outcome::Dropped,
+                }
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn build_result(
     seed: u64,
     data: &RecorderData,
     proto: &ProtocolData,
     rec: &RecoveryData,
+    storage: &StorageData,
 ) -> RunResult {
     let (protocol, node_states, chosen, leaders, applied) = build_protocol(proto);
     let nodes = proto
@@ -1155,25 +1665,31 @@ pub(crate) fn build_result(
         .iter()
         .max()
         .map_or(0, |&m| usize::try_from(m).unwrap_or(0) + 1);
-    let crashes = rec.crashes.clone();
-    let restarts = rec.restarts.clone();
-    let syncs = rec.syncs.clone();
-    let recovered = rec.recovered.clone();
-
+    let mut result = RunResult {
+        nodes,
+        protocol,
+        node_states,
+        chosen,
+        leaders,
+        applied,
+        crashes: rec.crashes.clone(),
+        restarts: rec.restarts.clone(),
+        syncs: rec.syncs.clone(),
+        recovered: rec.recovered.clone(),
+        compactions: proto.compactions.clone(),
+        snapshots: proto.snapshots.clone(),
+        catchups: proto.catchups.clone(),
+        reads: build_reads(data),
+        read_confirms: proto.read_confirms.clone(),
+        disk_faults: storage.disk_faults.clone(),
+        storage_crashes: storage.storage_crashes.clone(),
+        corruptions: storage.corruptions.clone(),
+        detections: storage.detections.clone(),
+        repairs: storage.repairs.clone(),
+        ..RunResult::empty(seed)
+    };
     if data.issued.is_empty() {
-        return RunResult {
-            nodes,
-            protocol,
-            node_states,
-            chosen,
-            leaders,
-            applied,
-            crashes,
-            restarts,
-            syncs,
-            recovered,
-            ..RunResult::empty(seed)
-        };
+        return result;
     }
 
     let ack: BTreeMap<(u64, u64), u64> = data.acked.iter().copied().collect();
@@ -1181,42 +1697,42 @@ pub(crate) fn build_result(
     let mut issued = data.issued.clone();
     issued.sort_by_key(|&(_, t)| t);
     let (shots, delivered, dropped, longest_rtt_ms) = build_shots(&issued, &ack, &fail);
+    result.requests = u32::try_from(issued.len()).unwrap_or(u32::MAX);
+    result.shots = shots;
+    result.delivered = delivered;
+    result.dropped = dropped;
+    result.ticks = data.ticks;
+    result.longest_rtt_ms = longest_rtt_ms;
+    result.sim_duration_ms = run_span_ms(&result);
+    result
+}
 
-    // The animation spans the latest of any observable event: a client leg, a
-    // protocol leg, a node-state change, a chosen marker, or a crash/restart —
-    // the crash/recovery tail must not be truncated.
-    let sim_duration_ms = shots
+/// The animation spans the latest of any observable event: a client leg, a
+/// protocol leg, a node-state change, a chosen marker, a crash/restart, or any
+/// of the storage / catch-up / read streams — the recovery tail must not be
+/// truncated.
+fn run_span_ms(r: &RunResult) -> u64 {
+    r.shots
         .iter()
         .map(|s| s.arrive_ms)
-        .chain(protocol.iter().map(|s| s.arrive_ms))
-        .chain(node_states.iter().map(|s| s.time_ms))
-        .chain(chosen.iter().map(|s| s.time_ms))
-        .chain(leaders.iter().map(|s| s.time_ms))
-        .chain(applied.iter().map(|s| s.time_ms))
-        .chain(crashes.iter().map(|s| s.time_ms))
-        .chain(restarts.iter().map(|s| s.time_ms))
-        .chain(recovered.iter().map(|s| s.time_ms))
+        .chain(r.protocol.iter().map(|s| s.arrive_ms))
+        .chain(r.node_states.iter().map(|s| s.time_ms))
+        .chain(r.chosen.iter().map(|s| s.time_ms))
+        .chain(r.leaders.iter().map(|s| s.time_ms))
+        .chain(r.applied.iter().map(|s| s.time_ms))
+        .chain(r.crashes.iter().map(|s| s.time_ms))
+        .chain(r.restarts.iter().map(|s| s.time_ms))
+        .chain(r.recovered.iter().map(|s| s.time_ms))
+        .chain(r.compactions.iter().map(|s| s.time_ms))
+        .chain(r.snapshots.iter().map(|s| s.time_ms))
+        .chain(r.catchups.iter().map(|s| s.time_ms))
+        .chain(r.reads.iter().map(|s| s.done_ms))
+        .chain(r.read_confirms.iter().map(|s| s.time_ms))
+        .chain(r.disk_faults.iter().map(|s| s.time_ms))
+        .chain(r.storage_crashes.iter().map(|s| s.time_ms))
+        .chain(r.corruptions.iter().map(|s| s.time_ms))
+        .chain(r.detections.iter().map(|s| s.time_ms))
+        .chain(r.repairs.iter().map(|s| s.time_ms))
         .max()
-        .unwrap_or(0);
-
-    RunResult {
-        seed,
-        nodes,
-        requests: u32::try_from(issued.len()).unwrap_or(u32::MAX),
-        shots,
-        protocol,
-        node_states,
-        chosen,
-        leaders,
-        applied,
-        crashes,
-        restarts,
-        syncs,
-        recovered,
-        delivered,
-        dropped,
-        ticks: data.ticks,
-        longest_rtt_ms,
-        sim_duration_ms,
-    }
+        .unwrap_or(0)
 }

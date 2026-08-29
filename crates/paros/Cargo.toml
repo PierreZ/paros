@@ -18,10 +18,11 @@ paros-core = { path = "../paros-core", version = "0.2.0" }
 # the SAME code runs in production (TokioProviders) and simulation (SimProviders).
 # Both Moonpool crates come in without production providers so `paros` stays
 # wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
-# Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
-# release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "980a6acc56da47733ad65ea0786b4c10cde2c1fd", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "980a6acc56da47733ad65ea0786b4c10cde2c1fd" }
+# Pinned to moonpool's `wasm-safe-hyper-timer` branch (the previous `main` pin
+# 980a6acc + the moonpool#189 HyperTimer wasm fix — zero native drift); back to
+# a `main` rev once #189 lands. Same rev as paros-sim.
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "debdcf3d77472f4dbb7c0bb921a50547a3447d34", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "debdcf3d77472f4dbb7c0bb921a50547a3447d34" }
 
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
 # tonic's tokio-bound `transport` feature remains disabled.

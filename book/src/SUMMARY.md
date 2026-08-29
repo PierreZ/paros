@@ -17,3 +17,9 @@
 - [Crash and recovery: what survives](crash-and-recovery.md)
 - [Truncation and snapshot restore](truncation-and-snapshots.md)
 - [Why reads are not free](linearizable-reads.md)
+
+# When the disk lies
+
+- [When the disk dies](disk-dies.md)
+- [Detecting silent corruption](detect-corruption.md)
+- [Protocol-aware recovery (CTRL)](ctrl-recovery.md)

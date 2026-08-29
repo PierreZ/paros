@@ -24,7 +24,11 @@ mod workload;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
 pub use node::NodeProcess;
-pub use oracle::{ChosenShot, NodeStateShot, Outcome, ProtocolShot, RunResult, Shot};
+pub use oracle::{
+    CatchupShot, ChosenShot, CompactShot, CorruptionShot, DetectionShot, DiskFaultShot,
+    NodeStateShot, Outcome, ProtocolShot, ReadConfirmShot, ReadShot, RepairShot, RunResult, Shot,
+    SnapshotShot, StorageCrashShot,
+};
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -43,7 +47,7 @@ use crate::node::{
 };
 use crate::oracle::{
     ChainAgreement, ProtocolData, ProtocolRecorder, RecorderData, RecoveryData, RecoveryRecorder,
-    TimelineRecorder, build_result,
+    StorageData, StorageRecorder, TimelineRecorder, build_result,
 };
 use crate::protocol_bounds::{ProtocolBoundsIdleProcess, ProtocolBoundsWorkload};
 use crate::workload::ProposeClient;
@@ -556,6 +560,7 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = Arc::new(Mutex::new(RecorderData::default()));
     let proto = Arc::new(Mutex::new(ProtocolData::default()));
     let recovery = Arc::new(Mutex::new(RecoveryData::default()));
+    let storage = Arc::new(Mutex::new(StorageData::default()));
     let report = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(ProcessCount::Range(CLUSTER_SIZE_RANGE), || {
@@ -567,6 +572,7 @@ pub fn run_seed(seed: u64) -> RunResult {
         .invariant(TimelineRecorder::new(data.clone()))
         .invariant(ProtocolRecorder::new(proto.clone()))
         .invariant(RecoveryRecorder::new(recovery.clone()))
+        .invariant(StorageRecorder::new(storage.clone()))
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .set_iterations(1)
@@ -582,7 +588,8 @@ pub fn run_seed(seed: u64) -> RunResult {
     let data = data.lock().unwrap_or_else(PoisonError::into_inner);
     let proto = proto.lock().unwrap_or_else(PoisonError::into_inner);
     let recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
-    build_result(seed, &data, &proto, &recovery)
+    let storage = storage.lock().unwrap_or_else(PoisonError::into_inner);
+    build_result(seed, &data, &proto, &recovery, &storage)
 }
 
 /// Run the DST bug-finding sweep: regional latency, attrition, driver hooks,

@@ -136,6 +136,61 @@ export function badgeDrop(cx, cy, color = PHASE.nack) {
   ]);
 }
 
+export function badgeDisk(cx, cy, color = C.muted) {
+  // a small disk cylinder: top ellipse + body
+  const rx = 5, ry = 2, h = 7;
+  return el('g', { stroke: color, 'stroke-width': 1.3, fill: 'none' }, [
+    el('ellipse', { cx, cy: cy - h / 2, rx, ry }),
+    el('path', { d: `M ${cx - rx} ${cy - h / 2} V ${cy + h / 2} A ${rx} ${ry} 0 0 0 ${cx + rx} ${cy + h / 2} V ${cy - h / 2}` }),
+  ]);
+}
+
+export function badgeRot(cx, cy, color = PHASE.nack) {
+  // a warning triangle with an exclamation stroke — silent corruption injected
+  const s = 6;
+  return el('g', {}, [
+    el('polygon', {
+      points: `${cx},${cy - s} ${cx + s},${cy + s * 0.8} ${cx - s},${cy + s * 0.8}`,
+      fill: 'none', stroke: color, 'stroke-width': 1.5, 'stroke-linejoin': 'round',
+    }),
+    el('line', { x1: cx, y1: cy - s * 0.45, x2: cx, y2: cy + s * 0.25, stroke: color, 'stroke-width': 1.6, 'stroke-linecap': 'round' }),
+    el('circle', { cx, cy: cy + s * 0.55, r: 0.9, fill: color }),
+  ]);
+}
+
+export function badgeDetect(cx, cy, color = PHASE.promise) {
+  // a magnifier: detection — the checksum caught the rot on read
+  const r = 3.6;
+  return el('g', { stroke: color, 'stroke-width': 1.5, fill: 'none', 'stroke-linecap': 'round' }, [
+    el('circle', { cx: cx - 1, cy: cy - 1, r }),
+    el('line', { x1: cx + 1.8, y1: cy + 1.8, x2: cx + 4.6, y2: cy + 4.6 }),
+  ]);
+}
+
+export function badgeHeal(cx, cy, color = PHASE.chosen) {
+  // a check mark — the record was repaired from a correct peer copy
+  return el('g', { stroke: color, 'stroke-width': 2, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, [
+    el('path', { d: `M ${cx - 4.5} ${cy} L ${cx - 1} ${cy + 3.5} L ${cx + 5} ${cy - 3.5}` }),
+  ]);
+}
+
+export function badgeWait(cx, cy, color = PHASE.accept) {
+  // two pause bars — the node waits rather than fabricate or truncate
+  return el('g', { fill: color }, [
+    el('rect', { x: cx - 4, y: cy - 5, width: 2.6, height: 10, rx: 1 }),
+    el('rect', { x: cx + 1.4, y: cy - 5, width: 2.6, height: 10, rx: 1 }),
+  ]);
+}
+
+export function badgeSnapshot(cx, cy, color = PHASE.promise) {
+  // a box with a down arrow into it — an installed application snapshot
+  return el('g', {}, [
+    el('path', { d: `M ${cx - 5} ${cy} V ${cy + 5} H ${cx + 5} V ${cy}`, fill: 'none', stroke: color, 'stroke-width': 1.5, 'stroke-linejoin': 'round' }),
+    el('line', { x1: cx, y1: cy - 6, x2: cx, y2: cy + 1.5, stroke: color, 'stroke-width': 1.6, 'stroke-linecap': 'round' }),
+    el('polygon', { points: `${cx - 2.6},${cy - 0.5} ${cx + 2.6},${cy - 0.5} ${cx},${cy + 2.8}`, fill: color }),
+  ]);
+}
+
 export function badgeLeader(cx, cy, color = PHASE.leader) {
   // gold ring + a small gold dot badge
   return el('g', {}, [

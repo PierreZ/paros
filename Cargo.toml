@@ -17,3 +17,13 @@ async_fn_in_trait = "allow"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
+
+# The browser demo's wasm runtime requires every wall-clock read to be gone:
+# h2's locally-reset-stream expiry calls std::time::Instant::now(), which
+# panics on wasm32-unknown-unknown and aborted every `runSeed`. This patch is
+# verbatim h2 0.4.19 plus a cfg-gated frozen-instant shim on those two reads
+# (native re-exports std::time::Instant, bit-identical). Tracked in
+# moonpool#189 together with the HyperTimer anchor fix; drop the patch once an
+# equivalent change lands in hyperium/h2.
+[patch.crates-io]
+h2 = { git = "https://github.com/PierreZ/moonpool", branch = "h2-0.4.19-wasm-time" }

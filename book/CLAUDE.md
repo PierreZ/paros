@@ -62,8 +62,10 @@ Each protocol chapter ends with a **"Watch it live"** demo page embedding the wa
 `single-decree.md` under *Single-decree Paxos*, `multi-paxos.md` under *Multi-Paxos* (so a
 reader meets the live demo right after the concept it shows). One file,
 `crates/paros-wasm-demo/web/index.html`, serves all modes via a `?mode=` switch (`single` is the
-default, `?mode=multi` selects the leader-and-log column scene, `?mode=crash` the crash &
-recovery timeline). The front-end is a **shell + pluggable renderers** (vanilla ES modules
+default; `?mode=multi` the leader-and-log column scene, `?mode=read` the linearizable-read
+barrier, `?mode=log` the catch-up/compaction/snapshot columns, `?mode=crash` the crash &
+recovery timeline, `?mode=disk` / `?mode=corrupt` / `?mode=ctrl` the Stage 6–8 storage-fault
+timelines). The front-end is a **shell + pluggable renderers** (vanilla ES modules
 under `web/app/`, SVG, no bundler): one shell owns the shared chrome (tabs, transport,
 narration, digest chips, oracle badge, responsive stage, the glowing message particle), and
 each mode is a renderer object registered in `app/registry.js`. Adding a mode is a drop-in —

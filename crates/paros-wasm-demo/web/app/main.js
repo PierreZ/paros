@@ -9,7 +9,7 @@
 // The wasm boundary is unchanged: `runSeed(seed)` returns the RunResult JSON.
 
 import init, { runSeed } from '../pkg/paros_wasm_demo.js';
-import { MODES, modeFromParam } from './registry.js';
+import { MODES, modeFromParam, defaultSeed } from './registry.js';
 import { Shell } from './shell.js';
 
 const params = new URLSearchParams(location.search);
@@ -17,8 +17,8 @@ const DUMP = params.has('dump');
 const EMBED = params.has('embed');
 const modeId = modeFromParam(params.get('mode'));
 
-// default seed: crash mode uses a seed that crashes a node at the seam
-let seed = params.has('seed') ? params.get('seed') : (modeId === 'crash' ? '99' : '0');
+// default seed: each mode's first curated lesson (e.g. crash → a seam crash)
+let seed = params.has('seed') ? params.get('seed') : defaultSeed(modeId);
 
 const statusEl = document.getElementById('status');
 const rawEl = document.getElementById('raw');

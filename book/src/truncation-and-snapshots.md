@@ -138,3 +138,34 @@ just present but exercised. In the common random run a below-floor node is often
 still healed by catch-up from a peer that truncated less aggressively — snapshot
 transfer is the accelerator that becomes *load-bearing* once every peer has
 truncated past it, which is exactly when nothing else can help.
+
+## Watch it live
+
+Everything above, on one real seeded run. Each column is a node's log; step
+through the frames: a **hole** (dashed red — a decided slot the node missed) is
+filled by a commit-replay catch-up leg; a decided `Truncate` raises the amber
+**floor** line and the prefix below it collapses into a block; and a node that
+came back below the floor takes a violet **snapshot** install plus the log tail.
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=log&seed=0"
+  title="paros: catch-up, compaction and snapshots (seed 0)"
+  style="width:100%;height:760px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+A second embed with a different seed — runs vary: in some, replay alone heals
+every hole; in others a node falls below the floor and only the snapshot
+rescue can reach it. The digest chips say which this run needed:
+
+<iframe
+  src="wasm-demo/index.html?embed=1&mode=log&seed=2"
+  title="paros: a laggard recovered by snapshot install (seed 2)"
+  style="width:100%;height:760px;border:1px solid #30363d;border-radius:12px"
+  loading="lazy">
+</iframe>
+
+Same seed, same run, byte for byte, here and in CI: the demo replays
+`run_seed(seed)` in your browser and *draws the recorded data* — the
+`compactions`, `snapshots` and `catchups` streams of the `RunResult` — rather
+than a hand-written animation. `?dump` on the iframe URL shows the raw JSON.

@@ -39,7 +39,7 @@ function injectStyle() {
   .paros-appbar{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px;
     border-bottom:1px solid var(--hair); padding-bottom:12px; }
   .paros-brand{ font-size:15px; font-weight:700; letter-spacing:.02em; }
-  .paros-tabs{ display:flex; gap:20px; align-items:flex-end; }
+  .paros-tabs{ display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; justify-content:flex-end; }
   .paros-tab{ position:relative; font-size:13px; color:var(--muted); padding-bottom:6px;
     letter-spacing:.01em; }
   .paros-tab .cap{ display:block; font-size:9px; color:${PHASE.prepare}; letter-spacing:.08em;

@@ -25,6 +25,13 @@ maintenance contract: never more than 3 in "Next 3".
 
 - `cargo check --target wasm32-unknown-unknown -p paros-core` — portability gate; `paros-core`
   must stay buildable for wasm (CI enforces it).
+
+**wasm-bindgen pin discipline.** The `wasm-bindgen` crate pin in
+`crates/paros-wasm-demo/Cargo.toml` and the `wasm-bindgen-cli` the flake's nixpkgs provides MUST
+be the exact same version — the bindgen schema is unstable, so any mismatch fails
+`build-wasm-demo.sh` outright. When they drift (e.g. a nixpkgs bump moves the CLI), prefer moving
+**forward**: bump the crate pin to the flake's `wasm-bindgen --version` (and advance the flake's
+nixpkgs input when needed) rather than pinning the CLI back to an old version.
 - `cargo xtask sim …` — sancov-instrumented simulation runner (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered main
   campaign is `cargo xtask sim run paros-chain`.
