@@ -72,6 +72,9 @@ const OUTCOME_BUDGET: Duration = Duration::from_secs(90);
 /// before the run believes nothing will be fabricated late.
 const WAIT_SETTLE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How long an accepted compact may take to raise the floor cluster-wide
+/// before the chunk corpus re-asks (the proposal can die with its leader).
+const FLOOR_GRACE: Duration = Duration::from_secs(3);
 
 /// Where an E1 run's mask comes from.
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +133,63 @@ fn expected_states(commands: &[Command]) -> Vec<ChainState> {
         states.push(previous.apply(command).next);
     }
     states
+}
+
+/// Identify the decided control tail behind an observed settled configuration
+/// (#101 chunk corpus). The coupling seeds one `Snap` and one `Truncate`, but
+/// chaos can legitimately decide more: a leadership blip re-seeds a marker, an
+/// ambiguous compact retry re-decides `Truncate{5}`, an election gap-fills a
+/// `Noop`, and a #94 duplicate applies as a `Noop`. The settled state stays
+/// fully analytic — it must equal the fold of the primed prefix plus SOME tail
+/// over `{Snap, Truncate{5}, Noop}` whose last `Snap` sits at the retained
+/// point. Returns `(point state, full state)` for the matching tail, `None`
+/// when no legitimate tail explains the observation (a real state corruption).
+fn identify_control_tail(
+    prefix: &[Command],
+    applied: u64,
+    hash: u64,
+    point: u64,
+) -> Option<(ChainState, ChainState)> {
+    let base = u64::try_from(prefix.len()).unwrap_or(u64::MAX);
+    let len = usize::try_from(applied.checked_sub(base)?).ok()?;
+    if len == 0 || len > 8 {
+        return None;
+    }
+    let patterns = 3_u32.checked_pow(u32::try_from(len).ok()?)?;
+    for pattern in 0..patterns {
+        let mut commands = prefix.to_vec();
+        let mut digits = pattern;
+        let mut last_snap: Option<u64> = None;
+        let mut truncates = 0_u32;
+        for offset in 0..len {
+            let slot = base + u64::try_from(offset).unwrap_or(0);
+            let command = match digits % 3 {
+                0 => {
+                    last_snap = Some(slot);
+                    Command::Control(Control::Snap {
+                        at_index: Slot(slot),
+                    })
+                }
+                1 => {
+                    truncates += 1;
+                    Command::Control(Control::Truncate { up_to: Slot(5) })
+                }
+                _ => Command::Control(Control::Noop),
+            };
+            digits /= 3;
+            commands.push(command);
+        }
+        if truncates == 0 || last_snap != Some(point) {
+            continue;
+        }
+        let states = expected_states(&commands);
+        let full = states[commands.len()];
+        if full.applied_count == applied && full.chain_hash == hash {
+            let point_state = states[usize::try_from(point).ok()? + 1];
+            return Some((point_state, full));
+        }
+    }
+    None
 }
 
 fn user_command(client: u64, seq: u64, bytes: Vec<u8>) -> Command {
@@ -1023,7 +1083,7 @@ impl Workload for ChunkMaskWorkload {
         // Phase 1: six decided slots, then compaction through the coupling —
         // the Snap marker at slot 6, the Truncate at slot 7, floor 6, and the
         // byte-identical decided point retained on every node.
-        let mut commands = prime_prefix(ctx, &clients, client_id, 6, None, 0, 0).await?;
+        let commands = prime_prefix(ctx, &clients, client_id, 6, None, 0, 0).await?;
         // Full replication before compaction: every node must hold and apply
         // the whole prefix, so no node is below the floor when the coupling's
         // Snap + Truncate decide — all three then record the identical point
@@ -1045,56 +1105,96 @@ impl Workload for ChunkMaskWorkload {
             drop(clients);
             return Err(invalid("chunk corpus priming did not replicate"));
         }
-        let compacted = clients
-            .compact_until_accepted(ctx, 5, None, time.now() + PRIME_BUDGET)
-            .await;
-        assert_always!(
-            compacted,
-            "corpus: compaction is accepted once the point is quorum-held"
-        );
-        commands.push(Command::Control(Control::Snap { at_index: Slot(6) }));
-        commands.push(Command::Control(Control::Truncate { up_to: Slot(5) }));
-        let states = expected_states(&commands);
-        let full = states[8];
-        let point_state = states[7];
-        let chunk_count = snap_chunk_count(point_state.encode().len());
-        assert_always!(
-            chunk_count == 5,
-            "corpus: the chunk grid matches the decided point's blob",
-            { "chunks" => chunk_count }
-        );
-        let settled = {
+        let compacted = {
+            // An `accepted: true` compact is a *proposal*, not a decision: the
+            // proposing leader can die before the Truncate's accepts leave it,
+            // and nothing re-proposes a lost control command. Re-ask until the
+            // floor genuinely rises (the tail identifier below absorbs any
+            // extra Truncate decisions a re-ask produces).
             let deadline = time.now() + PRIME_BUDGET;
             loop {
-                let all = servers.iter().all(|ip| {
-                    corpus_disk_probe(state, ip).is_some_and(|probe| {
-                        probe.floor == 6
-                            && probe.snap_point == Some(6)
-                            && probe.faulty_chunks.is_empty()
-                            && probe.applied_count == full.applied_count
-                            && probe.chain_hash == full.chain_hash
-                    })
-                });
-                if all {
+                if !clients.compact_until_accepted(ctx, 5, None, deadline).await {
+                    break false;
+                }
+                let grace = deadline.min(time.now() + FLOOR_GRACE);
+                let mut risen = false;
+                while time.now() < grace && !ctx.shutdown().is_cancelled() {
+                    if servers.iter().all(|ip| {
+                        corpus_disk_probe(state, ip).is_some_and(|probe| probe.floor == 6)
+                    }) {
+                        risen = true;
+                        break;
+                    }
+                    time.sleep(POLL_INTERVAL).await.ok();
+                }
+                if risen {
                     break true;
                 }
                 if time.now() >= deadline || ctx.shutdown().is_cancelled() {
                     break false;
                 }
+            }
+        };
+        assert_always!(
+            compacted,
+            "corpus: compaction is accepted once the point is quorum-held"
+        );
+        // Settle: wait for the cluster to agree on ONE post-compaction
+        // configuration (floor 6, a shared retained point, clean chunks, equal
+        // applied state everywhere), then identify the decided control tail
+        // behind it. The canonical tail is `Snap@6 + Truncate{5}`, but chaos
+        // can legitimately decide extra markers, truncate re-decisions, and
+        // gap-fill Noops — `identify_control_tail` derives the point and full
+        // states analytically for whichever legitimate tail actually decided,
+        // and refuses anything no tail explains.
+        let observed = {
+            let deadline = time.now() + PRIME_BUDGET;
+            loop {
+                let probes: Vec<_> = servers
+                    .iter()
+                    .map(|ip| corpus_disk_probe(state, ip))
+                    .collect();
+                let shape = probes.iter().all(|p| {
+                    p.as_ref().is_some_and(|probe| {
+                        probe.floor == 6
+                            && probe.snap_point.is_some()
+                            && probe.faulty_chunks.is_empty()
+                    })
+                });
+                let agreed = shape
+                    && probes
+                        .iter()
+                        .all(|p| match (probes[0].as_ref(), p.as_ref()) {
+                            (Some(a), Some(b)) => {
+                                a.applied_count == b.applied_count
+                                    && a.chain_hash == b.chain_hash
+                                    && a.snap_point == b.snap_point
+                            }
+                            _ => false,
+                        });
+                if agreed {
+                    break probes[0]
+                        .as_ref()
+                        .map(|p| (p.applied_count, p.chain_hash, p.snap_point.unwrap_or(0)));
+                }
+                if time.now() >= deadline || ctx.shutdown().is_cancelled() {
+                    break None;
+                }
                 time.sleep(POLL_INTERVAL).await.ok();
             }
         };
-        if !settled {
+        let matched = observed.and_then(|(applied, hash, point)| {
+            identify_control_tail(&commands, applied, hash, point)
+        });
+        if matched.is_none() {
             // Failure diagnostic (fires only on the red path).
             for (n, ip) in servers.iter().enumerate() {
                 let probe = corpus_disk_probe(state, ip);
                 eprintln!(
-                    "CORPUS-DIAG chunk settle node {n}: floor={:?} point={:?} applied={:?} want=({}, {:016x})",
+                    "CORPUS-DIAG chunk settle node {n}: floor={:?} point={:?} applied={:?} observed={observed:?}",
                     probe.as_ref().map(|p| p.floor),
                     probe.as_ref().map(|p| p.snap_point),
                     probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
-                    full.applied_count,
-                    full.chain_hash,
                 );
             }
             for event in ctx.observability().snapshot("command_applied") {
@@ -1109,13 +1209,19 @@ impl Workload for ChunkMaskWorkload {
             }
         }
         assert_always!(
-            settled,
+            matched.is_some(),
             "corpus: every node retains the decided point before the chunk mask"
         );
-        if !settled {
+        let Some((point_state, full)) = matched else {
             drop(clients);
             return Err(invalid("chunk corpus did not settle before injection"));
-        }
+        };
+        let chunk_count = snap_chunk_count(point_state.encode().len());
+        assert_always!(
+            chunk_count == 5,
+            "corpus: the chunk grid matches the decided point's blob",
+            { "chunks" => chunk_count }
+        );
 
         // Phase 2: derive and inject the chunk mask, atomically with the
         // restarts whose boot scans classify it.
