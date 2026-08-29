@@ -840,6 +840,9 @@ impl Outbound {
                 &queues.regular
             };
             if queue.try_send(message).is_err() {
+                // Deliberately lossy (etcd-style bounded mailbox), but never
+                // silent: the audit sees the drop the moment it happens.
+                audit.dropped_at_mailbox(NodeId(self.self_id), to, kind);
                 tracing::debug!(
                     node = self.self_id,
                     to = to.0,
@@ -850,14 +853,42 @@ impl Outbound {
     }
 }
 
+/// A short, stable label for an encoded [`internal::ConsensusMessage`], for
+/// the mailbox-drop audit report (mirrors [`message_kind`], which needs the
+/// decoded domain [`Message`] the delivery task no longer has).
+fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
+    use internal::consensus_message::Kind;
+    match &m.kind {
+        Some(Kind::Prepare(_)) => "prepare",
+        Some(Kind::Promise(_)) => "promise",
+        Some(Kind::Accept(_)) => "accept",
+        Some(Kind::Accepted(_)) => "accepted",
+        Some(Kind::Nack(_)) => "nack",
+        Some(Kind::Commit(_)) => "commit",
+        Some(Kind::CatchUpRequest(_)) => "catchup_request",
+        Some(Kind::CatchUpResponse(_)) => "catchup_response",
+        Some(Kind::InstallSnapshot(_)) => "install_snapshot",
+        Some(Kind::CheckLeader(_)) => "check_leader",
+        Some(Kind::Heartbeat(_)) => "heartbeat",
+        Some(Kind::HeartbeatAck(_)) => "heartbeat_ack",
+        Some(Kind::SnapAck(_)) => "snap_ack",
+        Some(Kind::SnapChunkRequest(_)) => "snap_chunk_request",
+        Some(Kind::SnapChunkResponse(_)) => "snap_chunk_response",
+        None => "unknown",
+    }
+}
+
 /// Feed bounded unary batches over one reconnecting h2 channel per peer. While
 /// a batch is in flight, new protocol messages accumulate for the next batch;
 /// on failure Paxos heartbeats/resends repair anything lost with that RPC.
-async fn run_peer_delivery<P: Providers>(
+async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
     mut messages: tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    audit: A,
+    self_id: u64,
+    to: NodeId,
 ) {
     let mut carried = None;
     loop {
@@ -876,7 +907,7 @@ async fn run_peer_delivery<P: Providers>(
             }
         };
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &mut messages);
+        let (batch, next) = delivery_batch(first, &mut messages, &audit, self_id, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -891,9 +922,12 @@ async fn run_peer_delivery<P: Providers>(
     }
 }
 
-fn delivery_batch(
+fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &mut tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    audit: &A,
+    self_id: u64,
+    to: NodeId,
 ) -> (internal::Deliver, Option<internal::ConsensusMessage>) {
     // Do not spend the eventual-synchrony tail replaying a bounded but stale
     // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
@@ -903,6 +937,14 @@ fn delivery_batch(
         let Ok(newer) = messages.try_recv() else {
             break;
         };
+        // The stale head of the backlog is discarded, never silently: report
+        // it at the instant of the drop, like the enqueue-side overflow.
+        audit.dropped_at_mailbox(NodeId(self_id), to, proto_message_kind(&first));
+        tracing::debug!(
+            node = self_id,
+            to = to.0,
+            "dropped stale Paxos message from delivery backlog"
+        );
         first = newer;
     }
     let mut batch = Vec::with_capacity(GRPC_DELIVERY_BATCH);
@@ -957,6 +999,7 @@ fn send_snapshot_offers<S, H, A>(
             // serves it. The core already withholds offers while its own
             // repair is open; this driver-side guard covers any other
             // application lag the core cannot see.
+            audit.snapshot_offer_skipped(NodeId(out.self_id), offered_index);
             tracing::info!(
                 node = out.self_id,
                 offered = offered_index.0,
@@ -1801,7 +1844,17 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
             );
         }
     }
-    audit.recovered(NodeId(self_id), promised, &records);
+    // The recovered chosen index and the configured cluster size travel with
+    // the boot report: the index anchors the cross-restart chosen-prefix
+    // checks, the size lets a checker do quorum arithmetic without guessing
+    // the topology from partial boot observations.
+    audit.recovered(
+        NodeId(self_id),
+        promised,
+        node.hard_state().chosen_index,
+        u64::try_from(node.config().peers.len()).unwrap_or(u64::MAX),
+        &records,
+    );
     let mut replayed_application = false;
     let mut replayed_snap_points: Vec<Slot> = Vec::new();
     let mut repair_from: Option<Slot> = None;
@@ -1952,7 +2005,12 @@ where
     P: Providers,
     S: NodeStorage,
     H: DriverHooks,
-    A: Audit,
+    // `Clone + Send + Sync + 'static` because each peer-delivery task carries
+    // its own handle to the audit: the bounded-mailbox drops happen inside
+    // those tasks, and reporting them (`Audit::dropped_at_mailbox`) is part of
+    // the observation contract. Pure observation still holds — the clone
+    // shares the same underlying sink.
+    A: Audit + Clone + Send + Sync + 'static,
 {
     // Stage 7: verify and classify every durable record BEFORE anything else —
     // in particular before `RawNode::new` reads the store — so no corrupted
@@ -2027,6 +2085,9 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         regular_rx,
+                        audit.clone(),
+                        self_id,
+                        id,
                     ),
                 )
                 .detach();
@@ -2039,6 +2100,9 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         snapshot_rx,
+                        audit.clone(),
+                        self_id,
+                        id,
                     ),
                 )
                 .detach();
@@ -2305,12 +2369,21 @@ where
                     };
                     if let Some(point) = covered {
                         let up_to = Slot(req.up_to.min(point));
-                        let _ = node.propose_control(Control::Truncate { up_to });
+                        // Honest ack: `accepted: true` only when the Truncate
+                        // proposal was actually admitted. `propose_control`
+                        // can refuse (a step-down raced this request), and the
+                        // client's retry handles `accepted: false` exactly
+                        // like the coupling refusal below.
+                        let proposed = matches!(
+                            node.propose_control(Control::Truncate { up_to }),
+                            ProposeResult::Accepted(_)
+                        );
                         tracing::info!(
                             node = self_id,
                             requested = req.up_to,
                             up_to = up_to.0,
                             point,
+                            accepted = proposed,
                             "truncate_coupled_to_snap_point"
                         );
                         if req.up_to > point {
@@ -2320,7 +2393,7 @@ where
                         }
                         CompactAck {
                             leader: Some(self_id),
-                            accepted: true,
+                            accepted: proposed,
                             first_slot: node.first_slot().0,
                         }
                     } else {
@@ -2338,6 +2411,7 @@ where
                         first_slot: node.first_slot().0,
                     }
                 };
+                audit.compact_acked(NodeId(self_id), ack.accepted);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);

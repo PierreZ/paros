@@ -103,9 +103,20 @@ pub trait Audit {
     fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {}
 
     /// This node (re)booted, having rebuilt volatile state from durable
-    /// storage: its recovered promise plus every `(slot, ballot, vhash)`
-    /// accepted record it read back.
-    fn recovered(&self, node: NodeId, promised: Ballot, accepted: &[(Slot, Ballot, u64)]) {}
+    /// storage: its recovered promise, the chosen index it rebuilt
+    /// (`None` = an empty chosen prefix), the full cluster size from its
+    /// durable configuration (so a checker can do quorum arithmetic without
+    /// guessing the topology), plus every `(slot, ballot, vhash)` accepted
+    /// record it read back.
+    fn recovered(
+        &self,
+        node: NodeId,
+        promised: Ballot,
+        chosen_index: Option<Slot>,
+        cluster_size: u64,
+        accepted: &[(Slot, Ballot, u64)],
+    ) {
+    }
 
     /// This node crashed at a durability `seam` inside a `Ready` batch.
     fn crashed(&self, node: NodeId, seam: Seam) {}
@@ -231,6 +242,25 @@ pub trait Audit {
     /// (chunk-repaired) decided snapshot point at `at`, instead of a
     /// whole-blob transfer.
     fn snap_point_restored(&self, node: NodeId, at: Slot) {}
+
+    /// This node answered a client `Compact` request; `accepted` is the honest
+    /// outcome the ack carried (`true` only when the `Truncate` control
+    /// proposal was actually admitted — a redirect, a coupling refusal, or a
+    /// failed proposal all report `false`).
+    fn compact_acked(&self, node: NodeId, accepted: bool) {}
+
+    /// This node dropped one outbound message at a bounded in-process mailbox
+    /// (the lossy per-peer transport handoff): either the enqueue found the
+    /// peer queue full, or the delivery task discarded a stale backlog entry
+    /// to keep the newest batch. `kind` is the message's stable label.
+    /// Deliberately lossy by design (heartbeats/resends repair it); surfaced
+    /// so a sweep can see the loss instead of inferring it.
+    fn dropped_at_mailbox(&self, node: NodeId, to: NodeId, kind: &'static str) {}
+
+    /// This node skipped materializing a snapshot offer because its applied
+    /// application state did not cover the offered boundary (a legitimate
+    /// transient under an open application repair); the requester re-asks.
+    fn snapshot_offer_skipped(&self, node: NodeId, offered: Slot) {}
 }
 
 /// Inert production audit: every observation is dropped.
