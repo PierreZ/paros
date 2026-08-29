@@ -89,8 +89,12 @@ impl<'a> Ready<'a> {
     /// compaction floor) but holds no application state, so the **driver** must
     /// read the opaque snapshot bytes from storage, build a
     /// [`Message::InstallSnapshot`] at `chosen_index`/`ballot`, and send it to
-    /// `to`. Process these alongside [`Ready::messages`] (step 2), after the batch
-    /// is durable.
+    /// `to`. Serve these only **after** applying [`Ready::committed`] (step 3)
+    /// and making that application state durable (the application fsync, plus
+    /// any truncate flush ordered behind it): the snapshot bytes are read from
+    /// storage at serve time, so an offer served alongside step 2's messages
+    /// could carry bytes that do not yet cover the advertised `chosen_index`
+    /// boundary.
     #[must_use]
     pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
         self.node.pending_snapshot_offers()

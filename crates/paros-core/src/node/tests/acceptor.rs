@@ -28,18 +28,32 @@ fn matching_configuration_message_is_processed_and_reply_is_tagged() {
 }
 
 #[test]
-#[should_panic(expected = "a protocol message matches the local durable configuration")]
-fn mismatching_configuration_message_is_rejected_before_dispatch() {
+fn mismatching_configuration_message_is_ignored_before_dispatch() {
     let mut storage = TestStorage::new(0, &[0, 1]);
     storage.hard_state.config_id = ConfigId(7);
     let mut n = RawNode::new(&storage);
+    let promise_before = n.hard_state().max_promised_ballot;
 
+    // A foreign configuration id is an operating condition (a stale peer, a
+    // misconfiguration), never a local invariant: the message is ignored
+    // whole — no reply, no promise movement.
     n.step(Message::Prepare {
         config_id: ConfigId(8),
         from: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
     });
+
+    let out = drain(&mut n);
+    assert!(
+        out.is_empty(),
+        "a cross-configuration prepare draws no reply"
+    );
+    assert_eq!(
+        n.hard_state().max_promised_ballot,
+        promise_before,
+        "a cross-configuration prepare must not move the promise"
+    );
 }
 
 #[test]

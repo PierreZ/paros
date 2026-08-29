@@ -369,6 +369,15 @@ impl RawNode {
         let (first, last) = (first_slot.0, storage.last_slot().0);
         for s in first..=last {
             if let Some(record) = storage.accepted(Slot(s)) {
+                // Boot-side pair of the write-side ordering (`on_accept` /
+                // `start_accept_round` raise the promise in the same batch as
+                // the append): no durable accept ever outranks the durable
+                // promise. This scan is already O(N), so the per-record check
+                // stays a hard assert — crash beats corruption.
+                assert!(
+                    record.0 <= hard_state.max_promised_ballot,
+                    "the durable promise dominates every accepted record"
+                );
                 accepted.insert(Slot(s), record);
             }
         }
@@ -428,6 +437,13 @@ impl RawNode {
                 !accepted.contains_key(&slot),
                 "a faulty entry is never also a readable accepted record"
             );
+            // Same boot-side promise domination as the readable scan above: a
+            // faulty entry's identity ballot was a real accepted ballot once,
+            // so the durable promise flushed with it still covers it.
+            assert!(
+                ballot <= hard_state.max_promised_ballot,
+                "the durable promise dominates every faulty record"
+            );
             faulty.insert(slot, ballot);
         }
 
@@ -454,6 +470,20 @@ impl RawNode {
             next_slot >= first_unchosen,
             "the rebuilt next slot never falls inside the chosen prefix"
         );
+        // Completeness of the retained chosen prefix: every slot between the
+        // floor and the first unchosen slot must read back as *some* durable
+        // record — readable, or faulty-with-identity. A silent hole (record
+        // fully lost, identity too) boots into a permanent wedge: catch-up
+        // replay stops at the hole it cannot attribute, and campaigns start at
+        // `min(first_faulty, first_unchosen)`, which never covers a slot no
+        // record names. The boot scan is already O(N), so this stays a hard
+        // per-slot assert — crash beats corruption.
+        for s in first_slot.0..first_unchosen.0 {
+            assert!(
+                accepted.contains_key(&Slot(s)) || faulty.contains_key(&Slot(s)),
+                "every retained slot below the chosen prefix has a durable record"
+            );
+        }
 
         let node = Self {
             config,
@@ -511,6 +541,7 @@ impl RawNode {
     /// checks are O(1) or O(log n) (min-key probes), so this runs
     /// unconditionally — TigerBeetle-style — at boot and at the exit of every
     /// public mutating entry point.
+    #[allow(clippy::too_many_lines)]
     fn assert_invariants(&self) {
         // Ordering chain: only chosen slots are ever dropped, so the compaction
         // floor never passes the first unchosen slot.
@@ -519,11 +550,20 @@ impl RawNode {
             "the compaction floor never outruns the chosen prefix"
         );
         // A chosen first-unchosen slot is legal only as the explicit bounded
-        // continuation left by `advance_chosen_index`.
-        assert!(
-            self.chosen.contains_key(&self.first_unchosen()) == self.chosen_advance_pending,
-            "a chosen first-unchosen slot has a deferred prefix continuation"
-        );
+        // continuation left by `advance_chosen_index` — an iff, split into its
+        // two directions so a violation names the side that broke.
+        if self.chosen.contains_key(&self.first_unchosen()) {
+            assert!(
+                self.chosen_advance_pending,
+                "a chosen first-unchosen slot has a deferred prefix continuation"
+            );
+        }
+        if self.chosen_advance_pending {
+            assert!(
+                self.chosen.contains_key(&self.first_unchosen()),
+                "a deferred prefix continuation names a chosen first-unchosen slot"
+            );
+        }
         // Floor bounds: nothing below the floor survives in any slot map.
         assert!(
             self.accepted
@@ -565,6 +605,18 @@ impl RawNode {
                 .is_none_or(|s| *s >= self.first_slot),
             "no in-flight round survives below the compaction floor"
         );
+        assert!(
+            self.duplicate_slots
+                .first()
+                .is_none_or(|s| *s >= self.first_slot),
+            "no duplicate marker survives below the compaction floor"
+        );
+        // Floor-bound structural checks that need a full scan stay debug-only
+        // (`inflight` is keyed by client identity, so its slots are unordered).
+        debug_assert!(
+            self.inflight.values().all(|s| *s >= self.first_slot),
+            "no in-flight dedup mapping survives below the compaction floor"
+        );
         // Role couplings. Note "leader ballot >= own promise" is deliberately
         // NOT a global invariant: a still-Leader node can learn a higher-ballot
         // `Commit` (raising its promise via `mark_chosen`) before any deposing
@@ -578,13 +630,54 @@ impl RawNode {
                     self.leader == Some(self.config.id),
                     "a leader knows itself as leader"
                 );
+                assert!(
+                    self.ballot.node == self.config.id,
+                    "an operating ballot names its own node"
+                );
+                // The #67/#88 allocator bound, gated exactly like the note
+                // above: a still-Leader that learned a higher-ballot `Commit`
+                // (or replayed catch-up decided past it) can see the chosen
+                // prefix pass its allocator before any deposing message
+                // arrives — but while its ballot still covers its own promise,
+                // quorum intersection guarantees the winning Phase 1 reported
+                // everything decided, so the allocator sits at or past the
+                // prefix.
+                if self.ballot >= self.hard_state.max_promised_ballot {
+                    assert!(
+                        self.next_slot >= self.first_unchosen(),
+                        "a leader's next slot never falls inside the chosen prefix"
+                    );
+                }
+                assert!(
+                    self.proposer
+                        .keys()
+                        .next_back()
+                        .is_none_or(|s| *s < self.next_slot),
+                    "a leader never allocates at or below an in-flight round"
+                );
+                // Every in-flight round runs at the leadership ballot: rounds
+                // are opened only by this leader, and every promise-raising
+                // path that could strand one demotes (clearing `proposer`)
+                // first. O(N) structural, so debug-only.
+                debug_assert!(
+                    self.proposer.values().all(|p| p.ballot == self.ballot),
+                    "a leader's in-flight rounds all run at its own ballot"
+                );
             }
             NodeRole::Candidate => {
+                assert!(
+                    self.election.is_some(),
+                    "a candidate holds an open campaign"
+                );
                 assert!(
                     self.election
                         .as_ref()
                         .is_some_and(|e| e.ballot == self.ballot),
                     "a candidate's campaign runs at its own operating ballot"
+                );
+                assert!(
+                    self.ballot.node == self.config.id,
+                    "an operating ballot names its own node"
                 );
             }
             NodeRole::Follower => {
@@ -620,19 +713,26 @@ impl RawNode {
 
     /// The single input entry point: every stimulus is a [`Message`], routed by
     /// variant and role. Tick-injected self-events (`CheckLeader`/`Heartbeat`)
-    /// enter here too.
+    /// enter here too. A ballot-bearing message naming a configuration other
+    /// than this node's durable configuration is ignored whole.
     ///
     /// # Panics
     ///
-    /// Panics if a ballot-bearing protocol message names a configuration other
-    /// than this node's durable configuration, or if processing exposes a
-    /// broken internal invariant.
+    /// Panics if processing exposes a broken internal invariant (a programmer
+    /// error, never an operating condition).
     pub fn step(&mut self, msg: Message) {
-        assert!(
-            msg.config_id()
-                .is_none_or(|config_id| config_id == self.hard_state.config_id),
-            "a protocol message matches the local durable configuration"
-        );
+        // Wire guard, not an assert: a foreign configuration id is an operating
+        // condition (a stale peer, a misconfigured cluster, a message from a
+        // past reconfiguration), never a local invariant. Quorum arithmetic is
+        // meaningless across configurations, so ignore the message wholesale —
+        // no reply, no state change; the sender's own configuration machinery
+        // owns healing the mismatch.
+        if msg
+            .config_id()
+            .is_some_and(|config_id| config_id != self.hard_state.config_id)
+        {
+            return;
+        }
         match msg {
             Message::Prepare {
                 from,
@@ -713,6 +813,11 @@ impl RawNode {
     /// Client entry point: try to get `value` chosen, deduplicated by
     /// `(client, seq)`. Only the leader admits proposals; a non-leader returns
     /// [`ProposeResult::NotLeader`] with a redirect hint.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -752,6 +857,11 @@ impl RawNode {
     /// entry). Its *effect* — for [`Control::Truncate`], dropping the log prefix —
     /// is applied lazily by every node when the slot enters its contiguous chosen
     /// prefix (see [`RawNode::advance_chosen_index`]).
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -768,6 +878,11 @@ impl RawNode {
     /// bound to exactly that slot **by construction** — Paxos never moves an
     /// accepted command between slots, so a decided marker always describes
     /// its own position. A non-leader returns [`ProposeResult::NotLeader`].
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn propose_snap_marker(&mut self) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -907,6 +1022,18 @@ impl RawNode {
         self.faulty = self.faulty.split_off(&first);
         self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
         self.proposer.retain(|slot, _| *slot >= first);
+        // Mirror the install path's dedup hand-off (`on_install_snapshot`):
+        // the contiguous walk already handed every applied slot's `inflight`
+        // entry over to `applied_seq`, except the below-prefix heals
+        // `mark_chosen` records while an application repair is open — and a
+        // mapping into the truncated prefix would answer a retry with a
+        // `Duplicate` whose commit can never ack anyone.
+        self.inflight.retain(|_, s| *s >= first);
+        // The duplicate-suppression markers for the dropped prefix are spent:
+        // their slots were applied (as no-ops) before truncation was decided,
+        // and a restarted node re-derives the set from the *retained* log only
+        // — a live node must not remember more than its own reboot would.
+        self.duplicate_slots = self.duplicate_slots.split_off(&first);
         self.first_slot = first;
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
@@ -927,6 +1054,11 @@ impl RawNode {
     /// Re-sending a leader's still-pending `Accept`s is deliberately *not* part of
     /// this: it is a separate decision on the same cadence, so the driver can skip
     /// it (see [`RawNode::resend_pending`]).
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn tick(&mut self) {
         self.tick_count += 1;
         let me = self.config.id;
@@ -1081,6 +1213,11 @@ impl RawNode {
     /// there) and which the `Control::Noop` gap fill exists to close. The
     /// deterministic simulation drives exactly that by skipping calls; production
     /// never skips.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn resend_pending(&mut self) {
         if self.role != NodeRole::Leader {
             return;
@@ -1114,6 +1251,7 @@ impl RawNode {
                 command,
             });
         }
+        self.assert_invariants();
     }
 
     /// Advance the next bounded page of deferred chosen-prefix application or
@@ -1167,11 +1305,17 @@ impl RawNode {
     /// as its holder keeps re-proposing it, and stops healing the moment that node
     /// stops being leader (#54) — and the leadership churn it creates is what
     /// #67's arc needs.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     pub fn step_down(&mut self) {
         if self.role != NodeRole::Leader {
             return;
         }
         self.become_follower(None);
+        self.assert_invariants();
     }
 
     /// Open an **application repair** (Stage 8): the driver's boot replay could

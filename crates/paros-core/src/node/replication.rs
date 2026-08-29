@@ -37,6 +37,14 @@ impl RawNode {
         seq: u64,
     ) {
         let me = self.config.id;
+        // Wire hygiene: a beat adopts its sender as leader (and triggers
+        // catch-up toward it), so an id outside the configured membership must
+        // never be followed — the same refusal every quorum-counting handler
+        // already applies. The tick-injected self-beat passes trivially:
+        // membership always includes this node's own id.
+        if !self.config.peers.contains(&from) {
+            return;
+        }
         if from == me {
             // Leader self-trigger: broadcast the beat. Re-sending the un-acked
             // `Accept`s is a *separate* decision the driver makes on the same

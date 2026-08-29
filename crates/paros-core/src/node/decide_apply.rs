@@ -50,6 +50,28 @@ impl RawNode {
     }
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
     pub(super) fn start_accept_round(&mut self, slot: Slot, command: Command) {
+        // Precondition stack (every caller is leader-gated and floor-guarded):
+        // only a leader opens a Phase-2 round, and never below the compaction
+        // floor — a below-floor slot is already chosen and truncated.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader starts an accept round"
+        );
+        assert!(
+            slot >= self.first_slot,
+            "an accept round never starts below the compaction floor"
+        );
+        // Re-deciding a chosen slot is guarded by the recovery/repair callers;
+        // the propose path can only violate it in the acknowledged still-Leader
+        // window after a higher-ballot `Commit` passed the allocator (see the
+        // role-couplings note in `assert_invariants`), so the check carries the
+        // same promise gate.
+        if self.ballot >= self.hard_state.max_promised_ballot {
+            assert!(
+                !self.chosen.contains_key(&slot),
+                "an accept round never re-opens a chosen slot"
+            );
+        }
         let me = self.config.id;
         let ballot = self.ballot;
         let mut accepted_by = BTreeSet::new();
