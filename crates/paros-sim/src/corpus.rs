@@ -606,8 +606,43 @@ impl Workload for E1MaskWorkload {
                 "world" => ground_truth.len()
             }
         );
+        // The E1 model counts *durable* custody only, so the restart must be a
+        // simultaneous cluster death: hold every node, wait out the node
+        // loop's epoch-poll window so every live incarnation is genuinely
+        // gone (a node still serving its volatile chosen state would
+        // legitimately heal a peer's rotted record and break the enumerated
+        // ground truth — found by hunt seed 13939994950726385685), then
+        // release them into boots that can only read disks.
         for ip in &servers {
-            corpus_restart_node(ctx.state(), ip);
+            corpus_hold_node(ctx.state(), ip);
+        }
+        time.sleep(Duration::from_millis(100)).await.ok();
+        // Death-time mask integrity: the injection raced the tail of ordinary
+        // replication traffic (a still-in-flight resent `Accept` re-persists
+        // its record, and a clean re-write legitimately clears the fault mark
+        // — found by hunt seed 13939994950726385685). A run where any masked
+        // record healed before the cluster died is *vacuous*: its ground truth
+        // no longer matches the enumerated mask, so it proves nothing either
+        // way — release the cluster and skip the judgment (the sometimes
+        // gates saturate over the seeds where the mask held).
+        let mask_held = (0..CORPUS_SLOTS).all(|slot| {
+            servers.iter().enumerate().all(|(n, ip)| {
+                let bit = u16::try_from(n).unwrap_or(0) * u16::try_from(CORPUS_SLOTS).unwrap_or(0)
+                    + u16::try_from(slot).unwrap_or(0);
+                if mask & (1_u16 << bit) == 0 {
+                    return true;
+                }
+                corpus_disk_probe(ctx.state(), ip)
+                    .is_some_and(|probe| !probe.clean_slots.contains(&slot))
+            })
+        });
+        for ip in &servers {
+            corpus_release_node(ctx.state(), ip);
+        }
+        if !mask_held {
+            tracing::info!(mask, "corpus_mask_superseded_by_late_write");
+            drop(clients);
+            return Ok(());
         }
 
         // Phase 3: judge the analytically derived outcome over live RPC reads.
@@ -633,11 +668,35 @@ impl Workload for E1MaskWorkload {
                     );
                 }
                 eprintln!(
-                    "CORPUS-DIAG mask={mask:#011b} derived={derived_unrecoverable:?} world={:?} expected_hold=({}, {:016x})",
+                    "CORPUS-DIAG mask={mask:#011b} derived={derived_unrecoverable:?} world={:?} expected_hold=({}, {:016x}) full=({}, {:016x})",
                     unrecoverable_slots(ctx.state()),
                     held_state.applied_count,
                     held_state.chain_hash,
+                    full.applied_count,
+                    full.chain_hash,
                 );
+                for name in [
+                    "value_chosen",
+                    "recovered",
+                    "election_gap_filled",
+                    "command_applied",
+                    "persist",
+                    "synced",
+                    "corpus_mask_selected",
+                ] {
+                    for ev in ctx.observability().snapshot(name).iter().rev().take(12) {
+                        eprintln!(
+                            "CORPUS-DIAG ev {name} t={}ms node={:?} slot={:?} idx={:?} kind={:?} cmd={:?} ballot={:?}",
+                            ev.time_ms,
+                            ev.u64("node"),
+                            ev.u64("slot"),
+                            ev.u64("index"),
+                            ev.str("kind"),
+                            ev.str("cmd"),
+                            ev.u64("ballot"),
+                        );
+                    }
+                }
             }
             assert_always!(
                 reached,

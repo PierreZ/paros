@@ -5,8 +5,9 @@
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    chunk_corpus_canonical_masks, corpus_canonical_masks, run_bare_quorum_case, run_chunk_mask,
-    run_corpus_mask, run_snapshot_lifecycle_case,
+    chunk_corpus_canonical_masks, corpus_canonical_masks, run_bare_quorum_case,
+    run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
+    run_snapshot_lifecycle_case,
 };
 
 fn assert_mask_green(mask: u16) {
@@ -113,4 +114,38 @@ fn chunk_mask_with_lost_live_snapshot_converges() {
         "chunk+live case converged: {:?}",
         report.assertion_violations
     );
+}
+
+/// Hunt-found corpus witnesses (2026-08-29), pinned. All were red on rigid
+/// pre-fix expectations and prove robustness fixes, not protocol bugs:
+/// - E1 seed 13939994950726385685: a still-in-flight resent `Accept`
+///   re-persisted a masked record 2ms after injection, legitimately clearing
+///   the fault mark — the run is judged vacuous (mask superseded) instead of
+///   producing a false "fabrication" verdict.
+/// - chunk seeds 18124219549777579368 / 792510575699257791 (a leadership blip
+///   re-seeded a second `Snap` marker, point at slot 7) and
+///   3675004985962188751 (the accepted compact was only a proposal — its
+///   leader died before the `Truncate`'s accepts left it): the control-tail
+///   identifier and the floor re-ask absorb every legitimate coupling
+///   outcome.
+#[test]
+fn corpus_hunt_witnesses_replay_clean() {
+    let report = run_corpus_seed(13_939_994_950_726_385_685);
+    assert!(
+        report.assertion_violations.is_empty(),
+        "E1 vacuous-run witness: {:?}",
+        report.assertion_violations
+    );
+    for seed in [
+        18_124_219_549_777_579_368_u64,
+        792_510_575_699_257_791,
+        3_675_004_985_962_188_751,
+    ] {
+        let report = run_chunk_corpus_seed(seed);
+        assert!(
+            report.assertion_violations.is_empty(),
+            "chunk coupling witness {seed}: {:?}",
+            report.assertion_violations
+        );
+    }
 }
