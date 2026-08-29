@@ -134,6 +134,27 @@ fn faulty_as_none_demo_stays_red() {
     );
 }
 
+/// The faulty-as-none mutation's *other* fate, pinned as the boot-side pair of
+/// [`faulty_as_none_demo_stays_red`]: when the withheld record's hole lands
+/// *below* the chosen prefix, the boot read-back's completeness assert ("every
+/// retained slot below the chosen prefix has a durable record") refuses the
+/// node before the misreport can reach a Promise — crash beats corruption. The
+/// pinned seed is the demo's previous double-choose witness, retired by that
+/// assert: its misreporting node now dies at boot (visible as the node.rs
+/// completeness panic on stderr; moonpool tolerates the death like attrition)
+/// and the surviving pair runs clean. If this seed ever goes red again, the
+/// boot completeness assert stopped refusing the below-prefix misreport — the
+/// double-choose it used to witness is back.
+#[test]
+fn faulty_as_none_below_prefix_dies_at_boot() {
+    let report = paros_sim::run_faulty_none_demo_seed(12_343_285_557_404_141_340);
+    assert!(
+        report.assertion_violations.is_empty(),
+        "a boot-refused misreport must never reach the agreement oracles; got: {:?}",
+        report.assertion_violations
+    );
+}
+
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {

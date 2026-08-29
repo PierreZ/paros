@@ -103,6 +103,20 @@ impl RawNode {
                 (Some((slot, _)), None) | (None, Some((slot, _))) => Some(**slot),
                 (Some((ra, _)), Some((rf, _))) => Some(*std::cmp::min(*ra, *rf)),
             };
+            // The durability claim behind a promise raised by this very
+            // message, paired with its write: the batch flushed before this
+            // send carries the matching raise. Scoped to the raise — a
+            // same-ballot page continuation re-sends no write, because the
+            // raise's own earlier batch already persisted it. O(N) scan of the
+            // batch, always-on by choice.
+            if raises_promise {
+                assert!(
+                    self.pending_writes
+                        .iter()
+                        .any(|op| matches!(op, WriteOp::SetPromise(b) if *b == ballot)),
+                    "a promise reply ships with its durable raise in the batch"
+                );
+            }
             self.pending_messages.push((
                 from,
                 Message::Promise {
@@ -138,6 +152,14 @@ impl RawNode {
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
     pub(super) fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
+        // Wire hygiene: this handler adopts `ballot.node` as the leader hint
+        // (and promises its ballot), so an id outside the configured membership
+        // must never be followed — the same refusal every quorum-counting
+        // handler (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`)
+        // already applies to its sender.
+        if !self.config.peers.contains(&ballot.node) {
+            return;
+        }
         // Floor guard: a slot below our floor is already chosen (only chosen slots
         // are ever truncated). Ignore the Accept rather than Nack: the slot is
         // decided, so re-accepting a different value there would break agreement,
@@ -147,6 +169,7 @@ impl RawNode {
             return;
         }
         let me = self.config.id;
+        let promise_at_entry = self.hard_state.max_promised_ballot;
         if ballot >= self.hard_state.max_promised_ballot {
             if ballot.node != me && self.role != NodeRole::Follower {
                 self.become_follower(Some(ballot.node));
@@ -182,6 +205,16 @@ impl RawNode {
                 self.hard_state.max_promised_ballot == ballot,
                 "an accept lands with the promise at its ballot"
             );
+            // The durability claim behind the reply, paired with its write: the
+            // batch flushed before this send carries the matching append
+            // (persist-before-send seals it). O(N) scan of the batch, always-on
+            // by choice.
+            assert!(
+                self.pending_writes
+                    .iter()
+                    .any(|op| matches!(op, WriteOp::AppendAccepted { slot: s, .. } if *s == slot)),
+                "an accepted reply ships with its durable append in the batch"
+            );
             self.pending_messages.push((
                 from,
                 Message::Accepted {
@@ -193,6 +226,13 @@ impl RawNode {
                 },
             ));
         } else {
+            // Negative space, pairing the accept-path promise claim above: the
+            // refusal must not have moved the promise — the accept lost
+            // precisely because the promise already sat above its ballot.
+            assert!(
+                self.hard_state.max_promised_ballot == promise_at_entry,
+                "a nacked accept never moves the promise"
+            );
             self.pending_messages.push((
                 from,
                 Message::Nack {

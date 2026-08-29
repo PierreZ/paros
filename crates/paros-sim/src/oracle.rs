@@ -885,10 +885,16 @@ impl ChainAgreement {
             return;
         };
         let mut per_node = self.node_index.borrow_mut();
-        let monotone = per_node
-            .get(&node)
-            .is_none_or(|previous| index >= *previous);
-        assert_always!(monotone, "chain: applies are contiguous per node");
+        let previous = per_node.get(&node).copied();
+        assert_always!(
+            previous.is_none_or(|previous| index >= previous),
+            "chain: a snapshot jump never moves the applied index backward",
+            {
+                "node" => node,
+                "from" => previous.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
+                "to" => index,
+            }
+        );
         per_node.insert(node, index);
         let mut states = self.state_by_index.borrow_mut();
         let prior = states.entry(index).or_insert_with(|| state.to_owned());
@@ -917,14 +923,11 @@ impl ChainAgreement {
         };
         let mut per_node = self.node_index.borrow_mut();
         let expected = per_node.get(&node).copied().unwrap_or(0).saturating_add(1);
-        if index != expected {
-            eprintln!(
-                "CONTIG-DIAG node={node} index={index} expected={expected} slot={:?} kind={:?}",
-                event.u64("slot"),
-                event.str("kind"),
-            );
-        }
-        assert_always!(index == expected, "chain: applies are contiguous per node");
+        assert_always!(
+            index == expected,
+            "chain: applies are contiguous per node",
+            { "node" => node, "index" => index, "expected" => expected }
+        );
         per_node.insert(node, index);
         drop(per_node);
 

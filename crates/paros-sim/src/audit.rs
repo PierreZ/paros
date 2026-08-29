@@ -210,9 +210,15 @@ impl AuditWorld {
     /// demo deliberately withholds from the protocol, so the *storage*
     /// divergence legs stay explained and the surviving red is the mutation's
     /// genuine protocol consequence — a unanimous-looking `none` no-op filling
-    /// a chosen slot.
+    /// a chosen slot. Fires from the boot scan, i.e. *before* the boot's
+    /// `recovered` report, so it stages exactly like the driver's own
+    /// faulty report and becomes live for that incarnation at the swap.
     pub(crate) fn note_reported_faulty(&self, node: u64, slot: u64) {
-        self.lock().reported_faulty.insert((node, slot));
+        self.lock()
+            .faulty_staged
+            .entry(node)
+            .or_default()
+            .insert(slot);
     }
 
     /// Ground-truth feed from the storage world (issue #19 C). A record can
@@ -363,6 +369,12 @@ impl Floor {
     }
 
     fn raise(&mut self, first: u64, now_ms: u64) {
+        // Deliberately lenient about `first <= now`: the ground-truth flush
+        // feed passes the *requested* floor through, and the storage contract
+        // legally treats a lower request as a no-op (the contract suite
+        // exercises exactly that). The no-regression assert lives on the
+        // driver-audited truncation report instead, where the core's monotone
+        // floor contract genuinely holds.
         if first <= self.now {
             return;
         }
@@ -396,9 +408,37 @@ struct AuditState {
     accepted: BTreeMap<(u64, u64, u64), u64>,
     /// Per `(node, slot)`: the last value the node made durable.
     persisted: BTreeMap<(u64, u64), u64>,
+    /// The configured cluster size (full membership), from the boot reports.
+    /// One shared configuration per run, so the max across reports is it.
+    cluster_size: Option<u64>,
+    /// `(slot, ballot round, ballot node)` → the nodes holding a durable
+    /// accept for it — the acceptor tally behind the quorum-decided oracle.
+    /// Fed by both the live accept fold and the boot re-reports (idempotent).
+    accept_sets: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
+    /// Per slot: the first quorum-decided `(ballot round, ballot node,
+    /// vhash)`. Records a decision the moment a majority of the *configured*
+    /// cluster holds the durable accept — even if no node ever applies the
+    /// slot, which is exactly the blind spot the apply-fed `chosen` map has.
+    decided: BTreeMap<u64, (u64, u64, u64)>,
+    /// The highest slot ever quorum-decided — a monotone scalar the
+    /// below-floor pruning of `decided` never lowers, so the cross-restart
+    /// frontier check stays sound after the whole prefix compacts away.
+    decided_max: Option<u64>,
+    /// Per node: the last durably reported chosen index, reset each boot
+    /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
+    /// across incarnations — within one it only advances).
+    chosen_watermark: BTreeMap<u64, u64>,
+    /// Per node: the highest confirmed read index served, reset each boot.
+    read_watermark: BTreeMap<u64, Option<u64>>,
 
     // --- truncation ---------------------------------------------------------
     floor: BTreeMap<u64, Floor>,
+    /// Per node: the highest floor its *driver-audited truncations* have
+    /// reported — the monotonicity watermark for those reports alone (the
+    /// folded [`Floor`] also absorbs installs and ground-truth flushes, which
+    /// can legally outrun a reordered stale truncate; see
+    /// [`NodeAudit::truncated`]).
+    truncate_watermark: BTreeMap<u64, u64>,
 
     // --- applied prefix -----------------------------------------------------
     /// Per node: the next slot expected to be newly applied.
@@ -488,10 +528,17 @@ struct AuditState {
     corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     storage_dead: BTreeSet<u64>,
-    /// Stage 8: `(node, slot)` records the boot scan classified recoverable
-    /// and reported into the tri-state — the second explanation the
-    /// divergence and no-gaps checks accept (#71's explained-only rule).
-    reported_faulty: BTreeSet<(u64, u64)>,
+    /// Stage 8: per node, the slots its boot scan classified recoverable and
+    /// reported into the tri-state — the second explanation the divergence
+    /// and no-gaps checks accept (#71's explained-only rule). Scoped to the
+    /// node's **current incarnation**: each boot re-runs the scan and
+    /// re-reports what is still faulty, so a stale excuse from a previous
+    /// boot must not keep explaining gaps forever.
+    reported_faulty: BTreeMap<u64, BTreeSet<u64>>,
+    /// Faulty reports staged since the node's last boot report: the scan (and
+    /// the red-demo side door) speak *before* [`Audit::recovered`] fires, so
+    /// the swap-in happens there — the boot report is the incarnation edge.
+    faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
     /// Stage 8 ground truth (budget-off only): slots with no readable copy
     /// anywhere. The wedge/convergence excuse — and the WAITED witness.
     unrecoverable: BTreeSet<u64>,
@@ -517,6 +564,10 @@ struct AuditState {
     snap_restore_seen: bool,
     resend_skipped: bool,
     resigned: bool,
+    compact_ack_accepted: bool,
+    compact_ack_refused: bool,
+    mailbox_dropped: bool,
+    offer_skipped: bool,
     shortest_timeout: bool,
     dropped_accept: bool,
     dropped_election: bool,
@@ -668,6 +719,73 @@ impl AuditState {
         }
     }
 
+    /// Fold one durable accept into the acceptor tally and run the
+    /// quorum-decided oracle. Fed by the live accept fold *and* the boot
+    /// re-reports (a `BTreeSet` makes the re-fold idempotent), so a value a
+    /// majority durably accepted is **decided** here even when no node ever
+    /// applies it — the case a buggy leader's later no-op fill would
+    /// otherwise hide from the apply-fed `chosen` map. Quorum arithmetic uses
+    /// the *configured* cluster size from the boot reports, never the booted
+    /// subset (which under-counts while nodes are still coming up).
+    fn observe_durable_accept(&mut self, node: u64, slot: u64, ballot: Ballot, vhash: u64) {
+        let key = (slot, ballot.round, ballot.node.0);
+        if let Some(prev) = self.accepted.insert(key, vhash) {
+            assert_always!(
+                prev == vhash,
+                "at most one command is ever accepted for one (slot, ballot)"
+            );
+        }
+        // P2, observed on durable state: once a slot is decided at some
+        // ballot, every accept at or above that ballot carries the decided
+        // value (a proposer above it must have adopted it via P2c).
+        if let Some(&(round, bnode, decided_vhash)) = self.decided.get(&slot)
+            && (ballot.round, ballot.node.0) >= (round, bnode)
+        {
+            assert_always!(
+                vhash == decided_vhash,
+                "an accept at or above a decided ballot carries the decided value",
+                {
+                    "node" => node,
+                    "slot" => slot,
+                    "round" => ballot.round,
+                    "decided_round" => round
+                }
+            );
+        }
+        let holders = self.accept_sets.entry(key).or_default();
+        holders.insert(node);
+        let quorum = self.cluster_size.map(|n| n / 2 + 1);
+        if quorum.is_some_and(|q| u64::try_from(holders.len()).unwrap_or(u64::MAX) >= q) {
+            match self.decided.get(&slot) {
+                None => {
+                    self.decided
+                        .insert(slot, (ballot.round, ballot.node.0, vhash));
+                    self.decided_max = Some(self.decided_max.map_or(slot, |m| m.max(slot)));
+                }
+                // Two quorums (at any two ballots) must agree — the crown
+                // jewel judged on durable accepts alone, with no apply in the
+                // loop. The first decision wins the recorded ballot.
+                Some(&(_, _, decided_vhash)) => {
+                    assert_always!(
+                        vhash == decided_vhash,
+                        "a durable accept quorum never decides two values for a slot",
+                        { "node" => node, "slot" => slot, "round" => ballot.round }
+                    );
+                }
+            }
+        }
+    }
+
+    /// The lowest compaction floor across the cluster: everything below it is
+    /// truncated *everywhere*, so the per-slot safety tallies can be pruned.
+    fn cluster_min_floor(&self) -> u64 {
+        self.booted
+            .iter()
+            .map(|node| self.floor.get(node).map_or(0, |f| f.now))
+            .min()
+            .unwrap_or(0)
+    }
+
     /// Fold one broadcast leader beat (#95). A leader beating at a ballot that
     /// a **promise-majority** has durably promised strictly past is deposed for
     /// good: an acceptor only acks a beat at or above its promise, so at most a
@@ -765,8 +883,11 @@ impl AuditState {
         // Stage 8: a boot replay may step over a rotted record whose effect is
         // already durable in the application state — legal only when every
         // skipped slot was reported faulty by this node (the explained jump).
-        let over_reported =
-            idx > next_now && (next_now..idx).all(|s| self.reported_faulty.contains(&(node, s)));
+        let over_reported = idx > next_now
+            && self
+                .reported_faulty
+                .get(&node)
+                .is_some_and(|slots| (next_now..idx).all(|s| slots.contains(&s)));
         let next = self.frontier.entry(node).or_insert(0);
         if idx == *next {
             *next += 1;
@@ -774,7 +895,8 @@ impl AuditState {
             *next = idx + 1;
             assert_always!(
                 at_floor || at_snapshot || over_reported,
-                "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor or a snapshot install)"
+                "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor or a snapshot install)",
+                { "node" => node, "index" => idx }
             );
         }
     }
@@ -870,6 +992,18 @@ pub(crate) struct NodeAudit<T> {
     world: Arc<AuditWorld>,
 }
 
+/// The driver hands each peer-delivery task its own handle to the audit (the
+/// bounded-mailbox drops happen inside those tasks); every clone shares the
+/// one per-iteration [`AuditWorld`].
+impl<T: Clone> Clone for NodeAudit<T> {
+    fn clone(&self) -> Self {
+        Self {
+            time: self.time.clone(),
+            world: self.world.clone(),
+        }
+    }
+}
+
 impl<T: TimeProvider> NodeAudit<T> {
     pub(crate) fn new(time: T, world: Arc<AuditWorld>) -> Self {
         Self { time, world }
@@ -897,18 +1031,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             ballot <= promised,
             "a node's accepted ballot never exceeds its promised ballot"
         );
-        // The durable mirror of the on-the-wire per-ballot proposal check: two
-        // different commands under one `(slot, ballot)` would be a ratified
-        // double-allocation.
-        if let Some(prev) = st
-            .accepted
-            .insert((slot.0, ballot.round, ballot.node.0), vhash)
-        {
-            assert_always!(
-                prev == vhash,
-                "at most one command is ever accepted for one (slot, ballot)"
-            );
-        }
+        // The independent half of the same claim: `promised` above is the
+        // driver's own word — cross-check the accept against the promise the
+        // audit *folded* from durable reports. Sound because a promise raise
+        // in the same batch is surfaced before its accepts, and every earlier
+        // raise (or the boot report) already fed the fold.
+        let folded = st.promised.get(&node.0).copied();
+        assert_always!(
+            folded.is_some_and(|p| ballot <= p),
+            "a node's accepted ballot never exceeds its last reported promise",
+            {
+                "node" => node.0,
+                "slot" => slot.0,
+                "round" => ballot.round,
+                "folded_round" => folded.map_or(0, |p| p.round)
+            }
+        );
+        // The durable mirror of the on-the-wire per-ballot proposal check
+        // lives in the fold (two different commands under one `(slot,
+        // ballot)` would be a ratified double-allocation), together with the
+        // acceptor tally behind the quorum-decided oracle.
+        st.observe_durable_accept(node.0, slot.0, ballot, vhash);
         // The truncated prefix is genuinely gone: nothing below the durable
         // floor is ever written again.
         let floor = st.floor.get(&node.0).copied().unwrap_or_default();
@@ -922,6 +1065,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn truncated(&self, node: NodeId, first: Slot) {
         let now = self.now_ms();
         let mut st = self.state();
+        // The core stages `WriteOp::Truncate` only when it raises its floor,
+        // batches flush in order, and a report only ever follows a successful
+        // fsync — so the *truncated reports themselves* are monotone per
+        // node, within and across incarnations. Judged against their own
+        // watermark, never the folded floor: a same-batch snapshot install
+        // jumps the folded floor higher while the driver's split flushes the
+        // (now stale-lower, no-op-on-disk) truncate after it, and the
+        // ground-truth feed likewise forwards raw requests the storage
+        // contract treats as no-ops. Equality is an idempotent re-raise.
+        let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
+        assert_always!(
+            first.0 >= was,
+            "a compaction floor never regresses",
+            { "node" => node.0, "was" => was, "reported" => first.0 }
+        );
+        st.truncate_watermark.insert(node.0, first.0.max(was));
         st.floor.entry(node.0).or_default().raise(first.0, now);
         if first.0 > 0 {
             reach_once!(
@@ -949,17 +1108,75 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "storage: a truncation is covered by a recorded snapshot point",
                 { "node" => node.0, "first" => first.0 }
             );
+            // Once a truncation at `first` is validated, a point too low to
+            // cover it can never cover any later (higher) truncation either —
+            // coverage is `point + 1 >= first` and floors only rise — so drop
+            // it. Only after a *passed* check: pruning on a red run could
+            // cascade the one root cause into noise. The surviving covering
+            // point keeps every lagging node's smaller `first` covered too.
+            if covered {
+                for points in st.snap_points.values_mut() {
+                    *points = points.split_off(&(first.0.saturating_sub(1)));
+                }
+            }
+        }
+        // Below the *cluster-wide* minimum floor every node has truncated, so
+        // the per-slot safety tallies can never be consulted again: reclaim
+        // them (an O(log n) split, on the rare truncation path).
+        let min_floor = st.cluster_min_floor();
+        if min_floor > 0 {
+            st.decided = st.decided.split_off(&min_floor);
+            st.accept_sets = st.accept_sets.split_off(&(min_floor, 0, 0));
         }
         st.check_below_all_floors(now);
     }
 
-    fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, _ballot: Ballot) {
+    fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {
         let now = self.now_ms();
         let mut st = self.state();
         reach_once!(
             st.snapshot_installed,
             "a snapshot was installed to recover a below-floor node"
         );
+        // The core adopts `max(promise, ballot)` on install and any raise is
+        // surfaced (as the batch's `SetPromise`) before this write's report,
+        // so by now the folded promise must already cover the snapshot's
+        // ballot — a lower fold would mean the adoption was lost.
+        let folded = st.promised.get(&node.0).copied();
+        assert_always!(
+            folded.is_some_and(|p| p >= ballot),
+            "an installed snapshot's ballot is covered by the node's promise",
+            {
+                "node" => node.0,
+                "round" => ballot.round,
+                "folded_round" => folded.map_or(0, |p| p.round)
+            }
+        );
+        // An offer is only ever materialized from state the serving peer had
+        // durably applied (the driver skips a mismatched offer), and that
+        // apply was folded before the offer left — so a landing past the
+        // cluster's applied frontier is a fabricated prefix.
+        assert_always!(
+            st.cluster_applied_max
+                .is_some_and(|max| chosen_index.0 <= max),
+            "an installed snapshot lands within the cluster's applied frontier",
+            {
+                "node" => node.0,
+                "landing" => chosen_index.0,
+                "cluster_max" => st.cluster_applied_max.unwrap_or(0)
+            }
+        );
+        // (Deliberately NOT asserted: `landing >= this node's own applied
+        // fold`. The applied fold is reported before the application fsync,
+        // so a crash at the after-apply seam legally leaves the fold above
+        // the durable state a rebooted node then heals from — a lower
+        // landing from a lagging-but-sufficient peer is legitimate there.)
+        //
+        // The install also jumps the durable chosen index to the landing;
+        // keep the per-incarnation watermark in step so a later
+        // `SetChosenIndex` report is judged against it.
+        let watermark = st.chosen_watermark.entry(node.0).or_insert(0);
+        *watermark = (*watermark).max(chosen_index.0);
         // A node can install more than one snapshot in a single drain (two peers
         // each serve it), so the admitted landings are a set.
         st.snap_landings
@@ -997,6 +1214,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a (client, seq) command is applied at exactly one log index"
             );
         }
+        // The quorum-decided oracle's apply leg: a user command applied where
+        // the durable-accept tally already decided the slot must apply the
+        // decided value. Control applies are exempt on purpose — the #94
+        // suppression legitimately executes a re-chosen identity as a `Noop`
+        // (identity `None`) while the quorum durably accepted the user
+        // command, and control-slot agreement is already covered by the
+        // per-slot `chosen` check above.
+        if identity.is_some()
+            && let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0)
+        {
+            assert_always!(
+                vhash == decided_vhash,
+                "an applied value matches the decided value",
+                { "node" => node.0, "slot" => slot.0 }
+            );
+        }
         reach_once!(st.any_chosen, "a value is chosen");
         st.observe_applied_index(node.0, slot.0, now);
     }
@@ -1014,12 +1247,62 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             self.state().observe_beat(node.0, *ballot, *seq);
             return;
         }
-        if let Message::Promise { accepted, .. } = msg {
+        if let Message::Promise {
+            ballot, accepted, ..
+        } = msg
+        {
             assert_always!(
                 accepted.len() <= PROMISE_BATCH,
                 "a Promise carries at most one bounded suffix chunk",
                 { "entries" => accepted.len() }
             );
+            // Persist-before-send at the promise seam: the batch that raised
+            // the promise flushed and reported it before this send, so a
+            // Promise above the folded durable promise left before its fsync.
+            let st = self.state();
+            let folded = st.promised.get(&node.0).copied();
+            assert_always!(
+                folded.is_some_and(|p| p >= *ballot),
+                "a sent Promise carries a durably promised ballot",
+                {
+                    "node" => node.0,
+                    "round" => ballot.round,
+                    "folded_round" => folded.map_or(0, |p| p.round)
+                }
+            );
+        }
+        // Persist-before-send at the accept seam: an `Accepted` claims "I hold
+        // this durably", so the matching record must already be in this
+        // node's folded durable-accept tally (the same-batch write is flushed
+        // and reported before the send; a re-answer names an older record
+        // that was folded when it was first written or re-read at boot).
+        if let Message::Accepted { ballot, slot, .. } = msg {
+            let st = self.state();
+            let holds = st
+                .accept_sets
+                .get(&(slot.0, ballot.round, ballot.node.0))
+                .is_some_and(|holders| holders.contains(&node.0));
+            assert_always!(
+                holds,
+                "an outgoing Accepted names a durably accepted record",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+        }
+        // A `Commit` names a decided slot; where the durable-accept tally
+        // already knows the decision, the commit must carry that value.
+        // Checked against `decided`, never the apply-fed `chosen` map: a #94
+        // re-chosen identity applies as a `Noop` everywhere while its commit
+        // honestly carries the decided user command.
+        if let Message::Commit { slot, command, .. } = msg {
+            let vhash = command_hash(command);
+            let st = self.state();
+            if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
+                assert_always!(
+                    vhash == decided_vhash,
+                    "a commit carries the chosen value",
+                    { "node" => node.0, "slot" => slot.0 }
+                );
+            }
         }
         // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
         // own proposer, so exactly one node ever sends `Accept`s at it, and
@@ -1156,9 +1439,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn client_acked(
         &self,
-        _node: NodeId,
-        _client: u64,
-        _seq: u64,
+        node: NodeId,
+        client: u64,
+        seq: u64,
         slot: Slot,
         applied: Option<Slot>,
         dedup: bool,
@@ -1167,6 +1450,24 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.any_ack_checked,
             "a committed write ack is checked against the acking node's applied prefix"
+        );
+        // A committed ack is a claim about a specific applied command: on both
+        // ack paths (ack-on-commit and the dedup fast path) the apply of this
+        // `(client, seq)` was folded before the ack fired — on this node, or,
+        // for a session fact adopted from a snapshot, on the peer that served
+        // it. The ack must name exactly the index the identity applied at; an
+        // ack for a never-applied identity fails the same check.
+        let applied_at = st.applied_identity.get(&(client, seq)).copied();
+        assert_always!(
+            applied_at == Some(slot.0),
+            "a committed ack names the slot its command applied at",
+            {
+                "node" => node.0,
+                "client" => client,
+                "seq" => seq,
+                "acked_slot" => slot.0,
+                "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+            }
         );
         // The dedup-window edge the reply-drop location exists for: a reply
         // was dropped after commit, and a retry then took the dedup path.
@@ -1186,18 +1487,81 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn recovered(&self, node: NodeId, promised: Ballot, accepted: &[(Slot, Ballot, u64)]) {
+    fn chosen_index(&self, node: NodeId, index: Slot) {
+        let mut st = self.state();
+        // Within one incarnation the core's chosen index only ever advances
+        // (the ordering-chain invariant), and its durable reports arrive in
+        // batch order — so a regression here is a driver/storage reordering
+        // bug. Across a restart the scalar is flushed *relaxed*, so a crash
+        // may legally rewind it (the boot recomputes it from what the disk
+        // actually holds); `recovered` therefore resets this watermark to the
+        // recovered index instead of asserting continuity across boots.
+        let watermark = st.chosen_watermark.entry(node.0).or_insert(0);
+        assert_always!(
+            index.0 >= *watermark,
+            "a chosen index never regresses within a boot",
+            { "node" => node.0, "index" => index.0, "watermark" => *watermark }
+        );
+        *watermark = (*watermark).max(index.0);
+    }
+
+    fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {
+        let mut st = self.state();
+        // The confirmed index is the serve-time chosen index, which is
+        // monotone within an incarnation — so confirmed reads on one node
+        // never step backwards between boots' resets. (Deliberately NOT
+        // asserted against the audit's applied fold: that fold is reported
+        // before the application fsync, so after an after-apply-seam crash it
+        // can legitimately sit above what this incarnation has applied.)
+        let confirmed = index.map(|s| s.0);
+        let watermark = st.read_watermark.entry(node.0).or_insert(None);
+        assert_always!(
+            confirmed >= *watermark,
+            "a confirmed read index never regresses within a boot",
+            {
+                "node" => node.0,
+                "confirmed" => confirmed.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+            }
+        );
+        *watermark = (*watermark).max(confirmed);
+    }
+
+    fn recovered(
+        &self,
+        node: NodeId,
+        promised: Ballot,
+        chosen_index: Option<Slot>,
+        cluster_size: u64,
+        accepted: &[(Slot, Ballot, u64)],
+    ) {
         let now = self.now_ms();
         let mut st = self.state();
         st.booted.insert(node.0);
+        st.cluster_size = Some(
+            st.cluster_size
+                .map_or(cluster_size, |n| n.max(cluster_size)),
+        );
         st.observe_promise(node.0, promised);
+        // The boot report is the incarnation edge: swap in the faulty
+        // classifications staged by *this* boot's scan (driver report and
+        // red-demo side door alike) and drop the previous incarnation's — a
+        // stale excuse must not keep explaining divergence forever.
+        let fresh = st.faulty_staged.remove(&node.0).unwrap_or_default();
+        st.reported_faulty.insert(node.0, fresh);
+        // Fresh incarnation: the durable chosen index legally rewinds across
+        // a crash (its writes flush relaxed), so restart the within-boot
+        // watermarks from what this boot actually recovered.
+        st.chosen_watermark
+            .insert(node.0, chosen_index.map_or(0, |s| s.0));
+        st.read_watermark.remove(&node.0);
         let boot_floor = st
             .floor
             .get(&node.0)
             .copied()
             .unwrap_or_default()
             .strictly_before(now);
-        for &(slot, _ballot, vhash) in accepted {
+        for &(slot, ballot, vhash) in accepted {
             // A synced accept is never lost or altered by a crash.
             if let Some(&prev) = st.persisted.get(&(node.0, slot.0)) {
                 assert_always!(
@@ -1208,6 +1572,38 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             assert_always!(
                 slot.0 >= boot_floor,
                 "a truncated record is never recovered on boot (the log stays bounded)"
+            );
+            // Re-fold the durable record into the acceptor tally: a record
+            // that became durable through an ambiguous fault leg (flushed,
+            // but the driver crashed before reporting it) enters the
+            // quorum-decided oracle here; a re-fold of an already-counted
+            // record is idempotent.
+            st.observe_durable_accept(node.0, slot.0, ballot, vhash);
+        }
+        // A chosen index is only ever set once the commits below it were
+        // learned, every one of which needed a durable accept quorum — one
+        // the tally has folded from live reports, or one this very boot
+        // report just re-supplied (an ambiguous fsync can land a decided
+        // batch durably with the driver crashing before surfacing it, which
+        // is why this check runs *after* the record fold above). The one
+        // evidence a fold cannot recover is a torn record whose value rotted:
+        // its `(slot, ballot)` identity survives as this boot's faulty
+        // report, so those slots extend the admissible frontier. Anything
+        // past all three is a fabricated prefix.
+        if let Some(ci) = chosen_index {
+            let faulty_max = st
+                .reported_faulty
+                .get(&node.0)
+                .and_then(|slots| slots.iter().next_back().copied());
+            let frontier = st.decided_max.max(faulty_max);
+            assert_always!(
+                frontier.is_some_and(|max| ci.0 <= max),
+                "a recovered chosen index stays within the cluster's decided frontier",
+                {
+                    "node" => node.0,
+                    "recovered" => ci.0,
+                    "frontier" => frontier.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                }
             );
         }
         // The #71 explained-divergence form, first leg (Stage 7): a recovered
@@ -1235,7 +1631,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 // recoverable and reported into the tri-state this boot —
                 // the peer-recovery path owns it now (#71: explained
                 // divergence only, never a blanket weakening).
-                || st.reported_faulty.contains(&(node.0, slot));
+                || st
+                    .reported_faulty
+                    .get(&node.0)
+                    .is_some_and(|slots| slots.contains(&slot));
             assert_always!(
                 explained,
                 "storage: a recovered log omits a persisted record only after a detected corruption crash",
@@ -1359,6 +1758,34 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
+    fn compact_acked(&self, _node: NodeId, accepted: bool) {
+        let mut st = self.state();
+        if accepted {
+            reach_once!(
+                st.compact_ack_accepted,
+                "a compact request is acked as accepted"
+            );
+        } else {
+            reach_once!(
+                st.compact_ack_refused,
+                "a compact request is acked as refused"
+            );
+        }
+    }
+
+    fn dropped_at_mailbox(&self, _node: NodeId, _to: NodeId, _kind: &'static str) {
+        let mut st = self.state();
+        reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
+    }
+
+    fn snapshot_offer_skipped(&self, _node: NodeId, _offered: Slot) {
+        let mut st = self.state();
+        reach_once!(
+            st.offer_skipped,
+            "the driver skips a mismatched snapshot offer"
+        );
+    }
+
     fn resend_skipped(&self, _node: NodeId) {
         let mut st = self.state();
         reach_once!(
@@ -1404,8 +1831,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
         let mut st = self.state();
+        // Staged, not live: this fires from the boot path *before* the boot's
+        // `recovered` report, which swaps the staged set in as this
+        // incarnation's classification (and drops the previous boot's).
+        let staged = st.faulty_staged.entry(node.0).or_default();
         for &(slot, _ballot) in entries {
-            st.reported_faulty.insert((node.0, slot.0));
+            staged.insert(slot.0);
         }
     }
 

@@ -355,17 +355,24 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
     let b = ucmd(2, 1, 0xb);
     let c = ucmd(3, 1, 0xc);
 
+    // A real disk's promise always dominates its accepted ballots (the accept
+    // path raises the promise in the same flushed batch), and the boot
+    // read-back re-asserts it — so each crafted storage carries a promise at
+    // its highest accepted ballot.
     let mut s1 = TestStorage::new(0, &[0, 1, 2]);
+    s1.hard_state.max_promised_ballot = ballot(1, 0);
     s1.accepted.insert(Slot(0), (ballot(1, 0), a));
     s1.rot(Slot(0));
 
     let mut s2 = TestStorage::new(1, &[0, 1, 2]);
+    s2.hard_state.max_promised_ballot = ballot(3, 1);
     s2.accepted.insert(Slot(0), (ballot(2, 1), b.clone()));
     s2.accepted.insert(Slot(1), (ballot(3, 1), c));
     s2.rot(Slot(0));
     s2.rot(Slot(1));
 
     let mut s3 = TestStorage::new(2, &[0, 1, 2]);
+    s3.hard_state.max_promised_ballot = ballot(2, 1);
     s3.accepted.insert(Slot(0), (ballot(2, 1), b.clone()));
 
     let mut nodes = [RawNode::new(&s1), RawNode::new(&s2), RawNode::new(&s3)];

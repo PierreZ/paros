@@ -111,14 +111,16 @@ demo). Mechanically: repair *fills or replaces-with-proven-identical* —
 
 ## Where each repair actually flows (Boxes B/C/D, fused into existing paths)
 
-paros deliberately grows **no dedicated recovery RPC**. Every repair rides a path that
-already exists, which is what keeps the M5 compartment split clean:
+paros grows **one dedicated repair plane and nothing else**: the #101 snap-chunk
+messages (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse`), handled driver-terminally —
+they never enter `RawNode`, so the core protocol still grows no recovery RPC and the M5
+compartment split stays clean. Every other repair rides a path that already exists:
 
 | Faulty item | Recovery path |
 |---|---|
 | chosen slot, value lost locally (below/at the chosen index) | commit-replay catch-up: the node pulls from its first unhealed slot (`CatchUpRequest`); any peer with the slot decided serves it. A peer never serves past its *own* faulty slot (per-slot attribution: silence, not garbage). |
 | accepted-but-undecided slot, value lost | the leader's Phase-1 tri-state (R2/R3) at the next election; before that, the leader's ordinary `Accept` re-send or the slot's `Commit` overwrites it. |
-| chosen prefix truncated on every peer that could serve it | whole-blob `InstallSnapshot`, the existing below-floor path (chunk-level snapshot repair is #101). |
+| chosen prefix truncated on every peer that could serve it | whole-blob `InstallSnapshot`, the existing below-floor path; a rotted chunk of a *retained* decided snapshot heals through the #101 driver-terminal chunk-repair plane. |
 | local application snapshot corrupted, log still covers it (floor = 0) | rebuild locally by replaying the retained log — CTRL's cheap path; a rot mid-log falls through to catch-up for the rest. |
 | local application snapshot corrupted, log truncated | remote `InstallSnapshot`; until one lands the node serves consensus for every slot it can read but applies nothing (wait, not fabricate). |
 

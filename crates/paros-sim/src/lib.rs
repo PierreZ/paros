@@ -868,7 +868,18 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// shifted stream, and a fresh 2,000-seed hunt returned 33 reds, of which
 /// this seed's red is the single pure agreement violation ("at most one
 /// value is ever chosen for a slot").
-pub const FAULTY_NONE_DEMO_SEED: u64 = 12_343_285_557_404_141_340;
+///
+/// Re-hunted again when the boot read-back gained the completeness assert
+/// ("every retained slot below the chosen prefix has a durable record"): the
+/// previous witness `12343285557404141340` now dies at boot — its withheld
+/// record leaves a hole *below* the chosen prefix, which the core refuses
+/// before the misreport can reach a Promise (see
+/// `faulty_as_none_below_prefix_dies_at_boot`, which pins that fate). The
+/// mutation's fatal consequence needs the hole *above* the chosen prefix
+/// (accepted but not yet chosen), where no single node can tell the record
+/// ever existed. A fresh 2,000-seed hunt returned 2 reds, both carrying the
+/// pure agreement violation; this one's cascade is the richer trace.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 2_237_311_295_790_817_120;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).

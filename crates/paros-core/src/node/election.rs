@@ -419,6 +419,7 @@ impl RawNode {
     /// non-win: the election stays open and self-heals — the next election
     /// timeout campaigns at `max(max_promised_ballot.round, ..) + 1`
     /// (`on_check_leader`), above the promise that caused the refusal.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn try_become_leader(&mut self) {
         let quorum = self.quorum();
         let won = self.role == NodeRole::Candidate
@@ -430,6 +431,13 @@ impl RawNode {
         }
         let me = self.config.id;
         let e = self.election.take().expect("won implies an election");
+        // Post-win restatement of the quorum half of the win condition (the
+        // ballot half is restated in the postcondition block below): the
+        // campaign that just closed really held a promise quorum.
+        assert!(
+            e.promised_by.len() >= quorum,
+            "a won election holds a promise quorum"
+        );
         self.role = NodeRole::Leader;
         self.leader = Some(me);
         self.ballot = e.ballot;
@@ -639,8 +647,22 @@ impl RawNode {
         let remaining = self.leader_recovery.as_ref().map_or(0, |recovery| {
             usize::try_from(recovery.end.0.saturating_sub(recovery.cursor.0)).unwrap_or(usize::MAX)
         });
-        if remaining == 0 {
-            self.leader_recovery = None;
+        if remaining == 0
+            && let Some(recovery) = self.leader_recovery.take()
+        {
+            // Closure postconditions: a recovery only closes once its cursor
+            // swept the whole inherited range, and nothing at or past the
+            // cursor was left behind unvisited (consumed entries are removed
+            // as the cursor passes them; what survives is only the
+            // below-prefix residue the prefix heal already handled).
+            assert!(
+                recovery.cursor >= recovery.end,
+                "a closed recovery drained its range"
+            );
+            assert!(
+                recovery.recovered.range(recovery.cursor..).next().is_none(),
+                "a closed recovery leaves no recovered slot unvisited"
+            );
         }
         if processed > 0 {
             self.pending_recovery_batch = Some((started, gap_fills, remaining));

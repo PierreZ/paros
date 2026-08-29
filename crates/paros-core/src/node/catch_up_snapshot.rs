@@ -117,8 +117,15 @@ impl RawNode {
         ballot: Ballot,
         chosen_index: Slot,
         snapshot: Value,
-        sessions: Vec<SessionEntry>,
+        mut sessions: Vec<SessionEntry>,
     ) {
+        // Wire guard: a boundary at the numeric ceiling has no floor one past
+        // itself (`first_unchosen` computes `chosen_index + 1`), and no honest
+        // serving peer can have chosen it. An operating condition (a corrupt
+        // or adversarial message), so ignore rather than overflow.
+        if chosen_index.0 == u64::MAX {
+            return;
+        }
         // Never go backward: a snapshot at or below our chosen prefix teaches us
         // nothing and must not lower the floor or re-truncate live slots. The
         // one exception (Stage 8): with an **application repair** open, a
@@ -140,7 +147,21 @@ impl RawNode {
         if ballot > self.hard_state.max_promised_ballot {
             self.set_promise(ballot);
         }
-        // Wire value: saturate rather than overflow on an adversarial u64::MAX.
+        // Wire hygiene: the boundary is the validation line for the ledger the
+        // snapshot carries. A session record naming a slot *above*
+        // `chosen_index` claims an applied fact the snapshot's state cannot
+        // contain; merged, it would let `propose`'s dedup fast path ack a
+        // never-applied slot as `Chosen` — a linearizability violation. Drop
+        // such records before they reach `applied_seq` or the durable install.
+        sessions.retain(|(_, _, slot)| *slot <= chosen_index);
+        // Past the validation boundary the fact may be re-asserted.
+        assert!(
+            sessions.iter().all(|(_, _, slot)| *slot <= chosen_index),
+            "a merged session record stays inside the snapshot boundary"
+        );
+        let old_floor = self.first_slot;
+        // The MAX guard at entry makes this addition exact; `saturating_add`
+        // stays as defense in depth.
         let first = Slot(chosen_index.0.saturating_add(1));
         self.hard_state.chosen_index = Some(chosen_index);
         // Fully compact up to the snapshot: everything at or below `chosen_index`
@@ -152,6 +173,10 @@ impl RawNode {
         // Faulty entries in the folded prefix are healed by the install: their
         // decided effects live in the opaque bytes now (the whole-blob repair).
         self.faulty = self.faulty.split_off(&first);
+        // The folded prefix's duplicate-suppression markers are spent, and a
+        // restarted node re-derives the set from the retained log only — a
+        // live node must not remember more than its own reboot would.
+        self.duplicate_slots = self.duplicate_slots.split_off(&first);
         // The snapshot's application state covers everything at or below its
         // boundary, so an open application repair for that range is closed.
         if self.app_repair.is_some_and(|cursor| cursor <= chosen_index) {
@@ -210,6 +235,13 @@ impl RawNode {
         assert!(
             self.hard_state.max_promised_ballot >= ballot,
             "a snapshot install never lowers the promise"
+        );
+        // Floor monotonicity, the install-side pair of `compact`'s "the floor
+        // strictly rose": the entry guards refuse any snapshot behind our
+        // prefix, so the floor an install lands never regresses.
+        assert!(
+            self.first_slot >= old_floor,
+            "a snapshot install never lowers the floor"
         );
         // Re-drive the contiguous walk: a `Commit` learned out of order may
         // already sit in `chosen` just above the boundary, and without the walk

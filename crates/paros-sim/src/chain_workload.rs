@@ -166,10 +166,19 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
 
 /// Factory-created stateful test driver. Its model contains outcomes, never a
 /// second implementation of Paxos.
+///
+/// Both models are keyed by the request's own identity — its `seq` (this
+/// workload is one client, so `seq` is the `(client, seq)` identity) — never
+/// by the payload hash: two distinct requests can legitimately carry
+/// identical bytes, and hash-keying would alias their outcomes ("never use
+/// hashes as identities"). The payload hash rides along as data, for the
+/// applied-trace joins.
 #[derive(Default)]
 pub(crate) struct ChainWorkload {
-    outcomes: BTreeMap<u64, Outcome>,
-    submitted: BTreeSet<u64>,
+    /// Per `seq`: the payload's `cmd_hash` and the terminal client outcome.
+    outcomes: BTreeMap<u64, (u64, Outcome)>,
+    /// Per `seq`: the submitted payload's `cmd_hash`.
+    submitted: BTreeMap<u64, u64>,
     final_state: Option<ChainState>,
     issued_count: u64,
     external_digests_compared: bool,
@@ -443,7 +452,7 @@ impl Workload for ChainWorkload {
                     raw,
                 );
                 let cmd_hash = user_command_hash(&payload);
-                self.submitted.insert(cmd_hash);
+                self.submitted.insert(seq, cmd_hash);
                 tracing::info!(
                     cmd = %hash_text(cmd_hash),
                     seq,
@@ -475,7 +484,8 @@ impl Workload for ChainWorkload {
                             server_count,
                         );
                         max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                        self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                        self.outcomes
+                            .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -507,11 +517,13 @@ impl Workload for ChainWorkload {
                             leader,
                             server_count,
                         );
-                        self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
+                        self.outcomes
+                            .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
                     ProposalResult::Ambiguous => {
-                        self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                        self.outcomes
+                            .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
                     }
                 }
@@ -565,7 +577,7 @@ impl Workload for ChainWorkload {
                         raw_payload,
                     );
                     let cmd_hash = user_command_hash(&payload);
-                    self.submitted.insert(cmd_hash);
+                    self.submitted.insert(seq, cmd_hash);
                     tracing::info!(
                         cmd = %hash_text(cmd_hash),
                         seq,
@@ -623,7 +635,8 @@ impl Workload for ChainWorkload {
                     };
                     let result = if matches!(result, ProposalResult::Ambiguous) {
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
-                        self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                        self.outcomes
+                            .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                         let retry_target =
                             leader_hint.unwrap_or((chosen_target + 1) % server_count);
                         let reconciled = moonpool_sim::select! {
@@ -648,7 +661,8 @@ impl Workload for ChainWorkload {
                                 server_count,
                             );
                             max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                            self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -695,11 +709,13 @@ impl Workload for ChainWorkload {
                                 leader,
                                 server_count,
                             );
-                            self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
                         ProposalResult::Ambiguous => {
-                            self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                         }
                     }
                 }
@@ -788,7 +804,7 @@ impl Workload for ChainWorkload {
                             raw_payload,
                         );
                         let cmd_hash = user_command_hash(&payload);
-                        self.submitted.insert(cmd_hash);
+                        self.submitted.insert(seq, cmd_hash);
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -865,7 +881,8 @@ impl Workload for ChainWorkload {
                             );
                             max_acked_slot =
                                 Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
-                            self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -896,14 +913,16 @@ impl Workload for ChainWorkload {
                                 redirect,
                                 server_count,
                             );
-                            self.outcomes.insert(cmd_hash, Outcome::Rejected { seq });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
                                 "chain_command_rejected"
                             );
                         } else {
-                            self.outcomes.insert(cmd_hash, Outcome::Ambiguous { seq });
+                            self.outcomes
+                                .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -1132,7 +1151,7 @@ impl Workload for ChainWorkload {
                 .iter()
                 .filter_map(|event| event.str("cmd").map(str::to_owned))
                 .collect();
-            for (cmd_hash, outcome) in &self.outcomes {
+            for (cmd_hash, outcome) in self.outcomes.values() {
                 if matches!(outcome, Outcome::Acked { .. }) {
                     if !applied_hashes.contains(&hash_text(*cmd_hash)) {
                         let q = ctx.observability();
@@ -1189,7 +1208,7 @@ impl Workload for ChainWorkload {
                 seq ^ recovery_offset ^ 0xa5a5_5a5a,
             );
             let cmd_hash = user_command_hash(&payload);
-            self.submitted.insert(cmd_hash);
+            self.submitted.insert(seq, cmd_hash);
             tracing::info!(
                 cmd = %hash_text(cmd_hash),
                 seq,
@@ -1207,7 +1226,8 @@ impl Workload for ChainWorkload {
                     ProposalResult::Acked { leader, slot } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
-                        self.outcomes.insert(cmd_hash, Outcome::Acked { seq, slot });
+                        self.outcomes
+                            .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -1478,7 +1498,7 @@ impl Workload for ChainWorkload {
             .iter()
             .filter_map(|event| event.str("cmd").map(str::to_owned))
             .collect();
-        for (cmd_hash, outcome) in &self.outcomes {
+        for (cmd_hash, outcome) in self.outcomes.values() {
             if matches!(outcome, Outcome::Acked { .. }) {
                 assert_always!(
                     applied_hashes.contains(&hash_text(*cmd_hash)),
@@ -1508,14 +1528,14 @@ impl Workload for ChainWorkload {
         crate::node::check_storage_gates(ctx.state(), scope);
         assert_always!(
             self.outcomes
-                .values()
-                .all(|outcome| outcome.seq() < self.issued_count),
+                .iter()
+                .all(|(seq, (_, outcome))| *seq == outcome.seq() && *seq < self.issued_count),
             "chain: retained outcome model is internally valid"
         );
         if !self.safety_only && !self.budget_off {
             assert_always!(
                 self.final_state
-                    .is_some_and(|state| self.outcomes.values().all(|outcome| {
+                    .is_some_and(|state| self.outcomes.values().all(|(_, outcome)| {
                         match outcome {
                             Outcome::Acked { slot, .. } => *slot < state.applied_count,
                             Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
