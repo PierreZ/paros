@@ -66,6 +66,11 @@
 //!
 //! - A relinquishes at most once per leadership, because the very act demotes
 //!   it and a demoted node fails [`RawNode::can_relinquish`].
+//! - **Only the node that minted a ballot ever relinquishes it**: a successor
+//!   may not hand an inherited authority on. That one-hop rule is what keeps
+//!   the whole mechanism free of a durable relinquishment record; see
+//!   [`RawNode::can_relinquish`] for the replay the simulation found without
+//!   it.
 //! - The intended successor is named **inside** the payload
 //!   ([`Message::Relinquish::to`]), so a duplicated, misrouted, replayed, or
 //!   reordered delivery cannot hand the authority to a second node.
