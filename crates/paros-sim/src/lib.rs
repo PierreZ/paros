@@ -899,12 +899,16 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 ///
 /// Re-hunted again for the cooperative-leader-handoff stream shift (the
 /// `initiate_handoff` / `handoff_target` BUGGIFY locations and the
-/// `Relinquish` drop/duplicate sites all move the seed schedule): the prior
-/// witness `1209198120647599430` replays green on the shifted stream, and a
-/// fresh 2,000-seed hunt returned 2 reds, of which this seed carries the pure
-/// agreement violation ("at most one value is ever chosen for a slot") with
-/// its full decided-value and one-state-per-index cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 18_170_485_419_286_272_337;
+/// `Relinquish` drop/duplicate sites all move the seed schedule), and once
+/// more when the handoff rates were lowered to stop them starving the
+/// budget-off WAITED leg — a probability is part of the draw schedule, so
+/// tuning one re-pins this witness exactly like adding a location does. Each
+/// prior witness (`1209198120647599430`, `18170485419286272337`) replays green
+/// on the stream that succeeded it; the latest 2,000-seed hunt returned 4
+/// reds, of which this seed is the one carrying the pure agreement violation
+/// ("at most one value is ever chosen for a slot") with its full
+/// decided-value and one-state-per-index cascade.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 12_405_914_642_135_197_196;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
