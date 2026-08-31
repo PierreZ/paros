@@ -596,7 +596,7 @@ struct AuditState {
     snap_restore_seen: bool,
     resend_skipped: bool,
     resigned: bool,
-    /// Cooperative-handoff coverage (§17), one sticky bit per distinct fact.
+    /// Cooperative-handoff coverage: one sticky bit per distinct fact.
     handoff_relinquished: bool,
     handoff_installed: bool,
     /// The payoff: an installed authority streamed Phase 2 without any Phase 1
@@ -617,7 +617,7 @@ struct AuditState {
     /// fence — the deliberate fallback to ordinary Phase 1.
     handoff_fence_expired: bool,
     /// A relinquishment was lost at the send seam (the availability-only
-    /// failure mode §3 accepts).
+    /// failure mode a handoff deliberately accepts).
     dropped_relinquish: bool,
     duplicated_relinquish: bool,
     compact_ack_accepted: bool,
@@ -810,7 +810,7 @@ impl AuditState {
         self.check_handoff_gates();
     }
 
-    /// The cooperative-handoff coverage gates (§17).
+    /// The cooperative-handoff coverage gates.
     ///
     /// Split by *what each one proves* rather than lumped into one "handoff
     /// happened" bit: a campaign that only ever transfers settled leaderships,
@@ -1018,7 +1018,7 @@ impl AuditState {
     /// `Accept` at `ballot` on the wire.
     ///
     /// This is where **authority uniqueness** — the `DPaxos` handoff's central
-    /// safety rule (§6) — is checked, and it is checked against what the
+    /// safety rule — is checked, and it is checked against what the
     /// cluster can actually observe (a proposal on the wire), never against a
     /// node's own `role` flag. Two nodes exercising one ballot for overlapping
     /// slots is exactly how two different values get chosen for one slot, and

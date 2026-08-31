@@ -164,7 +164,7 @@ pub struct HandoffCounters {
     pub rejected_target: u64,
     /// Refused: this node's durable promise already dominates the authority,
     /// or the frontier would rewind, or the authority is already held here —
-    /// the stale-handoff paths §12 exists for.
+    /// the stale-handoff paths.
     pub rejected_stale: u64,
     /// Refused: the payload did not describe a well-formed tail.
     pub rejected_shape: u64,
@@ -213,8 +213,8 @@ impl RawNode {
     /// Whether this node is currently in a state a cooperative handoff may
     /// leave from.
     ///
-    /// Deliberately narrow (§10/§11's "prefer a narrow, obviously safe
-    /// restriction"): a handoff transfers a *settled* leadership, never a
+    /// Deliberately narrow — the standing "prefer a narrow, obviously safe
+    /// restriction" rule: a handoff transfers a *settled* leadership, never a
     /// leadership that is still mid-recovery. Each refusal below would
     /// otherwise mean shipping fragile transient repair state across the wire
     /// for no protocol benefit — an election, which re-derives all of it from a
@@ -461,7 +461,7 @@ impl RawNode {
             self.handoff.rejected_target = self.handoff.rejected_target.saturating_add(1);
             return;
         }
-        // Stale authority (§12): our own durable promise already dominates it,
+        // Stale authority: our own durable promise already dominates it,
         // so some node ran a Phase 1 past this ballot and this transfer is
         // dead. A delayed `Relinquish` must never resurrect it.
         if ballot < self.hard_state.max_promised_ballot

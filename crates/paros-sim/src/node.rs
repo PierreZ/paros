@@ -3397,13 +3397,14 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         if !self.active() {
             return false;
         }
-        // Three independent locations, one per *shape* of transfer, rather than
-        // one uniform draw. §15's bias: a handoff that carries unfinished
-        // business — an accepted-but-unchosen tail, or a leader still healing a
-        // hole of its own — is the interesting one, so it fires an order of
-        // magnitude more often than the clean case. The clean case stays armed
-        // (a settled handoff is the common production shape and must keep
-        // working), just rarer, so it never crowds the hard states out.
+        // Three independent locations, one per *shape* of transfer, rather
+        // than one uniform draw, biased toward the hard states: a handoff
+        // carrying unfinished business — an accepted-but-unchosen tail, or a
+        // leader still healing a hole of its own — is the interesting one, and
+        // it fires an order of magnitude more often than the clean case. The
+        // clean case stays armed (a settled handoff is the common production
+        // shape and must keep working), just rarer, so it never crowds the
+        // hard states out.
         //
         // Consulted only when the core says the leadership is transferable, so
         // every `true` here has an observable effect.
@@ -3534,7 +3535,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // that this costs *availability only*: the outgoing leader has
             // already stepped down, so the cluster simply has no leader until
             // an ordinary Phase 1 elects one. Aggressive, because that fallback
-            // is the path §3 says must always work.
+            // is the path that must always work.
             Message::Relinquish { .. } => buggify_with_prob!(0.25),
             // Aggressive like the Nack location. Inert today — `CheckLeader`
             // is a tick-injected self-event that never crosses the transport —

@@ -215,7 +215,7 @@ is a caller that calls differently).
 
 - `initiate_handoff`, split into three independent probabilities by the *shape* of the
   transfer — a leader still healing a hole (0.30), one with a non-empty tail (0.20), a
-  fully settled one (0.02). §15's bias toward interesting states, with the clean case
+  fully settled one (0.02). Biased toward the interesting states, with the clean case
   kept armed so it never disappears.
 - `handoff_target` — occasionally pins the successor instead of taking the driver's
   uniform draw, so a seed can concentrate handoffs on one node.
