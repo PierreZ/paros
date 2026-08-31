@@ -3406,14 +3406,27 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // shape and must keep working), just rarer, so it never crowds the
         // hard states out.
         //
+        // The rates sit in the same range as `resign_leadership` (0.004), not
+        // an order above it, and that ceiling is load-bearing. A handoff
+        // *replaces* an election rather than adding to it, so an aggressive
+        // rate does not merely add coverage — it becomes the dominant way
+        // leadership moves and starves every campaign that needs a settled
+        // cluster to reach its own rare state. `ctx.healing` is the trap:
+        // it reads true for any leader holding a pipelined slot decided out of
+        // order, which is the ordinary streaming state rather than a rare one,
+        // so a high probability there is effectively a high *unconditional*
+        // rate. At 0.30 it moved leadership every few ticks, which pushed the
+        // budget-off (WAITED-leg) axis into `convergence_timeout` and left its
+        // "no clean copy of a committed item remains" gate unreached.
+        //
         // Consulted only when the core says the leadership is transferable, so
         // every `true` here has an observable effect.
         let fired = if ctx.healing {
-            buggify_with_prob!(0.30)
+            buggify_with_prob!(0.03)
         } else if !ctx.settled {
-            buggify_with_prob!(0.20)
-        } else {
             buggify_with_prob!(0.02)
+        } else {
+            buggify_with_prob!(0.002)
         };
         if fired {
             // BUGGIFY pairing: each shape genuinely fires on some seed. Split

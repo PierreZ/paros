@@ -124,6 +124,16 @@ fn main() {
         "{} seeds: {} ok, {} failed",
         report.iterations, report.successful_runs, report.failed_runs,
     );
+    // A hunt's deliverable is failing seeds, so coverage never decides its exit
+    // status — but a gate that never fired across the whole hunt is exactly what
+    // a starved `sometimes` looks like in the CI sweep, and finding it here is
+    // far cheaper than re-running the full coverage campaign to see it.
+    if !report.coverage_violations.is_empty() {
+        println!("coverage gates that never fired:");
+        for gate in &report.coverage_violations {
+            println!("  - {gate}");
+        }
+    }
     if report.assertion_violations.is_empty() && report.failed_runs == 0 {
         println!("no violations — the hunt came back empty");
         return;
