@@ -42,6 +42,7 @@ message ConsensusMessage {
     SnapAck snap_ack = 13;
     SnapChunkRequest snap_chunk_request = 14;
     SnapChunkResponse snap_chunk_response = 15;
+    Relinquish relinquish = 16;
   }
 }
 
@@ -219,6 +220,27 @@ message SnapChunkResponse {
   uint64 at_index = 2;
   repeated SnapChunk chunks = 3;
   uint64 config_id = 4;
+}
+
+// Cooperative leader handoff (DPaxos "Leader Handoff"): the outgoing leader
+// transfers the Phase-2 authority of `ballot` to exactly one successor, which
+// continues under it without running another Phase 1.
+message Relinquish {
+  // The current holder giving the authority up (not necessarily ballot.node,
+  // which keeps naming the node that minted the ballot).
+  uint64 from = 1;
+  // The single intended successor. Carried inside the payload so a duplicate,
+  // a misroute, or a replay can never hand the authority to a second node.
+  uint64 to = 2;
+  Ballot ballot = 3;
+  uint64 from_slot = 4;
+  // The allocator frontier the successor inherits.
+  uint64 next_slot = 5;
+  // Tail slots the outgoing leader knows are chosen, with their choosing ballot.
+  repeated SlotCommand decided = 6;
+  // Tail slots with an open Phase-2 round at `ballot` (the ballot is implied).
+  repeated SlotCommand pending = 7;
+  uint64 config_id = 8;
 }
 
 message InspectRequest {}

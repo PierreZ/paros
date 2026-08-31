@@ -896,7 +896,15 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// 2,000-seed hunt returned 4 reds, of which this seed's red carries the
 /// pure agreement violation ("at most one value is ever chosen for a slot")
 /// with its full decided-value and one-state-per-index cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 1_209_198_120_647_599_430;
+///
+/// Re-hunted again for the cooperative-leader-handoff stream shift (the
+/// `initiate_handoff` / `handoff_target` BUGGIFY locations and the
+/// `Relinquish` drop/duplicate sites all move the seed schedule): the prior
+/// witness `1209198120647599430` replays green on the shifted stream, and a
+/// fresh 2,000-seed hunt returned 2 reds, of which this seed carries the pure
+/// agreement violation ("at most one value is ever chosen for a slot") with
+/// its full decided-value and one-state-per-index cascade.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 18_170_485_419_286_272_337;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).

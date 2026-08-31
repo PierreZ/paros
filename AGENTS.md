@@ -219,6 +219,42 @@ A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a cl
 out of scope: a snapshot restores the log, not the promise, so a naive rejoin can regress the
 promise (a real safety violation). That belongs to the disk-fault stage (`prob_wipe` stays 0).
 
+**Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
+*election* destroys a leader's authority and makes the successor rediscover the log
+through Phase 1. A *handoff* moves the existing logical Phase-2 authority to another
+physical node, which continues under the **same ballot** with **no second Phase 1** —
+`RawNode::relinquish_to` → `Message::Relinquish` → `on_relinquish`. What travels is
+small and explicit: the ballot, the allocator frontier (`next_slot`), and the tail
+`[first_unchosen, next_slot)` split into slots already chosen and slots with an open
+Phase-2 round; the two **exactly tile** the range, and a handoff-installed recovery has
+**gap filling off** (no Phase-1 quorum report licenses inventing a `Noop`). Three rules
+carry the safety:
+
+- **Abdication is synchronous with the decision.** `relinquish_to` queues the message and
+  `become_follower`s in the *same call*, before any I/O — so emitting it without
+  abdicating is not expressible. No durable fence is needed for the crash case, because
+  paros leadership is entirely volatile (`RawNode::new` always boots a Follower, and
+  `on_check_leader` only campaigns at a strictly higher round): a crash *is* an
+  abdication.
+- **The successor is named inside the payload** (`to`), so a duplicate, a misroute, or a
+  replay can never hand one authority to a second node; the receiver also refuses an
+  authority its own promise dominates, one that would rewind the allocator, and one it
+  already holds.
+- **One hop only.** `can_relinquish` requires `LeadershipOrigin::Elected`: only the node
+  that *minted* a ballot may hand it on. The sweep found the general case unsafe (a
+  replayed `Relinquish` re-installs an authority at a node that already handed it on,
+  while its successor still exercises it), and closing that would need a durable
+  relinquishment fence — a new `HardState` scalar and its whole storage surface — for
+  one extra cooperative hop. Handing leadership on again costs the ordinary election
+  that mints a fresh ballot.
+
+A handoff is refused while any Phase-1-shaped work is open (leader recovery, CTRL repair
+probe, local `faulty` records, application repair) and while the tail exceeds
+`HANDOFF_BATCH`. A successor whose inherited read fence stays uncovered for
+`HANDOFF_FENCE_ELECTIONS` election timeouts resigns: ordinary Phase 1 is always the
+fallback, and a failed handoff costs availability, never safety. Design note:
+`docs/analysis/consensus/dpaxos-leader-handoff.md`.
+
 **Election gap fill.** A new leader has two duties, not one. It re-proposes every slot its promise
 quorum reported accepted (the P2c value-selection rule), *and* it fills every slot in
 `first_unchosen()..next_slot` the quorum reported **nothing** for with a `Control::Noop`. The second
@@ -304,7 +340,8 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-dem
 - `crates/paros-wasm-demo/` — browser/wasm demo, `cdylib` + `rlib` (`publish = false`).
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
-- `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos).
+- `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`
+  cooperative leader-handoff restatement).
 
 Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
 `CHANGELOG.md` (release-plz); binaries/demos/xtask are `publish = false`. Note: `paros` and

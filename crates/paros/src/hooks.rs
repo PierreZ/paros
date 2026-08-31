@@ -7,7 +7,7 @@
 //! leadership, and choosing the shortest valid election timeout. Production
 //! passes [`NoHooks`], whose defaults never perturb the driver.
 
-use paros_core::{Message, NodeId};
+use paros_core::{Message, NodeId, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +42,30 @@ pub enum Seam {
     AfterChunkRestoreBeforeSync,
 }
 
+/// What a cooperative leader handoff would transfer right now, handed to
+/// [`DriverHooks::initiate_handoff`] so a simulation can bias the decision
+/// toward the states that are actually interesting to explore rather than
+/// firing uniformly. Pure read-only context: the driver computes it from the
+/// core's public accessors and nothing here changes with the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HandoffContext {
+    /// Slots between this leader's contiguous chosen prefix and its allocator
+    /// frontier — the unfinished business a transfer must carry across
+    /// (accepted-but-unchosen rounds, plus anything decided above the prefix).
+    /// `0` on a fully settled leader.
+    pub tail: usize,
+    /// The allocator frontier the successor would inherit.
+    pub next_slot: Slot,
+    /// Whether the transfer is "clean": nothing unfinished below the frontier.
+    pub settled: bool,
+    /// Whether this leader is itself holding a chosen slot above its applied
+    /// prefix — a hole ordinary replication is still healing.
+    pub healing: bool,
+    /// How many successors are eligible.
+    pub candidates: usize,
+}
+
 /// A client-facing reply the driver is about to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reply {
@@ -73,6 +97,36 @@ pub trait DriverHooks {
     /// Whether the current leader should voluntarily step down.
     fn resign_leadership(&self) -> bool {
         false
+    }
+
+    /// Whether this leader should **cooperatively hand its Phase-2 authority
+    /// on** right now (`paros_core::RawNode::relinquish_to`), instead of
+    /// keeping it until an election takes it away.
+    ///
+    /// Consulted only when the core reports the leadership is in a
+    /// handoff-eligible state and at least one successor exists, so a `true`
+    /// here always has an observable effect. Answering `false` is always safe:
+    /// a handoff is an *optimization* — it saves the successor a Phase 1 — and
+    /// never a requirement, exactly like
+    /// [`DriverHooks::skip_accept_resend`]'s re-send.
+    ///
+    /// `ctx` describes what the transfer would carry, so a simulation can bias
+    /// toward the adversarial shapes (a non-empty accepted-but-unchosen tail, a
+    /// leader whose own prefix has not caught up) instead of drawing uniformly.
+    fn initiate_handoff(&self, _ctx: HandoffContext) -> bool {
+        false
+    }
+
+    /// Which of `candidates` should receive the authority, when a handoff is
+    /// going ahead. `None` (the default) leaves the choice to the driver's own
+    /// randomized pick. A returned id that is not in `candidates` is ignored.
+    ///
+    /// Every candidate is equally valid — the successor validates the transfer
+    /// against its own durable promise and falls back to an ordinary election
+    /// if it cannot use it — so this only steers *which* valid state the run
+    /// explores.
+    fn handoff_target(&self, _candidates: &[NodeId]) -> Option<NodeId> {
+        None
     }
 
     /// Whether the next election timeout should use the shortest valid value.

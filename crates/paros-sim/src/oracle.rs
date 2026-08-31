@@ -25,8 +25,9 @@ use moonpool_sim::{
     assert_sometimes, assert_sometimes_all, assert_sometimes_each,
 };
 use paros::{
-    EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED, EV_LEADER, EV_LEADERSHIP_RESIGNED,
-    EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK, EV_RECOVERED, EV_SYNCED,
+    EV_APPLIED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED, EV_CHOSEN, EV_COMPACTED, EV_CRASHED,
+    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
+    EV_RECOVERED, EV_SYNCED,
 };
 use serde::Serialize;
 
@@ -1021,7 +1022,11 @@ impl ChainAgreement {
             q.len("chain_snapshot_installed") != 0,
             "chain: node recovers through snapshot install"
         );
-        let old_leader_gone = q.len(EV_LEADERSHIP_RESIGNED) != 0 || q.len(EV_CRASHED) != 0;
+        // Every way a sitting leader can stop being one: it resigned, it
+        // crashed, or it cooperatively handed its authority to a successor.
+        let old_leader_gone = q.len(EV_LEADERSHIP_RESIGNED) != 0
+            || q.len(EV_CRASHED) != 0
+            || q.len(EV_AUTHORITY_RELINQUISHED) != 0;
         assert_sometimes_all!(
             "chain: failover completed",
             [

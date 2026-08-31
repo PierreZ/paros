@@ -17,7 +17,7 @@
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
-use paros_core::{Ballot, Message, NodeId, Slot};
+use paros_core::{Ballot, Handoff, Message, NodeId, Slot};
 
 use crate::hooks::Seam;
 use crate::storage::StorageError;
@@ -76,6 +76,46 @@ pub trait Audit {
 
     /// The driver asked this leader to resign, and it did.
     fn stepped_down(&self, node: NodeId) {}
+
+    /// This node **relinquished** the Phase-2 authority of `handoff.ballot` to
+    /// a single successor and demoted itself in the same core call. Reported at
+    /// the instant the authority changed hands — before the message reaches the
+    /// transport, and therefore before any successor can install it, so a
+    /// checker sees the two halves of a handoff in causal order.
+    ///
+    /// This is the semantic "authority released" event the uniqueness oracle
+    /// keys on: after it, this node must never again send an `Accept` at that
+    /// ballot, whatever its role field happens to say.
+    fn authority_relinquished(&self, node: NodeId, handoff: Handoff) {}
+
+    /// This node **installed** a predecessor's transferred authority and is now
+    /// exercising Phase 2 under `ballot` — a leadership acquired with *no*
+    /// Phase 1, so it is deliberately not reported through
+    /// [`Audit::elected`] (whose "leadership ballots strictly increase" reading
+    /// is about a node's own campaigns). `next_slot` is the inherited allocator
+    /// frontier and `tail` the number of slots between this node's own chosen
+    /// prefix and that frontier — the unfinished business it took over.
+    fn authority_installed(
+        &self,
+        node: NodeId,
+        from: NodeId,
+        ballot: Ballot,
+        next_slot: Slot,
+        tail: u64,
+    ) {
+    }
+
+    /// This node **refused** an incoming transfer: `target` counts payloads
+    /// addressed elsewhere or naming a non-member, `stale` counts authorities
+    /// its own durable promise already dominates (plus allocator rewinds and
+    /// re-installs), and `shape` counts malformed tails. Monotone totals for
+    /// this incarnation, reported when they change.
+    fn handoff_refused(&self, node: NodeId, target: u64, stale: u64, shape: u64) {}
+
+    /// This node resigned a handoff-installed leadership because its inherited
+    /// read fence stayed uncovered — the deliberate fallback to an ordinary
+    /// Phase 1. `count` is the monotone total for this incarnation.
+    fn handoff_fence_expired(&self, node: NodeId, count: u64) {}
 
     /// This node holds a chosen slot above its contiguous applied prefix:
     /// `hole` is the first slot missing, `above` the highest chosen slot past

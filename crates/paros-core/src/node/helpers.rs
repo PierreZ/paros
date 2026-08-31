@@ -1,4 +1,4 @@
-use super::{Message, NodeId, NodeRole, RawNode, Slot};
+use super::{LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot};
 
 impl RawNode {
     // ---- helpers ----------------------------------------------------------
@@ -35,6 +35,11 @@ impl RawNode {
     pub(super) fn become_follower(&mut self, leader: Option<NodeId>) {
         self.role = NodeRole::Follower;
         self.leader = leader;
+        // Leadership state dies whole, the inherited origin included: a
+        // demoted node holds no authority, so it can neither be a handoff
+        // leader nor be counted as one by the invariants.
+        self.leadership_origin = LeadershipOrigin::Elected;
+        self.handoff_fence_elapsed = 0;
         self.election = None;
         self.leader_recovery = None;
         self.repair_probe = None;

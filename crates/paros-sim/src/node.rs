@@ -24,10 +24,10 @@ use crate::audit::{AuditWorld, GateScope, NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, ClientId, ClientSeq, Command, Config, ConfigId, CorruptionVerdict, DriverHooks,
-    DriverTunables, HardState, IntegrityFault, MemStorage, Message, MetadataFault, MustSync,
-    NodeId, NodeStorage, RecoveryCase, RunError, SNAP_CHUNK_BYTES, Seam, SessionEntry, Slot,
-    SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log,
-    command_hash, parse_addr, run_node, snap_chunk_count,
+    DriverTunables, HandoffContext, HardState, IntegrityFault, MemStorage, Message, MetadataFault,
+    MustSync, NodeId, NodeStorage, RecoveryCase, RunError, SNAP_CHUNK_BYTES, Seam, SessionEntry,
+    Slot, SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome,
+    classify_log, command_hash, parse_addr, run_node, snap_chunk_count,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -3393,6 +3393,61 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.active() && buggify_with_prob!(0.004)
     }
 
+    fn initiate_handoff(&self, ctx: HandoffContext) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Three independent locations, one per *shape* of transfer, rather than
+        // one uniform draw. §15's bias: a handoff that carries unfinished
+        // business — an accepted-but-unchosen tail, or a leader still healing a
+        // hole of its own — is the interesting one, so it fires an order of
+        // magnitude more often than the clean case. The clean case stays armed
+        // (a settled handoff is the common production shape and must keep
+        // working), just rarer, so it never crowds the hard states out.
+        //
+        // Consulted only when the core says the leadership is transferable, so
+        // every `true` here has an observable effect.
+        let fired = if ctx.healing {
+            buggify_with_prob!(0.30)
+        } else if !ctx.settled {
+            buggify_with_prob!(0.20)
+        } else {
+            buggify_with_prob!(0.02)
+        };
+        if fired {
+            // BUGGIFY pairing: each shape genuinely fires on some seed. Split
+            // in three so saturation cannot hide a shape behind another's
+            // samples (a run that only ever hands over settled leaderships
+            // never exercises the inherited-recovery path at all).
+            if ctx.healing {
+                assert_reachable!("a handoff leaves a leader that is still healing a hole");
+            } else if ctx.settled {
+                assert_reachable!("a handoff leaves a fully settled leader");
+            } else {
+                assert_reachable!("a handoff carries an accepted-but-unchosen tail");
+            }
+        }
+        fired
+    }
+
+    fn handoff_target(&self, candidates: &[NodeId]) -> Option<NodeId> {
+        if !self.active() || candidates.is_empty() {
+            return None;
+        }
+        // Target selection is its own location: the driver's own randomized
+        // pick is uniform, and this occasionally overrides it with the
+        // *lowest*-id candidate instead, so a seed can concentrate repeated
+        // handoffs on one successor (the chain A -> B -> A -> B a uniform draw
+        // spreads out). Every candidate is equally valid — the successor
+        // validates the transfer itself — so this only steers which valid
+        // state the run explores.
+        if buggify_with_prob!(0.5) {
+            assert_reachable!("a handoff target is chosen by the pinning selector");
+            return candidates.first().copied();
+        }
+        None
+    }
+
     fn shortest_election_timeout(&self) -> bool {
         self.active() && buggify_with_prob!(0.5)
     }
@@ -3475,6 +3530,12 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             Message::SnapAck { .. } => buggify_with_prob!(0.10),
             Message::SnapChunkRequest { .. } => buggify_with_prob!(0.10),
             Message::SnapChunkResponse { .. } => buggify_with_prob!(0.10),
+            // The whole handoff, lost in one message. The correctness claim is
+            // that this costs *availability only*: the outgoing leader has
+            // already stepped down, so the cluster simply has no leader until
+            // an ordinary Phase 1 elects one. Aggressive, because that fallback
+            // is the path §3 says must always work.
+            Message::Relinquish { .. } => buggify_with_prob!(0.25),
             // Aggressive like the Nack location. Inert today — `CheckLeader`
             // is a tick-injected self-event that never crosses the transport —
             // but armed so a future remote leader probe is born chaos-covered.
@@ -3502,6 +3563,10 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             }
             // A duplicated catch-up request must only cost a redundant reply.
             Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
+            // A re-delivered handoff must be a no-op at its addressee (never an
+            // allocator rewind) and refused everywhere else — the structural
+            // half of authority uniqueness, kept honest by firing it often.
+            Message::Relinquish { .. } => buggify_with_prob!(0.25),
             // The snap-repair plane must stay idempotent: the leader's custody
             // tally is a set, and a re-delivered chunk response finds its
             // chunks no longer pending. One location per kind keeps the two

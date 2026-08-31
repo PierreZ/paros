@@ -1,6 +1,6 @@
 use super::{
-    BTreeMap, BTreeSet, Ballot, Command, Control, LEADER_RECOVERY_BATCH, Message, NodeId, NodeRole,
-    PROMISE_BATCH, RawNode, Slot,
+    BTreeMap, BTreeSet, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message,
+    NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot,
 };
 
 /// Volatile per-ballot Phase-1 state while a Candidate recovers the log suffix.
@@ -36,6 +36,16 @@ pub(super) struct LeaderRecovery {
     pub(super) cursor: Slot,
     /// One past the highest slot covered by the Phase-1 quorum.
     pub(super) end: Slot,
+    /// Whether a slot the range covers but `recovered` does not name may be
+    /// filled with a [`Control::Noop`].
+    ///
+    /// `true` for an election: quorum intersection guarantees a value already
+    /// chosen there would have been reported, so an unreported slot is
+    /// genuinely free. `false` for a cooperative handoff, which ran **no
+    /// Phase 1**: there is no quorum report behind it, so a slot the
+    /// predecessor did not explicitly describe is simply skipped — filling it
+    /// could overwrite a value chosen under an older ballot.
+    pub(super) gap_fill: bool,
 }
 
 /// The leader's open **distributed commitment determination** (Stage 8): the
@@ -551,11 +561,14 @@ impl RawNode {
             .map(|(slot, (_ballot, command))| (slot, command))
             .collect();
         self.election_gap_fills = 0;
+        self.leadership_origin = LeadershipOrigin::Elected;
         self.leader_recovery = Some(LeaderRecovery {
             recovered,
             blocked,
             cursor: recovery_start,
             end: self.next_slot,
+            // An election *is* the quorum report that licenses no-op filling.
+            gap_fill: true,
         });
         self.pump_leader_recovery();
         // The fresh-leader read fence: nothing decided under an earlier ballot
@@ -605,16 +618,22 @@ impl RawNode {
                     }
                     let slot = recovery.cursor;
                     recovery.cursor = Slot(recovery.cursor.0.saturating_add(1));
-                    let (command, is_gap) = recovery.recovered.remove(&slot).map_or_else(
-                        || (Command::Control(Control::Noop), true),
-                        |command| (command, false),
-                    );
+                    let (command, is_gap) = match recovery.recovered.remove(&slot) {
+                        Some(command) => (Some(command), false),
+                        // Only a Phase-1-backed recovery may invent a value for
+                        // a slot nobody reported (see `LeaderRecovery::gap_fill`).
+                        None if recovery.gap_fill => (Some(Command::Control(Control::Noop)), true),
+                        None => (None, false),
+                    };
                     Some((slot, command, is_gap))
                 })
             else {
                 break;
             };
             processed += 1;
+            let Some(command) = command else {
+                continue;
+            };
 
             // A previous page can decide and compact slots underneath the
             // continuation (especially in a single-node cluster), so each slot
