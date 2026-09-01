@@ -979,14 +979,14 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// same violation — two values decided for one slot — and the demo test
 /// accepts either.
 ///
-/// Re-hunted once more when the fsync-failure site's per-call rate rose from
-/// 0.01 to 0.03 (`P_FSYNC_FAIL`): the draw count is unchanged, but every seed
-/// whose coin lands between the two thresholds now takes the fault, which
-/// moved the prior witness (`8508603904814693545`) off its shape. A fresh
-/// 2,000-seed hunt returned this single red, carrying the durable-accept
-/// agreement violation with its decided-value, commit and applied-value
-/// cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 4_208_498_603_699_014_883;
+/// Re-hunted once more for the forced-torn-tail BUGGIFY location
+/// (`P_FORCE_TORN_TAIL` in `node.rs`): a new location adds its activation
+/// draw to every seed's stream, which moved the prior witnesses
+/// (`8508603904814693545`, then `4208498603699014883`) off their shape. A
+/// 10,000-seed hunt returned eight reds, every one carrying the
+/// durable-accept agreement violation; this seed is the tightest cascade
+/// (7 accept-quorum failures, 20 assertion failures in all).
+pub const FAULTY_NONE_DEMO_SEED: u64 = 11_060_938_262_250_246_913;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
