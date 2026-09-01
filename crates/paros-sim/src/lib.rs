@@ -8,7 +8,7 @@
 //! (`default-features = false` drops moonpool's native providers + fork explorer).
 //!
 //! [`run_seed`] is the single entry point both the native runner and the browser
-//! demo call: it runs one seeded multi-slot Paxos cluster under driver/attrition chaos and
+//! demo call: it runs one seeded multi-slot Paxos cluster under network/attrition/driver chaos and
 //! returns its timeline, replaying bit-identically from a seed. [`explore`] is the
 //! DST sweep that asserts safety + progress across the seed space.
 
@@ -93,11 +93,16 @@ pub(crate) const TIMEOUT_MS: u64 = 1000;
 /// Gap between proposals, in simulated milliseconds, so node ticks interleave.
 pub(crate) const GAP_MS: u64 = 20;
 /// Quiescence window the client holds open *after* its last proposal before it
-/// returns (and thereby triggers the harness shutdown). Chaos has ended by now,
-/// so this is a quiet tail in which the leader keeps heartbeating and any lagging
-/// follower runs commit-replay catch-up to converge. The final convergence check
-/// runs after this tail. Eight seconds covers issue #86's buggified seed 0, where
-/// a delayed leadership turnover made the final follower catch up 6.05 seconds
+/// returns (and thereby triggers the harness shutdown). This is
+/// [`ProposeClient`]'s half of the recovery tail drawn in [`CHAOS_DURATION_MS`]:
+/// every fault source — paros' own and, since Moonpool `43304d8`, the
+/// simulator's network/storage families and the partitions in force — has
+/// stopped by now, while the damage they did has not been undone, so the
+/// cluster spends this window recovering on live nodes (the leader keeps
+/// heartbeating, a lagging follower runs commit-replay catch-up, a below-floor
+/// one takes a snapshot). The final convergence check runs after the tail, not
+/// at the cutoff. Eight seconds covers issue #86's buggified seed 0, where a
+/// delayed leadership turnover made the final follower catch up 6.05 seconds
 /// into the tail.
 pub(crate) const SETTLE_MS: u64 = 8_000;
 /// Per-seed cluster-size draw (inclusive), AGENTS.md prong 2: the cluster size
@@ -129,13 +134,17 @@ pub const SMOKE_ITERATIONS: usize = 50;
 /// Cap on the sancov coverage run (`cargo xtask sim`). Re-armed provider timing
 /// needs headroom to reach the rare gates before the eight-root quiet window;
 /// the adaptive sweep still stops as soon as it saturates.
-pub const COVERAGE_ITERATIONS: usize = 256;
-/// Cap for the network-swarm safety axis. This is likewise only a ceiling; its
-/// wider timing surface needs room to establish the unchanged 32-root plateau.
-pub const NETWORK_COVERAGE_ITERATIONS: usize = 512;
+///
+/// Raised from 256 when swarm network turbulence folded into this campaign
+/// (the separate network axis, which carried its own 512-seed ceiling, is
+/// gone): partitions, clogs and random closes widen the timing surface the
+/// guided schedule has to cover before it can plateau. Like every other
+/// ceiling here it is a schedule parameter, not a safety margin — a saturating
+/// run still stops early, so the raise costs nothing in wall clock.
+pub const COVERAGE_ITERATIONS: usize = 512;
 /// Small cap for the dedicated graceful lifecycle choreography. Its workload
 /// forces one ordered scenario per root, so it needs plateau headroom rather
-/// than the broad seed volume of the main and network axes.
+/// than the broad seed volume of the main axis.
 pub const SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS: usize = 32;
 /// Tiny cap for the deterministic protocol-bounds choreography. Every root
 /// drives the complete three-page suffix and 64/64/2 Ready sequence.
@@ -397,9 +406,17 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     2_295_340_131_120_414_025,
 ];
 
-/// Network-swarm-axis witnesses, replayed via [`run_network_seed`].
+/// Witnesses farmed on the former network-swarm safety axis, now replayed
+/// through [`run_chain_seed`] alongside [`CHAIN_REGRESSION_SEEDS`]: that axis
+/// existed only because Moonpool's network faults outlived `chaos_duration`,
+/// and Moonpool `43304d8` removed the reason (see [`chaos_surfaces`]), so its
+/// swarm surface is now part of the main campaign. Folding the axis in shifts
+/// the config stream exactly as every earlier surface change did, so — like
+/// most of [`REGRESSION_SEEDS`] — these are historical markers replayed as a
+/// cheap always-green corpus over the partition-shaped paths, not live
+/// reproductions.
 ///
-/// Both pin the **false-commit dedup bug**: `propose`'s old `seq <= applied`
+/// The first two pin the **false-commit dedup bug**: `propose`'s old `seq <= applied`
 /// shortcut assumed a client's seqs execute in order, but an early seq can die
 /// without entering the log (a `NotLeader` window on a fresh singleton) while a
 /// later seq applies — and the retry of the dead command was then acked
@@ -447,18 +464,92 @@ pub const NETWORK_REGRESSION_SEEDS: &[u64] = &[
     // the public gRPC boundary rejects the altered request before consensus.
     11_666_517_603_030_887_004,
 ];
-/// Simulated window (ms) over which chaos (network faults + attrition reboots)
-/// fires — wide enough to span the proposal phase so crashes land mid-protocol
-/// (creating the follower holes convergence must heal), but ending *before* the
-/// client's [`SETTLE_MS`] tail so that tail is quiet. Convergence is asserted
-/// only after that tail, so legitimate lag while chaos is active is ignored.
+/// Open liveness findings the unified campaign exposed and the separated
+/// network axis never could — that axis was safety-only, so it made no
+/// convergence claim over network faults at all.
+///
+/// A 10,000-seed raw hunt (`sim-paros-hunt main 10000`) on the combined axis
+/// returned **4 reds, all liveness, none safety**; the same hunt on the
+/// pre-unification surfaces (network chaos off, everything else identical)
+/// returned 10,000/10,000 clean, so these are genuinely new visibility rather
+/// than a regression in the protocol.
+///
+/// All four share one shape: after the cutoff the environment is provably
+/// quiet — moonpool healed every partition in force at t=4000ms and no
+/// send-seam BUGGIFY drop fires past it — yet a lagging node's catch-up
+/// **responses** are attempted about a thousand times and delivered fewer than
+/// two dozen (`cu_resp_sent=1090, cu_resp_recv=9` on the first seed), so the
+/// node sits below a chosen gap. The suspected mechanism is the driver's
+/// peer transport under the *persistent* damage recovery mode deliberately
+/// keeps: a per-pair latency degradation sampled once and held for the run,
+/// plus TCP-realistic partial writes, against a fixed one-second
+/// `GRPC_DELIVERY_TIMEOUT` that restarts a whole large catch-up response on
+/// every expiry.
+///
+/// The first two never heal inside the 60-second recovery tail (red on "chain:
+/// cluster converged after chaos"); the last two heal after 0.4s and 3.9s of
+/// wedge reports (red only on the audit's gap-wedge claim, at 6.7s and 21.9s
+/// past the cutoff). They are recorded here rather than pinned into a test
+/// because the fix belongs to the driver's catch-up delivery path, not to this
+/// change: nothing about the chaos lifecycle is wrong in these runs.
+pub const OPEN_LIVENESS_SEEDS: &[u64] = &[
+    14_371_623_759_479_170_018,
+    13_938_523_914_823_716_398,
+    9_249_500_861_697_710_678,
+    1_470_598_606_547_155_381,
+];
+/// Simulated window (ms) over which chaos (network faults + attrition reboots +
+/// the paros-side driver/storage perturbations) fires — wide enough to span the
+/// proposal phase so faults land mid-protocol (creating the follower holes
+/// convergence must heal), and ending well *before* the workloads do, so what
+/// follows is a recovery tail.
+///
+/// The run's shape, and the one place convergence is judged:
+///
+/// ```text
+/// t = 0 .. CHAOS_DURATION_MS      workload + chaos (network, attrition, BUGGIFY)
+/// t = CHAOS_DURATION_MS           chaos_duration expires
+///                                   → Moonpool enters recovery mode:
+///                                       no new simulator faults,
+///                                       partitions in force are healed,
+///                                       persistent damage is kept,
+///                                       replicas stay alive
+///                                   → paros stops its own driver-hook and
+///                                     storage-fault injection at the same cutoff
+/// t = CHAOS_DURATION_MS ..        the quiet tail: leader election, `Accept`
+///     + recovery budget             re-sends, gap fill, catch-up, snapshot
+///                                   transfer, chunk repair — real protocol
+///                                   recovery, on live nodes
+/// end of the tail                 convergence + the audit/oracle checks
+/// ```
+///
+/// The tail is the client workloads' own lifetime, not a separate framework:
+/// [`SETTLE_MS`] for [`workload::ProposeClient`] and the buggified
+/// `recovery_budget_ms` (45–90 s, default 60 s) for
+/// [`chain_workload::ChainWorkload`]. Both are an order of magnitude longer
+/// than this window. Convergence is asserted only at the end of that tail, and
+/// the audit's quiescence gate additionally waits out a grace window past this
+/// cutoff, so legitimate lag while chaos is active — or immediately after it —
+/// is never mistaken for a stall.
 pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
 /// Simulated window over which chaos fires (see [`CHAOS_DURATION_MS`]).
 const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 
-/// The main liveness campaign's chaos surfaces: single-node crash/restart
-/// attrition plus buggified provider knobs. Network swarm is a separate safety
-/// axis because its faults persist past Moonpool's cutoff. `prob_wipe = 0`, so durable state (the per-node
+/// The main campaign's chaos surfaces: swarm network turbulence, single-node
+/// crash/restart attrition, and buggified provider knobs — one combined axis.
+///
+/// Network chaos used to live on its own safety-only axis because Moonpool's
+/// environmental faults outlived `chaos_duration`, which made the quiet tail
+/// unclaimable and the liveness/convergence gates unassertable. Moonpool
+/// `43304d8` ends chaos properly: at the cutoff the runner enters recovery
+/// mode, which stops every configuration-driven network/storage/block fault
+/// family and heals the partitions in force, while leaving *persistent* damage
+/// (closed connections, degraded pair latency, accumulated clock skew, killed
+/// processes, rotted records) exactly as chaos left it. The tail after the
+/// cutoff is therefore a real protocol-recovery window, so network turbulence
+/// belongs on the main campaign with everything else.
+///
+/// `prob_wipe = 0`, so durable state (the per-node
 /// records in the per-iteration `StorageWorld`) survives a restart, modelling a
 /// clean process crash with intact disk (a **wiped** disk, which loses the
 /// promise, is the amnesia case deferred to a later stage). The recovery window
@@ -469,8 +560,9 @@ const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 /// That is the scenario the [`oracle::ConvergenceOracle`] now demands convergence
 /// for. Shared by [`run_seed`] and [`explore`] so a failing seed replays
 /// identically.
-fn chaos_surfaces() -> [Chaos; 2] {
+fn chaos_surfaces() -> [Chaos; 3] {
     [
+        Chaos::Network(ChaosMode::Swarm),
         Chaos::Attrition {
             config: Attrition {
                 max_dead: 1,
@@ -492,6 +584,10 @@ fn chaos_surfaces() -> [Chaos; 2] {
 ///
 /// `BuggifiedDelay` stays enabled: the pinned moonpool gates sleep inflation to
 /// `chaos_duration`, so setup and the quiet recovery tail remain fault-free.
+/// `BitFlip` stays masked off for the reason every axis masks it (moonpool#183
+/// terrain): the un-checksummed public replies carry no per-message integrity
+/// protection, so a provider-level flip fabricates a *client observation*
+/// rather than cluster state.
 fn chain_cluster_builder() -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
@@ -505,15 +601,6 @@ fn chain_logic_builder() -> SimulationBuilder {
     chain_cluster_builder()
         .workload_factory(|| Box::new(ChainWorkload::default()))
         .invariant(ChainAgreement::new())
-}
-
-fn chain_network_builder() -> SimulationBuilder {
-    chain_cluster_builder()
-        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
-        .invariant(ChainAgreement::network())
-        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
-        .chaos_duration(CHAOS_DURATION)
-        .swarm_operations()
 }
 
 fn chain_builder() -> SimulationBuilder {
@@ -532,7 +619,7 @@ fn snapshot_recovery_builder() -> SimulationBuilder {
         // Reuse ChainAgreement's continuously pumped application-safety checks,
         // but not the main campaign's unrelated driver-hook/liveness gates. The
         // choreography workload owns the stronger ordered lifecycle gate.
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
         .enable_chaos([Chaos::Attrition {
             config: Attrition {
                 max_dead: 1,
@@ -576,9 +663,10 @@ pub fn run_storage_contract_suite() -> SimulationReport {
         .run()
 }
 
-/// Run one deterministic seed and return its timeline. Driver decisions and
-/// clean-crash attrition are active; the same seed
-/// always produces the same [`RunResult`].
+/// Run one deterministic seed and return its timeline. The main campaign's
+/// combined surfaces are active — swarm network turbulence, clean-crash
+/// attrition, and the driver's buggified decisions — and the same seed always
+/// produces the same [`RunResult`].
 ///
 /// # Panics
 ///
@@ -618,8 +706,8 @@ pub fn run_seed(seed: u64) -> RunResult {
     build_result(seed, &data, &proto, &recovery)
 }
 
-/// Run the DST bug-finding sweep: regional latency, attrition, driver hooks,
-/// operation swarm, and the safety/recovery oracles under
+/// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
+/// attrition, driver hooks, operation swarm, and the safety/recovery oracles under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
 /// coverage plateaus, capped at `max_iterations`). The cap is a parameter because
 /// the two modes saturate differently: the nextest test passes [`SWEEP_ITERATIONS`]
@@ -679,42 +767,8 @@ pub fn run_snapshot_recovery_seed(seed: u64) -> SimulationReport {
         .run()
 }
 
-/// Coverage-guided network-turbulence safety axis. Provider network faults do
-/// not stop at `chaos_duration` in the pinned Moonpool revision, so this axis
-/// deliberately checks Chain and Paxos safety without claiming a quiet recovery
-/// tail. Gap-fill Noop application is recorded opportunistically; the pinned
-/// network model lacks independent message loss/reorder, so it is not a
-/// saturation gate.
-#[must_use]
-pub fn explore_network_safety(max_iterations: usize) -> SimulationReport {
-    chain_network_builder()
-        .until_coverage_stable(32, max_iterations)
-        .run()
-}
-
-/// Raw-iteration network-swarm sweep: `iterations` fresh seeds through the
-/// safety oracles with **no** saturation gate and no plateau stop. This is the
-/// red-seed *hunting* entry point for partition-shaped interleavings (the #94
-/// double-apply lives on this axis): [`explore_network_safety`] stops once
-/// coverage plateaus, which is exactly wrong for a hunt that needs raw seed
-/// volume past the plateau.
-#[must_use]
-pub fn network_hunt(iterations: usize) -> SimulationReport {
-    chain_network_builder().set_iterations(iterations).run()
-}
-
-/// Replay one network-swarm safety-axis seed deterministically (the axis
-/// [`explore_network_safety`] sweeps): same builder, one iteration.
-#[must_use]
-pub fn run_network_seed(seed: u64) -> SimulationReport {
-    chain_network_builder()
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run()
-}
-
 /// The **amnesia red demo** (issue #19 item D): a fixed three-node cluster
-/// under the main campaign's attrition + driver chaos, where the first node
+/// under the main campaign's chaos surfaces, where the first node
 /// that comes back through the restart path holding a raised durable promise
 /// is *wiped* and rejoins **naively** — as itself, with no protocol support.
 ///
@@ -733,8 +787,8 @@ fn amnesia_demo_builder() -> SimulationBuilder {
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(3, || Box::new(NaiveWipeNodeProcess))
         .link_latency(LinkLatencyConfig::default())
-        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
-        .invariant(ChainAgreement::network())
+        .workload_factory(|| Box::new(ChainWorkload::safety_only()))
+        .invariant(ChainAgreement::safety_only())
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
 }
@@ -764,8 +818,8 @@ pub fn amnesia_demo_hunt(iterations: usize) -> SimulationReport {
 }
 
 /// The **truncate-on-mismatch red demo** (issue #20 item F): a fixed
-/// three-node cluster under the main campaign's attrition + driver chaos,
-/// where one persisted accepted record is corrupted at the first qualifying
+/// three-node cluster under the main campaign's chaos surfaces, where one
+/// persisted accepted record is corrupted at the first qualifying
 /// reboot and the boot scan then reproduces the CTRL Figure 2 bug — found in
 /// both `ZooKeeper` and `LogCabin` — of truncating from the faulty entry onward
 /// instead of crashing, with the derived chosen index regressing alongside.
@@ -784,8 +838,8 @@ fn truncate_demo_builder() -> SimulationBuilder {
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(3, || Box::new(TruncateOnMismatchNodeProcess))
         .link_latency(LinkLatencyConfig::default())
-        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
-        .invariant(ChainAgreement::network())
+        .workload_factory(|| Box::new(ChainWorkload::safety_only()))
+        .invariant(ChainAgreement::safety_only())
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
 }
@@ -831,7 +885,7 @@ fn budget_off_builder() -> SimulationBuilder {
         })
         .link_latency(LinkLatencyConfig::default())
         .workload_factory(|| Box::new(ChainWorkload::budget_off()))
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
@@ -878,8 +932,8 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(3, || Box::new(FaultyAsNoneNodeProcess))
         .link_latency(LinkLatencyConfig::default())
-        .workload_factory(|| Box::new(ChainWorkload::network_safety()))
-        .invariant(ChainAgreement::network())
+        .workload_factory(|| Box::new(ChainWorkload::safety_only()))
+        .invariant(ChainAgreement::safety_only())
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
 }
@@ -926,11 +980,17 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// budget-off WAITED leg — a probability is part of the draw schedule, so
 /// tuning one re-pins this witness exactly like adding a location does. Each
 /// prior witness (`1209198120647599430`, `18170485419286272337`) replays green
-/// on the stream that succeeded it; the latest 2,000-seed hunt returned 4
-/// reds, of which this seed is the one carrying the pure agreement violation
-/// ("at most one value is ever chosen for a slot") with its full
+/// on the stream that succeeded it.
+///
+/// Re-hunted once more when swarm network turbulence folded into
+/// [`chaos_surfaces`]: this demo runs on the main campaign's surfaces by
+/// construction, so the axis gaining a fault family moves its schedule exactly
+/// like gaining a BUGGIFY location does. The prior witness
+/// (`12405914642135197196`) replays green on the combined stream; a fresh
+/// 2,000-seed hunt returned a single red, and that red is the pure agreement
+/// violation ("at most one value is ever chosen for a slot") with its full
 /// decided-value and one-state-per-index cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 12_405_914_642_135_197_196;
+pub const FAULTY_NONE_DEMO_SEED: u64 = 13_358_680_809_242_813_233;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
@@ -965,7 +1025,7 @@ fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
 }
 
 /// The canonical E1 mask cases the nextest corpus runner enumerates: the
@@ -1043,7 +1103,7 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()
@@ -1060,7 +1120,7 @@ pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()
@@ -1077,7 +1137,7 @@ fn chunk_corpus_builder(
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
-        .invariant(ChainAgreement::network())
+        .invariant(ChainAgreement::safety_only())
 }
 
 /// The canonical #101 chunk-mask cases (bit index `node * 5 + chunk` over the

@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
-    RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceQuery,
-    Workload, assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
-    buggify_knob, buggify_with_prob, sim::config_random_f64, swarm_op_enabled,
+    RandomProvider, SIM_FAULT_EVENT_NAME, SimContext, SimulationError, SimulationResult,
+    TimeProvider, TraceQuery, Workload, assert_always, assert_reachable, assert_sometimes,
+    assert_sometimes_greater_than, buggify_knob, buggify_with_prob, sim::config_random_f64,
+    swarm_op_enabled,
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
@@ -197,7 +198,11 @@ pub(crate) struct ChainWorkload {
 }
 
 impl ChainWorkload {
-    pub(crate) fn network_safety() -> Self {
+    /// The safety-only workload: the red demos and the scripted
+    /// choreographies, whose cluster is deliberately broken and may correctly
+    /// never converge. It records the safety history and skips every liveness
+    /// claim and coverage gate the main campaign owns.
+    pub(crate) fn safety_only() -> Self {
         Self {
             safety_only: true,
             ..Self::default()
@@ -283,9 +288,13 @@ impl Workload for ChainWorkload {
     }
 
     async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The network-swarm safety axis has no quiet recovery tail — provider
-        // faults outlive `chaos_duration` in the pinned Moonpool revision — so
-        // it must never make the quiescence-gated liveness claim.
+        // The safety-only axes (the red demos and the scripted choreographies)
+        // deliberately run a cluster that may never converge — a wiped promise,
+        // a silently truncated log, a misreported record — so they must never
+        // make the quiescence-gated liveness claim. The main campaign, network
+        // turbulence included, does: Moonpool `43304d8` stops every fault
+        // source at `chaos_duration` and heals the partitions in force, so the
+        // tail that follows is a genuine recovery window.
         if !self.safety_only {
             audit_world(ctx.state()).enable_liveness_checks();
         }
@@ -1291,9 +1300,16 @@ impl Workload for ChainWorkload {
             return Ok(());
         }
 
-        // Driver perturbations and attrition stop at the cutoff. Provider-level
-        // turbulence may continue, so recovery is retry-based rather than a claim
-        // of a perfectly fault-free network.
+        // Everything that injects faults stops at the cutoff: paros' own driver
+        // hooks and storage-fault layer by their own clock, and Moonpool's
+        // network/storage/block families plus the partitions in force through
+        // recovery mode. What survives is the *damage* — closed connections,
+        // degraded pair latency, accumulated clock skew, rotted records, a node
+        // still down its restart delay. Everything from here to
+        // `recovery_budget_ms` is therefore an explicit quiet tail on live
+        // replicas: election, `Accept` re-send, gap fill, catch-up, snapshot
+        // transfer and chunk repair get real fault-free simulated time, and
+        // convergence is judged only at its end.
         let cutoff = Duration::from_millis(CHAOS_DURATION_MS);
         if time.now() < cutoff {
             time.sleep(cutoff.checked_sub(time.now()).unwrap())
@@ -1480,6 +1496,47 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
+        // The combined-campaign evidence (Moonpool #194): this axis genuinely
+        // injects environmental network faults, and the tail after the cutoff
+        // is genuinely where the cluster recovers from them. Without the first
+        // gate a unified campaign could go green having only ever run the
+        // attrition surface; without the second, nothing would prove that
+        // Moonpool's recovery-mode heal is what makes the tail claimable.
+        let faults = ctx.observability().snapshot(SIM_FAULT_EVENT_NAME);
+        let is_kind = |event: &moonpool_sim::TraceEvent, kinds: &[&str]| {
+            event.str("kind").is_some_and(|kind| kinds.contains(&kind))
+        };
+        let network_faults = faults
+            .iter()
+            .filter(|event| {
+                is_kind(
+                    event,
+                    &[
+                        "partition_created",
+                        "send_partition_created",
+                        "recv_partition_created",
+                        "random_close",
+                    ],
+                )
+            })
+            .count();
+        assert_sometimes!(
+            network_faults > 0 && converged,
+            "chain: a run injects network faults and still converges"
+        );
+        if faults.iter().any(|event| {
+            event.time_ms >= CHAOS_DURATION_MS
+                && is_kind(
+                    event,
+                    &[
+                        "partition_healed",
+                        "send_partition_healed",
+                        "recv_partition_healed",
+                    ],
+                )
+        }) {
+            assert_reachable!("chain: the chaos cutoff heals a partition still in force");
+        }
 
         if !converged {
             // Failure diagnostic (fires only on the red path): which node is

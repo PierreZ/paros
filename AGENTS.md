@@ -97,7 +97,13 @@ separation; #81 removed the message-class nemesis, which mixed them):
 - **Environmental faults belong to moonpool.** Drop, delay, duplicate, reorder, directional
   partitions (`AsymmetricSend`/`AsymmetricRecv`), random close, bit-flip, buggified delay,
   crash/restart attrition, seeded-random scheduling — all swarm-masked per seed. paros never
-  re-implements one of these at the protocol layer.
+  re-implements one of these at the protocol layer. They all ride the **one combined campaign**
+  axis (`chaos_surfaces()`): network turbulence used to need a separate safety-only axis because
+  moonpool's faults outlived `chaos_duration`, but since the moonpool pin at `43304d8` the cutoff
+  enters *recovery mode* — no new simulator faults, partitions in force healed, persistent damage
+  (closed connections, degraded pair latency, clock skew, rotted records, killed processes) kept —
+  so the workload's remaining lifetime is a genuine protocol-recovery tail and the liveness /
+  convergence oracles apply to network faults too. Do not re-split the axis.
 - **`paros-core` is never buggified.** No cargo feature, no conditional compilation, no RNG, no
   knob: the sans-IO core stays unconditionally pure, and it is perturbed **only through its public
   API** — the methods its caller chooses to call, and the data it is handed. Where a rare-but-valid

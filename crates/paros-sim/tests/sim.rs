@@ -1,7 +1,8 @@
 //! Stage-3 simulation tests: seed-replay determinism, a chaos-aware well-formed
 //! single-seed run, multi-slot log progress under a stable leader, and the
-//! safety-and-progress sweep under arbitrary network faults (prefix agreement, no
-//! gaps, monotonic leadership, and progress under eventual synchrony).
+//! safety-and-progress smoke under the combined swarm campaign — network
+//! turbulence, attrition and BUGGIFY on one axis (prefix agreement, no gaps,
+//! monotonic leadership, and progress under eventual synchrony).
 
 use std::collections::BTreeMap;
 
@@ -158,10 +159,16 @@ fn faulty_as_none_below_prefix_dies_at_boot() {
     );
 }
 
+/// The witnesses farmed on the former network-swarm axis, replayed on the
+/// campaign that absorbed it. That axis existed only because Moonpool's network
+/// faults outlived `chaos_duration`; `43304d8` fixed the lifecycle, so swarm
+/// network turbulence is now part of the main combined campaign and these seeds
+/// replay through the same builder as every other Chain seed.
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {
-        let report = paros_sim::run_network_seed(seed);
+        let report = run_chain_seed(seed);
+        assert_eq!(report.failed_runs, 0, "network seed {seed}");
         assert!(
             report.assertion_violations.is_empty(),
             "network seed {seed}: {:?}",

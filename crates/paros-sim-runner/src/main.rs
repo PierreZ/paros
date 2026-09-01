@@ -4,10 +4,10 @@
 
 use paros_sim::{
     AssertKind, BUDGET_OFF_COVERAGE_ITERATIONS, CHUNK_CORPUS_CI_ITERATIONS, CORPUS_CI_ITERATIONS,
-    COVERAGE_ITERATIONS, NETWORK_COVERAGE_ITERATIONS, Outcome, PROTOCOL_BOUNDS_COVERAGE_ITERATIONS,
+    COVERAGE_ITERATIONS, Outcome, PROTOCOL_BOUNDS_COVERAGE_ITERATIONS,
     SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS, SimulationReport, chunk_corpus_hunt, corpus_hunt,
-    explore, explore_budget_off, explore_network_safety, explore_protocol_bounds,
-    explore_snapshot_recovery, run_seed, run_seed_json,
+    explore, explore_budget_off, explore_protocol_bounds, explore_snapshot_recovery, run_seed,
+    run_seed_json,
 };
 
 fn main() {
@@ -22,7 +22,8 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(COVERAGE_ITERATIONS);
 
-    // 1. The DST bug-finding sweep: many seeds of swarm chaos, asserting safety.
+    // 1. The DST bug-finding sweep: many seeds of combined swarm chaos
+    //    (network + attrition + BUGGIFY), asserting safety and recovery.
     println!("--- Chain-of-Blocks campaign (coverage + exploration) ---");
     let report = explore(iterations);
     let stop = if report.convergence_timeout {
@@ -88,7 +89,6 @@ fn main() {
 
     run_protocol_bounds_axis();
     run_snapshot_recovery_axis();
-    run_network_axis();
     run_budget_off_axis();
     run_corpus_axes();
 
@@ -146,8 +146,8 @@ fn run_protocol_bounds_axis() {
     println!("  Promise, Ready, Accepted, and Nack bounds are green");
 }
 
-/// One fixed three-node lifecycle sequence, kept separate from both broad
-/// operation chaos and the network-only safety axis.
+/// One fixed three-node lifecycle sequence, kept separate from the main
+/// campaign's broad operation chaos.
 fn run_snapshot_recovery_axis() {
     println!("\n--- Chain graceful snapshot-recovery choreography axis ---");
     let recovery = explore_snapshot_recovery(SNAPSHOT_RECOVERY_COVERAGE_ITERATIONS);
@@ -291,41 +291,4 @@ fn run_corpus_axes() {
         std::process::exit(1);
     }
     println!("  Chunk mask corpus gate is green");
-}
-
-/// Network faults persist past Moonpool's cutoff in the pinned revision, so
-/// this is a safety axis rather than a false quiet-tail liveness claim.
-fn run_network_axis() {
-    println!("\n--- Chain network-swarm safety axis ---");
-    let network = explore_network_safety(NETWORK_COVERAGE_ITERATIONS);
-    println!(
-        "{} seeds: {} ok, {} failed; convergence_timeout={}",
-        network.iterations,
-        network.successful_runs,
-        network.failed_runs,
-        network.convergence_timeout,
-    );
-    if let Some(s) = &network.saturation {
-        println!(
-            "  signal {:?}: {}/{} reachability fired, plateau {}",
-            s.signal, s.sometimes_hit, s.sometimes_total, s.plateau_seeds,
-        );
-    }
-    if !network.coverage_violations.is_empty() {
-        println!("  coverage gates that never fired:");
-        for gate in &network.coverage_violations {
-            println!("    - {gate}");
-        }
-    }
-    if !network.assertion_violations.is_empty()
-        || network.failed_runs > 0
-        || !network.coverage_violations.is_empty()
-        || network.convergence_timeout
-    {
-        println!("  SAFETY VIOLATIONS: {:?}", network.assertion_violations);
-        println!("  COVERAGE VIOLATIONS: {:?}", network.coverage_violations);
-        println!("  FAILING SEEDS: {:?}", network.seeds_failing);
-        std::process::exit(1);
-    }
-    println!("  Network-swarm Chain safety gate is green");
 }
