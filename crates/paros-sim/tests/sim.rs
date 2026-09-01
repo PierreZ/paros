@@ -121,15 +121,20 @@ fn budget_off_smoke_stays_safe() {
 /// fires*: if the demo ever comes back green, either the misreport stopped
 /// landing or the agreement oracles went blind, and both are bugs. (The real
 /// scan reports `faulty(slot, ballot)` instead — the rule this demo proves
-/// load-bearing.)
+/// load-bearing.) The audit states the double-decision twice, on durable
+/// accepts alone ("a durable accept quorum never decides two values for a
+/// slot") and again at apply time ("at most one value is ever chosen for a
+/// slot"); which one a witness reaches first depends on the interleaving, so
+/// either satisfies the contract.
 #[test]
 fn faulty_as_none_demo_stays_red() {
     let report = paros_sim::run_faulty_none_demo_seed(paros_sim::FAULTY_NONE_DEMO_SEED);
     assert!(
-        report
-            .assertion_violations
-            .iter()
-            .any(|v| format!("{v:?}").contains("at most one value is ever chosen")),
+        report.assertion_violations.iter().any(|v| {
+            let text = format!("{v:?}");
+            text.contains("at most one value is ever chosen")
+                || text.contains("a durable accept quorum never decides two values")
+        }),
         "the faulty-as-none demo must surface the double-choose; got: {:?}",
         report.assertion_violations
     );

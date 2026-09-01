@@ -992,10 +992,21 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// construction, so the axis gaining a fault family moves its schedule exactly
 /// like gaining a BUGGIFY location does. The prior witness
 /// (`12405914642135197196`) replays green on the combined stream; a fresh
-/// 2,000-seed hunt returned a single red, and that red is the pure agreement
-/// violation ("at most one value is ever chosen for a slot") with its full
-/// decided-value and one-state-per-index cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 13_358_680_809_242_813_233;
+/// 2,000-seed hunt returned a single red (`13358680809242813233`) carrying the
+/// apply-time agreement violation ("at most one value is ever chosen for a
+/// slot") with its full cascade.
+///
+/// Re-hunted again for the per-kind peer mailbox: it consumes no randomness,
+/// but a mailbox that evicts different messages changes which interleaving a
+/// seed drives, and the demo needs one specific shape. That witness replays
+/// green; a 10,000-seed hunt returned four reds, none reaching the apply-time
+/// message — every one is caught earlier, on durable accepts alone, by "a
+/// durable accept quorum never decides two values for a slot" (the audit's
+/// crown jewel, judged with no apply in the loop), followed by the
+/// decided-value, commit and applied-value cascade. This seed is the tightest
+/// of them. Both messages name the same violation — two values decided for
+/// one slot — and the demo test accepts either.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 8_508_603_904_814_693_545;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
