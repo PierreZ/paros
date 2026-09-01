@@ -3449,6 +3449,31 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.active() && buggify_with_prob!(0.95)
     }
 
+    fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
+        // Per message on a non-empty mailbox; a per-peer stream is otherwise
+        // delivered in enqueue order, so this is the only in-stream reorder.
+        let fired = self.active() && buggify_with_prob!(0.02);
+        if fired {
+            // BUGGIFY pairing: the overtake genuinely fires.
+            assert_reachable!("mailbox: a message overtakes its peer queue");
+        }
+        fired
+    }
+
+    fn evict_across_kinds(&self, _to: NodeId, _msg: &Message) -> bool {
+        // Per overflow. Kept occasional on purpose: a *systematic* cross-kind
+        // eviction is the starvation `PeerMailbox`'s per-kind default exists
+        // to prevent (a class crowded out on every round trip), and the point
+        // here is to prove the liveness argument survives sporadic pressure,
+        // not to reinstate the bug as a fault model.
+        let fired = self.active() && buggify_with_prob!(0.10);
+        if fired {
+            // BUGGIFY pairing: a full mailbox genuinely evicted across kinds.
+            assert_reachable!("mailbox: overflow evicts across kinds");
+        }
+        fired
+    }
+
     fn resign_leadership(&self) -> bool {
         self.active() && buggify_with_prob!(0.004)
     }

@@ -931,23 +931,48 @@ impl PeerMailbox {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.lock().len() >= self.capacity
+    }
+
     /// Enqueue `message`, evicting and returning one undelivered message when
     /// the mailbox is full: the oldest of the *same kind* as `message` if one
-    /// is queued, else the oldest overall. Never blocks.
-    fn push(&self, message: internal::ConsensusMessage) -> Option<internal::ConsensusMessage> {
+    /// is queued, else the oldest overall — unless `evict_across_kinds`, which
+    /// takes the oldest overall outright. `overtake` enqueues at the front
+    /// instead of the back. Both are the driver-hook perturbations
+    /// ([`DriverHooks::overtake_in_mailbox`], [`DriverHooks::evict_across_kinds`]);
+    /// production passes `false` for both. Never blocks.
+    fn push(
+        &self,
+        message: internal::ConsensusMessage,
+        overtake: bool,
+        evict_across_kinds: bool,
+    ) -> Option<internal::ConsensusMessage> {
         let evicted = {
             let mut queue = self.lock();
             let evicted = if queue.len() >= self.capacity {
                 let kind = proto_message_kind(&message);
-                let victim = queue
-                    .iter()
-                    .position(|queued| proto_message_kind(queued) == kind)
-                    .unwrap_or(0);
+                let victim = if evict_across_kinds {
+                    0
+                } else {
+                    queue
+                        .iter()
+                        .position(|queued| proto_message_kind(queued) == kind)
+                        .unwrap_or(0)
+                };
                 queue.remove(victim)
             } else {
                 None
             };
-            queue.push_back(message);
+            if overtake {
+                queue.push_front(message);
+            } else {
+                queue.push_back(message);
+            }
             assert!(
                 queue.len() <= self.capacity,
                 "a peer mailbox never exceeds its capacity"
@@ -990,7 +1015,7 @@ impl Outbound {
     /// `msg_sent` deliberately records the core's outbound decision even when
     /// the bounded mailbox or network later drops it; safety oracles inspect the
     /// messages a proposer attempted, independently of delivery.
-    fn transmit<A: Audit>(&self, audit: &A, to: NodeId, msg: &Message) {
+    fn transmit<H: DriverHooks, A: Audit>(&self, hooks: &H, audit: &A, to: NodeId, msg: &Message) {
         audit.sent(NodeId(self.self_id), to, msg);
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
@@ -1069,7 +1094,12 @@ impl Outbound {
             } else {
                 &queues.regular
             };
-            if let Some(evicted) = queue.push(message) {
+            // The mailbox's two enqueue-side decisions, each consulted only
+            // where it can have an observable effect (a non-empty queue to
+            // overtake; a full one to evict from).
+            let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
+            let evict_across_kinds = queue.is_full() && hooks.evict_across_kinds(to, msg);
+            if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
                 // Deliberately lossy (etcd-style bounded mailbox, keep-newest),
                 // but never silent: the audit sees the drop the moment it
                 // happens, naming the *evicted* message, not the one that
@@ -1268,7 +1298,7 @@ fn send_snapshot_offers<S, H, A>(
             trace_send_drop(audit, out.self_id, to, &message);
             continue;
         }
-        out.transmit(audit, to, &message);
+        out.transmit(hooks, audit, to, &message);
         if hooks.duplicate_outgoing(to, &message) {
             audit.duplicated_at_send(NodeId(out.self_id), to, &message);
             tracing::info!(
@@ -1277,7 +1307,7 @@ fn send_snapshot_offers<S, H, A>(
                 kind = message_kind(&message),
                 "msg_duplicated_at_send"
             );
-            out.transmit(audit, to, &message);
+            out.transmit(hooks, audit, to, &message);
         }
     }
 }
@@ -1407,7 +1437,7 @@ where
             trace_send_drop(audit, self_id, to, &msg);
             continue;
         }
-        out.transmit(audit, to, &msg);
+        out.transmit(hooks, audit, to, &msg);
         if hooks.duplicate_outgoing(to, &msg) {
             audit.duplicated_at_send(NodeId(self_id), to, &msg);
             tracing::info!(
@@ -1416,7 +1446,7 @@ where
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );
-            out.transmit(audit, to, &msg);
+            out.transmit(hooks, audit, to, &msg);
         }
     }
 }
