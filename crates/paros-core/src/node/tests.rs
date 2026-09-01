@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    LEADER_RECOVERY_BATCH, NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode,
-    ReadIndexResult, ReadState,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin, NodeRole,
+    PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode, ReadIndexResult, ReadState,
 };
 use crate::message::Message;
 use crate::state::{Config, HardState};
@@ -226,6 +226,7 @@ mod acceptor;
 mod catch_up_snapshot;
 mod decide_apply;
 mod election;
+mod handoff;
 mod reads;
 mod recovery;
 mod replication;

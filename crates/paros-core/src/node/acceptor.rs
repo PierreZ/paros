@@ -152,12 +152,12 @@ impl RawNode {
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
     pub(super) fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
-        // Wire hygiene: this handler adopts `ballot.node` as the leader hint
-        // (and promises its ballot), so an id outside the configured membership
-        // must never be followed — the same refusal every quorum-counting
-        // handler (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`)
-        // already applies to its sender.
-        if !self.config.peers.contains(&ballot.node) {
+        // Wire hygiene: this handler adopts the *sender* as the leader hint and
+        // promises the ballot, so neither id may sit outside the configured
+        // membership — the same refusal every quorum-counting handler
+        // (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`) already
+        // applies to its sender.
+        if !self.config.peers.contains(&from) || !self.config.peers.contains(&ballot.node) {
             return;
         }
         // Floor guard: a slot below our floor is already chosen (only chosen slots
@@ -171,10 +171,19 @@ impl RawNode {
         let me = self.config.id;
         let promise_at_entry = self.hard_state.max_promised_ballot;
         if ballot >= self.hard_state.max_promised_ballot {
-            if ballot.node != me && self.role != NodeRole::Follower {
-                self.become_follower(Some(ballot.node));
+            // The redirect hint is the **sender**, never `ballot.node`. They are
+            // the same node for an elected leader, and deliberately different
+            // after a cooperative handoff: the ballot keeps naming the node that
+            // owns the authority, while the node exercising Phase 2 — the one a
+            // client must be sent to — is whoever put this `Accept` on the wire.
+            // Pointing at `ballot.node` there sent clients to a node that had
+            // already stepped down, and, when this node *is* `ballot.node` (the
+            // predecessor accepting under the authority it just gave away), made
+            // a Follower name itself as leader and redirect clients to itself.
+            if from != me && self.role != NodeRole::Follower {
+                self.become_follower(Some(from));
             } else {
-                self.leader = Some(ballot.node);
+                self.leader = Some(from);
                 self.election_elapsed = 0;
             }
             if ballot > self.ballot {

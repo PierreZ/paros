@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam,
-    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    Audit, Ballot, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH,
+    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -339,6 +339,25 @@ struct DeposedStreak {
     count: u64,
 }
 
+/// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
+/// **from semantic events only** — the `Accept`s actually put on the wire, and
+/// the relinquish/install transitions — never from any node's `role` field.
+/// Reading a node's own belief about its leadership would only re-derive the
+/// implementation's interpretation; this re-derives the *observable* one.
+#[derive(Clone, Debug, Default)]
+struct Authority {
+    /// The single node currently observed exercising this ballot.
+    holder: Option<u64>,
+    /// Nodes that have permanently given this authority up. The `DPaxos` rule:
+    /// an authority is relinquished at most once per node, and never exercised
+    /// again afterwards.
+    retired: BTreeSet<u64>,
+    /// The highest allocator frontier this authority has been transferred with.
+    /// Monotone: a successor that rewound it could propose a *different*
+    /// command at a `(slot, ballot)` its predecessor already used.
+    frontier: u64,
+}
+
 /// One node's compaction floor, plus what it was before the most recent raise.
 ///
 /// The truncation checks admit a record at a slot the node compacts away *in
@@ -452,6 +471,19 @@ struct AuditState {
     lagged: BTreeSet<u64>,
     booted: BTreeSet<u64>,
 
+    // --- cooperative leader handoff -----------------------------------------
+    /// `(ballot round, ballot node)` → who is exercising that logical authority
+    /// (see [`Authority`]). The uniqueness oracle's whole state.
+    authorities: BTreeMap<(u64, u64), Authority>,
+    /// Refusal totals folded from [`Audit::handoff_refused`].
+    handoff_refused: (u64, u64, u64, u64),
+    /// `(node, authority)` pairs the core decided to relinquish — the
+    /// "at most once" ledger, keyed on the decision rather than the wire (one
+    /// decision can be re-transmitted many times).
+    relinquish_calls: BTreeSet<(u64, (u64, u64))>,
+    /// How many authorities have been installed in this run.
+    handoff_installs: u64,
+
     // --- leadership ---------------------------------------------------------
     /// Per node: its deposed-heartbeat streak (#95, see [`DeposedStreak`]).
     deposed_streaks: BTreeMap<u64, DeposedStreak>,
@@ -564,6 +596,31 @@ struct AuditState {
     snap_restore_seen: bool,
     resend_skipped: bool,
     resigned: bool,
+    /// Cooperative-handoff coverage: one sticky bit per distinct fact.
+    handoff_relinquished: bool,
+    handoff_installed: bool,
+    /// The payoff: an installed authority streamed Phase 2 without any Phase 1
+    /// of its own — the whole point of the `DPaxos` technique.
+    handoff_streamed_without_phase1: bool,
+    /// A transfer carried unfinished business (an accepted-but-unchosen tail).
+    handoff_carried_tail: bool,
+    /// Leadership was handed over more than once in this run. Distinct
+    /// authorities: one authority is handed on at most once (see
+    /// `RawNode::can_relinquish`'s *One hop only*).
+    handoff_repeated: bool,
+    /// A refusal path fired: wrong addressee/non-member, stale authority, or a
+    /// malformed tail.
+    handoff_refused_target: bool,
+    handoff_refused_stale: bool,
+    handoff_refused_shape: bool,
+    handoff_refused_unfit: bool,
+    /// A handoff-installed leadership resigned on its uncovered inherited
+    /// fence — the deliberate fallback to ordinary Phase 1.
+    handoff_fence_expired: bool,
+    /// A relinquishment was lost at the send seam (the availability-only
+    /// failure mode a handoff deliberately accepts).
+    dropped_relinquish: bool,
+    duplicated_relinquish: bool,
     compact_ack_accepted: bool,
     compact_ack_refused: bool,
     mailbox_dropped: bool,
@@ -751,6 +808,48 @@ impl AuditState {
             self.dedup_after_dropped_reply,
             "a committed proposal ack is lost and the retry takes the dedup path"
         );
+        self.check_handoff_gates();
+    }
+
+    /// The cooperative-handoff coverage gates.
+    ///
+    /// Split by *what each one proves* rather than lumped into one "handoff
+    /// happened" bit: a campaign that only ever transfers settled leaderships,
+    /// or only ever completes them, would saturate a single gate while leaving
+    /// the interesting halves of the design — the inherited tail, the refusal
+    /// paths, the fallback to Phase 1 — entirely unexercised.
+    ///
+    /// Only the facts a campaign is *certain* to reach are `sometimes`; the rest
+    /// stay `reachable`-only, which creates no slot when unreached and so can
+    /// never fail coverage.
+    ///
+    /// The line is drawn by what a handoff is conditioned on. Relinquishing,
+    /// installing, streaming under the inherited ballot and carrying a tail all
+    /// follow from a single handoff happening at all, so a campaign that ever
+    /// hands leadership over hits every one of them. Everything else needs a
+    /// handoff *and* a second rare event — a duplicate or a drop of that exact
+    /// message, a superseding election landing inside the window, a second
+    /// handoff in the same run, a payload damaged in flight, a successor that
+    /// happens to hold faulty records. Gating every seed on a conjunction of
+    /// two rare draws is what makes a sweep spend its whole seed budget chasing
+    /// one bit, so those are recorded when they happen and never demanded.
+    fn check_handoff_gates(&self) {
+        assert_sometimes!(
+            self.handoff_relinquished,
+            "a leader cooperatively hands its authority on"
+        );
+        assert_sometimes!(
+            self.handoff_installed,
+            "a successor installs a transferred authority"
+        );
+        assert_sometimes!(
+            self.handoff_streamed_without_phase1,
+            "a handed-over authority continues Phase 2 without another Phase 1"
+        );
+        assert_sometimes!(
+            self.handoff_carried_tail,
+            "a handoff carries accepted-but-unchosen work"
+        );
     }
 
     /// A node's promised ballot is monotonic — it never decreases, including
@@ -875,6 +974,89 @@ impl AuditState {
                 "streak_beats" => streak
             }
         );
+    }
+
+    /// Fold one authority actually changing hands, at the **transmit** instant.
+    ///
+    /// Deliberately not at the core call that decided it: the abdicating batch
+    /// may still have `Accept`s queued ahead of this message, and those were
+    /// proposed while the node genuinely held the authority. Here the ordering
+    /// is exact — every earlier message of the batch has already been reported,
+    /// and no successor can install a message it has not yet received.
+    ///
+    /// Idempotent, because the send seam deliberately duplicates messages: a
+    /// re-transmit simply re-applies the same retirement.
+    fn observe_authority_release(&mut self, from: u64, ballot: Ballot, next_slot: Slot) {
+        let entry = self
+            .authorities
+            .entry((ballot.round, ballot.node.0))
+            .or_default();
+        assert_always!(
+            entry.holder.is_none_or(|held| held == from),
+            "only the node exercising an authority relinquishes it",
+            { "node" => from, "holder" => entry.holder.unwrap_or(u64::MAX) }
+        );
+        // The allocator frontier only ever moves forward: a rewind is how one
+        // `(slot, ballot)` ends up carrying two different commands.
+        assert_always!(
+            next_slot.0 >= entry.frontier,
+            "a transferred allocator frontier never rewinds",
+            {
+                "node" => from,
+                "frontier" => next_slot.0,
+                "previous" => entry.frontier
+            }
+        );
+        entry.frontier = next_slot.0;
+        entry.retired.insert(from);
+        entry.holder = None;
+    }
+
+    /// Fold one observed exercise of a logical authority: `node` put an
+    /// `Accept` at `ballot` on the wire.
+    ///
+    /// This is where **authority uniqueness** — the `DPaxos` handoff's central
+    /// safety rule — is checked, and it is checked against what the
+    /// cluster can actually observe (a proposal on the wire), never against a
+    /// node's own `role` flag. Two nodes exercising one ballot for overlapping
+    /// slots is exactly how two different values get chosen for one slot, and
+    /// the sibling check in [`NodeAudit::sent`] ("one ballot proposes at most
+    /// one command for a slot") is the consequence this exists to prevent
+    /// upstream of.
+    fn observe_authority_use(&mut self, node: u64, ballot: Ballot) {
+        let key = (ballot.round, ballot.node.0);
+        // A node proposing under a ballot that names *someone else* can only
+        // have got there through a handoff: a `Prepare` is honored solely when
+        // the ballot names its sender, so no Phase 1 at this ballot is even
+        // expressible here. Read straight off the wire, with no bookkeeping to
+        // race against.
+        let inherited = node != ballot.node.0;
+        let entry = self.authorities.entry(key).or_default();
+        assert_always!(
+            !entry.retired.contains(&node),
+            "a relinquished authority is never exercised again",
+            { "node" => node, "round" => ballot.round, "bnode" => ballot.node.0 }
+        );
+        let previous = entry.holder;
+        entry.holder = Some(node);
+        assert_always!(
+            previous.is_none_or(|held| held == node),
+            "one physical node at a time exercises a logical Paxos authority",
+            {
+                "node" => node,
+                "previous" => previous.unwrap_or(u64::MAX),
+                "round" => ballot.round,
+                "bnode" => ballot.node.0
+            }
+        );
+        if inherited {
+            // The payoff, observed rather than assumed: this node acquired the
+            // ballot from a predecessor and is now streaming Phase 2 under it.
+            reach_once!(
+                self.handoff_streamed_without_phase1,
+                "an inherited authority streams Phase 2 with no Phase 1 of its own"
+            );
+        }
     }
 
     /// Fold one applied index into the per-node prefix, the no-gaps frontier and
@@ -1284,6 +1466,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a protocol message carries a configuration identity"
             );
         }
+        if let Message::Relinquish {
+            from,
+            ballot,
+            next_slot,
+            ..
+        } = msg
+        {
+            self.state()
+                .observe_authority_release(from.0, *ballot, *next_slot);
+            return;
+        }
         // #95: every broadcast leader beat feeds the zombie-leader streak.
         if let Message::Heartbeat { ballot, seq, .. } = msg {
             self.state().observe_beat(node.0, *ballot, *seq);
@@ -1363,6 +1556,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         {
             let vhash = command_hash(command);
             let mut st = self.state();
+            // Authority uniqueness first: *who* may propose under this ballot,
+            // checked before *what* they proposed. A violation of the first
+            // explains a violation of the second, so ordering them this way
+            // makes the root cause the one that fires.
+            st.observe_authority_use(node.0, *ballot);
             reach_once!(
                 st.any_proposal_checked,
                 "a proposed command is checked against its ballot's other proposals"
@@ -1421,6 +1619,166 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn stepped_down(&self, _node: NodeId) {
         let mut st = self.state();
         reach_once!(st.resigned, "the driver voluntarily resigns leadership");
+    }
+
+    fn authority_relinquished(&self, node: NodeId, handoff: Handoff) {
+        let now = self.now_ms();
+        let mut st = self.state();
+        // Shape and coverage only. The *bookkeeping* — who holds the authority
+        // now — is folded from the `Relinquish` on the wire (see
+        // [`NodeAudit::sent`]), because that is the instant with the right
+        // causal order: it lands after every message the abdicating batch had
+        // already queued, and before any successor can possibly install.
+        assert_always!(
+            u64::try_from(handoff.decided + handoff.pending).unwrap_or(u64::MAX)
+                == handoff.next_slot.0.saturating_sub(handoff.from_slot.0),
+            "a relinquished tail exactly tiles the transferred range",
+            {
+                "node" => node.0,
+                "decided" => handoff.decided,
+                "pending" => handoff.pending
+            }
+        );
+        assert_always!(
+            handoff.decided + handoff.pending <= HANDOFF_BATCH,
+            "a relinquished tail stays within one bounded page",
+            { "node" => node.0, "slots" => handoff.decided + handoff.pending }
+        );
+        assert_always!(
+            handoff.to != node,
+            "an authority is handed to another node, never to its own holder",
+            { "node" => node.0 }
+        );
+        let key = (handoff.ballot.round, handoff.ballot.node.0);
+        // The `DPaxos` "at most once" rule, checked on the decision itself: the
+        // core demotes in the very call that decides, so it can never decide to
+        // relinquish one authority twice.
+        assert_always!(
+            st.relinquish_calls.insert((node.0, key)),
+            "an authority is relinquished at most once by a node",
+            { "node" => node.0, "round" => handoff.ballot.round }
+        );
+        // One hop only: the node that mints a ballot by winning Phase 1 at it is
+        // the only one that may hand it on (see `RawNode::can_relinquish`).
+        // Without that rule a replayed payload can re-install an authority at a
+        // node that already gave it up while its own successor is still
+        // exercising it — the hole this sweep found.
+        assert_always!(
+            handoff.ballot.node == node,
+            "only a ballot's own minter relinquishes it",
+            { "node" => node.0, "bnode" => handoff.ballot.node.0 }
+        );
+        reach_once!(
+            st.handoff_relinquished,
+            "a leader cooperatively relinquishes its authority"
+        );
+        if handoff.pending > 0 {
+            reach_once!(
+                st.handoff_carried_tail,
+                "a handoff carries accepted-but-unchosen work across"
+            );
+        }
+        // Leadership changed hands: the quiescence gate must not read the
+        // resulting transient as a settled cluster.
+        st.last_leader_ms = now;
+    }
+
+    fn authority_installed(
+        &self,
+        node: NodeId,
+        from: NodeId,
+        ballot: Ballot,
+        next_slot: Slot,
+        _tail: u64,
+    ) {
+        let now = self.now_ms();
+        let mut st = self.state();
+        assert_always!(
+            from != node,
+            "an installed authority came from another node",
+            { "node" => node.0 }
+        );
+        let key = (ballot.round, ballot.node.0);
+        let entry = st.authorities.entry(key).or_default();
+        assert_always!(
+            !entry.retired.contains(&node.0),
+            "a node never re-installs an authority it relinquished",
+            { "node" => node.0, "round" => ballot.round }
+        );
+        assert_always!(
+            entry.holder.is_none_or(|held| held == node.0),
+            "at most one node installs a relinquished authority",
+            { "node" => node.0, "holder" => entry.holder.unwrap_or(u64::MAX) }
+        );
+        assert_always!(
+            next_slot.0 >= entry.frontier,
+            "an inherited allocator frontier never rewinds",
+            {
+                "node" => node.0,
+                "frontier" => next_slot.0,
+                "previous" => entry.frontier
+            }
+        );
+        entry.frontier = next_slot.0;
+        entry.holder = Some(node.0);
+        st.handoff_installs = st.handoff_installs.saturating_add(1);
+        reach_once!(
+            st.handoff_installed,
+            "a node installs a predecessor's transferred authority"
+        );
+        if st.handoff_installs >= 2 {
+            reach_once!(
+                st.handoff_repeated,
+                "leadership is handed over more than once in a run"
+            );
+        }
+        reach_once!(st.any_leader, "a leader is elected");
+        st.last_leader_ms = now;
+    }
+
+    fn handoff_refused(&self, _node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {
+        let mut st = self.state();
+        let (last_target, last_stale, last_shape, last_unfit) = st.handoff_refused;
+        st.handoff_refused = (
+            target.max(last_target),
+            stale.max(last_stale),
+            shape.max(last_shape),
+            unfit.max(last_unfit),
+        );
+        if target > 0 {
+            reach_once!(
+                st.handoff_refused_target,
+                "a handoff addressed elsewhere is refused"
+            );
+        }
+        if stale > 0 {
+            reach_once!(
+                st.handoff_refused_stale,
+                "a stale or superseded handoff is refused"
+            );
+        }
+        if shape > 0 {
+            reach_once!(
+                st.handoff_refused_shape,
+                "a malformed handoff tail is refused"
+            );
+        }
+        if unfit > 0 {
+            reach_once!(
+                st.handoff_refused_unfit,
+                "a handoff onto a node needing Phase-1 repair is refused"
+            );
+        }
+    }
+
+    fn handoff_fence_expired(&self, _node: NodeId, _count: u64) {
+        let now = self.now_ms();
+        let mut st = self.state();
+        st.last_leader_ms = now;
+        reach_once!(
+            st.handoff_fence_expired,
+            "an uncovered inherited fence resigns back to an ordinary election"
+        );
     }
 
     fn chosen_gap(&self, node: NodeId, hole: Slot, above: Slot) {
@@ -1819,6 +2177,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver drops a snap chunk response at the send seam"
                 );
             }
+            // The whole cooperative handoff, lost in one message: the outgoing
+            // leader has already stepped down and the successor never starts,
+            // so this must cost availability only — an ordinary Phase 1 is the
+            // documented fallback, and the liveness checks are what prove it.
+            Message::Relinquish { .. } => {
+                reach_once!(
+                    st.dropped_relinquish,
+                    "the driver drops a relinquishment at the send seam"
+                );
+            }
             // Inert today: `CheckLeader` never crosses the transport (it is a
             // tick-injected self-event), so this reach gate creates no slot
             // until a future remote probe makes the drop arm live.
@@ -1887,6 +2255,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 reach_once!(
                     st.duplicated_snap_chunk_response,
                     "the driver duplicates a snap chunk response at the send seam"
+                );
+            }
+            // A re-delivered handoff must be a no-op at its addressee — never
+            // an allocator rewind — and refused everywhere else. The uniqueness
+            // oracle above is what keeps that honest.
+            Message::Relinquish { .. } => {
+                reach_once!(
+                    st.duplicated_relinquish,
+                    "the driver duplicates a relinquishment at the send seam"
                 );
             }
             _ => {}

@@ -247,6 +247,87 @@ pub enum Message {
         chunks: Vec<(u32, Value)>,
     },
 
+    // ---- Cooperative leader handoff (DPaxos "Leader Handoff") ----
+    /// Outgoing leader → **one** successor: "I permanently give up the
+    /// Phase-2 authority of `ballot` for every slot at or after `next_slot`,
+    /// together with the unfinished business below it; you may continue
+    /// Phase 2 under `ballot` without running another Phase 1."
+    ///
+    /// This is the cooperative counterpart of an election. An election
+    /// *destroys* the sitting leader's authority and makes the successor
+    /// rediscover the log through Phase 1; a handoff *moves* the existing
+    /// logical authority to another physical node, which is why the ballot
+    /// carried here keeps naming the **relinquishing** node
+    /// ([`Ballot::node`](crate::Ballot::node) is the ballot's owner, not the
+    /// sender of a given message).
+    ///
+    /// # The safety rule
+    ///
+    /// An authority is relinquished **at most once** and never exercised
+    /// again by the node that gave it up. In paros that rule needs no durable
+    /// fence: leadership is entirely volatile state
+    /// ([`RawNode::new`](crate::RawNode::new) always boots a Follower, and
+    /// `on_check_leader` only ever campaigns at a strictly higher round), so a
+    /// crash is itself an abdication — and
+    /// [`RawNode::relinquish_to`](crate::RawNode::relinquish_to) abdicates
+    /// *synchronously, in the same call that queues this message*, before it
+    /// can possibly reach the transport. See that method's `# Safety` section
+    /// for the full argument.
+    ///
+    /// # Failure is an availability problem, never a safety one
+    ///
+    /// This message is fire-and-forget: no ack, no retry, no two-phase
+    /// commit. If it is lost, the old leader has already stopped and the new
+    /// one never started, so the cluster simply has no leader until an
+    /// ordinary Phase 1 elects one. That is the intended trade.
+    Relinquish {
+        /// Durable cluster configuration identity.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_id: ConfigId,
+        /// The node giving the authority up — its **current** holder. Equal to
+        /// `ballot.node` for the leader that minted the ballot, and a different
+        /// member once the authority has already been handed on at least once
+        /// (an authority survives a chain of handoffs while its ballot keeps
+        /// naming the node that won it).
+        from: NodeId,
+        /// The **single intended successor**. A receiver whose own id differs
+        /// ignores the message whole: authority uniqueness must not depend on
+        /// the transport delivering to exactly one address, so the intended
+        /// target travels *inside* the payload where a duplicate, a misroute,
+        /// or a replay cannot change it.
+        to: NodeId,
+        /// The logical Phase-2 authority being transferred.
+        ballot: Ballot,
+        /// First slot the transferred tail describes: the relinquishing
+        /// leader's own first unchosen slot.
+        from_slot: Slot,
+        /// The **allocator frontier**: the successor must allocate fresh
+        /// proposals at or above this slot, exactly as the relinquishing
+        /// leader would have. This is the field that makes authority
+        /// uniqueness structural — two nodes can only ever propose different
+        /// commands at one `(slot, ballot)` if the successor rewinds the
+        /// allocator, and it never does.
+        next_slot: Slot,
+        /// Slots in `[from_slot, next_slot)` the relinquishing leader knows
+        /// are **chosen**, with the ballot each was decided under. Exactly the
+        /// claim a [`Message::Commit`] or a
+        /// [`Message::CatchUpResponse`] makes, batched.
+        decided: BTreeMap<Slot, (Ballot, Command)>,
+        /// Slots in `[from_slot, next_slot)` with an **open Phase-2 round at
+        /// `ballot`**: the accepted-but-unchosen work the successor inherits
+        /// and re-proposes verbatim under the same ballot (re-proposing an
+        /// identical command at an identical `(slot, ballot)` is a no-op for
+        /// P2b, and it is what keeps the contiguous chosen prefix from
+        /// freezing at the first inherited hole).
+        ///
+        /// Every command here runs at `ballot` by construction — a leader's
+        /// in-flight rounds all run at its own ballot — so no per-slot ballot
+        /// is carried. Together with `decided` this **exactly tiles**
+        /// `[from_slot, next_slot)`; a payload that does not is rejected
+        /// whole, and the cluster falls back to an ordinary election.
+        pending: BTreeMap<Slot, Command>,
+    },
+
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
     /// "Have I heard from a leader recently?" — drives leader election / a
     /// ballot bump when it fires.
@@ -320,7 +401,8 @@ impl Message {
             | Self::HeartbeatAck { config_id, .. }
             | Self::SnapAck { config_id, .. }
             | Self::SnapChunkRequest { config_id, .. }
-            | Self::SnapChunkResponse { config_id, .. } => Some(*config_id),
+            | Self::SnapChunkResponse { config_id, .. }
+            | Self::Relinquish { config_id, .. } => Some(*config_id),
             Self::CatchUpRequest { .. }
             | Self::CatchUpResponse { .. }
             | Self::CheckLeader { .. } => None,

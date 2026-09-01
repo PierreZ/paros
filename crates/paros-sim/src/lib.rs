@@ -144,7 +144,29 @@ pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
 /// campaign. Its `GateScope::BudgetOff` pair — a repair from a surviving clean
 /// copy AND a correct WAIT at an unrecoverable committed item — must both
 /// fire; the adaptive sweep stops as soon as coverage plateaus.
-pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 128;
+///
+/// Raised from 128 when cooperative leader handoff added its instrumented
+/// surface to `paros-core`/`paros`, which starved this axis' WAITED gate.
+///
+/// **This value is not a safety margin — it is a schedule parameter.** It is
+/// passed as `max_iterations` to `until_coverage_stable`, which feeds the
+/// guided seed schedule, so changing it changes *which* seeds are drawn rather
+/// than only how many are allowed. Measured on one build, standalone
+/// (`sim-paros-hunt budget-off-coverage`, cold coverage map): a ceiling of 128
+/// saturates in 53 seeds, a ceiling of 384 in 95. Inside the campaign — where
+/// the sancov map is **per process** and this axis runs fifth, so guidance
+/// reaches it already warm — 128 exhausted the budget without ever firing the
+/// WAITED gate, while 384 saturates in 75 (104 on CI's build).
+///
+/// So the honest reading is: the new instrumented surface shifted the guided
+/// schedule off the corruption-deep seeds the WAITED leg needs, and this value
+/// shifts it back. It was chosen empirically, and it will need choosing again
+/// the next time the instrumented surface moves — the number carries no margin
+/// you can reason about in advance. The plateau contract ([`PLATEAU_SEEDS`]) is
+/// unchanged, and a saturating run still stops early, so the raise costs
+/// nothing in wall clock. (Same remedy, and the same empirical character, as
+/// the #102 bump.)
+pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 384;
 /// Seeded-mask volume for the #113 E1 evaluation corpus in the CI campaign.
 /// Scripted and fast per seed; enough draws from the 512-mask space that both
 /// corpus gates (recoverable-converges and unrecoverable-waits) fire.
@@ -896,7 +918,19 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// 2,000-seed hunt returned 4 reds, of which this seed's red carries the
 /// pure agreement violation ("at most one value is ever chosen for a slot")
 /// with its full decided-value and one-state-per-index cascade.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 1_209_198_120_647_599_430;
+///
+/// Re-hunted again for the cooperative-leader-handoff stream shift (the
+/// `initiate_handoff` / `handoff_target` BUGGIFY locations and the
+/// `Relinquish` drop/duplicate sites all move the seed schedule), and once
+/// more when the handoff rates were lowered to stop them starving the
+/// budget-off WAITED leg — a probability is part of the draw schedule, so
+/// tuning one re-pins this witness exactly like adding a location does. Each
+/// prior witness (`1209198120647599430`, `18170485419286272337`) replays green
+/// on the stream that succeeded it; the latest 2,000-seed hunt returned 4
+/// reds, of which this seed is the one carrying the pure agreement violation
+/// ("at most one value is ever chosen for a slot") with its full
+/// decided-value and one-state-per-index cascade.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 12_405_914_642_135_197_196;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).

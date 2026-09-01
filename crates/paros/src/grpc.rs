@@ -184,6 +184,36 @@ fn slot_commands_from_proto(
     Ok(decoded)
 }
 
+/// Encode the `pending` half of a [`Message::Relinquish`] tail: each slot's
+/// command runs at the transferred ballot by construction, so the per-slot
+/// ballot field of `SlotCommand` is left unset on the wire and re-derived on
+/// decode.
+fn pending_commands_to_proto(entries: &BTreeMap<Slot, Command>) -> Vec<internal::SlotCommand> {
+    entries
+        .iter()
+        .map(|(slot, command)| internal::SlotCommand {
+            slot: slot.0,
+            ballot: None,
+            command: Some(command_to_proto(command)),
+        })
+        .collect()
+}
+
+fn pending_commands_from_proto(
+    entries: Vec<internal::SlotCommand>,
+) -> Result<BTreeMap<Slot, Command>, &'static str> {
+    let mut decoded = BTreeMap::new();
+    for entry in entries {
+        if decoded
+            .insert(Slot(entry.slot), command_from_proto(entry.command)?)
+            .is_some()
+        {
+            return Err("duplicate slot in message");
+        }
+    }
+    Ok(decoded)
+}
+
 fn snapshot_to_proto(
     config_id: ConfigId,
     from: NodeId,
@@ -386,6 +416,25 @@ pub(crate) fn message_to_proto(
                 })
                 .collect(),
         }),
+        Message::Relinquish {
+            config_id,
+            from,
+            to,
+            ballot,
+            from_slot,
+            next_slot,
+            decided,
+            pending,
+        } => Kind::Relinquish(internal::Relinquish {
+            config_id: config_id.0,
+            from: from.0,
+            to: to.0,
+            ballot: Some(ballot_to_proto(*ballot)),
+            from_slot: from_slot.0,
+            next_slot: next_slot.0,
+            decided: slot_commands_to_proto(decided),
+            pending: pending_commands_to_proto(pending),
+        }),
         _ => return Err("unsupported Paxos message variant"),
     };
     Ok(internal::ConsensusMessage { kind: Some(kind) })
@@ -505,6 +554,16 @@ pub(crate) fn message_from_proto(
                 .into_iter()
                 .map(|chunk| (chunk.index, Value(chunk.bytes)))
                 .collect(),
+        }),
+        Kind::Relinquish(message) => Ok(Message::Relinquish {
+            config_id: ConfigId(message.config_id),
+            from: NodeId(message.from),
+            to: NodeId(message.to),
+            ballot: ballot_from_proto(message.ballot)?,
+            from_slot: Slot(message.from_slot),
+            next_slot: Slot(message.next_slot),
+            decided: slot_commands_from_proto(message.decided)?,
+            pending: pending_commands_from_proto(message.pending)?,
         }),
     }
 }

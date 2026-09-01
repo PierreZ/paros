@@ -23,8 +23,9 @@ use moonpool_core::{
 };
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Message, NodeId, NodeRole,
-    ProposeResult, RawNode, ReadIndexResult, ReadState, SessionEntry, Slot, Value, WriteOp,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, HandoffCounters, LeadershipOrigin,
+    Message, NodeId, NodeRole, ProposeResult, RawNode, ReadIndexResult, ReadState, SessionEntry,
+    Slot, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +35,7 @@ use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
     ReadAck, ReplySender, RpcInbox, internal, message_to_proto, rpc_channel, wire_checksum,
 };
-use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::hooks::{DriverHooks, HandoffContext, Reply, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 /// How often a node advances its logical clock.
@@ -188,6 +189,26 @@ pub const EV_RESEND_SKIPPED: &str = "accept_resend_skipped";
 
 /// Tracing event: the driver deliberately asked the current leader to resign.
 pub const EV_LEADERSHIP_RESIGNED: &str = "leadership_resigned";
+
+/// Tracing event: this leader cooperatively relinquished its Phase-2 authority to
+/// a named successor and demoted itself in the same core call (`DPaxos` leader
+/// handoff). Fields: `node`, `to`, `round`/`bnode` (the transferred authority),
+/// `next_slot`, `decided`, `pending`.
+pub const EV_AUTHORITY_RELINQUISHED: &str = "authority_relinquished";
+
+/// Tracing event: this node installed a predecessor's transferred authority and
+/// continues Phase 2 under it with **no** Phase 1 of its own. Fields: `node`,
+/// `from`, `round`/`bnode`, `next_slot`, `tail`.
+pub const EV_AUTHORITY_INSTALLED: &str = "authority_installed";
+
+/// Tracing event: this node refused an incoming transfer. Fields: `node` plus the
+/// monotone per-reason totals `target`, `stale`, `shape`, `unfit`.
+pub const EV_HANDOFF_REFUSED: &str = "handoff_refused";
+
+/// Tracing event: a handoff-installed leadership resigned because its inherited
+/// read fence stayed uncovered — the deliberate fallback to ordinary Phase 1.
+/// Fields: `node`, `count`.
+pub const EV_HANDOFF_FENCE_EXPIRED: &str = "handoff_fence_expired";
 
 /// Tracing event: a snapshot install persisted while this node was a live
 /// Candidate (`role == Candidate`, election open). This is the #88 window —
@@ -415,6 +436,7 @@ fn message_kind(m: &Message) -> &'static str {
         Message::SnapAck { .. } => "snap_ack",
         Message::SnapChunkRequest { .. } => "snap_chunk_request",
         Message::SnapChunkResponse { .. } => "snap_chunk_response",
+        Message::Relinquish { .. } => "relinquish",
         _ => "unknown",
     }
 }
@@ -483,7 +505,35 @@ fn message_route(m: &Message) -> Option<(NodeId, ConfigId, Ballot, Option<Slot>)
             chosen_index,
             ..
         } => Some((*from, *config_id, *ballot, Some(*chosen_index))),
+        // A handoff's "slot" is the allocator frontier it transfers — the
+        // field that carries its meaning on a timeline.
+        Message::Relinquish {
+            config_id,
+            from,
+            ballot,
+            next_slot,
+            ..
+        } => Some((*from, *config_id, *ballot, Some(*next_slot))),
         _ => None,
+    }
+}
+
+/// What a handoff would transfer right now, from the core's public read views:
+/// the span between this leader's contiguous chosen prefix and its allocator
+/// frontier, plus whether it is itself still healing a hole.
+///
+/// Pure observation — it exists only so [`DriverHooks::initiate_handoff`] can be
+/// biased toward the interesting shapes instead of firing uniformly.
+fn handoff_context(node: &RawNode, candidates: usize) -> HandoffContext {
+    let first_unchosen = node.hard_state().chosen_index.map_or(0, |ci| ci.0 + 1);
+    let tail =
+        usize::try_from(node.next_slot().0.saturating_sub(first_unchosen)).unwrap_or(usize::MAX);
+    HandoffContext {
+        tail,
+        next_slot: node.next_slot(),
+        settled: tail == 0,
+        healing: node.chosen_gap().is_some(),
+        candidates,
     }
 }
 
@@ -947,6 +997,7 @@ fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
         Some(Kind::Heartbeat(_)) => "heartbeat",
         Some(Kind::HeartbeatAck(_)) => "heartbeat_ack",
         Some(Kind::SnapAck(_)) => "snap_ack",
+        Some(Kind::Relinquish(_)) => "relinquish",
         Some(Kind::SnapChunkRequest(_)) => "snap_chunk_request",
         Some(Kind::SnapChunkResponse(_)) => "snap_chunk_response",
         None => "unknown",
@@ -1776,6 +1827,74 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
     }
 }
 
+/// Report this batch's cooperative-handoff transitions and return whether an
+/// authority was **installed** in it.
+///
+/// Three channels, each a different fact: the install of a predecessor's
+/// authority (a leadership acquired with *no* Phase 1, so it is deliberately
+/// not reported through [`Audit::elected`], whose "leadership ballots strictly
+/// increase" reading is about a node's own campaigns), the per-reason refusal
+/// totals the wire guards accumulated, and the inherited-fence resignations.
+/// The relinquish half is reported at its own call site, at the instant the
+/// authority changes hands.
+fn report_handoff<A: Audit>(
+    node: &RawNode,
+    last: &mut HandoffCounters,
+    self_id: u64,
+    audit: &A,
+) -> bool {
+    let handoff = node.handoff_counters();
+    let installed_now = handoff.installed != last.installed;
+    if handoff.rejected_target != last.rejected_target
+        || handoff.rejected_stale != last.rejected_stale
+        || handoff.rejected_shape != last.rejected_shape
+        || handoff.rejected_unfit != last.rejected_unfit
+    {
+        audit.handoff_refused(
+            NodeId(self_id),
+            handoff.rejected_target,
+            handoff.rejected_stale,
+            handoff.rejected_shape,
+            handoff.rejected_unfit,
+        );
+        tracing::info!(
+            node = self_id,
+            target = handoff.rejected_target,
+            stale = handoff.rejected_stale,
+            shape = handoff.rejected_shape,
+            unfit = handoff.rejected_unfit,
+            "handoff_refused"
+        );
+    }
+    if handoff.fence_step_downs != last.fence_step_downs {
+        audit.handoff_fence_expired(NodeId(self_id), handoff.fence_step_downs);
+        tracing::info!(
+            node = self_id,
+            count = handoff.fence_step_downs,
+            "handoff_fence_expired"
+        );
+    }
+    // Keyed on the install counter rather than a role transition: an install
+    // can also replace a leadership this node already held at a lower ballot.
+    if installed_now && let LeadershipOrigin::Handoff { from } = node.leadership_origin() {
+        let ballot = node.ballot();
+        let next_slot = node.next_slot();
+        let tail = u64::try_from(handoff_context(node, 0).tail).unwrap_or(u64::MAX);
+        audit.authority_installed(NodeId(self_id), from, ballot, next_slot, tail);
+        tracing::info!(
+            node = self_id,
+            from = from.0,
+            round = ballot.round,
+            bnode = ballot.node.0,
+            next_slot = next_slot.0,
+            tail,
+            "authority_installed"
+        );
+    }
+    *last = handoff;
+    installed_now
+}
+
 /// Post-batch upkeep: feed the core a fresh randomized election timeout whenever
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
@@ -1791,6 +1910,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     last_duplicates: &mut u64,
     last_quorum_lost: &mut u64,
     last_repair: &mut (u64, u64, u64, u64, u64),
+    last_handoff: &mut HandoffCounters,
     waiters: &mut ClientWaiters,
     self_id: u64,
     hooks: &H,
@@ -1825,6 +1945,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             "repair_progress"
         );
     }
+    let installed_now = report_handoff(node, last_handoff, self_id, audit);
     // Surface any CheckQuorum step-down the batch's tick performed (#95).
     let quorum_lost = node.quorum_lost_step_downs();
     if quorum_lost > *last_quorum_lost {
@@ -1834,7 +1955,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         tracing::info!(node = self_id, count, "leader_quorum_lost");
     }
     let role = node.role();
-    if role == NodeRole::Leader && *last_role != NodeRole::Leader {
+    if role == NodeRole::Leader && *last_role != NodeRole::Leader && !installed_now {
         // The won ballot *and* the promise held at the instant of victory. They
         // are normally the same ballot — winning means having promised your own
         // campaign ballot and heard nothing higher — and the oracle asserts
@@ -2259,6 +2380,7 @@ where
     let mut last_duplicates = node.duplicates_suppressed();
     let mut last_quorum_lost = node.quorum_lost_step_downs();
     let mut last_repair = node.repair_counters();
+    let mut last_handoff = node.handoff_counters();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -2320,7 +2442,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -2340,7 +2462,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -2462,7 +2584,7 @@ where
                     node.step(msg);
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -2545,7 +2667,7 @@ where
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
                 let _ = reply.send(ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -2569,7 +2691,44 @@ where
                         node.resend_pending();
                     }
                 }
-                if node.role() == NodeRole::Leader && hooks.resign_leadership() {
+                // Cooperative leader handoff (`DPaxos`): move the existing
+                // Phase-2 authority to another physical node instead of letting
+                // an election destroy it and make the successor rediscover the
+                // log through Phase 1. Consulted only when the core says the
+                // leadership is transferable, so a `true` always has an effect;
+                // answering `false` is always safe (a handoff is an
+                // optimization, never a requirement). Offered *before* the
+                // resignation hook: both give up the leadership, and the
+                // cooperative one is strictly the more interesting outcome.
+                let mut handed_off = false;
+                if node.can_relinquish() {
+                    let candidates = node.handoff_candidates();
+                    if !candidates.is_empty() {
+                        let ctx = handoff_context(&node, candidates.len());
+                        if hooks.initiate_handoff(ctx) {
+                            let fallback = providers.random().random_range(0..candidates.len());
+                            let target = hooks
+                                .handoff_target(&candidates)
+                                .filter(|t| candidates.contains(t))
+                                .unwrap_or(candidates[fallback]);
+                            if let Some(handoff) = node.relinquish_to(target) {
+                                handed_off = true;
+                                audit.authority_relinquished(NodeId(self_id), handoff);
+                                tracing::info!(
+                                    node = self_id,
+                                    to = handoff.to.0,
+                                    round = handoff.ballot.round,
+                                    bnode = handoff.ballot.node.0,
+                                    next_slot = handoff.next_slot.0,
+                                    decided = handoff.decided,
+                                    pending = handoff.pending,
+                                    "authority_relinquished"
+                                );
+                            }
+                        }
+                    }
+                }
+                if !handed_off && node.role() == NodeRole::Leader && hooks.resign_leadership() {
                     audit.stepped_down(NodeId(self_id));
                     tracing::info!(node = self_id, "leadership_resigned");
                     node.step_down();
@@ -2593,7 +2752,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

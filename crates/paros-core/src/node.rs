@@ -5,6 +5,7 @@ mod acceptor;
 mod catch_up_snapshot;
 mod decide_apply;
 mod election;
+mod handoff;
 mod helpers;
 mod reads;
 mod replication;
@@ -13,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use self::decide_apply::Proposing;
 use self::election::{Election, LeaderRecovery, RepairProbe};
+pub use self::handoff::{
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
+};
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 use self::replication::HEARTBEAT_TICKS;
 use crate::message::Message;
@@ -261,6 +265,17 @@ pub struct RawNode {
     /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
     /// assembled from stragglers; decided `Noop`).
     repair_case2: u64,
+    /// How this node came to hold its current leadership (see
+    /// [`LeadershipOrigin`]). `Elected` on every non-leader.
+    leadership_origin: LeadershipOrigin,
+    /// Ticks a handoff-installed leadership has held an **uncovered inherited
+    /// fence** (its chosen prefix still below `read_floor`). Drives the
+    /// resignation that hands an unrecoverable inherited log back to an
+    /// ordinary Phase 1; reset whenever the fence is covered.
+    handoff_fence_elapsed: u64,
+    /// Monotone cooperative-handoff counters this incarnation, for the
+    /// driver's audit report.
+    handoff: HandoffCounters,
     /// Remaining bounded recovery work for the current leadership.
     leader_recovery: Option<LeaderRecovery>,
     /// The bounded chosen-prefix walk stopped with another contiguous slot ready.
@@ -522,6 +537,9 @@ impl RawNode {
             repair_bytes: 0,
             repair_case1: 0,
             repair_case2: 0,
+            leadership_origin: LeadershipOrigin::Elected,
+            handoff_fence_elapsed: 0,
+            handoff: HandoffCounters::default(),
             leader_recovery: None,
             chosen_advance_pending: false,
             resend_cursor: None,
@@ -630,10 +648,29 @@ impl RawNode {
                     self.leader == Some(self.config.id),
                     "a leader knows itself as leader"
                 );
-                assert!(
-                    self.ballot.node == self.config.id,
-                    "an operating ballot names its own node"
-                );
+                // Whose node id the operating ballot names is exactly what
+                // separates the two leadership origins — an elected leader owns
+                // its ballot, a handoff leader is exercising a predecessor's.
+                match self.leadership_origin {
+                    LeadershipOrigin::Elected => assert!(
+                        self.ballot.node == self.config.id,
+                        "an elected leader's ballot names its own node"
+                    ),
+                    LeadershipOrigin::Handoff { from } => {
+                        // The ballot names whoever *minted* it, which after a
+                        // chain of handoffs is neither this node nor its
+                        // immediate predecessor — so only the predecessor is
+                        // pinned here, and it is always someone else.
+                        assert!(
+                            from != self.config.id,
+                            "a handoff leader inherited its authority from another node"
+                        );
+                        assert!(
+                            self.config.peers.binary_search(&from).is_ok(),
+                            "a handoff leader inherited from a configured member"
+                        );
+                    }
+                }
                 // The #67/#88 allocator bound, gated exactly like the note
                 // above: a still-Leader that learned a higher-ballot `Commit`
                 // (or replayed catch-up decided past it) can see the chosen
@@ -683,6 +720,14 @@ impl RawNode {
             NodeRole::Follower => {
                 assert!(self.election.is_none(), "a follower has no open campaign");
             }
+        }
+        // A leadership origin is leadership state: it is cleared with the rest
+        // of it (`become_follower`), so only a leader ever carries a handoff.
+        if self.role != NodeRole::Leader {
+            assert!(
+                self.leadership_origin == LeadershipOrigin::Elected,
+                "only a leader carries an inherited leadership origin"
+            );
         }
         // Volatile leadership state exists only on a leader.
         if !self.proposer.is_empty() {
@@ -785,6 +830,16 @@ impl RawNode {
                 sessions,
                 ..
             } => self.on_install_snapshot(ballot, chosen_index, snapshot, sessions),
+            Message::Relinquish {
+                from,
+                to,
+                ballot,
+                from_slot,
+                next_slot,
+                decided,
+                pending,
+                ..
+            } => self.on_relinquish(from, to, ballot, from_slot, next_slot, decided, pending),
             Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
@@ -1115,6 +1170,7 @@ impl RawNode {
                 self.step(Message::CheckLeader { from: me });
             }
         }
+        self.tick_handoff_fence();
         self.tick_repair();
         self.assert_invariants();
     }
@@ -1517,6 +1573,31 @@ impl RawNode {
     #[must_use]
     pub fn faulty_entries(&self) -> &BTreeMap<Slot, Ballot> {
         &self.faulty
+    }
+
+    /// How this node came to hold its current leadership: won by ordinary
+    /// Phase 1, or installed from a predecessor's cooperative handoff.
+    /// [`LeadershipOrigin::Elected`] on any non-leader.
+    #[must_use]
+    pub fn leadership_origin(&self) -> LeadershipOrigin {
+        self.leadership_origin
+    }
+
+    /// The next slot this leader would allocate to a fresh proposal — the
+    /// **allocator frontier** a cooperative handoff transfers. A read view for
+    /// drivers/oracles.
+    #[must_use]
+    pub fn next_slot(&self) -> Slot {
+        self.next_slot
+    }
+
+    /// Monotone cooperative-handoff counters this incarnation (see
+    /// [`HandoffCounters`]). The driver reports the delta through its audit
+    /// port, so a simulation can prove each handoff and refusal path is
+    /// genuinely reached.
+    #[must_use]
+    pub fn handoff_counters(&self) -> HandoffCounters {
+        self.handoff
     }
 
     /// The open application repair cursor, if any (see

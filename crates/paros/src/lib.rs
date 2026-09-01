@@ -23,11 +23,12 @@ pub use corruption::{
     classify_log, decide,
 };
 pub use driver::{
-    DriverTunables, EV_APPLIED, EV_BOOTED, EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED,
-    EV_COMPACTED, EV_CRASHED, EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED,
-    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
-    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED,
-    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
+    DriverTunables, EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED,
+    EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED,
+    EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_HANDOFF_FENCE_EXPIRED,
+    EV_HANDOFF_REFUSED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE,
+    EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST,
+    EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError,
     command_hash, parse_addr, run_node,
 };
@@ -35,15 +36,16 @@ pub use grpc::{
     Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
     ProposeAck, Read, ReadAck, proposal_checksum,
 };
-pub use hooks::{DriverHooks, NoHooks, Reply, Seam};
+pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry, HardState,
-    LEADER_RECOVERY_BATCH, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult,
+    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry, HANDOFF_BATCH,
+    HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState, LEADER_RECOVERY_BATCH,
+    LeadershipOrigin, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult,
     QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value,
     WriteOp, command_fingerprint,
 };
@@ -193,6 +195,52 @@ mod tests {
                 from: NodeId(0),
                 at_index: Slot(4),
                 chunks: vec![(0, Value(vec![1, 2])), (3, Value(vec![]))],
+            },
+            // Cooperative leader handoff: the intended successor, the
+            // transferred allocator frontier, and both halves of the tail —
+            // `pending` deliberately carries no per-slot ballot on the wire
+            // (it is the transferred ballot by construction), so the round
+            // trip is what pins that re-derivation.
+            Message::Relinquish {
+                config_id,
+                from: NodeId(3),
+                to: NodeId(1),
+                ballot,
+                from_slot: Slot(4),
+                next_slot: Slot(7),
+                decided: BTreeMap::from([(
+                    Slot(4),
+                    (
+                        Ballot {
+                            round: 6,
+                            node: NodeId(2),
+                        },
+                        Command::Control(Control::Snap { at_index: Slot(4) }),
+                    ),
+                )]),
+                pending: BTreeMap::from([
+                    (
+                        Slot(5),
+                        Command::User(Entry {
+                            client: ClientId(8),
+                            seq: ClientSeq(3),
+                            value: Value(vec![4, 5]),
+                        }),
+                    ),
+                    (Slot(6), Command::Control(Control::Noop)),
+                ]),
+            },
+            // The empty tail: a fully settled leader hands over the frontier
+            // and nothing else.
+            Message::Relinquish {
+                config_id,
+                from: NodeId(3),
+                to: NodeId(2),
+                ballot,
+                from_slot: Slot(9),
+                next_slot: Slot(9),
+                decided: BTreeMap::new(),
+                pending: BTreeMap::new(),
             },
         ]
     }
