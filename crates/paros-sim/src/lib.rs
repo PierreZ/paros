@@ -980,13 +980,14 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// accepts either.
 ///
 /// Re-hunted once more for the forced-torn-tail BUGGIFY location
-/// (`P_FORCE_TORN_TAIL` in `node.rs`): a new location adds its activation
-/// draw to every seed's stream, which moved the prior witnesses
-/// (`8508603904814693545`, then `4208498603699014883`) off their shape. A
-/// 10,000-seed hunt returned eight reds, every one carrying the
-/// durable-accept agreement violation; this seed is the tightest cascade
-/// (7 accept-quorum failures, 20 assertion failures in all).
-pub const FAULTY_NONE_DEMO_SEED: u64 = 11_060_938_262_250_246_913;
+/// (`P_FORCE_TORN_TAIL` in `node.rs`) and again for the peer mailbox's two
+/// hook locations (`overtake_in_mailbox`, `evict_across_kinds`): every new
+/// location adds its activation draw to every seed's stream, which moved the
+/// prior witnesses (`8508603904814693545`, `4208498603699014883`,
+/// `11060938262250246913`) off their shape. The latest 10,000-seed hunt
+/// returned two reds, both carrying the durable-accept agreement violation;
+/// this is the tighter cascade (26 assertion failures in all).
+pub const FAULTY_NONE_DEMO_SEED: u64 = 89_862_534_621_252_025;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
