@@ -178,7 +178,15 @@ pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
 /// unchanged, and a saturating run still stops early, so the raise costs
 /// nothing in wall clock. (Same remedy, and the same empirical character, as
 /// the #102 bump.)
-pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 384;
+///
+/// Raised again to 1024 when the per-kind peer mailbox moved the instrumented
+/// surface once more: on CI's build the WAITED gate never fired inside 384
+/// guided seeds (a local sancov run saturated in 56 — the schedule is
+/// build-dependent, which is the empirical character above). A more reliable
+/// catch-up delivery also makes a bare-quorum commit rarer, and the WAITED
+/// leg needs exactly that shape, so the leg is genuinely rarer per seed than
+/// it was.
+pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 1024;
 /// Seeded-mask volume for the #113 E1 evaluation corpus in the CI campaign.
 /// Scripted and fast per seed; enough draws from the 512-mask space that both
 /// corpus gates (recoverable-converges and unrecoverable-waits) fire.
