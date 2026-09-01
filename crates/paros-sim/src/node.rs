@@ -80,6 +80,21 @@ const P_WRITE_EIO: f64 = 0.01;
 /// from the write site — the sweep must be able to select the two failure
 /// modes separately (same rule as the driver's two durability seams).
 const P_FSYNC_FAIL: f64 = 0.01;
+/// Per-call firing probability of the **forced torn tail** BUGGIFY site: its
+/// own location, consulted on a `Sync` whose stage holds fresh appends, that
+/// takes the fsync site's *lost* leg with the torn coin already decided. The
+/// torn-tail shape ("storage: a crash-truncatable tail is discarded on boot")
+/// is otherwise the compound of four coins — the fsync site firing at
+/// [`P_FSYNC_FAIL`], its lost leg, [`P_TORN_TAIL`], and fresh appends being
+/// staged at that moment — which reached only ~1–2% of raw seeds; a
+/// coverage-guided schedule clustered on a few roots starved it for a
+/// thousand iterations on one CI build. Per BUGGIFY doctrine the
+/// rare-but-valid shape gets a location that makes it *likely* on the seeds
+/// that activate it, instead of waiting for the swarm to stumble into it.
+/// The fault it injects is the ordinary fsync loss (same ledger entry, same
+/// budget check, same crash decision by the driver), so every downstream
+/// invariant sees exactly what the unforced leg produces.
+const P_FORCE_TORN_TAIL: f64 = 0.05;
 /// Coin on the fsync *lost* leg: the crash tore the batch instead of losing
 /// it whole — a prefix of the staged fresh appends reaches disk without
 /// identifiers (Stage 7's per-record torn durability; the `CrashTail` leg of
@@ -2143,6 +2158,36 @@ impl<T: TimeProvider> DurableStorage<T> {
         records
     }
 
+    /// Whether a torn flush would tear anything right now: the stage holds at
+    /// least one accept above this disk's durable maximum (only fresh appends
+    /// tear, see [`Self::torn_flush`]) **and** the first such record clears the
+    /// per-record budget (a clean quorum of live copies survives its loss).
+    /// The budget is what makes the shape rare — a leader's first write of a
+    /// slot has no clean copies elsewhere yet, so only a node writing slots a
+    /// quorum already holds can tear — which is why the forcing site consults
+    /// this predicate rather than the bare fresh-append check.
+    fn tearable_stage(&self) -> bool {
+        let key = self.key.clone();
+        let staged: Vec<Slot> = self.staged_accepted.keys().copied().collect();
+        self.with_world(|w| {
+            let durable_max = w
+                .disks
+                .get(&key)
+                .and_then(|d| d.accepted.keys().next_back().copied());
+            let Some(first) = staged
+                .into_iter()
+                .find(|slot| durable_max.is_none_or(|max| *slot > max))
+            else {
+                return false;
+            };
+            let already = w.marks.get(&key).is_some_and(|m| m.contains(&first.0));
+            w.clean_copies(first.0)
+                .saturating_sub(usize::from(!already))
+                >= w.quorum()
+        })
+        .unwrap_or(false)
+    }
+
     /// The torn leg of a lost fsync (Stage 7): a prefix of the batch's
     /// **fresh appends** reaches the disk without identifiers — the crash tore
     /// the batch mid-write instead of losing it whole. Only fresh appends
@@ -2328,12 +2373,17 @@ impl<T: TimeProvider> DurableStorage<T> {
     }
 
     /// BUGGIFY site 2: the staged batch's fsync fails. Independent location
-    /// from the write site; same ambiguity contract.
-    fn roll_fsync_fault(&mut self) -> Option<bool> {
-        if !self.faults.active() || !buggify_with_prob!(P_FSYNC_FAIL) {
+    /// from the write site; same ambiguity contract. `force_lost` is the
+    /// forced-torn-tail site's verdict: it skips this site's own coin and
+    /// takes the lost leg outright, through the same ledger and budget.
+    fn roll_fsync_fault(&mut self, force_lost: bool) -> Option<bool> {
+        if !self.faults.active() {
             return None;
         }
-        let persisted = sim_random::<f64>() < 0.5;
+        if !force_lost && !buggify_with_prob!(P_FSYNC_FAIL) {
+            return None;
+        }
+        let persisted = !force_lost && sim_random::<f64>() < 0.5;
         let accepted_slots: Vec<u64> = self.staged_accepted.keys().map(|s| s.0).collect();
         let fault = InjectedFault {
             node: self.node_id,
@@ -3020,17 +3070,27 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             );
             return Ok(());
         }
+        // The forced torn tail (its own BUGGIFY location): only a stage whose
+        // fresh appends clear the per-record budget can tear, so the site is
+        // consulted only where it can have an effect (AGENTS.md: consult a
+        // hook only when the choice is observable).
+        let force_torn =
+            self.faults.active() && self.tearable_stage() && buggify_with_prob!(P_FORCE_TORN_TAIL);
         // BUGGIFY site 2: the fsync fails — only when the stage actually holds
         // something (an empty flush has nothing at stake). On the durable leg
         // the flush happens anyway before the error is reported (fsyncgate);
         // on the lost leg the stage stays un-flushed and dies with the
         // incarnation the driver's crash decision is about to unwind.
         if !self.staged_records().is_empty()
-            && let Some(persisted) = self.roll_fsync_fault()
+            && let Some(persisted) = self.roll_fsync_fault(force_torn)
         {
             if persisted {
                 self.flush_stage()?;
-            } else if self.faults.active() && sim_random::<f64>() < P_TORN_TAIL {
+            } else if self.faults.active() && (force_torn || sim_random::<f64>() < P_TORN_TAIL) {
+                if force_torn {
+                    // BUGGIFY pairing: the forcing site genuinely fired.
+                    assert_reachable!("storage: a torn tail is forced by its BUGGIFY site");
+                }
                 // Stage 7's per-record torn durability, paired with the crash
                 // the driver is about to take on this error: a prefix of the
                 // batch's fresh appends lands unwitnessed, so the next boot
@@ -3387,6 +3447,31 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
 
     fn skip_accept_resend(&self) -> bool {
         self.active() && buggify_with_prob!(0.95)
+    }
+
+    fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
+        // Per message on a non-empty mailbox; a per-peer stream is otherwise
+        // delivered in enqueue order, so this is the only in-stream reorder.
+        let fired = self.active() && buggify_with_prob!(0.02);
+        if fired {
+            // BUGGIFY pairing: the overtake genuinely fires.
+            assert_reachable!("mailbox: a message overtakes its peer queue");
+        }
+        fired
+    }
+
+    fn evict_across_kinds(&self, _to: NodeId, _msg: &Message) -> bool {
+        // Per overflow. Kept occasional on purpose: a *systematic* cross-kind
+        // eviction is the starvation `PeerMailbox`'s per-kind default exists
+        // to prevent (a class crowded out on every round trip), and the point
+        // here is to prove the liveness argument survives sporadic pressure,
+        // not to reinstate the bug as a fault model.
+        let fired = self.active() && buggify_with_prob!(0.10);
+        if fired {
+            // BUGGIFY pairing: a full mailbox genuinely evicted across kinds.
+            assert_reachable!("mailbox: overflow evicts across kinds");
+        }
+        fired
     }
 
     fn resign_leadership(&self) -> bool {

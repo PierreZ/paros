@@ -13,8 +13,9 @@
 //! dependency-free) and holds each client reply until its slot commits
 //! (ack-on-commit), redirecting non-leader proposals.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_core::{
@@ -49,6 +50,7 @@ const GRPC_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this is
 /// deliberately bounded and lossy: the consensus driver never waits for
 /// network I/O, and current heartbeats/resends repair anything dropped here.
+/// Overflow evicts the *oldest* undelivered message (see [`PeerMailbox`]).
 const GRPC_PEER_QUEUE_CAPACITY: usize = 4096;
 /// Snapshot offers use an independent h2 request lane so their opaque bytes
 /// cannot sit in front of heartbeats and normal replication.
@@ -71,8 +73,9 @@ pub struct DriverTunables {
     /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this
     /// is deliberately bounded and lossy: the consensus driver never waits for
     /// network I/O, and current heartbeats/resends repair anything dropped
-    /// here. The extreme (a handful of slots) makes mailbox overflow —
-    /// [`Audit::dropped_at_mailbox`] — a likely event instead of a rare one.
+    /// here (overflow evicts the oldest message, keep-newest). The extreme (a
+    /// handful of slots) makes mailbox overflow — [`Audit::dropped_at_mailbox`]
+    /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
     /// Maximum Paxos messages packed into one protobuf/gRPC request. The
     /// extreme (one per request) maximizes h2 framing pressure and the
@@ -870,8 +873,135 @@ fn snap_repair_tick<S, H, A>(
 /// the gRPC clients, the task provider, and this node's id for observability
 /// events. Bundled so `drain_ready` takes one parameter instead of three.
 struct PeerQueues {
-    regular: tokio::sync::mpsc::Sender<internal::ConsensusMessage>,
-    snapshot: tokio::sync::mpsc::Sender<internal::ConsensusMessage>,
+    regular: PeerMailbox,
+    snapshot: PeerMailbox,
+}
+
+/// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
+/// stream-mailbox shape). The consensus driver never waits for network I/O:
+/// `push` always returns at once, and when the mailbox is full it evicts the
+/// *oldest* undelivered message to make room for the new one.
+///
+/// Keep-newest is the whole point, not a detail. Every outbound class is
+/// repaired by its *latest* instance — the current heartbeat, the current
+/// `Accept` re-send, the current catch-up page — so under sustained overload
+/// the messages worth delivering are the newest ones. The alternative,
+/// refusing the new message while stale ones drain (what a bounded mpsc
+/// `try_send` does), starves whole classes deterministically once a peer link
+/// is slow: with a handful of slots and a delivery round trip of several
+/// ticks, the slots free up once per round trip and refill with whatever is
+/// enqueued first afterward, so a class that is always enqueued a beat later
+/// than the heartbeat is dropped on every round trip, forever. That is an
+/// adversary dropping every message of one kind, which defeats eventual
+/// synchrony, and it is precisely how a lagging follower's catch-up responses
+/// were lost for an entire quiet tail (sim seeds `14371623759479170018`,
+/// `13938523914823716398`: 983 of 983 evicted at a 5-slot mailbox behind a
+/// ~277 ms link).
+///
+/// Recency alone is not enough either: a leader re-sends *every* pending
+/// `Accept` on every beat, so one beat's burst can fill a small mailbox by
+/// itself and evict the single catch-up response enqueued just before it, on
+/// every round trip (seeds `12153861921929631187`, `9558440018523712995`,
+/// `1336557888375411500`, red on a plain keep-newest mailbox). So eviction is
+/// **per kind**: a new message displaces the oldest queued message *of its own
+/// kind* when one exists, and the oldest overall only when none does. A class
+/// can then only be crowded out by itself — an `Accept` burst churns the
+/// queued accepts, the current heartbeat replaces the stale one, the current
+/// catch-up page replaces the previous — which is the same separation etcd
+/// gets from carrying heartbeats and appends on distinct streams. The scan is
+/// linear in the mailbox and runs only on overflow.
+#[derive(Clone)]
+struct PeerMailbox {
+    inner: Arc<Mutex<VecDeque<internal::ConsensusMessage>>>,
+    capacity: usize,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl PeerMailbox {
+    fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "a peer mailbox holds at least one message");
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            capacity,
+            wake: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<internal::ConsensusMessage>> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.lock().len() >= self.capacity
+    }
+
+    /// Enqueue `message`, evicting and returning one undelivered message when
+    /// the mailbox is full: the oldest of the *same kind* as `message` if one
+    /// is queued, else the oldest overall — unless `evict_across_kinds`, which
+    /// takes the oldest overall outright. `overtake` enqueues at the front
+    /// instead of the back. Both are the driver-hook perturbations
+    /// ([`DriverHooks::overtake_in_mailbox`], [`DriverHooks::evict_across_kinds`]);
+    /// production passes `false` for both. Never blocks.
+    fn push(
+        &self,
+        message: internal::ConsensusMessage,
+        overtake: bool,
+        evict_across_kinds: bool,
+    ) -> Option<internal::ConsensusMessage> {
+        let evicted = {
+            let mut queue = self.lock();
+            let evicted = if queue.len() >= self.capacity {
+                let kind = proto_message_kind(&message);
+                let victim = if evict_across_kinds {
+                    0
+                } else {
+                    queue
+                        .iter()
+                        .position(|queued| proto_message_kind(queued) == kind)
+                        .unwrap_or(0)
+                };
+                queue.remove(victim)
+            } else {
+                None
+            };
+            if overtake {
+                queue.push_front(message);
+            } else {
+                queue.push_back(message);
+            }
+            assert!(
+                queue.len() <= self.capacity,
+                "a peer mailbox never exceeds its capacity"
+            );
+            evicted
+        };
+        self.wake.notify_one();
+        evicted
+    }
+
+    fn try_pop(&self) -> Option<internal::ConsensusMessage> {
+        self.lock().pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Wait for the next message. A `Notify` permit is stored when nobody is
+    /// waiting, so a push that lands between the empty check and the await is
+    /// never lost.
+    async fn recv(&self) -> internal::ConsensusMessage {
+        loop {
+            if let Some(message) = self.try_pop() {
+                return message;
+            }
+            self.wake.notified().await;
+        }
+    }
 }
 
 struct Outbound {
@@ -885,7 +1015,7 @@ impl Outbound {
     /// `msg_sent` deliberately records the core's outbound decision even when
     /// the bounded mailbox or network later drops it; safety oracles inspect the
     /// messages a proposer attempted, independently of delivery.
-    fn transmit<A: Audit>(&self, audit: &A, to: NodeId, msg: &Message) {
+    fn transmit<H: DriverHooks, A: Audit>(&self, hooks: &H, audit: &A, to: NodeId, msg: &Message) {
         audit.sent(NodeId(self.self_id), to, msg);
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
@@ -964,14 +1094,23 @@ impl Outbound {
             } else {
                 &queues.regular
             };
-            if queue.try_send(message).is_err() {
-                // Deliberately lossy (etcd-style bounded mailbox), but never
-                // silent: the audit sees the drop the moment it happens.
-                audit.dropped_at_mailbox(NodeId(self.self_id), to, kind);
+            // The mailbox's two enqueue-side decisions, each consulted only
+            // where it can have an observable effect (a non-empty queue to
+            // overtake; a full one to evict from).
+            let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
+            let evict_across_kinds = queue.is_full() && hooks.evict_across_kinds(to, msg);
+            if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
+                // Deliberately lossy (etcd-style bounded mailbox, keep-newest),
+                // but never silent: the audit sees the drop the moment it
+                // happens, naming the *evicted* message, not the one that
+                // displaced it.
+                let evicted_kind = proto_message_kind(&evicted);
+                audit.dropped_at_mailbox(NodeId(self.self_id), to, evicted_kind);
                 tracing::debug!(
                     node = self.self_id,
                     to = to.0,
-                    "dropped Paxos message because peer gRPC mailbox is unavailable"
+                    kind = evicted_kind,
+                    "evicted oldest Paxos message from a full peer gRPC mailbox"
                 );
             }
         }
@@ -1015,7 +1154,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
-    mut messages: tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    messages: PeerMailbox,
     batch_limit: usize,
     audit: A,
     self_id: u64,
@@ -1029,16 +1168,11 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => return,
-                message = messages.recv() => {
-                    let Some(message) = message else {
-                        return;
-                    };
-                    message
-                }
+                message = messages.recv() => message,
             }
         };
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &mut messages, batch_limit, &audit, self_id, to);
+        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, self_id, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -1055,7 +1189,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
 
 fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
-    messages: &mut tokio::sync::mpsc::Receiver<internal::ConsensusMessage>,
+    messages: &PeerMailbox,
     batch_limit: usize,
     audit: &A,
     self_id: u64,
@@ -1064,16 +1198,19 @@ fn delivery_batch<A: Audit>(
     // Do not spend the eventual-synchrony tail replaying a bounded but stale
     // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
     // protocol's current heartbeat, Accept resend, and catch-up paths repair
-    // them. Keep the newest batch so recovery signals can overtake old ballots.
-    // The shed threshold stays at the *default* batch depth even when the
-    // buggified `batch_limit` is smaller: shedding detects a stale backlog,
-    // and tying it to a one-message batch turns "drop stale traffic" into
-    // "drop everything but the newest message on every drain" — a determinist
-    // starvation of whole message classes that no repair path can outrun (an
-    // adversary dropping every message of one kind forever defeats eventual
-    // synchrony, which the knob's extreme must not do).
+    // them. Keep the newest batch so recovery signals can overtake old ballots
+    // — the drain-side half of the mailbox's keep-newest policy (see
+    // [`PeerMailbox`] for the enqueue-side half, which is what keeps a small
+    // mailbox from starving a message class). The shed threshold stays at the
+    // *default* batch depth even when the buggified `batch_limit` is smaller:
+    // shedding detects a stale backlog, and tying it to a one-message batch
+    // turns "drop stale traffic" into "drop everything but the newest message
+    // on every drain" — a deterministic starvation of whole message classes
+    // that no repair path can outrun (an adversary dropping every message of
+    // one kind forever defeats eventual synchrony, which the knob's extreme
+    // must not do).
     while messages.len() >= batch_limit.max(GRPC_DELIVERY_BATCH) {
-        let Ok(newer) = messages.try_recv() else {
+        let Some(newer) = messages.try_pop() else {
             break;
         };
         // The stale head of the backlog is discarded, never silently: report
@@ -1091,7 +1228,7 @@ fn delivery_batch<A: Audit>(
     batch.push(wire_message(first));
     let mut carried = None;
     while batch.len() < batch_limit {
-        let Ok(message) = messages.try_recv() else {
+        let Some(message) = messages.try_pop() else {
             break;
         };
         if batch_bytes.saturating_add(message.encoded_len()) > GRPC_DELIVERY_BATCH_BYTES {
@@ -1161,7 +1298,7 @@ fn send_snapshot_offers<S, H, A>(
             trace_send_drop(audit, out.self_id, to, &message);
             continue;
         }
-        out.transmit(audit, to, &message);
+        out.transmit(hooks, audit, to, &message);
         if hooks.duplicate_outgoing(to, &message) {
             audit.duplicated_at_send(NodeId(out.self_id), to, &message);
             tracing::info!(
@@ -1170,7 +1307,7 @@ fn send_snapshot_offers<S, H, A>(
                 kind = message_kind(&message),
                 "msg_duplicated_at_send"
             );
-            out.transmit(audit, to, &message);
+            out.transmit(hooks, audit, to, &message);
         }
     }
 }
@@ -1300,7 +1437,7 @@ where
             trace_send_drop(audit, self_id, to, &msg);
             continue;
         }
-        out.transmit(audit, to, &msg);
+        out.transmit(hooks, audit, to, &msg);
         if hooks.duplicate_outgoing(to, &msg) {
             audit.duplicated_at_send(NodeId(self_id), to, &msg);
             tracing::info!(
@@ -1309,7 +1446,7 @@ where
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );
-            out.transmit(audit, to, &msg);
+            out.transmit(hooks, audit, to, &msg);
         }
     }
 }
@@ -2298,9 +2435,8 @@ where
             let channel = ReconnectingChannel::new(&providers, addr, grpc_channel_config());
             peer_channels.push(channel.clone());
             let client = ParosInternalClient::with_origin(channel, origin);
-            let (regular_tx, regular_rx) = tokio::sync::mpsc::channel(tunables.peer_queue_capacity);
-            let (snapshot_tx, snapshot_rx) =
-                tokio::sync::mpsc::channel(GRPC_SNAPSHOT_QUEUE_CAPACITY);
+            let regular = PeerMailbox::new(tunables.peer_queue_capacity);
+            let snapshot = PeerMailbox::new(GRPC_SNAPSHOT_QUEUE_CAPACITY);
             providers
                 .task()
                 .spawn_task(
@@ -2309,7 +2445,7 @@ where
                         client.clone(),
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
-                        regular_rx,
+                        regular.clone(),
                         tunables.delivery_batch,
                         audit.clone(),
                         self_id,
@@ -2325,7 +2461,7 @@ where
                         client,
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
-                        snapshot_rx,
+                        snapshot.clone(),
                         tunables.delivery_batch,
                         audit.clone(),
                         self_id,
@@ -2333,13 +2469,7 @@ where
                     ),
                 )
                 .detach();
-            (
-                id,
-                PeerQueues {
-                    regular: regular_tx,
-                    snapshot: snapshot_tx,
-                },
-            )
+            (id, PeerQueues { regular, snapshot })
         })
         .collect::<BTreeMap<_, _>>();
 

@@ -77,9 +77,10 @@ pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
 /// Which family of coverage gates a workload's `check()` should record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GateScope {
-    /// The safety axis only (the network-swarm campaign, whose provider faults
-    /// outlive `chaos_duration`, so it makes no liveness or coverage claim
-    /// beyond safety).
+    /// Safety only: the red demos and the scripted choreographies, which run a
+    /// deliberately broken cluster (a reneged promise, a silently truncated
+    /// log, a misreported record) that may correctly never converge, so they
+    /// make no liveness or coverage claim beyond safety.
     SafetyOnly,
     /// Every protocol/driver gate the main campaign saturates on.
     Full,
@@ -110,9 +111,12 @@ impl AuditWorld {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Arm the quiescence-gated liveness checks. Off by default so a campaign
-    /// whose faults outlive `chaos_duration` (the network-swarm safety axis)
-    /// never claims a quiet tail it does not have.
+    /// Arm the quiescence-gated liveness checks. Off by default so a
+    /// safety-only campaign — one whose cluster is deliberately broken and may
+    /// correctly never converge — never claims a quiet tail it does not have.
+    /// The main campaign arms them: since Moonpool `43304d8` every fault source
+    /// stops at `chaos_duration` and the partitions in force are healed, so the
+    /// tail is genuinely quiet even with network turbulence on the axis.
     pub(crate) fn enable_liveness_checks(&self) {
         self.lock().liveness = true;
     }

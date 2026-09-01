@@ -1,7 +1,8 @@
 //! Stage-3 simulation tests: seed-replay determinism, a chaos-aware well-formed
 //! single-seed run, multi-slot log progress under a stable leader, and the
-//! safety-and-progress sweep under arbitrary network faults (prefix agreement, no
-//! gaps, monotonic leadership, and progress under eventual synchrony).
+//! safety-and-progress smoke under the combined swarm campaign — network
+//! turbulence, attrition and BUGGIFY on one axis (prefix agreement, no gaps,
+//! monotonic leadership, and progress under eventual synchrony).
 
 use std::collections::BTreeMap;
 
@@ -120,15 +121,20 @@ fn budget_off_smoke_stays_safe() {
 /// fires*: if the demo ever comes back green, either the misreport stopped
 /// landing or the agreement oracles went blind, and both are bugs. (The real
 /// scan reports `faulty(slot, ballot)` instead — the rule this demo proves
-/// load-bearing.)
+/// load-bearing.) The audit states the double-decision twice, on durable
+/// accepts alone ("a durable accept quorum never decides two values for a
+/// slot") and again at apply time ("at most one value is ever chosen for a
+/// slot"); which one a witness reaches first depends on the interleaving, so
+/// either satisfies the contract.
 #[test]
 fn faulty_as_none_demo_stays_red() {
     let report = paros_sim::run_faulty_none_demo_seed(paros_sim::FAULTY_NONE_DEMO_SEED);
     assert!(
-        report
-            .assertion_violations
-            .iter()
-            .any(|v| format!("{v:?}").contains("at most one value is ever chosen")),
+        report.assertion_violations.iter().any(|v| {
+            let text = format!("{v:?}");
+            text.contains("at most one value is ever chosen")
+                || text.contains("a durable accept quorum never decides two values")
+        }),
         "the faulty-as-none demo must surface the double-choose; got: {:?}",
         report.assertion_violations
     );
@@ -158,10 +164,16 @@ fn faulty_as_none_below_prefix_dies_at_boot() {
     );
 }
 
+/// The witnesses farmed on the former network-swarm axis, replayed on the
+/// campaign that absorbed it. That axis existed only because Moonpool's network
+/// faults outlived `chaos_duration`; `43304d8` fixed the lifecycle, so swarm
+/// network turbulence is now part of the main combined campaign and these seeds
+/// replay through the same builder as every other Chain seed.
 #[test]
 fn network_regression_seeds_replay_clean() {
     for &seed in paros_sim::NETWORK_REGRESSION_SEEDS {
-        let report = paros_sim::run_network_seed(seed);
+        let report = run_chain_seed(seed);
+        assert_eq!(report.failed_runs, 0, "network seed {seed}");
         assert!(
             report.assertion_violations.is_empty(),
             "network seed {seed}: {:?}",

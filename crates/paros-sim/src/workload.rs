@@ -544,10 +544,13 @@ impl Workload for ProposeClient {
         // triggers the harness shutdown (every node then leaves its loop), so
         // without this pause the cluster stops ticking the instant the last
         // proposal is acked — a lagging follower would never get a chance to run
-        // commit-replay catch-up. Chaos has ended by now (see `CHAOS_DURATION`),
-        // so this is a quiet tail in which the leader keeps heartbeating and any
-        // node still short of the chosen prefix converges. The `ConvergenceOracle`
-        // asserts over exactly this tail.
+        // commit-replay catch-up. Every fault source has stopped by now (see
+        // `CHAOS_DURATION`) — paros' own hooks by their own clock, Moonpool's
+        // by entering recovery mode, which also heals the partitions in force —
+        // while the damage already done survives, so this is a quiet tail in
+        // which the leader keeps heartbeating and any node still short of the
+        // chosen prefix converges. The `ConvergenceOracle` asserts over exactly
+        // this tail.
         moonpool_sim::select! {
             _ = time.sleep(Duration::from_millis(SETTLE_MS)) => {}
             () = shutdown.cancelled() => {}

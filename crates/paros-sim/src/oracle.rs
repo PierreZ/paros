@@ -730,7 +730,7 @@ pub(crate) struct ChainAgreement {
     max_ack_seq: Cell<Option<u64>>,
     /// A `Noop` gap fill reached the application.
     noop_applied: Cell<bool>,
-    network_guidance: bool,
+    safety_only: bool,
 }
 
 impl ChainAgreement {
@@ -757,13 +757,16 @@ impl ChainAgreement {
             second_leader_seq: Cell::new(None),
             max_ack_seq: Cell::new(None),
             noop_applied: Cell::new(false),
-            network_guidance: false,
+            safety_only: false,
         }
     }
 
-    pub(crate) fn network() -> Self {
+    /// The safety-only flavor, paired with [`ChainWorkload::safety_only`]: it
+    /// keeps every agreement check and drops the campaign-liveness guidance
+    /// gates, which a deliberately broken cluster cannot be asked to satisfy.
+    pub(crate) fn safety_only() -> Self {
         Self {
-            network_guidance: true,
+            safety_only: true,
             ..Self::new()
         }
     }
@@ -1004,7 +1007,7 @@ impl ChainAgreement {
             .second_leader_seq
             .get()
             .is_some_and(|changed| self.max_ack_seq.get().is_some_and(|ack| ack > changed));
-        if self.network_guidance {
+        if self.safety_only {
             if self.noop_applied.get() {
                 assert_reachable!("chain: noop gap fill is applied");
             }

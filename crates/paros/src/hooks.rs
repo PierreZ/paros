@@ -4,8 +4,9 @@
 //! (moonpool's attrition) can only crash a node *between* batches — never at the
 //! persist/send seam within one. [`DriverHooks`] also exposes the driver's
 //! optional policy decisions: delaying an `Accept` re-send, resigning
-//! leadership, and choosing the shortest valid election timeout. Production
-//! passes [`NoHooks`], whose defaults never perturb the driver.
+//! leadership, choosing the shortest valid election timeout, and the peer
+//! mailbox's enqueue-side choices (overtake the queue, evict across kinds).
+//! Production passes [`NoHooks`], whose defaults never perturb the driver.
 
 use paros_core::{Message, NodeId, Slot};
 
@@ -175,6 +176,31 @@ pub trait DriverHooks {
     /// "optimized" into an integer would let a duplicated `Accepted` fabricate
     /// a quorum from a sub-quorum). Moonpool has no message-duplication fault.
     fn duplicate_outgoing(&self, _to: NodeId, _msg: &Message) -> bool {
+        false
+    }
+
+    /// Whether this outbound message should **overtake** everything already
+    /// queued in its peer mailbox — enqueued at the front instead of the back.
+    /// Always safe: the peer transport never promised ordering (a reconnect,
+    /// a retried RPC or the network itself reorders), and every protocol path
+    /// is built for it — but the unary batch RPC normally preserves the order
+    /// a node enqueued in, so within one peer stream this interleaving is
+    /// otherwise unreachable. Consulted only when the mailbox is non-empty
+    /// (overtaking an empty queue changes nothing).
+    fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
+        false
+    }
+
+    /// Whether a **full** peer mailbox should make room for this message by
+    /// evicting its oldest queued message of *any* kind, instead of the
+    /// default oldest-of-the-same-kind victim. Always safe: the mailbox is
+    /// lossy by contract, so any queued message may be lost, and the
+    /// per-kind default is a liveness policy (it stops one class from
+    /// crowding another out on a slow link), not a safety one. Consulted only
+    /// on overflow, so a `true` always evicts something the default would have
+    /// kept — the occasional cross-kind pressure the liveness argument has to
+    /// survive.
+    fn evict_across_kinds(&self, _to: NodeId, _msg: &Message) -> bool {
         false
     }
 

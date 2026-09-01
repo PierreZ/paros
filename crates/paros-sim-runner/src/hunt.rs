@@ -3,10 +3,11 @@
 //! saturation gate), a hunt never stops at a coverage plateau and treats
 //! coverage gates as irrelevant — its only deliverable is failing seeds.
 //!
-//! Usage: `sim-paros-hunt [network|main|snapshot|bounds|amnesia|budget-off] [iterations]`
-//!        `sim-paros-hunt replay-network <seed>` — deterministic single-seed
-//!        replay on the network axis (the red→green witness command)
-//!        `sim-paros-hunt replay-main <seed>` — same on the main campaign
+//! Usage: `sim-paros-hunt [main|snapshot|bounds|amnesia|budget-off] [iterations]`
+//!        `sim-paros-hunt replay-main <seed>` — deterministic single-seed
+//!        replay on the main campaign (the red→green witness command). The
+//!        former `network` axis folded into `main` once Moonpool `43304d8`
+//!        made the post-chaos tail genuinely fault-free.
 //!        `sim-paros-hunt replay-snapshot <seed>` — lifecycle choreography
 //!        `sim-paros-hunt replay-bounds <seed>` — protocol-bounds choreography
 //!        `sim-paros-hunt replay-amnesia <seed>` — the naive-wipe **red demo**
@@ -45,20 +46,19 @@
 use paros_sim::{
     amnesia_demo_hunt, budget_off_hunt, chain_smoke, chunk_corpus_hunt, corpus_hunt,
     explore_budget_off, explore_chain_seed, explore_snapshot_recovery,
-    explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt,
+    explore_snapshot_recovery_seed, faulty_none_demo_hunt, protocol_bounds_hunt,
     run_amnesia_demo_seed, run_bare_quorum_case, run_budget_off_seed, run_chain_seed,
     run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_faulty_none_demo_seed, run_network_seed, run_protocol_bounds_seed,
-    run_snapshot_lifecycle_case, run_snapshot_recovery_seed, run_truncate_demo_seed,
-    truncate_demo_hunt,
+    run_faulty_none_demo_seed, run_protocol_bounds_seed, run_snapshot_lifecycle_case,
+    run_snapshot_recovery_seed, run_truncate_demo_seed, truncate_demo_hunt,
 };
 
 fn main() {
-    let axis = std::env::args().nth(1).unwrap_or_else(|| "network".into());
+    let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
-    if let "replay-network" | "replay-main" | "replay-snapshot" | "replay-bounds"
-    | "replay-amnesia" | "replay-truncate" | "replay-budget-off" | "replay-faulty-none"
-    | "replay-corpus" | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle"
+    if let "replay-main" | "replay-snapshot" | "replay-bounds" | "replay-amnesia"
+    | "replay-truncate" | "replay-budget-off" | "replay-faulty-none" | "replay-corpus"
+    | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle"
     | "replay-chunk-mask" | "replay-chunk-seed" | "explore-snapshot" | "explore-main" =
         axis.as_str()
     {
@@ -68,7 +68,6 @@ fn main() {
             .expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
         let report = match axis.as_str() {
-            "replay-network" => run_network_seed(seed),
             "replay-snapshot" => run_snapshot_recovery_seed(seed),
             // Root + explored continuation timelines: the replay command for
             // choreography failures that live only on explorer branches.
@@ -107,7 +106,6 @@ fn main() {
 
     println!("--- hunt: {axis} axis, {iterations} seeds ---");
     let report = match axis.as_str() {
-        "network" => network_hunt(iterations),
         "main" => chain_smoke(iterations),
         "snapshot" => explore_snapshot_recovery(iterations),
         "bounds" => protocol_bounds_hunt(iterations),
@@ -127,7 +125,7 @@ fn main() {
         "faulty-none" => faulty_none_demo_hunt(iterations),
         other => {
             eprintln!(
-                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'budget-off', 'budget-off-coverage', 'corpus', 'corpus-chunks', 'amnesia', 'truncate', or 'faulty-none')"
+                "unknown axis: {other} (expected 'main', 'snapshot', 'bounds', 'budget-off', 'budget-off-coverage', 'corpus', 'corpus-chunks', 'amnesia', 'truncate', or 'faulty-none')"
             );
             std::process::exit(2);
         }

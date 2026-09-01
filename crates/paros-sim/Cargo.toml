@@ -28,13 +28,13 @@ paros = { path = "../paros", version = "0.2.0" }
 # fast and we track it deliberately, bumping `rev` by hand. Both crates come in
 # without their production (tokio net/fs) features so the sim stays wasm-able; the
 # `native` feature above layers those back on for the native runner.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "980a6acc56da47733ad65ea0786b4c10cde2c1fd", default-features = false }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27", default-features = false }
 
 async-trait = "0.1"
 # `join_all`, to drive the `Pipelined` workload mode's concurrent proposals.
 futures = "0.3"
 http = "1"
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "980a6acc56da47733ad65ea0786b4c10cde2c1fd" }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["codegen"] }
