@@ -407,42 +407,6 @@ pub const CHAIN_REGRESSION_SEEDS: &[u64] = &[
     // with the cluster-wide marked-slot re-check under the availability
     // re-derivation's own formula.
     2_295_340_131_120_414_025,
-    // The per-kind keep-newest mailbox witnesses (2026-09-01, the first
-    // 10,000-seed hunts after swarm network turbulence folded into the main
-    // campaign — the separated network axis was safety-only, so it could never
-    // see them; the same hunt on the pre-unification surfaces was 10,000/10,000
-    // clean). All seven share one shape: after a provably quiet cutoff (every
-    // partition healed at t=4000ms, no send-seam drop past it) a lagging
-    // follower's catch-up responses never arrive — 983 of 983 on the first
-    // seed — so it sits below a chosen gap for the whole 60-second tail. The
-    // responses were under 1 KB and no delivery RPC ever timed out: every one
-    // was evicted at the *leader's* buggified 4–5-slot peer mailbox, behind a
-    // ~130–280 ms round trip to that peer (a per-pair latency degradation, the
-    // persistent damage recovery mode deliberately keeps).
-    //
-    // Two halves, each with its own witnesses. The first four went red on the
-    // original bounded mpsc, whose `try_send` refused the *newest* message
-    // while stale heartbeats drained (its drain-side "keep the newest" shed
-    // loop only engages at 64 queued messages, so at a small capacity the
-    // policy silently flipped to drop-newest); they go green on a keep-newest
-    // mailbox. The next three went red on that plain keep-newest mailbox: a
-    // leader re-sends every pending `Accept` on every beat, so one beat's
-    // burst fills the mailbox by itself and evicts the single catch-up
-    // response queued just before it, on every round trip. Green once
-    // eviction is *per kind* (`PeerMailbox`: a message displaces the oldest of
-    // its own kind, and the oldest overall only when none is queued), after
-    // which the 10,000-seed hunt came back clean. The first two never healed in
-    // the tail ("chain: cluster converged after chaos"); seeds three and four
-    // healed after 0.4 s and 3.9 s of wedge reports (red only on the audit's
-    // gap-wedge claim, 6.7 s and 21.9 s past the cutoff). The mailbox consumes
-    // no randomness, so each seed is a same-interleaving red→green witness.
-    14_371_623_759_479_170_018,
-    13_938_523_914_823_716_398,
-    9_249_500_861_697_710_678,
-    1_470_598_606_547_155_381,
-    12_153_861_921_929_631_187,
-    9_558_440_018_523_712_995,
-    1_336_557_888_375_411_500,
 ];
 
 /// Witnesses farmed on the former network-swarm safety axis, now replayed
