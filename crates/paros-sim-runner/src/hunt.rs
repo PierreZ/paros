@@ -16,6 +16,11 @@
 //!        **red demo** (issue #20 F): RED is the expected, correct result — the
 //!        recovered-vs-persisted divergence leg catching the silent record loss
 //!        of a node that truncated on a corruption verdict instead of crashing.
+//!        `sim-paros-hunt budget-off-coverage [iterations]` — the same axis as
+//!        the CI campaign runs it: coverage-guided selection with the
+//!        saturation gate armed (the raw `budget-off` hunt below is random
+//!        volume, and a gate it reaches easily can still starve under
+//!        guidance).
 //!        `sim-paros-hunt budget-off [iterations]` — the WAITED-leg axis
 //!        (issue #21): corruption may take every copy of a committed item, and
 //!        safety must still hold while the cluster correctly waits.
@@ -39,12 +44,13 @@
 
 use paros_sim::{
     amnesia_demo_hunt, budget_off_hunt, chain_smoke, chunk_corpus_hunt, corpus_hunt,
-    explore_chain_seed, explore_snapshot_recovery, explore_snapshot_recovery_seed,
-    faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt, run_amnesia_demo_seed,
-    run_bare_quorum_case, run_budget_off_seed, run_chain_seed, run_chunk_corpus_seed,
-    run_chunk_mask, run_corpus_mask, run_corpus_seed, run_faulty_none_demo_seed, run_network_seed,
-    run_protocol_bounds_seed, run_snapshot_lifecycle_case, run_snapshot_recovery_seed,
-    run_truncate_demo_seed, truncate_demo_hunt,
+    explore_budget_off, explore_chain_seed, explore_snapshot_recovery,
+    explore_snapshot_recovery_seed, faulty_none_demo_hunt, network_hunt, protocol_bounds_hunt,
+    run_amnesia_demo_seed, run_bare_quorum_case, run_budget_off_seed, run_chain_seed,
+    run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
+    run_faulty_none_demo_seed, run_network_seed, run_protocol_bounds_seed,
+    run_snapshot_lifecycle_case, run_snapshot_recovery_seed, run_truncate_demo_seed,
+    truncate_demo_hunt,
 };
 
 fn main() {
@@ -106,6 +112,13 @@ fn main() {
         "snapshot" => explore_snapshot_recovery(iterations),
         "bounds" => protocol_bounds_hunt(iterations),
         "budget-off" => budget_off_hunt(iterations),
+        // The CI campaign's budget-off axis, standalone: coverage-*guided*
+        // seed selection with the saturation gate armed, rather than the raw
+        // hunt's random volume. The two answer different questions — a gate
+        // the raw hunt reaches easily can still be starved under guidance,
+        // which is exactly the failure shape that is otherwise only visible by
+        // re-running the whole sweep.
+        "budget-off-coverage" => explore_budget_off(iterations),
         "corpus" => corpus_hunt(iterations),
         "corpus-chunks" => chunk_corpus_hunt(iterations),
         // Red demo axes: violations here are the deliverable, not a defect.
@@ -114,7 +127,7 @@ fn main() {
         "faulty-none" => faulty_none_demo_hunt(iterations),
         other => {
             eprintln!(
-                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'budget-off', 'corpus', 'corpus-chunks', 'amnesia', 'truncate', or 'faulty-none')"
+                "unknown axis: {other} (expected 'network', 'main', 'snapshot', 'bounds', 'budget-off', 'budget-off-coverage', 'corpus', 'corpus-chunks', 'amnesia', 'truncate', or 'faulty-none')"
             );
             std::process::exit(2);
         }

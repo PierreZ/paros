@@ -144,7 +144,19 @@ pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
 /// campaign. Its `GateScope::BudgetOff` pair — a repair from a surviving clean
 /// copy AND a correct WAIT at an unrecoverable committed item — must both
 /// fire; the adaptive sweep stops as soon as coverage plateaus.
-pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 128;
+///
+/// Raised from 128 when cooperative leader handoff added its instrumented
+/// surface to `paros-core`/`paros`. The sancov coverage map is **per process**
+/// and shared by every axis, and this one runs fifth: guidance reaching it is
+/// already steering on a warm map, so new instrumented code pulls seed
+/// selection toward the seeds that exercise *it* and away from the
+/// corruption-deep seeds the WAITED leg needs. Run standalone on a cold map the
+/// axis still saturates in ~50 seeds; inside the campaign it needs the
+/// headroom. Only the ceiling moves — the plateau contract
+/// ([`PLATEAU_SEEDS`]) is unchanged, and a saturating run still stops early, so
+/// this costs nothing on the runs that do not need it. (Same remedy as the
+/// #102 bump, for the same reason: new surface, unchanged contract.)
+pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 384;
 /// Seeded-mask volume for the #113 E1 evaluation corpus in the CI campaign.
 /// Scripted and fast per seed; enough draws from the 512-mask space that both
 /// corpus gates (recoverable-converges and unrecoverable-waits) fire.
