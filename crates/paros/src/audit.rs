@@ -108,9 +108,10 @@ pub trait Audit {
     /// This node **refused** an incoming transfer: `target` counts payloads
     /// addressed elsewhere or naming a non-member, `stale` counts authorities
     /// its own durable promise already dominates (plus allocator rewinds and
-    /// re-installs), and `shape` counts malformed tails. Monotone totals for
-    /// this incarnation, reported when they change.
-    fn handoff_refused(&self, node: NodeId, target: u64, stale: u64, shape: u64) {}
+    /// re-installs), `shape` counts malformed tails, and `unfit` counts
+    /// transfers onto a node that needs Phase-1-shaped repair. Monotone totals
+    /// for this incarnation, reported when they change.
+    fn handoff_refused(&self, node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {}
 
     /// This node resigned a handoff-installed leadership because its inherited
     /// read fence stayed uncovered — the deliberate fallback to an ordinary

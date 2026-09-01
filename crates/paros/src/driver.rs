@@ -202,7 +202,7 @@ pub const EV_AUTHORITY_RELINQUISHED: &str = "authority_relinquished";
 pub const EV_AUTHORITY_INSTALLED: &str = "authority_installed";
 
 /// Tracing event: this node refused an incoming transfer. Fields: `node` plus the
-/// monotone per-reason totals `target`, `stale`, `shape`.
+/// monotone per-reason totals `target`, `stale`, `shape`, `unfit`.
 pub const EV_HANDOFF_REFUSED: &str = "handoff_refused";
 
 /// Tracing event: a handoff-installed leadership resigned because its inherited
@@ -1848,18 +1848,21 @@ fn report_handoff<A: Audit>(
     if handoff.rejected_target != last.rejected_target
         || handoff.rejected_stale != last.rejected_stale
         || handoff.rejected_shape != last.rejected_shape
+        || handoff.rejected_unfit != last.rejected_unfit
     {
         audit.handoff_refused(
             NodeId(self_id),
             handoff.rejected_target,
             handoff.rejected_stale,
             handoff.rejected_shape,
+            handoff.rejected_unfit,
         );
         tracing::info!(
             node = self_id,
             target = handoff.rejected_target,
             stale = handoff.rejected_stale,
             shape = handoff.rejected_shape,
+            unfit = handoff.rejected_unfit,
             "handoff_refused"
         );
     }

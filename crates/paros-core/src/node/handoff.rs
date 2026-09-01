@@ -168,6 +168,10 @@ pub struct HandoffCounters {
     pub rejected_stale: u64,
     /// Refused: the payload did not describe a well-formed tail.
     pub rejected_shape: u64,
+    /// Refused: this node is not in a state a leadership without Phase 1 can
+    /// be exercised from — it holds faulty records or an open application
+    /// repair, both of which heal only from a promise quorum's reports.
+    pub rejected_unfit: u64,
     /// Resignations after an inherited fence stayed uncovered for
     /// [`HANDOFF_FENCE_ELECTIONS`] election timeouts.
     pub fence_step_downs: u64,
@@ -477,6 +481,25 @@ impl RawNode {
         }
         if !tail_shape_valid(ballot, from_slot, next_slot, &decided, &pending) {
             self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
+            return;
+        }
+        // The successor must be able to *use* the leadership it is handed. A
+        // node holding faulty records, or an open application repair, needs
+        // Phase-1-shaped work to heal: the repair probe that resolves a blocked
+        // faulty slot is created only by winning an election, and the promise
+        // quorum's reports are the only thing that can decide one. An installed
+        // authority runs no Phase 1, so such a node would take a leadership it
+        // cannot repair from, hold reads behind an inherited fence it cannot
+        // cover, and resign a fence timeout later — a long dead window in
+        // exactly the runs that can least afford one.
+        //
+        // This mirrors the sender-side refusal in
+        // [`RawNode::can_relinquish`]: a handoff moves a *settled* leadership
+        // between nodes that are both in a position to keep it settled.
+        // Refusing costs one ordinary election, which is precisely the
+        // machinery the repair needs anyway.
+        if !self.faulty.is_empty() || self.app_repair.is_some() {
+            self.handoff.rejected_unfit = self.handoff.rejected_unfit.saturating_add(1);
             return;
         }
 

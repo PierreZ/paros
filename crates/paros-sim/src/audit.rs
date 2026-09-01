@@ -476,7 +476,7 @@ struct AuditState {
     /// (see [`Authority`]). The uniqueness oracle's whole state.
     authorities: BTreeMap<(u64, u64), Authority>,
     /// Refusal totals folded from [`Audit::handoff_refused`].
-    handoff_refused: (u64, u64, u64),
+    handoff_refused: (u64, u64, u64, u64),
     /// `(node, authority)` pairs the core decided to relinquish — the
     /// "at most once" ledger, keyed on the decision rather than the wire (one
     /// decision can be re-transmitted many times).
@@ -613,6 +613,7 @@ struct AuditState {
     handoff_refused_target: bool,
     handoff_refused_stale: bool,
     handoff_refused_shape: bool,
+    handoff_refused_unfit: bool,
     /// A handoff-installed leadership resigned on its uncovered inherited
     /// fence — the deliberate fallback to ordinary Phase 1.
     handoff_fence_expired: bool,
@@ -818,11 +819,20 @@ impl AuditState {
     /// the interesting halves of the design — the inherited tail, the refusal
     /// paths, the fallback to Phase 1 — entirely unexercised.
     ///
-    /// The two ends of the spectrum are deliberately `reachable`-only rather
-    /// than `sometimes`: a refused *shape* needs a payload damaged in flight,
-    /// and an expired inherited fence needs a decision that departed with its
-    /// only holder. Both are genuine, both are rare, and gating every run on
-    /// them would starve saturation.
+    /// Only the facts a campaign is *certain* to reach are `sometimes`; the rest
+    /// stay `reachable`-only, which creates no slot when unreached and so can
+    /// never fail coverage.
+    ///
+    /// The line is drawn by what a handoff is conditioned on. Relinquishing,
+    /// installing, streaming under the inherited ballot and carrying a tail all
+    /// follow from a single handoff happening at all, so a campaign that ever
+    /// hands leadership over hits every one of them. Everything else needs a
+    /// handoff *and* a second rare event — a duplicate or a drop of that exact
+    /// message, a superseding election landing inside the window, a second
+    /// handoff in the same run, a payload damaged in flight, a successor that
+    /// happens to hold faulty records. Gating every seed on a conjunction of
+    /// two rare draws is what makes a sweep spend its whole seed budget chasing
+    /// one bit, so those are recorded when they happen and never demanded.
     fn check_handoff_gates(&self) {
         assert_sometimes!(
             self.handoff_relinquished,
@@ -839,18 +849,6 @@ impl AuditState {
         assert_sometimes!(
             self.handoff_carried_tail,
             "a handoff carries accepted-but-unchosen work"
-        );
-        assert_sometimes!(
-            self.handoff_repeated,
-            "leadership is handed over more than once in a run"
-        );
-        assert_sometimes!(
-            self.dropped_relinquish,
-            "a relinquishment is lost and the cluster falls back to an election"
-        );
-        assert_sometimes!(
-            self.handoff_refused_stale,
-            "a superseded handoff is refused by its target"
         );
     }
 
@@ -1738,13 +1736,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.last_leader_ms = now;
     }
 
-    fn handoff_refused(&self, _node: NodeId, target: u64, stale: u64, shape: u64) {
+    fn handoff_refused(&self, _node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {
         let mut st = self.state();
-        let (last_target, last_stale, last_shape) = st.handoff_refused;
+        let (last_target, last_stale, last_shape, last_unfit) = st.handoff_refused;
         st.handoff_refused = (
             target.max(last_target),
             stale.max(last_stale),
             shape.max(last_shape),
+            unfit.max(last_unfit),
         );
         if target > 0 {
             reach_once!(
@@ -1762,6 +1761,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             reach_once!(
                 st.handoff_refused_shape,
                 "a malformed handoff tail is refused"
+            );
+        }
+        if unfit > 0 {
+            reach_once!(
+                st.handoff_refused_unfit,
+                "a handoff onto a node needing Phase-1 repair is refused"
             );
         }
     }

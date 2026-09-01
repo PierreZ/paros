@@ -451,6 +451,30 @@ fn a_leader_trailing_its_own_frontier_past_the_bound_is_refused() {
     );
 }
 
+#[test]
+fn a_successor_that_needs_phase_1_repair_refuses_the_handoff() {
+    // A node holding a faulty record heals only from a promise quorum's
+    // reports, and an installed authority runs no Phase 1. Taking the
+    // leadership would strand its own repair until a fence timeout resigned it.
+    let mut nodes = cluster_with_three_chosen();
+    let mut disk = TestStorage::from_node(&nodes[1]);
+    disk.rot(Slot(1));
+    nodes[1] = RawNode::new(&disk);
+    nodes[1].set_election_timeout(NO_CHECK_QUORUM);
+    assert!(!nodes[1].faulty_entries().is_empty());
+
+    nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+
+    assert!(!nodes[1].is_leader(), "an unfit successor refuses");
+    assert_eq!(nodes[1].handoff_counters().rejected_unfit, 1);
+    // The cost is one ordinary election — which is exactly the machinery the
+    // faulty record needs to be repaired from.
+    make_leader(&mut nodes, 1);
+    assert!(nodes[1].is_leader());
+}
+
 // ---- the fallback: ordinary Phase 1 -----------------------------------------
 
 #[test]
