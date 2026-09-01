@@ -79,7 +79,16 @@ const P_WRITE_EIO: f64 = 0.01;
 /// Per-call firing probability of the fsync-failure BUGGIFY site. Independent
 /// from the write site — the sweep must be able to select the two failure
 /// modes separately (same rule as the driver's two durability seams).
-const P_FSYNC_FAIL: f64 = 0.01;
+///
+/// Raised from 0.01 when the coverage-guided sweep starved the torn-tail leg
+/// ("storage: a crash-truncatable tail is discarded on boot") on one CI
+/// build: that shape is this site's lost leg × the torn coin × fresh appends
+/// staged × a later boot, and at 0.01 per sync it fired on only ~1–2% of raw
+/// seeds — rare enough that a guided schedule clustering on a few roots can
+/// miss it for a thousand iterations, and it did. Per BUGGIFY doctrine the
+/// rare-but-valid shape is made *likely*, not left to the swarm to stumble
+/// into. Still an independent per-seed location; only its per-call rate moved.
+const P_FSYNC_FAIL: f64 = 0.03;
 /// Coin on the fsync *lost* leg: the crash tore the batch instead of losing
 /// it whole — a prefix of the staged fresh appends reaches disk without
 /// identifiers (Stage 7's per-record torn durability; the `CrashTail` leg of

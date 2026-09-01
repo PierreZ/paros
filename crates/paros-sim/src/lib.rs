@@ -975,10 +975,18 @@ fn faulty_none_demo_builder() -> SimulationBuilder {
 /// message — every one is caught earlier, on durable accepts alone, by "a
 /// durable accept quorum never decides two values for a slot" (the audit's
 /// crown jewel, judged with no apply in the loop), followed by the
-/// decided-value, commit and applied-value cascade. This seed is the tightest
-/// of them. Both messages name the same violation — two values decided for
-/// one slot — and the demo test accepts either.
-pub const FAULTY_NONE_DEMO_SEED: u64 = 8_508_603_904_814_693_545;
+/// decided-value, commit and applied-value cascade. Both messages name the
+/// same violation — two values decided for one slot — and the demo test
+/// accepts either.
+///
+/// Re-hunted once more when the fsync-failure site's per-call rate rose from
+/// 0.01 to 0.03 (`P_FSYNC_FAIL`): the draw count is unchanged, but every seed
+/// whose coin lands between the two thresholds now takes the fault, which
+/// moved the prior witness (`8508603904814693545`) off its shape. A fresh
+/// 2,000-seed hunt returned this single red, carrying the durable-accept
+/// agreement violation with its decided-value, commit and applied-value
+/// cascade.
+pub const FAULTY_NONE_DEMO_SEED: u64 = 4_208_498_603_699_014_883;
 
 /// Replay one faulty-as-none red-demo seed (the interesting result is the
 /// violation, not a green run).
