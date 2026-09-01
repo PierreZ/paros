@@ -1150,12 +1150,13 @@ fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
 // lifecycle, queue, batch shape, and the audit identity for drop reports);
 // a bundle would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
-async fn run_peer_delivery<P: Providers, A: Audit>(
+async fn run_peer_delivery<P: Providers, H: DriverHooks, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
     messages: PeerMailbox,
     batch_limit: usize,
+    hooks: H,
     audit: A,
     self_id: u64,
     to: NodeId,
@@ -1171,8 +1172,20 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
                 message = messages.recv() => message,
             }
         };
+        // Park the drain for one tick before batching. The mailbox keeps
+        // filling while we wait, so the batcher below meets a real backlog
+        // rather than the one-or-two messages a promptly drained queue holds —
+        // the concurrency window the enqueue-side hooks cannot reach.
+        if hooks.hold_peer_delivery(to) {
+            moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                _ = time.sleep(TICK_INTERVAL) => {}
+            }
+        }
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, self_id, to);
+        let (batch, next) =
+            delivery_batch(first, &messages, batch_limit, &hooks, &audit, self_id, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -1187,10 +1200,15 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     }
 }
 
-fn delivery_batch<A: Audit>(
+// The batcher's inputs are the batch head, the queue it drains, the shape
+// limits, and the two ports (hooks decide, audit observes) plus the identity a
+// drop is reported under; a bundle would only rename the same seven things.
+#[allow(clippy::too_many_arguments)]
+fn delivery_batch<H: DriverHooks, A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &PeerMailbox,
     batch_limit: usize,
+    hooks: &H,
     audit: &A,
     self_id: u64,
     to: NodeId,
@@ -1238,6 +1256,12 @@ fn delivery_batch<A: Audit>(
         batch_bytes += message.encoded_len();
         batch.push(wire_message(message));
     }
+    // The drain-side reorder, consulted only where it can have an effect: the
+    // peer transport never promised ordering, and reversing a whole batch is
+    // the shape a retried RPC or a re-established stream produces.
+    if batch.len() > 1 && hooks.reverse_delivery_batch(to) {
+        batch.reverse();
+    }
     (internal::Deliver { messages: batch }, carried)
 }
 
@@ -1265,6 +1289,26 @@ fn send_snapshot_offers<S, H, A>(
     A: Audit,
 {
     for &(to, offered_index, ballot, config_id) in snapshot_offers {
+        // The mismatch skip below, taken spuriously: the requester re-asks
+        // every tick and any other custodian may answer, so an unserved beat
+        // is always safe — and this reaches the "nobody served me this round"
+        // state without needing an application repair to be open.
+        //
+        // Deliberately *not* reported through `Audit::snapshot_offer_skipped`:
+        // that channel's coverage gate claims a **mismatched** offer was
+        // withheld, and a hook that can fire on a perfectly matched offer would
+        // satisfy it trivially. The hook's own BUGGIFY pairing proves this
+        // location fires; the trace field says which of the two skips a reader
+        // is looking at.
+        if hooks.skip_snapshot_offer(to) {
+            tracing::info!(
+                node = out.self_id,
+                offered = offered_index.0,
+                reason = "hook",
+                "snapshot_offer_skipped"
+            );
+            continue;
+        }
         if storage.applied_slot() != Some(offered_index) {
             // An offered snapshot must describe exactly the application prefix
             // the protocol message names. Stage 8 makes a mismatch a
@@ -1279,6 +1323,7 @@ fn send_snapshot_offers<S, H, A>(
             tracing::info!(
                 node = out.self_id,
                 offered = offered_index.0,
+                reason = "mismatch",
                 "snapshot_offer_skipped"
             );
             continue;
@@ -2366,7 +2411,12 @@ pub async fn run_node<P, S, H, A>(
 where
     P: Providers,
     S: NodeStorage,
-    H: DriverHooks,
+    // `Clone + Send + Sync + 'static` for the same reason the audit needs it:
+    // the peer-delivery tasks own two of the driver's decisions (hold a drained
+    // batch, reverse it), so each task carries its own handle. The clone shares
+    // the same underlying decision source, and production's [`NoHooks`] is a
+    // zero-sized `Copy` type.
+    H: DriverHooks + Clone + Send + Sync + 'static,
     // `Clone + Send + Sync + 'static` because each peer-delivery task carries
     // its own handle to the audit: the bounded-mailbox drops happen inside
     // those tasks, and reporting them (`Audit::dropped_at_mailbox`) is part of
@@ -2447,6 +2497,7 @@ where
                         incarnation_shutdown.clone(),
                         regular.clone(),
                         tunables.delivery_batch,
+                        hooks.clone(),
                         audit.clone(),
                         self_id,
                         id,
@@ -2463,6 +2514,7 @@ where
                         incarnation_shutdown.clone(),
                         snapshot.clone(),
                         tunables.delivery_batch,
+                        hooks.clone(),
                         audit.clone(),
                         self_id,
                         id,
@@ -2808,7 +2860,14 @@ where
                 });
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
-                next_tick = time.now() + TICK_INTERVAL;
+                // Pacing, not a protocol bound: every timeout the core owns is
+                // counted in ticks, so a node that waits twice as long between
+                // ticks is exactly a slow node. Stretching desynchronizes the
+                // cluster's protocol clocks — a shape moonpool's clock skew
+                // reaches only for the wall clock, never for the tick counter
+                // the election and read-round timers actually run on.
+                next_tick = time.now()
+                    + if hooks.stretch_tick_interval() { TICK_INTERVAL * 2 } else { TICK_INTERVAL };
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision

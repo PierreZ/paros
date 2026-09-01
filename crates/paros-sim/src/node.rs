@@ -34,36 +34,6 @@ use paros::{
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 const QUIET_HOOKS_KEY: &str = "paros-quiet-driver-hooks";
-/// Flag key for the **adversarial amnesia red demo** (issue #19 item D): when
-/// set, exactly one node that crashes after raising its durable promise is
-/// wiped (its disk deleted from the world) and rejoins **naively** — as itself,
-/// with no protocol support. This is *proven unsafe* (CTRL's `MarkNonVoting`
-/// takedown: a node that lost its promise can accept from an old leader while
-/// the new leader still counts that promise), so the demo's contract is to go
-/// **red**: the cross-restart promise audit must catch the reneged promise.
-/// Never set on a real campaign; `prob_wipe` stays 0 there (a snapshot restores
-/// the log, not the promise — node replacement is #22's reconfiguration).
-const NAIVE_WIPE_KEY: &str = "paros-naive-wipe-demo";
-
-/// Flag key for the **truncate-on-mismatch red demo** (issue #20 item F): when
-/// set, one persisted accepted record is corrupted at a reboot, and the boot
-/// scan — instead of taking Stage 7's crash baseline — reproduces the classic
-/// CTRL Figure 2 bug (found in both `ZooKeeper` and `LogCabin`): truncate from the
-/// faulty entry onward and keep running as if the log simply ended earlier.
-/// The demo's contract is to go **red**: the audit's recovered-vs-persisted
-/// divergence leg must surface the silent loss as an `assertion_violation`.
-/// Never set on a real campaign.
-const TRUNCATE_ON_MISMATCH_KEY: &str = "paros-truncate-on-mismatch-demo";
-
-/// Flag key for the **faulty-as-none red demo** (issue #21, CTRL §5.1.1's
-/// first known-fatal mutation): when set, the boot scan classifies a rotted
-/// record normally but *withholds* it from the tri-state — the acceptor then
-/// reports "nothing accepted here" for a slot whose value it lost, the CTRL
-/// Figure-2 bug class wearing a protocol hat. A promise quorum that excludes
-/// the record's surviving clean copy then sees a unanimous `none` and no-op
-/// fills a chosen slot: two values chosen for one slot. The demo's contract
-/// is to go **red** on the agreement oracles. Never set on a real campaign.
-const FAULTY_AS_NONE_KEY: &str = "paros-faulty-as-none-demo";
 
 /// Flag key for **budget-off** runs (issue #21/#71, the WAITED leg): the
 /// per-record clean-quorum budget on corruption injection is lifted, so every
@@ -72,15 +42,24 @@ const FAULTY_AS_NONE_KEY: &str = "paros-faulty-as-none-demo";
 /// losing data — and the WAITED gate proves the leg is genuinely exercised.
 const BUDGET_OFF_KEY: &str = "paros-budget-off";
 
-/// Per-call firing probability of the write-`EIO` BUGGIFY site (one location,
-/// per-seed activation × per-call firing; the record identity travels on the
-/// typed error, not on the location).
-const P_WRITE_EIO: f64 = 0.01;
-/// Per-call firing probability of the fsync-failure BUGGIFY site. Independent
-/// from the write site — the sweep must be able to select the two failure
-/// modes separately (same rule as the driver's two durability seams).
-const P_FSYNC_FAIL: f64 = 0.01;
-/// Per-call firing probability of the **forced torn tail** BUGGIFY site: its
+/// **Default** per-call firing probability of the write-`EIO` BUGGIFY site (one
+/// location, per-seed activation × per-call firing; the record identity travels
+/// on the typed error, not on the location). The rate itself is a knob — see
+/// [`WritePathRates`], which draws it per node per seed.
+const P_WRITE_EIO: f64 = PCT_WRITE_EIO as f64 / 100.0;
+/// [`P_WRITE_EIO`] as the integer percentage its knob draws in (see
+/// [`WritePathRates`]); the two must not drift, so the probability is derived
+/// from this rather than written twice.
+const PCT_WRITE_EIO: u8 = 1;
+/// **Default** per-call firing probability of the fsync-failure BUGGIFY site.
+/// Independent from the write site — the sweep must be able to select the two
+/// failure modes separately (same rule as the driver's two durability seams) —
+/// and its rate is an independent knob too ([`WritePathRates`]).
+const P_FSYNC_FAIL: f64 = PCT_FSYNC_FAIL as f64 / 100.0;
+/// [`P_FSYNC_FAIL`] as the integer percentage its knob draws in.
+const PCT_FSYNC_FAIL: u8 = 1;
+/// **Default** per-call firing probability of the **forced torn tail** BUGGIFY
+/// site (its rate is a knob: [`WritePathRates`]): its
 /// own location, consulted on a `Sync` whose stage holds fresh appends, that
 /// takes the fsync site's *lost* leg with the torn coin already decided. The
 /// torn-tail shape ("storage: a crash-truncatable tail is discarded on boot")
@@ -94,7 +73,9 @@ const P_FSYNC_FAIL: f64 = 0.01;
 /// The fault it injects is the ordinary fsync loss (same ledger entry, same
 /// budget check, same crash decision by the driver), so every downstream
 /// invariant sees exactly what the unforced leg produces.
-const P_FORCE_TORN_TAIL: f64 = 0.05;
+const P_FORCE_TORN_TAIL: f64 = PCT_FORCE_TORN_TAIL as f64 / 100.0;
+/// [`P_FORCE_TORN_TAIL`] as the integer percentage its knob draws in.
+const PCT_FORCE_TORN_TAIL: u8 = 5;
 /// Coin on the fsync *lost* leg: the crash tore the batch instead of losing
 /// it whole — a prefix of the staged fresh appends reaches disk without
 /// identifiers (Stage 7's per-record torn durability; the `CrashTail` leg of
@@ -103,7 +84,12 @@ const P_FORCE_TORN_TAIL: f64 = 0.05;
 /// fsync failure; whole-loss vs torn is the world's outcome-shaping of that
 /// one fault, and per-seed location activation must not suppress the torn
 /// flavor (the whole-loss leg is already the clean-crash model's default).
-const P_TORN_TAIL: f64 = 0.75;
+/// Its *value* is still a knob ([`WritePathRates`]) — a knob's un-activated
+/// draw is the default, so shaping the coin per seed cannot suppress a leg the
+/// way gating the coin behind an activation would.
+const P_TORN_TAIL: f64 = PCT_TORN_TAIL as f64 / 100.0;
+/// [`P_TORN_TAIL`] as the integer percentage its knob draws in.
+const PCT_TORN_TAIL: u8 = 75;
 /// Per-boot firing probabilities of the Stage-7 rot BUGGIFY sites — each fault
 /// family its own independent location (per-seed activation × per-boot
 /// firing), modelling latent faults that surfaced while the node was down and
@@ -123,6 +109,15 @@ const P_SNAP_CHUNK_ROT: f64 = 0.05;
 /// in-flight accept writes one torn batch can leave unwitnessed (a `Ready`
 /// batch is the driver's flush unit, and its accept count is bounded by the
 /// leader's recovery page size).
+///
+/// **Deliberately not a knob.** It is not a tunable that shapes a run but a
+/// bound the classifier's correctness depends on: it must equal the driver's
+/// real maximum unwitnessed in-flight window. Widen it and the boot scan may
+/// discard as "crash tail" a record that *was* acknowledged — data loss the
+/// scan invents. Narrow it and legitimate crash tails are classified as
+/// corruption and park otherwise healthy nodes. Neither extreme is a valid
+/// configuration, so this constant tracks [`paros::LEADER_RECOVERY_BATCH`]
+/// instead of being drawn.
 const MAX_TORN_TAIL: usize = 64;
 
 /// A paros node in the simulation.
@@ -142,70 +137,6 @@ impl Process for QuietNodeProcess {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         if ctx.state().get::<bool>(QUIET_HOOKS_KEY).is_none() {
             ctx.state().publish(QUIET_HOOKS_KEY, true);
-        }
-        NodeProcess.run(ctx).await
-    }
-}
-
-/// A paros node for the **amnesia red demo** ([`NAIVE_WIPE_KEY`]): identical to
-/// [`NodeProcess`] except that one node per run loses its disk on a restart and
-/// rejoins naively. The demo's deliverable is the resulting
-/// `assertion_violation` — the cross-restart promise audit catching the reneged
-/// promise — never a green run.
-pub(crate) struct NaiveWipeNodeProcess;
-
-#[async_trait]
-impl Process for NaiveWipeNodeProcess {
-    fn name(&self) -> &'static str {
-        "paros-node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.state().get::<bool>(NAIVE_WIPE_KEY).is_none() {
-            ctx.state().publish(NAIVE_WIPE_KEY, true);
-        }
-        NodeProcess.run(ctx).await
-    }
-}
-
-/// A paros node for the **truncate-on-mismatch red demo**
-/// ([`TRUNCATE_ON_MISMATCH_KEY`]): identical to [`NodeProcess`] except that
-/// one persisted record is corrupted at a qualifying reboot and the boot scan
-/// then truncates on the mismatch instead of crashing — the CTRL Figure 2 bug
-/// class Stage 7's *never truncate on a mismatch* invariant exists to forbid.
-/// The deliverable is the resulting `assertion_violation`, never a green run.
-pub(crate) struct TruncateOnMismatchNodeProcess;
-
-#[async_trait]
-impl Process for TruncateOnMismatchNodeProcess {
-    fn name(&self) -> &'static str {
-        "paros-node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.state().get::<bool>(TRUNCATE_ON_MISMATCH_KEY).is_none() {
-            ctx.state().publish(TRUNCATE_ON_MISMATCH_KEY, true);
-        }
-        NodeProcess.run(ctx).await
-    }
-}
-
-/// A paros node for the **faulty-as-none red demo** ([`FAULTY_AS_NONE_KEY`]):
-/// identical to [`NodeProcess`] except that the boot scan withholds its
-/// recoverable classification from the Promise tri-state — a rotted copy
-/// counts toward the none-tally. The deliverable is the resulting agreement
-/// `assertion_violation`, never a green run.
-pub(crate) struct FaultyAsNoneNodeProcess;
-
-#[async_trait]
-impl Process for FaultyAsNoneNodeProcess {
-    fn name(&self) -> &'static str {
-        "paros-node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.state().get::<bool>(FAULTY_AS_NONE_KEY).is_none() {
-            ctx.state().publish(FAULTY_AS_NONE_KEY, true);
         }
         NodeProcess.run(ctx).await
     }
@@ -295,11 +226,7 @@ async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
     }
     // Every fault on this axis is a scripted injection: the swarm sites and
     // the driver's BUGGIFY hooks stay dark so a case replays as choreographed.
-    let faults = StorageFaults {
-        time: ctx.time().clone(),
-        cutoff: Duration::ZERO,
-        enabled: false,
-    };
+    let faults = StorageFaults::new(ctx.time().clone(), Duration::ZERO, false);
     let hooks = BuggifyHooks::new(ctx.time().clone(), Duration::ZERO, false);
     let checker = audit_world(ctx.state());
     let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
@@ -341,7 +268,6 @@ async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
             self_rank.0,
             faults.clone(),
             checker.clone(),
-            DemoMode::default(),
         );
         let restart = scripted_restart_signal(ctx, &world, &my_ip, boot_epoch);
         let exited = moonpool_sim::select! {
@@ -473,14 +399,11 @@ impl Process for NodeProcess {
         // hooks' chaos window and quiet-mode switch: after the cutoff the world
         // stops injecting **new** faults but never heals the consequences of
         // old ones — recovery through the tail must be genuine.
-        let faults = StorageFaults {
-            time: ctx.time().clone(),
-            cutoff: Duration::from_millis(crate::CHAOS_DURATION_MS),
-            enabled: perturb,
-        };
-        let naive_wipe_demo = ctx.state().get::<bool>(NAIVE_WIPE_KEY) == Some(true);
-        let truncate_demo = ctx.state().get::<bool>(TRUNCATE_ON_MISMATCH_KEY) == Some(true);
-        let faulty_none_demo = ctx.state().get::<bool>(FAULTY_AS_NONE_KEY) == Some(true);
+        let faults = StorageFaults::new(
+            ctx.time().clone(),
+            Duration::from_millis(crate::CHAOS_DURATION_MS),
+            perturb,
+        );
         if ctx.state().get::<bool>(BUDGET_OFF_KEY) == Some(true) {
             world
                 .lock()
@@ -560,14 +483,6 @@ impl Process for NodeProcess {
                 tracing::info!(node = self_rank.0, "storage_parked");
                 return Ok(());
             }
-            // The amnesia red demo (item D): on a rejoin with a raised durable
-            // promise, wipe the disk once and let the node come back naively.
-            if naive_wipe_demo {
-                maybe_naive_wipe(&world, &my_ip, self_rank.0);
-            }
-            if truncate_demo {
-                maybe_demo_corrupt(&world, &my_ip, self_rank.0);
-            }
             let storage = DurableStorage::restore(
                 config.clone(),
                 Arc::downgrade(&world),
@@ -575,11 +490,6 @@ impl Process for NodeProcess {
                 self_rank.0,
                 faults.clone(),
                 checker.clone(),
-                DemoMode {
-                    truncate_on_mismatch: truncate_demo,
-                    naive_wipe: naive_wipe_demo,
-                    faulty_as_none: faulty_none_demo,
-                },
             );
             match run_node(
                 ctx.providers().clone(),
@@ -654,84 +564,6 @@ impl Process for NodeProcess {
     }
 }
 
-/// One-shot disk wipe for the amnesia red demo: the first time a node with a
-/// raised durable promise comes back through the restart path, delete its disk
-/// so it rejoins as itself with no memory of the promise. Deterministic per
-/// seed (the first qualifying restart spends the single wipe budget).
-fn maybe_naive_wipe(world: &Arc<Mutex<StorageWorld>>, key: &str, node: u64) {
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    if guard.wipe_spent {
-        return;
-    }
-    let promised = guard
-        .disks
-        .get(key)
-        .map(|disk| disk.hard_state.max_promised_ballot);
-    if promised.is_some_and(|ballot| ballot > Ballot::default()) {
-        guard.disks.remove(key);
-        guard.marks.remove(key);
-        guard.wipe_spent = true;
-        // Demo-only anchor: the wipe genuinely happened before the naive rejoin.
-        assert_reachable!("amnesia demo: a wiped node rejoins naively");
-        tracing::info!(node, "naive_wipe");
-    }
-}
-
-/// One-shot corruption for the truncate-on-mismatch red demo: the first time a
-/// node reboots holding a clean, persisted accepted record, corrupt one —
-/// preferring a *chosen* record, the dangerous loss — so the demo boot scan
-/// has a mismatch to (buggily) truncate on. Deterministic per seed.
-fn maybe_demo_corrupt(world: &Arc<Mutex<StorageWorld>>, key: &str, node: u64) {
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    if guard.demo_rot_spent {
-        return;
-    }
-    let Some(disk) = guard.disks.get(key) else {
-        return;
-    };
-    let chosen = disk.hard_state.chosen_index;
-    let target = disk
-        .accepted
-        .keys()
-        .rfind(|slot| disk.slot_health(**slot).clean() && chosen.is_some_and(|ci| **slot <= ci))
-        .copied()
-        .or_else(|| {
-            disk.accepted
-                .keys()
-                .rfind(|slot| disk.slot_health(**slot).clean())
-                .copied()
-        });
-    let Some(slot) = target else {
-        return;
-    };
-    let Some(disk) = guard.disks.get_mut(key) else {
-        return;
-    };
-    disk.entry_health.insert(
-        slot,
-        SlotHealth {
-            entry: RecordHealth::Faulty,
-            id: WitnessStatus::Present,
-        },
-    );
-    guard
-        .marks
-        .entry(key.to_string())
-        .or_default()
-        .insert(slot.0);
-    guard.demo_rot_spent = true;
-    guard.note_corruption(CorruptionInjection {
-        node,
-        record: StorageRecord::Accepted(slot),
-        kind: CorruptionKind::BitFlip,
-        block: false,
-        outcome: CorruptionOutcome::Dormant,
-    });
-    // Demo-only anchor: the corruption genuinely landed before the buggy boot.
-    assert_reachable!("truncate demo: a persisted record is corrupted before a reboot");
-    tracing::info!(node, slot = slot.0, "demo_corrupt");
-}
-
 /// The **contract-suite workload** (issue #21 item F): runs the shared
 /// [`paros::storage_contract_suite`] against the world-backed [`DurableStorage`]
 /// inside one quiet simulation iteration, so the sim's storage fake can never
@@ -753,11 +585,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             .unwrap_or_else(PoisonError::into_inner)
             .set_cluster_size(1);
         let checker = audit_world(ctx.state());
-        let faults = StorageFaults {
-            time: ctx.time().clone(),
-            cutoff: Duration::ZERO,
-            enabled: false,
-        };
+        let faults = StorageFaults::new(ctx.time().clone(), Duration::ZERO, false);
         let config = Config {
             id: NodeId(0),
             peers: vec![NodeId(0)],
@@ -773,7 +601,6 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 100 + instance,
                 faults.clone(),
                 checker.clone(),
-                DemoMode::default(),
             )
         };
         // A reopen is a clean reboot of the same store: drop the handle and
@@ -788,7 +615,6 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 node_id,
                 faults.clone(),
                 checker.clone(),
-                DemoMode::default(),
             )
         };
         paros::storage_contract_suite(fresh, reopen);
@@ -975,12 +801,6 @@ pub(crate) enum CorruptionOutcome {
     /// (an in-place repair — a re-sent `Accept`, a learned chosen value, a
     /// decided no-op) or superseded by truncation/snapshot custodianship.
     Recovered,
-    /// Withheld from the tri-state by the faulty-as-none red demo — never
-    /// legal outside it; the agreement oracles are what catch it.
-    DemoMisreported,
-    /// Silently truncated by the truncate-on-mismatch red demo — never legal
-    /// outside it; the audit's divergence leg is what catches it.
-    DemoTruncated,
 }
 
 /// Ground truth of one Stage-7 corruption injection.
@@ -1055,10 +875,6 @@ struct StorageWorld {
     /// a clean flush (or discarded as a crash tail). These are what the
     /// budget counts.
     marks: BTreeMap<String, BTreeSet<u64>>,
-    /// The amnesia demo's single wipe budget (see [`NAIVE_WIPE_KEY`]).
-    wipe_spent: bool,
-    /// The truncate-on-mismatch demo's single injection budget.
-    demo_rot_spent: bool,
     /// Ground truth of every Stage-7 corruption injection, in order.
     corruptions: Vec<CorruptionInjection>,
     /// Nodes terminally crashed by a detected persistent fault (detect ⇒
@@ -1336,7 +1152,7 @@ impl StorageWorld {
                 // widened, while every other family gate fired. Per the
                 // assertion doctrine, a leg the sweep is not *certain* to
                 // reach anchors exploration when hit and never fails coverage.
-                if injection.block && outcome != CorruptionOutcome::DemoTruncated {
+                if injection.block {
                     assert_reachable!(
                         "storage: a block fault corrupts a contiguous run of entries"
                     );
@@ -1507,6 +1323,60 @@ impl StorageWorld {
     }
 }
 
+/// Per-boot rot firing rates, one **independent knob location per fault
+/// family** (AGENTS.md prong 2). The defaults are this module's documented
+/// `P_*` constants; an activated seed multiplies one family's rate toward its
+/// extreme.
+///
+/// **The floor is the cap plus the budget.** Each rate is clamped to 0.5, so a
+/// boot can never rot *every* candidate record, and every family still passes
+/// through [`StorageWorld::may_corrupt_record`]'s per-record clean-quorum
+/// budget (or [`StorageWorld::may_park`]'s dead-node budget for the families
+/// that crash), which is what keeps a live quorum readable. Density buys a
+/// denser fault *window*, never a longer one: the sites are rolled only while
+/// [`StorageFaults::active`] holds.
+#[derive(Clone, Copy)]
+struct RotRates {
+    entry: f64,
+    lost_write: f64,
+    misdirect: f64,
+    snapshot: f64,
+    promise: f64,
+    meta: f64,
+    read_eio: f64,
+    snap_chunk: f64,
+}
+
+impl RotRates {
+    fn for_boot() -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        let dense = |base: f64, multiplier: u64| (base * multiplier as f64).min(0.5);
+        Self {
+            entry: dense(P_ENTRY_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
+            lost_write: dense(P_LOST_WRITE, buggify_knob!(1_u64, 2_u64..6_u64)),
+            misdirect: dense(P_MISDIRECT, buggify_knob!(1_u64, 2_u64..6_u64)),
+            snapshot: dense(P_SNAPSHOT_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
+            promise: dense(P_PROMISE_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
+            meta: dense(P_META_FAULT, buggify_knob!(1_u64, 2_u64..6_u64)),
+            read_eio: dense(P_READ_EIO, buggify_knob!(1_u64, 2_u64..6_u64)),
+            snap_chunk: dense(P_SNAP_CHUNK_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
+        }
+    }
+
+    /// Whether any family drew above its default — the BUGGIFY pairing's
+    /// condition.
+    fn any_dense(self) -> bool {
+        self.entry > P_ENTRY_ROT
+            || self.lost_write > P_LOST_WRITE
+            || self.misdirect > P_MISDIRECT
+            || self.snapshot > P_SNAPSHOT_ROT
+            || self.promise > P_PROMISE_ROT
+            || self.meta > P_META_FAULT
+            || self.read_eio > P_READ_EIO
+            || self.snap_chunk > P_SNAP_CHUNK_ROT
+    }
+}
+
 /// Roll the Stage-7 rot sites for one booting node: latent faults that
 /// surfaced while it was down, injected at the boot that will immediately read
 /// them back (the boot scan runs before anything else in `run_node`, with no
@@ -1516,18 +1386,20 @@ impl StorageWorld {
 /// each is gated on [`StorageWorld::may_park`]'s dead-node budget.
 #[allow(clippy::too_many_lines)] // one flat block per independent BUGGIFY location
 fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &AuditWorld) {
-    // Rot density is workload-buggified config (prong 2): one per-boot knob
-    // multiplies every family's *firing* probability toward its extreme (a
-    // seed whose boots rot several families at once), capped so a probability
-    // stays a probability. Only the firing rates scale — the per-record
-    // clean-quorum budget and the budget-off axis semantics are untouched.
-    #[allow(clippy::cast_precision_loss)]
-    let density = buggify_knob!(1_u64, 2_u64..6_u64) as f64;
-    if density > 1.0 {
+    // Rot density is workload-buggified config (prong 2), and **one knob per
+    // family**: each multiplies its own family's *firing* probability toward
+    // the extreme, capped so a probability stays a probability. Per family
+    // rather than one shared multiplier because per-seed activation has to
+    // compose — a seed whose boots rot lost writes hard but flip no bits is a
+    // different disk from one that does the reverse, and a single location can
+    // only ever select "all families at once". Only the firing rates scale:
+    // the per-record clean-quorum budget and the budget-off axis semantics are
+    // untouched.
+    let rates = RotRates::for_boot();
+    if rates.any_dense() {
         // BUGGIFY pairing: a boot genuinely rolled at the dense extreme.
         assert_reachable!("storage: a boot rolls rot at buggified density");
     }
-    let dense = |p: f64| (p * density).min(0.5);
     let clean_slots = |world: &StorageWorld| -> Vec<Slot> {
         world.disks.get(key).map_or_else(Vec::new, |disk| {
             disk.accepted
@@ -1573,7 +1445,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // it faulty and keeps running — so the gate is the per-record budget, not
     // the dead-node budget. Only the identifier-lost sub-case (unidentifiable
     // ⇒ crash) still needs to park, so it also needs the dead-node budget.
-    if buggify_with_prob!(dense(P_ENTRY_ROT)) {
+    if buggify_with_prob!(rates.entry) {
         let slots = clean_slots(world);
         let permitted: Vec<Slot> = slots
             .iter()
@@ -1628,7 +1500,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // A lost write: the entry reads back as its reserved record where the
     // identifier exists (absence made detectable by the reserved-record
     // contract). Identity known ⇒ recoverable ⇒ per-record budget, no park.
-    if buggify_with_prob!(dense(P_LOST_WRITE)) {
+    if buggify_with_prob!(rates.lost_write) {
         let slots = clean_slots(world);
         if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
@@ -1646,7 +1518,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     }
     // A misdirected write: valid checksum, wrong identity — the identity
     // check inside the checksummed region catches it. Recoverable likewise.
-    if buggify_with_prob!(dense(P_MISDIRECT)) {
+    if buggify_with_prob!(rates.misdirect) {
         let slots = clean_slots(world);
         if let Some(slot) = pick_permitted(world, key, &slots) {
             mark_entry(
@@ -1667,7 +1539,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // recovers it (local log replay at floor 0, a peer's InstallSnapshot
     // otherwise), so no park; a singleton under a truncated log has no peer
     // to recover from, so budget-on skips that one unrecoverable shape.
-    if buggify_with_prob!(dense(P_SNAPSHOT_ROT))
+    if buggify_with_prob!(rates.snapshot)
         && world
             .disks
             .get(key)
@@ -1702,7 +1574,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // repaired from its twin, no availability cost — and rarely both, which is
     // the one unrecoverable scalar loss (the node cannot know what it
     // promised, and no peer can tell it).
-    if buggify_with_prob!(dense(P_PROMISE_ROT)) && world.disks.contains_key(key) {
+    if buggify_with_prob!(rates.promise) && world.disks.contains_key(key) {
         let both = sim_random::<f64>() < 0.25;
         if both {
             if world.may_park(key) {
@@ -1749,10 +1621,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     }
     // A file-granularity FS-metadata fault: reliably crash, never recover
     // (item E) — the whole store is the record.
-    if buggify_with_prob!(dense(P_META_FAULT))
-        && world.disks.contains_key(key)
-        && world.may_park(key)
-    {
+    if buggify_with_prob!(rates.meta) && world.disks.contains_key(key) && world.may_park(key) {
         let fault = match sim_random::<u64>() % 3 {
             0 => MetadataFault::Missing,
             1 => MetadataFault::WrongSize,
@@ -1776,7 +1645,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // byte-identical cluster-wide, so any peer can serve the chunk back. The
     // budget keeps a clean quorum of each chunk across the holders of the
     // same point (budget-off lifts it, like every other family).
-    if buggify_with_prob!(dense(P_SNAP_CHUNK_ROT))
+    if buggify_with_prob!(rates.snap_chunk)
         && let Some((at, state)) = world.disks.get(key).and_then(|d| d.snap_point)
     {
         let chunks = snap_chunk_count(state.encode().len());
@@ -1826,7 +1695,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
     // A transient EIO on the read path: collapses into the corruption channel
     // (one detection path), crashes the node once, and the retry — the next
     // boot — reads clean. The only Stage-7 family with no availability cost.
-    if buggify_with_prob!(dense(P_READ_EIO)) && world.disks.contains_key(key) {
+    if buggify_with_prob!(rates.read_eio) && world.disks.contains_key(key) {
         let record = world
             .disks
             .get(key)
@@ -1880,17 +1749,6 @@ struct BootEvidence {
     snap_point: Option<(u64, Vec<RecordHealth>)>,
 }
 
-/// Which red demo, if any, this node runs under (both perturb the storage
-/// layer's honest behavior in exactly one deliberate way each).
-#[derive(Clone, Copy, Default)]
-struct DemoMode {
-    truncate_on_mismatch: bool,
-    naive_wipe: bool,
-    /// The faulty-as-none mutation (issue #21 red demo): classify normally,
-    /// report nothing — a rotted copy counts toward the none-tally.
-    faulty_as_none: bool,
-}
-
 impl BootEvidence {
     fn collect(disk: &NodeDisk) -> Self {
         Self {
@@ -1920,9 +1778,108 @@ struct StorageFaults<T> {
     time: T,
     cutoff: Duration,
     enabled: bool,
+    /// Per-node write-path fault rates, drawn once per seed (see
+    /// [`WritePathRates`]).
+    rates: WritePathRates,
+}
+
+/// The write-path fault rates, **born workload-buggified** (AGENTS.md prong 2):
+/// the defaults are this module's documented constants, and an activated seed
+/// draws an extreme. Four independent knob locations, so the sweep can select
+/// "this seed's disk fails writes often" separately from "this seed's disk
+/// fails fsyncs often" and from either torn-tail shaping.
+///
+/// **The floor on all four is structural rather than numeric**: every write
+/// site is gated on [`StorageFaults::active`], so all of them stop at the chaos
+/// cutoff, and the accepted-record sites additionally pass through
+/// [`StorageWorld::permit_and_record`]'s per-record clean-quorum budget and its
+/// never-fault-every-record-of-one-node cap. A run therefore cannot be made
+/// unwinnable by turning a rate up: the extremes buy a *denser* fault window,
+/// never a longer one, and the recovery tail that follows (an order of
+/// magnitude longer than the window) is always fault-free.
+#[derive(Clone, Copy)]
+struct WritePathRates {
+    write_eio: f64,
+    fsync_fail: f64,
+    force_torn_tail: f64,
+    torn_tail: f64,
+}
+
+impl Default for WritePathRates {
+    fn default() -> Self {
+        Self {
+            write_eio: P_WRITE_EIO,
+            fsync_fail: P_FSYNC_FAIL,
+            force_torn_tail: P_FORCE_TORN_TAIL,
+            torn_tail: P_TORN_TAIL,
+        }
+    }
+}
+
+impl WritePathRates {
+    /// Draw this node's rates for one timeline. The knobs are integer
+    /// percentages (`buggify_knob!` draws from an integer range) converted to
+    /// probabilities here.
+    fn for_timeline() -> Self {
+        // A disk that returns `EIO` on one write in twelve rather than one in a
+        // hundred. The ambiguity contract is unchanged (the world still decides
+        // persisted-vs-lost per fault), so the extreme only makes the *recovery*
+        // path — boot from whatever the disk actually holds — the common case
+        // instead of the rare one.
+        let write_eio = buggify_knob!(u64::from(PCT_WRITE_EIO), 2_u64..9_u64);
+        // The batch-fsync twin, independently selectable for the same reason
+        // the two sites are independent locations at all: the sweep must be
+        // able to pick per-record ambiguity without whole-batch ambiguity, and
+        // the other way round.
+        let fsync_fail = buggify_knob!(u64::from(PCT_FSYNC_FAIL), 2_u64..9_u64);
+        // Forcing the torn shape harder. It rides the ordinary fsync ledger,
+        // budget and crash decision, so a high rate buys more
+        // crash-truncatable tails, not a new fault.
+        let force_torn_tail = buggify_knob!(u64::from(PCT_FORCE_TORN_TAIL), 10_u64..41_u64);
+        // Outcome-shaping of one fault, not a fault of its own: how a lost
+        // fsync leg *lands* (a torn prefix vs. a whole-batch loss). Both legs
+        // stay legal at either extreme — whole-batch loss is also what every
+        // seam crash before the fsync produces — so the knob only moves which
+        // shape this seed's boots have to classify.
+        let torn_tail = buggify_knob!(u64::from(PCT_TORN_TAIL), 25_u64..101_u64);
+        if write_eio != u64::from(PCT_WRITE_EIO) || fsync_fail != u64::from(PCT_FSYNC_FAIL) {
+            // BUGGIFY pairing: a node genuinely runs on a dense-failure disk.
+            assert_reachable!("storage: a node runs with a buggified write-fault rate");
+        }
+        if force_torn_tail != u64::from(PCT_FORCE_TORN_TAIL)
+            || torn_tail != u64::from(PCT_TORN_TAIL)
+        {
+            // BUGGIFY pairing: the torn-tail shaping knobs genuinely fire.
+            assert_reachable!("storage: a node runs with a buggified torn-tail rate");
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let pct = |v: u64| v as f64 / 100.0;
+        Self {
+            write_eio: pct(write_eio),
+            fsync_fail: pct(fsync_fail),
+            force_torn_tail: pct(force_torn_tail),
+            torn_tail: pct(torn_tail),
+        }
+    }
 }
 
 impl<T: TimeProvider> StorageFaults<T> {
+    fn new(time: T, cutoff: Duration, enabled: bool) -> Self {
+        // Only an enabled (perturbing) node draws: the scripted corpus and the
+        // contract suite must not spend randomness they never use.
+        let rates = if enabled {
+            WritePathRates::for_timeline()
+        } else {
+            WritePathRates::default()
+        };
+        Self {
+            time,
+            cutoff,
+            enabled,
+            rates,
+        }
+    }
+
     fn active(&self) -> bool {
         self.enabled && self.time.now() < self.cutoff
     }
@@ -1972,12 +1929,6 @@ struct DurableStorage<T> {
     application: ChainState,
     /// This boot's durable-record evidence, consumed by the boot scan.
     evidence: BootEvidence,
-    /// Truncate-on-mismatch red-demo mode: the boot scan truncates on a
-    /// corruption verdict instead of crashing (the CTRL Figure 2 bug).
-    demo_truncate: bool,
-    /// Faulty-as-none red-demo mode: the scan classifies a recoverable record
-    /// but withholds it from the tri-state (counts toward the none-tally).
-    demo_faulty_none: bool,
     /// The scan's recoverable classification, served to the core through
     /// [`Storage::faulty_entries`].
     faulty_list: Vec<(Slot, Ballot)>,
@@ -2015,7 +1966,6 @@ impl<T: TimeProvider> DurableStorage<T> {
         node_id: u64,
         faults: StorageFaults<T>,
         checker: Arc<AuditWorld>,
-        demo: DemoMode,
     ) -> Self {
         let mut boot = MemStorage::new(config);
         let mut application = ChainState::default();
@@ -2024,13 +1974,8 @@ impl<T: TimeProvider> DurableStorage<T> {
             let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             // Stage 7 rot: latent faults that surfaced while the node was
             // down, rolled at the boot that immediately scans them. Gated on
-            // the chaos window like every other injection — and never rolled
-            // in either red demo, whose contracts each hinge on their own
-            // single deterministic perturbation.
-            // The faulty-as-none demo *keeps* the rot sites: its single
-            // deliberate perturbation is the misreport at the scan, and it
-            // needs genuine rot to misreport.
-            if faults.active() && !demo.truncate_on_mismatch && !demo.naive_wipe {
+            // the chaos window like every other injection.
+            if faults.active() {
                 roll_boot_rot(&mut guard, &key, node_id, &checker);
             }
             let guard = &*guard;
@@ -2101,8 +2046,6 @@ impl<T: TimeProvider> DurableStorage<T> {
             checker,
             application,
             evidence,
-            demo_truncate: demo.truncate_on_mismatch,
-            demo_faulty_none: demo.faulty_as_none,
             faulty_list: Vec::new(),
             faulty_chunks: Vec::new(),
             staged_snap_point: None,
@@ -2267,83 +2210,12 @@ impl<T: TimeProvider> DurableStorage<T> {
         });
     }
 
-    /// The truncate-on-mismatch red demo's buggy reaction (CTRL Figure 2):
-    /// drop the log from the first corrupt entry onward and keep running as if
-    /// the log simply ended earlier — the derived chosen index regresses with
-    /// the dropped tail, exactly as it does in an implementation that treats
-    /// its log tail as the end of history. Silent by design; the audit's
-    /// recovered-vs-persisted divergence leg is what must catch it.
-    fn demo_truncate_from(&mut self, first_bad: Slot) -> Result<(), StorageError> {
-        let key = self.key.clone();
-        let node = self.node_id;
-        self.with_world(|w| {
-            if let Some(disk) = w.disks.get_mut(&key) {
-                let dropped: Vec<Slot> = disk
-                    .accepted
-                    .range(first_bad..)
-                    .map(|(slot, _)| *slot)
-                    .collect();
-                for slot in &dropped {
-                    disk.accepted.remove(slot);
-                    disk.entry_health.remove(slot);
-                }
-                let regressed = first_bad.0.checked_sub(1).map(Slot);
-                disk.hard_state.chosen_index = disk.hard_state.chosen_index.min(regressed);
-                for slot in dropped {
-                    w.resolve_corruption(
-                        node,
-                        StorageRecord::Accepted(slot),
-                        CorruptionOutcome::DemoTruncated,
-                    );
-                }
-            }
-            // The buggy node keeps running: it is not parked, it is wrong.
-            w.parked.remove(&key);
-            w.parked_ids.remove(&node);
-        })?;
-        self.reseed_boot()?;
-        tracing::info!(node, slot = first_bad.0, "truncate_on_mismatch");
-        Ok(())
-    }
-
-    /// Rebuild the boot read view from the world's current durable records
-    /// (used after the demo's truncation mutates the disk under the view).
-    fn reseed_boot(&mut self) -> Result<(), StorageError> {
-        let config = self.boot.initial_state().1;
-        let key = self.key.clone();
-        let boot = self.with_world(|w| {
-            let mut boot = MemStorage::new(config);
-            if let Some(disk) = w.disks.get(&key) {
-                let sealed: Vec<SessionEntry> = disk
-                    .sealed
-                    .iter()
-                    .map(|(&(client, seq), &slot)| (client, seq, slot))
-                    .collect();
-                let _ = boot.truncate(disk.first_slot, &sealed);
-                let _ = boot.persist_config_id(disk.hard_state.config_id);
-                let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
-                for (slot, (ballot, command)) in &disk.accepted {
-                    if disk.slot_health(*slot).clean() {
-                        let _ = boot.append_accepted(*slot, *ballot, command.clone());
-                    }
-                }
-                if let Some(ci) = disk.hard_state.chosen_index {
-                    let _ = boot.set_chosen_index(ci);
-                }
-                let _ = boot.sync(MustSync::Sync);
-            }
-            boot
-        })?;
-        self.boot = boot;
-        Ok(())
-    }
-
     /// BUGGIFY site 1: this per-record write returns `EIO`. Returns
     /// `Some(persisted)` when the fault fires and the budget permits it —
     /// `persisted` is the world's seeded ambiguity decision (item C), recorded
     /// as ground truth and never told to the node.
     fn roll_write_eio(&mut self, record: StorageRecord) -> Option<bool> {
-        if !self.faults.active() || !buggify_with_prob!(P_WRITE_EIO) {
+        if !self.faults.active() || !buggify_with_prob!(self.faults.rates.write_eio) {
             return None;
         }
         let persisted = sim_random::<f64>() < 0.5;
@@ -2380,7 +2252,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         if !self.faults.active() {
             return None;
         }
-        if !force_lost && !buggify_with_prob!(P_FSYNC_FAIL) {
+        if !force_lost && !buggify_with_prob!(self.faults.rates.fsync_fail) {
             return None;
         }
         let persisted = !force_lost && sim_random::<f64>() < 0.5;
@@ -2629,7 +2501,19 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     /// resolves exactly two things itself — a crash-truncatable tail is
     /// discarded (never acknowledged to anyone) and a single bad `HardState`
     /// copy is repaired from its twin — and **never truncates on a corruption
-    /// verdict** (outside the deliberately buggy red demo).
+    /// verdict**.
+    ///
+    /// That last rule is CTRL Figure 2's bug class, found in both `ZooKeeper`
+    /// and `LogCabin`: a scan that drops the log from the faulty entry onward
+    /// and keeps running as if the log simply ended earlier silently discards
+    /// possibly-chosen records (and regresses the derived chosen index with
+    /// them), so the node can then win an election against lagging peers and
+    /// erase committed data cluster-wide. It was proven load-bearing by
+    /// mutation: wiring the scan to truncate here instead of crashing turned
+    /// the audit's recovered-vs-persisted divergence leg ("storage: a
+    /// recovered log omits a persisted record only after a detected corruption
+    /// crash") red. Detect ⇒ crash is the baseline; a crash-truncatable tail is
+    /// the only thing a scan may ever discard.
     #[allow(clippy::too_many_lines)] // one linear scan: metadata → scalars → log
     fn boot_scan(&mut self) -> Result<(), StorageError> {
         let evidence = std::mem::take(&mut self.evidence);
@@ -2908,12 +2792,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             }
         });
         if let Some(&(slot, health, case)) = crashes.first() {
-            if self.demo_truncate {
-                // THE BUG under demonstration: truncate on the mismatch
-                // instead of crashing.
-                self.demo_truncate_from(slot)?;
-                return Ok(());
-            }
             let _ = self.with_world(|w| {
                 // Detection is certain and terminal for an unidentifiable
                 // record: restarting cannot help (rot injection already parked
@@ -2943,52 +2821,26 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             });
         }
         if !recover.is_empty() {
-            // The truncate-on-mismatch demo's bug fires on ANY corruption
-            // verdict, recoverable or not (that is the bug).
-            if self.demo_truncate {
-                let (slot, _b, _c) = recover[0];
-                self.demo_truncate_from(slot)?;
-                return Ok(());
-            }
-            let demo_misreport = self.demo_faulty_none;
             let _ = self.with_world(|w| {
                 for (slot, _ballot, case) in &recover {
-                    if demo_misreport {
-                        // THE MUTATION under demonstration (CTRL §5.1.1's
-                        // known-fatal weakening): classify, then withhold —
-                        // the acceptor will answer "nothing accepted here".
-                        // The audit still learns the classification (the
-                        // side door), so the surviving red is the protocol
-                        // consequence, not a storage-divergence catch.
-                        tracing::info!(node, slot = slot.0, "demo_faulty_as_none");
-                        self.checker.note_reported_faulty(node, slot.0);
-                        w.resolve_corruption(
-                            node,
-                            StorageRecord::Accepted(*slot),
-                            CorruptionOutcome::DemoMisreported,
-                        );
-                    } else {
-                        w.s7.faulty_reported = true;
-                        tracing::info!(
-                            node,
-                            slot = slot.0,
-                            case = case.label(),
-                            "faulty_entry_reported"
-                        );
-                        w.resolve_corruption(
-                            node,
-                            StorageRecord::Accepted(*slot),
-                            CorruptionOutcome::Reported,
-                        );
-                    }
+                    w.s7.faulty_reported = true;
+                    tracing::info!(
+                        node,
+                        slot = slot.0,
+                        case = case.label(),
+                        "faulty_entry_reported"
+                    );
+                    w.resolve_corruption(
+                        node,
+                        StorageRecord::Accepted(*slot),
+                        CorruptionOutcome::Reported,
+                    );
                 }
             });
-            if !demo_misreport {
-                self.faulty_list = recover
-                    .iter()
-                    .map(|(slot, ballot, _case)| (*slot, *ballot))
-                    .collect();
-            }
+            self.faulty_list = recover
+                .iter()
+                .map(|(slot, ballot, _case)| (*slot, *ballot))
+                .collect();
         }
         if !discard.is_empty() {
             // The one legal discard: a crash-truncatable tail was never
@@ -3074,8 +2926,9 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         // fresh appends clear the per-record budget can tear, so the site is
         // consulted only where it can have an effect (AGENTS.md: consult a
         // hook only when the choice is observable).
-        let force_torn =
-            self.faults.active() && self.tearable_stage() && buggify_with_prob!(P_FORCE_TORN_TAIL);
+        let force_torn = self.faults.active()
+            && self.tearable_stage()
+            && buggify_with_prob!(self.faults.rates.force_torn_tail);
         // BUGGIFY site 2: the fsync fails — only when the stage actually holds
         // something (an empty flush has nothing at stake). On the durable leg
         // the flush happens anyway before the error is reported (fsyncgate);
@@ -3086,7 +2939,9 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         {
             if persisted {
                 self.flush_stage()?;
-            } else if self.faults.active() && (force_torn || sim_random::<f64>() < P_TORN_TAIL) {
+            } else if self.faults.active()
+                && (force_torn || sim_random::<f64>() < self.faults.rates.torn_tail)
+            {
                 if force_torn {
                     // BUGGIFY pairing: the forcing site genuinely fired.
                     assert_reachable!("storage: a torn tail is forced by its BUGGIFY site");
@@ -3394,6 +3249,12 @@ impl<T: TimeProvider> Storage for DurableStorage<T> {
 /// reach. Every behavior has its own `BUGGIFY` location, so activation is
 /// independent and replayable. All hooks turn off with the chaos window, leaving
 /// the settle tail genuinely quiet for convergence.
+///
+/// `Clone` because two of the driver's decisions (hold a drained peer batch,
+/// reverse it) live inside the per-peer delivery tasks, so each task carries
+/// its own handle. The clone shares nothing mutable: every decision is a fresh
+/// draw against Moonpool's iteration-owned BUGGIFY state.
+#[derive(Clone)]
 struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
@@ -3456,6 +3317,68 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         if fired {
             // BUGGIFY pairing: the overtake genuinely fires.
             assert_reachable!("mailbox: a message overtakes its peer queue");
+        }
+        fired
+    }
+
+    fn hold_peer_delivery(&self, _to: NodeId) -> bool {
+        // Per drained batch, and the drain is the *hot* path — every peer, many
+        // times a tick — so the rate stays low: holding most drains would cap
+        // per-peer throughput for the whole chaos window, which is a partition
+        // in disguise (moonpool's job) rather than a delay. One tick per hold
+        // is the bound, so the backlog it builds is exactly one tick's traffic:
+        // enough to cross the shed threshold, never enough to wedge a link.
+        let fired = self.active() && buggify_with_prob!(0.05);
+        if fired {
+            // BUGGIFY pairing: a drain genuinely parked for a tick.
+            assert_reachable!("mailbox: a peer drain is held for a tick");
+        }
+        fired
+    }
+
+    fn reverse_delivery_batch(&self, _to: NodeId) -> bool {
+        // Per multi-message batch — the drain-side twin of `overtake_in_mailbox`
+        // and, like it, kept occasional: the unary batch RPC otherwise preserves
+        // enqueue order end to end, so this is the only whole-batch reorder, and
+        // reversing *every* batch would make the per-peer stream systematically
+        // backwards rather than occasionally so.
+        let fired = self.active() && buggify_with_prob!(0.05);
+        if fired {
+            // BUGGIFY pairing: a delivery batch genuinely arrives reversed.
+            assert_reachable!("mailbox: a delivery batch is reversed");
+        }
+        fired
+    }
+
+    fn skip_snapshot_offer(&self, _to: NodeId) -> bool {
+        // Consulted only when an offer is about to go out. Skipping costs the
+        // requester one beat — it re-asks every tick, and any other custodian
+        // may answer — so the rate can be generous: the state worth reaching is
+        // "nobody served me this round", and a below-floor node needs a
+        // snapshot offer rarely enough that a shy rate would never build a
+        // streak of unserved beats.
+        let fired = self.active() && buggify_with_prob!(0.25);
+        if fired {
+            // BUGGIFY pairing: a snapshot offer is genuinely withheld.
+            assert_reachable!("the driver skips a snapshot offer beat");
+        }
+        fired
+    }
+
+    fn stretch_tick_interval(&self) -> bool {
+        // Per tick, per node. Deliberately shy: every core timeout is counted
+        // in ticks, so a node that stretches most of its ticks runs its whole
+        // protocol clock at half speed for the chaos window — an election
+        // timeout that never fires relative to its peers' is a stalled node,
+        // not a slow one. At this rate a node loses a handful of ticks across
+        // the window, which is enough to desynchronize the cluster's protocol
+        // clocks (the shape moonpool's clock skew reaches only for the *wall*
+        // clock) without any node falling permanently behind. Off after the
+        // cutoff, so the recovery tail runs at the honest cadence.
+        let fired = self.active() && buggify_with_prob!(0.05);
+        if fired {
+            // BUGGIFY pairing: a node genuinely ticked at the stretched cadence.
+            assert_reachable!("a node stretches its tick interval");
         }
         fired
     }
@@ -4008,12 +3931,10 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
             CorruptionOutcome::CoDetected
             | CorruptionOutcome::Repaired
             | CorruptionOutcome::DiscardedTail
-            | CorruptionOutcome::DemoTruncated
             // Stage 8: a standing report (a run may end mid-repair, or WAITED)
             // and a genuinely re-written record are both fully accounted.
             | CorruptionOutcome::Reported
-            | CorruptionOutcome::Recovered
-            | CorruptionOutcome::DemoMisreported => {}
+            | CorruptionOutcome::Recovered => {}
         }
     }
     CorruptionStats {
@@ -4050,18 +3971,19 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
         "storage: injected faults never cost a record its clean quorum of live copies"
     );
     check_corruption_gates(handle, &corruption, scope);
-    if scope == GateScope::SafetyOnly {
-        // The #71 compound gate, on the partition-bearing axis: corruption x
-        // partition x a lagging follower reached in one run (the network
-        // swarm IS the partition; lag is the audit's observed fact).
-        assert_sometimes!(
-            corruption.injected > 0 && audit_world(handle).lag_observed(),
-            "storage: corruption compounds with a partition and a lagging follower"
-        );
-    }
     if scope != GateScope::Full {
         return;
     }
+    // The #71 compound gate: corruption x partition x a lagging follower
+    // reached in one run (the network swarm IS the partition; lag is the
+    // audit's observed fact). It used to ride the safety-only axis, which was
+    // the only one carrying swarm network turbulence; since #126 folded that
+    // turbulence into the main campaign, the main campaign is where the
+    // compound is reachable and where it must saturate.
+    assert_sometimes!(
+        corruption.injected > 0 && audit_world(handle).lag_observed(),
+        "storage: corruption compounds with a partition and a lagging follower"
+    );
     assert_sometimes!(
         stats.eio_landed,
         "storage: EIO was reported but the write landed"

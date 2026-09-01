@@ -193,22 +193,10 @@ pub(crate) struct ChainWorkload {
     issued_count: u64,
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
-    safety_only: bool,
     budget_off: bool,
 }
 
 impl ChainWorkload {
-    /// The safety-only workload: the red demos and the scripted
-    /// choreographies, whose cluster is deliberately broken and may correctly
-    /// never converge. It records the safety history and skips every liveness
-    /// claim and coverage gate the main campaign owns.
-    pub(crate) fn safety_only() -> Self {
-        Self {
-            safety_only: true,
-            ..Self::default()
-        }
-    }
-
     /// The budget-off (WAITED-leg) campaign's workload: the full main-campaign
     /// drive, but an unavailable run is excused when — and only when — the
     /// world's ground truth says a committed item has no readable copy left.
@@ -288,16 +276,12 @@ impl Workload for ChainWorkload {
     }
 
     async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The safety-only axes (the red demos and the scripted choreographies)
-        // deliberately run a cluster that may never converge — a wiped promise,
-        // a silently truncated log, a misreported record — so they must never
-        // make the quiescence-gated liveness claim. The main campaign, network
-        // turbulence included, does: Moonpool `43304d8` stops every fault
-        // source at `chaos_duration` and heals the partitions in force, so the
-        // tail that follows is a genuine recovery window.
-        if !self.safety_only {
-            audit_world(ctx.state()).enable_liveness_checks();
-        }
+        // This campaign has a genuinely quiet settle tail, network turbulence
+        // included: Moonpool `43304d8` stops every fault source at
+        // `chaos_duration` and heals the partitions in force, so the tail that
+        // follows is a real recovery window and the quiescence-gated liveness
+        // claims apply.
+        audit_world(ctx.state()).enable_liveness_checks();
         Ok(())
     }
 
@@ -568,12 +552,7 @@ impl Workload for ChainWorkload {
             }
         }
 
-        let steps = if self.safety_only {
-            config.steps.min(16)
-        } else {
-            config.steps
-        };
-        for _step in 0..steps {
+        for _step in 0..config.steps {
             if shutdown.is_cancelled() {
                 break;
             }
@@ -1206,99 +1185,58 @@ impl Workload for ChainWorkload {
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
         );
-        if !self.safety_only {
-            assert_sometimes!(
-                matches!(weight_profile, WeightProfile::ReadHeavy),
-                "chain: read-heavy operation weights are selected"
-            );
-            assert_sometimes!(
-                matches!(weight_profile, WeightProfile::WriteHeavy),
-                "chain: write-heavy operation weights are selected"
-            );
-            assert_sometimes!(
-                matches!(weight_profile, WeightProfile::Mixed),
-                "chain: mixed operation weights are selected"
-            );
-            assert_sometimes!(
-                self.adversarial.duplicate_across_leader_change,
-                "a duplicate is suppressed across a leader change"
-            );
-            assert_sometimes!(
-                self.adversarial.dual_submitted,
-                "chain: concurrent dual-submit is exercised"
-            );
-            assert_sometimes!(
-                self.adversarial.compact_storm_modes[0],
-                "chain: compact-storm overask is exercised"
-            );
-            assert_sometimes!(
-                self.adversarial.compact_storm_modes[1],
-                "chain: compact-storm follower targeting is exercised"
-            );
-            assert_sometimes!(
-                self.adversarial.compact_storm_modes[2],
-                "chain: compact-storm stale-leader targeting is exercised"
-            );
-            assert_sometimes!(
-                self.adversarial.payload_classes[0],
-                "chain: an empty payload is acknowledged"
-            );
-            assert_sometimes!(
-                self.adversarial.payload_classes[1],
-                "chain: a one-byte payload is acknowledged"
-            );
-            assert_sometimes!(
-                self.adversarial.payload_classes[2],
-                "chain: a boundary-sized payload is acknowledged"
-            );
-            assert_sometimes!(
-                self.adversarial.payload_classes[3],
-                "chain: a large payload is acknowledged"
-            );
-            assert_sometimes!(
-                self.adversarial.read_index_committed,
-                "chain: a committed read-index observes the applied frontier"
-            );
-        }
-
-        if self.safety_only {
-            let observation_end =
-                Duration::from_millis(CHAOS_DURATION_MS).saturating_add(Duration::from_secs(8));
-            if time.now() < observation_end {
-                time.sleep(observation_end.saturating_sub(time.now()))
-                    .await
-                    .ok();
-            }
-            self.issued_count = next_seq;
-            let applied_hashes: BTreeSet<String> = ctx
-                .observability()
-                .snapshot(EV_APPLIED)
-                .iter()
-                .filter_map(|event| event.str("cmd").map(str::to_owned))
-                .collect();
-            for (cmd_hash, outcome) in self.outcomes.values() {
-                if matches!(outcome, Outcome::Acked { .. }) {
-                    if !applied_hashes.contains(&hash_text(*cmd_hash)) {
-                        let q = ctx.observability();
-                        eprintln!(
-                            "ACK-NOT-APPLIED: outcome={:?} t={}ms; dedup_acks={} crashes={} boots={} applied_events={} nodes={}",
-                            outcome,
-                            time.now().as_millis(),
-                            q.len("propose_dedup_ack"),
-                            q.len("crashed"),
-                            q.len("booted"),
-                            q.len(EV_APPLIED),
-                            server_count,
-                        );
-                    }
-                    assert_always!(
-                        applied_hashes.contains(&hash_text(*cmd_hash)),
-                        "chain: every acknowledged command was applied"
-                    );
-                }
-            }
-            return Ok(());
-        }
+        assert_sometimes!(
+            matches!(weight_profile, WeightProfile::ReadHeavy),
+            "chain: read-heavy operation weights are selected"
+        );
+        assert_sometimes!(
+            matches!(weight_profile, WeightProfile::WriteHeavy),
+            "chain: write-heavy operation weights are selected"
+        );
+        assert_sometimes!(
+            matches!(weight_profile, WeightProfile::Mixed),
+            "chain: mixed operation weights are selected"
+        );
+        assert_sometimes!(
+            self.adversarial.duplicate_across_leader_change,
+            "a duplicate is suppressed across a leader change"
+        );
+        assert_sometimes!(
+            self.adversarial.dual_submitted,
+            "chain: concurrent dual-submit is exercised"
+        );
+        assert_sometimes!(
+            self.adversarial.compact_storm_modes[0],
+            "chain: compact-storm overask is exercised"
+        );
+        assert_sometimes!(
+            self.adversarial.compact_storm_modes[1],
+            "chain: compact-storm follower targeting is exercised"
+        );
+        assert_sometimes!(
+            self.adversarial.compact_storm_modes[2],
+            "chain: compact-storm stale-leader targeting is exercised"
+        );
+        assert_sometimes!(
+            self.adversarial.payload_classes[0],
+            "chain: an empty payload is acknowledged"
+        );
+        assert_sometimes!(
+            self.adversarial.payload_classes[1],
+            "chain: a one-byte payload is acknowledged"
+        );
+        assert_sometimes!(
+            self.adversarial.payload_classes[2],
+            "chain: a boundary-sized payload is acknowledged"
+        );
+        assert_sometimes!(
+            self.adversarial.payload_classes[3],
+            "chain: a large payload is acknowledged"
+        );
+        assert_sometimes!(
+            self.adversarial.read_index_committed,
+            "chain: a committed read-index observes the applied frontier"
+        );
 
         // Everything that injects faults stops at the cutoff: paros' own driver
         // hooks and storage-fault layer by their own clock, and Moonpool's
@@ -1697,9 +1635,7 @@ impl Workload for ChainWorkload {
     }
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let scope = if self.safety_only {
-            GateScope::SafetyOnly
-        } else if self.budget_off {
+        let scope = if self.budget_off {
             GateScope::BudgetOff
         } else {
             GateScope::Full
@@ -1712,7 +1648,7 @@ impl Workload for ChainWorkload {
                 .all(|(seq, (_, outcome))| *seq == outcome.seq() && *seq < self.issued_count),
             "chain: retained outcome model is internally valid"
         );
-        if !self.safety_only && !self.budget_off {
+        if !self.budget_off {
             assert_always!(
                 self.final_state
                     .is_some_and(|state| self.outcomes.values().all(|(_, outcome)| {

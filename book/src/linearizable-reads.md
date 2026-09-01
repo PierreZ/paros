@@ -226,10 +226,12 @@ The red run came first, per the house rule. The read RPC was landed *naively*,
 serving `chosen_index` whenever `role == Leader`, no confirmation round, no
 floor. The sweep hunted until the interleaving fired: seed
 `286172402316494352` records a read served from a stale leader's belief,
-violating condition 1. That seed is pinned in `REGRESSION_SEEDS` and replays
-clean now that the read-index protocol is in: the same sweep saturates with the
-read reachables firing (a read commits, a read commits after a leader change, a
-read retried across nodes), and the deterministic core test
+violating condition 1. That was the red→green witness, cited here as evidence
+rather than kept as a replay — a seed names a draw schedule, not a scenario, so
+it reproduces only the build it was found on. What stands guard instead is the
+sweep itself: it saturates with the read reachables firing (a read commits, a
+read commits after a leader change, a read retried across nodes), and the
+deterministic core test
 `fresh_leader_read_waits_for_the_read_floor` pins the trap mechanism at the
 state-machine level.
 
@@ -276,8 +278,8 @@ oracle were explicitly told to skip slotless acks. The exemption was exactly
 the size of the bug. `ProposeResult::Chosen` now carries its slot, so the ack
 is falsifiable: `AppliedAckOracle` joins every committed ack against the acking
 node's own `log_applied` events and asserts the node had already applied the
-slot it named. It went red on seed 11 (twelve seeds in the first two thousand),
-which is now pinned, and the core tests
+slot it named. It went red on twelve seeds in the first two thousand, and the
+core tests
 `a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied` and
 `a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies` pin the
 mechanism on both call sites.

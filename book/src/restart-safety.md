@@ -198,5 +198,6 @@ replay them, so the applied prefix looked like it skipped. The durable prefix wa
 gap-free the whole time; the *apply* had simply not been re-driven. The fix mirrors
 what a real state machine must do: on boot, re-drive the apply of the durable
 committed prefix (it is idempotent — the commit index *is* the applied index). With
-that, the sweep runs clean and saturates with seam crashes on, and the seed that
-first surfaced the gap is pinned in the regression corpus.
+that, the sweep runs clean and saturates with seam crashes on: the boot replay
+is exercised on every run that crashes at a seam, which is a stronger guard than
+replaying the one seed that first surfaced the gap.
