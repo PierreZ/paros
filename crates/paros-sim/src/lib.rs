@@ -146,16 +146,26 @@ pub const PROTOCOL_BOUNDS_COVERAGE_ITERATIONS: usize = 8;
 /// fire; the adaptive sweep stops as soon as coverage plateaus.
 ///
 /// Raised from 128 when cooperative leader handoff added its instrumented
-/// surface to `paros-core`/`paros`. The sancov coverage map is **per process**
-/// and shared by every axis, and this one runs fifth: guidance reaching it is
-/// already steering on a warm map, so new instrumented code pulls seed
-/// selection toward the seeds that exercise *it* and away from the
-/// corruption-deep seeds the WAITED leg needs. Run standalone on a cold map the
-/// axis still saturates in ~50 seeds; inside the campaign it needs the
-/// headroom. Only the ceiling moves — the plateau contract
-/// ([`PLATEAU_SEEDS`]) is unchanged, and a saturating run still stops early, so
-/// this costs nothing on the runs that do not need it. (Same remedy as the
-/// #102 bump, for the same reason: new surface, unchanged contract.)
+/// surface to `paros-core`/`paros`, which starved this axis' WAITED gate.
+///
+/// **This value is not a safety margin — it is a schedule parameter.** It is
+/// passed as `max_iterations` to `until_coverage_stable`, which feeds the
+/// guided seed schedule, so changing it changes *which* seeds are drawn rather
+/// than only how many are allowed. Measured on one build, standalone
+/// (`sim-paros-hunt budget-off-coverage`, cold coverage map): a ceiling of 128
+/// saturates in 53 seeds, a ceiling of 384 in 95. Inside the campaign — where
+/// the sancov map is **per process** and this axis runs fifth, so guidance
+/// reaches it already warm — 128 exhausted the budget without ever firing the
+/// WAITED gate, while 384 saturates in 75 (104 on CI's build).
+///
+/// So the honest reading is: the new instrumented surface shifted the guided
+/// schedule off the corruption-deep seeds the WAITED leg needs, and this value
+/// shifts it back. It was chosen empirically, and it will need choosing again
+/// the next time the instrumented surface moves — the number carries no margin
+/// you can reason about in advance. The plateau contract ([`PLATEAU_SEEDS`]) is
+/// unchanged, and a saturating run still stops early, so the raise costs
+/// nothing in wall clock. (Same remedy, and the same empirical character, as
+/// the #102 bump.)
 pub const BUDGET_OFF_COVERAGE_ITERATIONS: usize = 384;
 /// Seeded-mask volume for the #113 E1 evaluation corpus in the CI campaign.
 /// Scripted and fast per seed; enough draws from the 512-mask space that both
