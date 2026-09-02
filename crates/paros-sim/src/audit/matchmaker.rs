@@ -474,6 +474,16 @@ impl MatchmakerAudit {
         self.bootstrap.get_or_insert_with(|| bootstrap.clone());
     }
 
+    /// `node` booted (a first boot, an attrition restart, a seam-crash
+    /// recovery): its round floor is volatile and starts over from the
+    /// durable promise, so a refusal folded for its previous incarnation no
+    /// longer binds its next campaign (the hunt found the gate red on exactly
+    /// that — a node refused at round 1, restarted, and honestly campaigned
+    /// at round 2 again; one more refusal re-floors it).
+    pub(super) fn node_booted(&mut self, node: NodeId) {
+        self.refused_floor.remove(&node.0);
+    }
+
     /// A candidate opened matchmaking for `ballot`, registering `config`.
     pub(super) fn campaign_started(
         &mut self,

@@ -1396,6 +1396,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         st.matchmaker.note_deployment(deployment.matchmakers.len());
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
+        st.matchmaker.node_booted(node);
         st.observe_promise(node.0, promised);
         // The boot report is the incarnation edge: swap in the faulty
         // classifications staged by *this* boot's scan and drop the previous
