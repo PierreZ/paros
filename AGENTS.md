@@ -62,16 +62,6 @@ needs to be *likely* rather than lucky — a new BUGGIFY location. A test may st
 when the seed is not a witness: a determinism replay (the same seed twice), a scripted corpus case
 whose seed *is* its input (an E1 mask, a chunk mask), or an arbitrary display seed.
 
-**Red demos are retired.** An oracle's load-bearing-ness — "revert the rule and this assertion goes
-red" — is proven **once**, at step 4 of simulation-driven development below, and recorded in the
-commit message and in the rule's own doc comment. It is not kept afterwards as a permanently
-replayed mutation: a demo is a single-seed replay, so it inherits every problem above (its witness
-cannot stay stable) while carrying a deliberately broken code path in the shipped harness, its own
-process type, its own storage flags, and its own axis in every runner. The rules those demos
-defended are live in the oracles and the in-core asserts, which is where they belong: promise
-monotonicity across a restart (`paros_sim::audit`), never-truncate-on-a-corruption-verdict (the
-boot scan), and `faulty` never counting toward the Promise none-tally (`NodeStorage::faulty_entries`).
-
 **Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
 target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
 introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided
