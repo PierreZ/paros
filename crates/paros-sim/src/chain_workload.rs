@@ -447,12 +447,9 @@ impl Workload for ChainWorkload {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The seed's deployment map ranks the topology pool into the acceptor
-        // cluster this client proposes to and the matchmakers it matchmakes
-        // with (none on a plain seed). The chain workload only ever runs on
-        // the perturbing campaign, so the map is the drawn one.
-        let deployment =
-            crate::roles::deployment(ctx.state(), ctx.topology().all_process_ips(), true);
+        // The seed's deployment map: the acceptor pool this client proposes
+        // to and the matchmakers it matchmakes with (none on a plain seed).
+        let deployment = crate::roles::deployment(ctx.topology());
         let servers = deployment.acceptors().to_vec();
         if servers.is_empty() {
             return Err(SimulationError::InvalidState(

@@ -1,11 +1,12 @@
-//! The sim-side adapter: a moonpool [`Process`] that runs the provider-generic
-//! [`paros::run_node`] driver under `SimProviders`.
+//! The sim-side adapter: the moonpool [`Process`]es that run the
+//! provider-generic [`paros::run_node`] and [`paros::run_matchmaker`] drivers
+//! under `SimProviders`.
 //!
-//! All the driver logic lives in `paros`; this bridges the sim boundary. A
-//! process learns its role from the seed's deployment map (`crate::roles`):
-//! an **acceptor** wires the node to a per-node handle on the shared
+//! All the driver logic lives in `paros`; this bridges the sim boundary. Each
+//! role is its own moonpool process group (`crate::roles`): a [`NodeProcess`]
+//! — an **acceptor** — wires the node to a per-node handle on the shared
 //! [`StorageWorld`] (the sim's stand-in for durable disk) and runs the same
-//! `run_node` a production `tokio::main` would; a **matchmaker** runs
+//! `run_node` a production `tokio::main` would; a [`MatchmakerProcess`] runs
 //! `run_matchmaker` over its own slice of the same world. Both sit inside a
 //! recovery loop that turns a `buggify`-injected seam crash into a real
 //! crash+restart: the driver unwinds, the volatile core is dropped, and the
@@ -27,18 +28,18 @@ use moonpool_sim::{
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::hooks::BuggifyHooks;
-use crate::roles::{Deployment, Role};
+use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, Role};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::storage_world;
 use paros::{Config, MatchmakerId, NodeId, RunError, parse_addr, run_matchmaker, run_node};
 
-/// A paros node in the simulation.
+/// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess {
     mode: NodeMode,
 }
 
-/// How a node is perturbed.
+/// How a process is perturbed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeMode {
     /// The main campaign: the driver's BUGGIFY hooks, the disk's fault sites
@@ -65,6 +66,11 @@ impl NodeProcess {
     }
 }
 
+/// A matchmaker in the simulation: its own process group, so a seed draws
+/// how many it deploys independently of the acceptor pool and attrition can
+/// be scoped to it.
+pub(crate) struct MatchmakerProcess;
+
 /// One inert topology member that keeps the simulator lifecycle open while a
 /// workload drives something else (the storage contract suite).
 pub(crate) struct IdleProcess;
@@ -85,29 +91,54 @@ impl Process for IdleProcess {
 #[async_trait]
 impl Process for NodeProcess {
     fn name(&self) -> &'static str {
-        "paros-node"
+        ACCEPTOR_GROUP
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The topology pool: `all_process_ips()` excludes this process, so add
-        // `my_ip`. The deployment map ranks the pool into acceptors and
-        // matchmakers, drawn once per seed by whoever boots first, so every
-        // process derives the *same* map without coordination.
+        // The deployment map is read off the topology's process groups, so
+        // every process derives the *same* map without coordination.
         let my_ip = ctx.my_ip().to_string();
-        let mut pool: Vec<String> = ctx.topology().all_process_ips().to_vec();
-        pool.push(my_ip.clone());
+        let deployment = crate::roles::deployment(ctx.topology());
         let perturb = self.mode == NodeMode::Chaotic;
-        let deployment = crate::roles::deployment(ctx.state(), &pool, perturb);
         match deployment.role_of(&my_ip) {
             Some(Role::Acceptor(self_rank)) => {
                 run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb).await
             }
-            Some(Role::Matchmaker(id)) => run_matchmaker_role(ctx, id, &my_ip, perturb).await,
-            None => {
-                assert_always!(false, "every process of the pool is mapped to a role");
+            other => {
+                assert_always!(
+                    false,
+                    "every node process is mapped to the acceptor role",
+                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
+                );
                 Err(SimulationError::InvalidState(format!(
-                    "{my_ip} has no role in the deployment"
+                    "{my_ip} is not an acceptor of the deployment"
+                )))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Process for MatchmakerProcess {
+    fn name(&self) -> &'static str {
+        MATCHMAKER_GROUP
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let my_ip = ctx.my_ip().to_string();
+        let deployment = crate::roles::deployment(ctx.topology());
+        match deployment.role_of(&my_ip) {
+            Some(Role::Matchmaker(id)) => run_matchmaker_role(ctx, id, &my_ip).await,
+            other => {
+                assert_always!(
+                    false,
+                    "every matchmaker process is mapped to the matchmaker role",
+                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
+                );
+                Err(SimulationError::InvalidState(format!(
+                    "{my_ip} is not a matchmaker of the deployment"
                 )))
             }
         }
@@ -314,8 +345,10 @@ async fn run_matchmaker_role(
     ctx: &SimContext,
     id: MatchmakerId,
     my_ip: &str,
-    perturb: bool,
 ) -> SimulationResult<()> {
+    // Only the main campaign deploys matchmakers, so a matchmaker is always
+    // a perturbing process.
+    let perturb = true;
     let world = storage_world(ctx.state());
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
