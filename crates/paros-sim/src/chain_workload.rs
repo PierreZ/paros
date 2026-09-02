@@ -1,6 +1,7 @@
 //! Chain-of-Blocks client workload.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,7 +10,7 @@ use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
-    buggify_with_prob, sim::config_random_f64, swarm_op_enabled,
+    buggify_with_prob, swarm_op_enabled,
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
@@ -33,76 +34,150 @@ const COMPACT_STORM: u8 = 7;
 const READ_INDEX: u8 = 8;
 const OP_COUNT: u8 = 9;
 
+/// Per-timeline client shape — every field is a `buggify_knob!` (AGENTS.md,
+/// prong 2): the default is production's ordinary client, and an activated seed
+/// draws one extreme. Each knob documents its floor: the extreme is a valid
+/// configuration that keeps the run winnable, never a defeat of it.
+///
+/// No knob here carries a pairing gate. The location's own firing is the
+/// proof, and a per-knob `reachable` would only spend assertion slots.
 #[derive(Clone, Copy, Debug)]
 struct ChainConfig {
+    /// Swarm steps after the primer. Floor 0: the primer and the recovery
+    /// batch still commit, so a run whose whole chaos-window history is the
+    /// primer (slot 0 alone, at depth 1) is the #56 boundary, not a dead run.
     steps: u64,
+    /// Ordinary payload size. Floor 1 byte; ceiling far under the 3 MiB
+    /// delivery batch cap.
     command_bytes: usize,
+    /// Large payload size. Ceiling 16 KiB, still far under the batch cap.
     large_command_bytes: usize,
+    /// Per-request client deadline. Floor 350 ms sits *below* the election
+    /// timeout, so every leader change turns into an ambiguous outcome and the
+    /// retry/dedup surface saturates; that is a valid client, not a stall.
     request_timeout_ms: u64,
+    /// Idle between ops in a `PAUSE` step. Floor 1 ms.
     pause_ms: u64,
+    /// One compaction ping every N acked proposals. Floor 1 (every ack).
     compact_every: u64,
+    /// Whether this client ever asks for compaction. The off extreme keeps
+    /// the chosen prefix uncompacted for the whole run, so catch-up never has
+    /// to go through a snapshot — the other half of the recovery surface.
+    compaction: bool,
+    /// Concurrent proposals in the primer batch. Floor 1: a sequential start.
     pipeline_depth: usize,
+    /// Requests per compaction storm. Floor 1.
     compact_storm_attempts: usize,
+    /// The recovery tail, an order of magnitude past the 4 s chaos window and
+    /// past the longest attrition restart (5 s after swarm rescaling) plus
+    /// the below-floor snapshot recovery it forces. **Never below 45 s**.
     recovery_budget_ms: u64,
+    /// Proposals in the post-chaos recovery batch. Floor 1: convergence
+    /// needs at least one commit past the pre-tail watermark.
+    recovery_proposals: u64,
+    /// Percent chance a chaos-window proposal abandons its first attempt
+    /// mid-flight (honest ambiguity, retried under the same identity).
+    /// Ceiling 60: every abandoned attempt is retried, so no rate stalls.
+    abandon_pct: u64,
+    /// Idle between a redirect and the next attempt. Floor 0 (tight loop
+    /// bounded by the request deadline).
+    redirect_sleep_ms: u64,
+    /// Idle between recovery-batch retries. Floor 0, same bound.
+    retry_backoff_ms: u64,
+    /// Convergence probe cadence. Floor 10 ms: the probe is one inspect RPC
+    /// per live node, and the tail is tens of seconds.
+    probe_interval_ms: u64,
+    /// Beat between compaction re-asks at the same leader (the #101 coupling
+    /// answers the first ask with `accepted: false` while the marker decides).
+    /// Floor 10 ms.
+    compact_beat_ms: u64,
+    /// Compaction re-asks per operation. Floor 1.
+    compact_attempts: u8,
+    /// Per-operation weights of the swarm alphabet, one knob each so a seed
+    /// can be storm-heavy and read-starved at once. Floor 0 for any single
+    /// weight (the alphabet's total is guarded, and an all-zero draw falls
+    /// back to the first enabled op).
+    weights: [u64; OP_COUNT as usize],
 }
 
 impl ChainConfig {
     fn for_timeline() -> Self {
         Self {
-            steps: buggify_knob!(32_u64, 8_u64..65_u64),
+            steps: buggify_knob!(32_u64, 0_u64..65_u64),
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
             large_command_bytes: buggify_knob!(4096_usize, 512_usize..16_385_usize),
             request_timeout_ms: buggify_knob!(1500_u64, 350_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
-            pipeline_depth: buggify_knob!(8_usize, 4_usize..17_usize),
-            compact_storm_attempts: buggify_knob!(6_usize, 3_usize..13_usize),
+            compaction: buggify_knob!(1_u64, 0_u64..1_u64) == 1,
+            pipeline_depth: buggify_knob!(8_usize, 1_usize..17_usize),
+            compact_storm_attempts: buggify_knob!(6_usize, 1_usize..13_usize),
             recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum WeightProfile {
-    ReadHeavy,
-    WriteHeavy,
-    Mixed,
-}
-
-impl WeightProfile {
-    fn for_timeline() -> Self {
-        let draw = config_random_f64();
-        if draw < 1.0 / 3.0 {
-            Self::ReadHeavy
-        } else if draw < 2.0 / 3.0 {
-            Self::WriteHeavy
-        } else {
-            Self::Mixed
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::ReadHeavy => "read-heavy",
-            Self::WriteHeavy => "write-heavy",
-            Self::Mixed => "mixed",
-        }
-    }
-
-    fn weight(self, operation: u8) -> u64 {
-        let weights = match self {
+            recovery_proposals: buggify_knob!(12_u64, 1_u64..25_u64),
+            abandon_pct: buggify_knob!(15_u64, 0_u64..61_u64),
+            redirect_sleep_ms: buggify_knob!(10_u64, 0_u64..101_u64),
+            retry_backoff_ms: buggify_knob!(25_u64, 0_u64..201_u64),
+            probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
+            compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
+            compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX
-            Self::ReadHeavy => [10, 5, 4, 52, 12, 5, 5, 7, 14],
-            Self::WriteHeavy => [30, 12, 8, 8, 4, 14, 14, 10, 6],
-            Self::Mixed => [20, 10, 9, 16, 10, 11, 11, 13, 10],
-        };
-        weights[usize::from(operation)]
+            weights: [
+                buggify_knob!(20_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(9_u64, 0_u64..41_u64),
+                buggify_knob!(16_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(11_u64, 0_u64..41_u64),
+                buggify_knob!(11_u64, 0_u64..41_u64),
+                buggify_knob!(13_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+            ],
+        }
+    }
+
+    fn weight(&self, operation: u8) -> u64 {
+        self.weights[usize::from(operation)]
+    }
+}
+
+/// Where a client sends its next attempt after a redirect, a transport error,
+/// or an ambiguous outcome. Drawn per step, so a seed can be a client that
+/// always follows the hint, one that stubbornly re-asks the same node (the
+/// dedup path on the node that may have committed the abandoned attempt), or
+/// one that walks the ring.
+#[derive(Clone, Copy, Debug)]
+enum Retarget {
+    FollowHint,
+    SameNode,
+    NextNode,
+}
+
+impl Retarget {
+    /// Two bits of `draw` pick the policy; the hint-following default keeps
+    /// half the mass so the ordinary client stays the common shape.
+    fn from_draw(draw: u64) -> Self {
+        match draw % 4 {
+            0 | 1 => Self::FollowHint,
+            2 => Self::SameNode,
+            _ => Self::NextNode,
+        }
+    }
+
+    fn next(self, current: usize, hinted: Option<u64>, server_count: usize) -> usize {
+        let hint = hinted
+            .and_then(|id| usize::try_from(id).ok())
+            .filter(|node| *node < server_count);
+        match self {
+            Self::FollowHint => hint.unwrap_or((current + 1) % server_count),
+            Self::SameNode => current,
+            Self::NextNode => (current + 1) % server_count,
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 enum Outcome {
-    Acked { seq: u64, slot: u64 },
+    Acked { seq: u64 },
     Rejected { seq: u64 },
     Ambiguous { seq: u64 },
 }
@@ -110,7 +185,7 @@ enum Outcome {
 impl Outcome {
     fn seq(&self) -> u64 {
         match self {
-            Self::Acked { seq, .. } | Self::Rejected { seq } | Self::Ambiguous { seq } => *seq,
+            Self::Acked { seq } | Self::Rejected { seq } | Self::Ambiguous { seq } => *seq,
         }
     }
 }
@@ -134,6 +209,36 @@ struct AckedCommand {
     cmd_hash: u64,
     slot: u64,
     node: usize,
+}
+
+const TAIL_KEY: &str = "paros-chain-tail";
+
+/// How long the cluster must stay converged and unchanged before the run is
+/// over. One observation of "every live node equal" is not the end of the
+/// tail: the leader can still decide a follow-up control command (a `Snap`
+/// marker's `Truncate`, a gap fill) a few beats later, and the audit's final
+/// claim would then catch the followers one slot behind. A second's worth of
+/// ticks covers those follow-ups. **Never buggified**: this is the definition
+/// of the tail's end, not a shape the run takes.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// The run's shared tail bookkeeping, one per iteration: how many clients the
+/// run has and how many have finished proposing. Convergence is only called
+/// once *every* client is quiet — the first client to see it ends the run, and
+/// its siblings, cut short by that shutdown, defer to the audit's final claim.
+#[derive(Default)]
+struct Tail {
+    registered: usize,
+    done_proposing: usize,
+}
+
+fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
+    if let Some(tail) = state.get::<Arc<Mutex<Tail>>>(TAIL_KEY) {
+        return tail;
+    }
+    let tail = Arc::new(Mutex::new(Tail::default()));
+    state.publish(TAIL_KEY, tail.clone());
+    tail
 }
 
 /// Sticky per-run coverage facts for the adversarial operations — a *flag
@@ -183,7 +288,6 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
 pub(crate) struct ChainWorkload {
     /// Per `seq`: the payload's `cmd_hash` and the terminal client outcome.
     outcomes: BTreeMap<u64, (u64, Outcome)>,
-    final_state: Option<ChainState>,
     issued_count: u64,
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
@@ -199,7 +303,6 @@ impl ChainWorkload {
     pub(crate) fn new(digest: Option<DigestSink>) -> Self {
         Self {
             outcomes: BTreeMap::new(),
-            final_state: None,
             issued_count: 0,
             external_digests_compared: false,
             adversarial: AdversarialCoverage::default(),
@@ -217,14 +320,14 @@ impl ChainWorkload {
         }
     }
 
-    fn choose_operation(profile: WeightProfile, enabled: &[u8], draw: u64) -> u8 {
+    fn choose_operation(config: &ChainConfig, enabled: &[u8], draw: u64) -> u8 {
         let total = enabled
             .iter()
-            .map(|operation| profile.weight(*operation))
+            .map(|operation| config.weight(*operation))
             .sum::<u64>();
         let mut ticket = draw % total.max(1);
         for operation in enabled {
-            let weight = profile.weight(*operation);
+            let weight = config.weight(*operation);
             if ticket < weight {
                 return *operation;
             }
@@ -276,6 +379,14 @@ impl Workload for ChainWorkload {
         "chain-client"
     }
 
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        tail(ctx.state())
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .registered += 1;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
@@ -312,8 +423,7 @@ impl Workload for ChainWorkload {
 
         let config = ChainConfig::for_timeline();
         let operations = Self::enabled_operations();
-        let weight_profile = WeightProfile::for_timeline();
-        tracing::info!(profile = weight_profile.name(), "chain_weight_profile");
+        tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -400,7 +510,7 @@ impl Workload for ChainWorkload {
                 // (and everything downstream of raised floors) at its
                 // pre-coupling cadence.
                 let mut attempt_target = target;
-                for _attempt in 0..4_u8 {
+                for _attempt in 0..config.compact_attempts {
                     let outcome = moonpool_sim::select! {
                         response = client.compact(Compact { up_to }) => match response {
                             Ok(response) => {
@@ -421,7 +531,11 @@ impl Workload for ChainWorkload {
                         {
                             // Same leader, not yet coupled: give the marker a
                             // beat to decide and the custody acks to land.
-                            if time.sleep(Duration::from_millis(60)).await.is_err() {
+                            if time
+                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .await
+                                .is_err()
+                            {
                                 return outcome;
                             }
                         }
@@ -445,13 +559,19 @@ impl Workload for ChainWorkload {
         // observable without fabricating or filtering protocol messages.
         if operations.contains(&PROPOSE) {
             let mut primer = Vec::with_capacity(config.pipeline_depth);
-            for offset in 0..config.pipeline_depth {
+            for _ in 0..config.pipeline_depth {
                 let seq = next_seq;
                 next_seq = next_seq.saturating_add(1);
+                // One draw per primer entry shapes its payload class, its
+                // bytes, and its first target — every combination is a valid
+                // client.
                 let raw = ctx.random().random::<u64>();
-                let payload_class = offset.saturating_add(1) % 4;
+                let payload_class = usize::try_from(raw % 4).unwrap_or(0);
+                let primer_target =
+                    usize::try_from((raw >> 2) % u64::try_from(server_count).unwrap_or(1))
+                        .unwrap_or(0);
                 let payload = Self::payload(
-                    u64::try_from(offset).unwrap_or(0).saturating_add(1),
+                    raw % 4,
                     config.command_bytes,
                     config.large_command_bytes,
                     raw,
@@ -465,7 +585,7 @@ impl Workload for ChainWorkload {
                     bytes = payload.len() as u64,
                     "chain_command_submitted"
                 );
-                primer.push((seq, payload, payload_class, cmd_hash, offset % server_count));
+                primer.push((seq, payload, payload_class, cmd_hash, primer_target));
             }
             let results = join_all(primer.iter().map(|(seq, payload, _, _, target)| {
                 let attempt = propose_once(*target, *seq, payload.clone(), false);
@@ -491,7 +611,7 @@ impl Workload for ChainWorkload {
                         );
                         max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                         self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                            .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                         self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
@@ -535,15 +655,17 @@ impl Workload for ChainWorkload {
                     }
                 }
             }
-            if let Some(up_to) = max_acked_slot {
+            if let Some(up_to) = max_acked_slot.filter(|_| config.compaction) {
                 let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
                 tracing::info!(
                     cmd = %hash_text(command_hash(&control)),
                     up_to,
                     "chain_control_submitted"
                 );
+                let fallback =
+                    usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
                 if matches!(
-                    compact_once(leader_hint.unwrap_or(0), up_to).await,
+                    compact_once(leader_hint.unwrap_or(fallback), up_to).await,
                     CompactResult::Accepted { .. }
                 ) {
                     tracing::info!(up_to, "chain_compact_accepted");
@@ -556,16 +678,25 @@ impl Workload for ChainWorkload {
                 break;
             }
 
-            // Exactly five provider draws per logical step, independent of the
-            // swarm mask and payload length.
+            // Exactly six provider draws per logical step, independent of the
+            // swarm mask and payload length. `raw_policy` shapes this step's
+            // client policies: which node it asks first, how it retargets
+            // after a redirect, where a duplicate goes, how far it compacts.
             let raw_op = ctx.random().random::<u64>();
             let raw_target = ctx.random().random::<u64>();
             let raw_class = ctx.random().random::<u64>();
             let raw_payload = ctx.random().random::<u64>();
             let raw_pause = ctx.random().random::<u64>();
-            let op = Self::choose_operation(weight_profile, &operations, raw_op);
+            let raw_policy = ctx.random().random::<u64>();
+            let op = Self::choose_operation(&config, &operations, raw_op);
             let target =
                 usize::try_from(raw_target % u64::try_from(server_count).unwrap_or(1)).unwrap_or(0);
+            let retarget = Retarget::from_draw(raw_policy);
+            // One step in eight ignores the leader hint outright: a proposal
+            // to whoever `target` is, which after a turnover is the *old*
+            // leader — the stale-hint edge `PROPOSE_TO_NON_LEADER` reaches only
+            // deliberately.
+            let ignore_hint = (raw_policy >> 2) % 8 == 0;
 
             match op {
                 PROPOSE | PROPOSE_TO_NON_LEADER => {
@@ -596,14 +727,17 @@ impl Workload for ChainWorkload {
                                 leader
                             }
                         })
+                    } else if ignore_hint {
+                        target
                     } else {
                         leader_hint.unwrap_or(target)
                     };
                     // Honest ambiguity: abandon the client observation, never
                     // falsify a server acknowledgement. The identical identity
                     // is retried below.
+                    #[allow(clippy::cast_precision_loss)]
                     let abandon = time.now() < Duration::from_millis(CHAOS_DURATION_MS)
-                        && buggify_with_prob!(0.15);
+                        && buggify_with_prob!(config.abandon_pct as f64 / 100.0);
                     if abandon {
                         // BUGGIFY pairing: the deliberate mid-flight
                         // abandonment (the honest-ambiguity generator) fires.
@@ -633,10 +767,11 @@ impl Workload for ChainWorkload {
                             ProposalResult::Rejected { leader }
                                 if op == PROPOSE && time.now() < proposal_deadline =>
                             {
-                                attempt_target = leader
-                                    .and_then(|id| usize::try_from(id).ok())
-                                    .unwrap_or((attempt_target + 1) % server_count);
-                                time.sleep(Duration::from_millis(10)).await.ok();
+                                attempt_target =
+                                    retarget.next(attempt_target, leader, server_count);
+                                time.sleep(Duration::from_millis(config.redirect_sleep_ms))
+                                    .await
+                                    .ok();
                             }
                             terminal => break terminal,
                         }
@@ -645,8 +780,15 @@ impl Workload for ChainWorkload {
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
                         self.outcomes
                             .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
-                        let retry_target =
-                            leader_hint.unwrap_or((chosen_target + 1) % server_count);
+                        // The reconciling retry: by policy, back to the node
+                        // that may have committed the abandoned attempt (the
+                        // dedup path on the committing node), or on to the
+                        // hinted leader / the next node.
+                        let retry_target = retarget.next(
+                            chosen_target,
+                            leader_hint.and_then(|node| u64::try_from(node).ok()),
+                            server_count,
+                        );
                         let reconciled = moonpool_sim::select! {
                             result = propose_once(retry_target, seq, payload.clone(), false) => result,
                             _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
@@ -670,7 +812,7 @@ impl Workload for ChainWorkload {
                             );
                             max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                             self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                                .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                             self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
@@ -695,19 +837,27 @@ impl Workload for ChainWorkload {
                                 node: leader_hint.unwrap_or(chosen_target),
                             });
                             self.adversarial.payload_classes[payload_class] = true;
-                            if seq.is_multiple_of(config.compact_every) {
+                            if config.compaction && seq.is_multiple_of(config.compact_every) {
+                                // How far to ask: the just-acked slot, a
+                                // partial prefix below it, or one past it (a
+                                // refusal is a legal answer to any of them).
+                                let up_to = match (raw_policy >> 5) % 4 {
+                                    0 => slot.saturating_sub((raw_policy >> 7) % (slot + 1)),
+                                    1 => slot + 1 + (raw_policy >> 7) % 8,
+                                    _ => slot,
+                                };
                                 let control =
-                                    Command::Control(Control::Truncate { up_to: Slot(slot) });
+                                    Command::Control(Control::Truncate { up_to: Slot(up_to) });
                                 tracing::info!(
                                     cmd = %hash_text(command_hash(&control)),
-                                    up_to = slot,
+                                    up_to,
                                     "chain_control_submitted"
                                 );
                                 if matches!(
-                                    compact_once(leader_hint.unwrap_or(chosen_target), slot).await,
+                                    compact_once(leader_hint.unwrap_or(chosen_target), up_to).await,
                                     CompactResult::Accepted { .. }
                                 ) {
-                                    tracing::info!(up_to = slot, "chain_compact_accepted");
+                                    tracing::info!(up_to, "chain_compact_accepted");
                                 }
                             }
                         }
@@ -744,7 +894,14 @@ impl Workload for ChainWorkload {
                         )
                         .unwrap_or(0);
                         let command = (*candidates[index]).clone();
-                        let duplicate_target = current_leader;
+                        // Where the duplicate goes: the current leader (the
+                        // dedup fast path), the node that originally acked it
+                        // (dedup at a possibly demoted node), or anyone.
+                        let duplicate_target = match (raw_policy >> 3) % 4 {
+                            0 | 1 => current_leader,
+                            2 => command.node % server_count,
+                            _ => target,
+                        };
                         tracing::info!(
                             cmd = %hash_text(command.cmd_hash),
                             seq = command.seq,
@@ -896,7 +1053,7 @@ impl Workload for ChainWorkload {
                             max_acked_slot =
                                 Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
                             self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                                .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                             self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
@@ -948,6 +1105,7 @@ impl Workload for ChainWorkload {
                 }
                 COMPACT => {
                     if let Some(up_to) = max_acked_slot
+                        && config.compaction
                         && raw_pause % config.compact_every == 0
                     {
                         let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
@@ -965,7 +1123,7 @@ impl Workload for ChainWorkload {
                     }
                 }
                 COMPACT_STORM => {
-                    if let Some(base) = max_acked_slot {
+                    if let Some(base) = max_acked_slot.filter(|_| config.compaction) {
                         let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
                         for attempt in 0..config.compact_storm_attempts {
                             let mode = (first_mode + attempt) % 3;
@@ -976,7 +1134,7 @@ impl Workload for ChainWorkload {
                                     leader_hint.unwrap_or(target),
                                 ),
                                 1 if server_count > 1 && leader_hint.is_some() => {
-                                    let leader = leader_hint.unwrap_or(0) % server_count;
+                                    let leader = leader_hint.unwrap_or(target) % server_count;
                                     let offset = 1 + usize::try_from(
                                         (raw_target + u64::try_from(attempt).unwrap_or(0))
                                             % u64::try_from(server_count - 1).unwrap_or(1),
@@ -1102,18 +1260,21 @@ impl Workload for ChainWorkload {
                                 if ack.committed {
                                     break Some(ack.read_index);
                                 }
-                                // Redirect: retry the hinted leader (or the
-                                // next node) inside the same deadline.
-                                attempt_target = ack
-                                    .leader
-                                    .and_then(|id| usize::try_from(id).ok())
-                                    .filter(|node| *node < server_count)
-                                    .unwrap_or((attempt_target + 1) % server_count);
+                                // Redirect, by this step's policy, inside
+                                // the same deadline.
+                                attempt_target =
+                                    retarget.next(attempt_target, ack.leader, server_count);
                             }
-                            // Transport error: try the next node.
-                            None => attempt_target = (attempt_target + 1) % server_count,
+                            // Transport error: same policy, no hint.
+                            None => {
+                                attempt_target = retarget.next(attempt_target, None, server_count);
+                            }
                         }
-                        if time.sleep(Duration::from_millis(10)).await.is_err() {
+                        if time
+                            .sleep(Duration::from_millis(config.redirect_sleep_ms))
+                            .await
+                            .is_err()
+                        {
                             break None;
                         }
                     };
@@ -1199,18 +1360,6 @@ impl Workload for ChainWorkload {
             "chain: ambiguous proposal is reconciled as committed"
         );
         assert_sometimes!(
-            matches!(weight_profile, WeightProfile::ReadHeavy),
-            "chain: read-heavy operation weights are selected"
-        );
-        assert_sometimes!(
-            matches!(weight_profile, WeightProfile::WriteHeavy),
-            "chain: write-heavy operation weights are selected"
-        );
-        assert_sometimes!(
-            matches!(weight_profile, WeightProfile::Mixed),
-            "chain: mixed operation weights are selected"
-        );
-        assert_sometimes!(
             self.adversarial.duplicate_across_leader_change,
             "a duplicate is suppressed across a leader change"
         );
@@ -1276,15 +1425,17 @@ impl Workload for ChainWorkload {
         // suppressed proposals during the turbulent prefix.
         let recovery_deadline = time.now() + Duration::from_millis(config.recovery_budget_ms);
         let mut recovery_acked = 0_u64;
-        let mut target = leader_hint.unwrap_or(0) % server_count;
-        for recovery_offset in 0..12_u64 {
+        let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+        let mut target = leader_hint.unwrap_or(first) % server_count;
+        for _ in 0..config.recovery_proposals {
             let seq = next_seq;
             next_seq = next_seq.saturating_add(1);
+            let raw = ctx.random().random::<u64>();
             let payload = Self::payload(
-                2,
+                raw % 4,
                 config.command_bytes,
                 config.large_command_bytes,
-                seq ^ recovery_offset ^ 0xa5a5_5a5a,
+                raw,
             );
             let cmd_hash = user_command_hash(&payload);
             audit.note_submitted(cmd_hash);
@@ -1307,7 +1458,7 @@ impl Workload for ChainWorkload {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
                         self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                            .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                         self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
@@ -1334,16 +1485,25 @@ impl Workload for ChainWorkload {
                     }
                     ProposalResult::Ambiguous => target = (target + 1) % server_count,
                 }
-                time.sleep(Duration::from_millis(25)).await.ok();
+                time.sleep(Duration::from_millis(config.retry_backoff_ms))
+                    .await
+                    .ok();
             }
             if !acknowledged {
                 break;
             }
         }
         self.issued_count = next_seq;
+        let tail = tail(ctx.state());
+        tail.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .done_proposing += 1;
 
         let mut converged = false;
         let mut last_probe: Vec<Option<ChainState>> = Vec::new();
+        // `(since, state)`: when the cluster was first seen converged at
+        // `state`, reset whenever a probe disagrees.
+        let mut stable: Option<(Duration, ChainState)> = None;
         while time.now() < recovery_deadline && !shutdown.is_cancelled() {
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
@@ -1400,16 +1560,35 @@ impl Workload for ChainWorkload {
                             }
                         );
                     }
-                    if reference.applied_count > pre_tail_count
+                    let all_quiet = {
+                        let guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                        guard.done_proposing == guard.registered
+                    };
+                    if all_quiet
+                        && reference.applied_count > pre_tail_count
                         && observed.iter().all(|state| *state == reference)
                     {
-                        self.final_state = Some(reference);
-                        converged = true;
-                        break;
+                        match stable {
+                            Some((since, state)) if state == reference => {
+                                if time.now().saturating_sub(since) >= SETTLE {
+                                    converged = true;
+                                    break;
+                                }
+                            }
+                            _ => stable = Some((time.now(), reference)),
+                        }
+                    } else {
+                        stable = None;
                     }
+                } else {
+                    stable = None;
                 }
+            } else {
+                stable = None;
             }
-            time.sleep(Duration::from_millis(50)).await.ok();
+            time.sleep(Duration::from_millis(config.probe_interval_ms))
+                .await
+                .ok();
         }
 
         // Availability oracle (issue #19 E): the budget bounds storage faults a
@@ -1419,9 +1598,13 @@ impl Workload for ChainWorkload {
         // genuinely missing). Under the per-record budget no run is excusable,
         // so an unavailable run with clean quorums everywhere is a real
         // liveness bug, named as such beside the convergence failure.
+        // A run a sibling client ended (it saw the cluster converged once every
+        // client was quiet) cuts this client's own observation short; the
+        // audit's final-convergence claim is the arbiter for that run.
+        let ended_by_sibling = !converged && shutdown.is_cancelled();
         let storage = crate::world::storage_fault_stats(ctx.state());
         assert_always!(
-            converged || !storage.clean_quorum_everywhere,
+            converged || ended_by_sibling || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster
@@ -1438,7 +1621,7 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !converged {
+        if !converged && !ended_by_sibling {
             // Failure diagnostic (fires only on the red path): which node is
             // stuck, and where. `None` = the node did not answer the inspect
             // probe inside its timeout. The seed's buggified shape is printed
@@ -1470,16 +1653,14 @@ impl Workload for ChainWorkload {
             }
         }
         assert_always!(
-            recovery_acked > 0 && converged,
+            (recovery_acked > 0 && converged) || ended_by_sibling,
             "chain: cluster converged after chaos"
         );
-        if let Some(state) = self.final_state {
-            assert_sometimes_greater_than!(
-                state.applied_count,
-                8_u64,
-                "chain: applied index watermark"
-            );
-        }
+        assert_sometimes_greater_than!(
+            audit.cluster_applied_max().map_or(0, |slot| slot + 1),
+            8_u64,
+            "chain: applied index watermark"
+        );
         Ok(())
     }
 
@@ -1493,21 +1674,13 @@ impl Workload for ChainWorkload {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(digest);
         }
+        // (Every acked slot being inside the applied prefix is the audit's
+        // final claim, judged once over every client's history.)
         assert_always!(
             self.outcomes
                 .iter()
                 .all(|(seq, (_, outcome))| *seq == outcome.seq() && *seq < self.issued_count),
             "chain: retained outcome model is internally valid"
-        );
-        assert_always!(
-            self.final_state
-                .is_some_and(|state| self.outcomes.values().all(|(_, outcome)| {
-                    match outcome {
-                        Outcome::Acked { slot, .. } => *slot < state.applied_count,
-                        Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
-                    }
-                })),
-            "chain: retained acknowledged slots are valid"
         );
         Ok(())
     }

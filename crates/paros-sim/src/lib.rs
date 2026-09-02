@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use moonpool_sim::{
     Attrition, AttritionScope, Chaos, ChaosMode, ExplorationConfig, LinkLatencyConfig,
-    LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
+    LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder, WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
@@ -86,6 +86,12 @@ fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {
 /// lose one, so neither exercises a regime a 3–5 node cluster under attrition
 /// does not, and each needed its own special cases in the checks.
 pub(crate) const CLUSTER_SIZE_RANGE: std::ops::RangeInclusive<usize> = 3..=5;
+/// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
+/// are what give the linearizability checker conflicting concurrent histories
+/// to reject; single-client runs keep the cheap sequential fast path. Each
+/// client is its own identity (`ctx.client_id()`), so their histories merge
+/// without aliasing.
+pub(crate) const CLIENT_COUNT_RANGE: std::ops::Range<usize> = 1..4;
 /// Adaptive-sweep plateau window: stop once coverage has been stable for this
 /// many consecutive seeds (and every `sometimes`/`reachable` has fired).
 ///
@@ -183,7 +189,9 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
             Box::new(NodeProcess::chaotic())
         })
         .link_latency(LinkLatencyConfig::default())
-        .workload_factory(move || Box::new(ChainWorkload::new(digest.clone())))
+        .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
+            Box::new(ChainWorkload::new(digest.clone()))
+        })
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
