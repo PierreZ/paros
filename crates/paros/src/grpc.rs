@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Message, NodeId, SessionEntry,
-    Slot, Value,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, MatchOutcome,
+    MatchRefusal, MatchReply, MatchRequest, MatchmakerId, Message, NodeId, QuorumSystem,
+    SessionEntry, Slot, Value,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
@@ -23,9 +24,22 @@ pub(crate) mod internal {
     tonic::include_proto!("paros.internal.v1");
 }
 
+/// The matchmaker contract generated from `proto/matchmaker.proto`: a per-ballot
+/// configuration registry, spoken only by a deployment that names matchmakers.
+pub mod matchmaker {
+    #![allow(missing_docs, clippy::pedantic)]
+    tonic::include_proto!("paros.matchmaker.v1");
+}
+
 pub use internal::paros_internal_client::ParosInternalClient;
 pub(crate) use internal::paros_internal_server::ParosInternalServer;
 pub use internal::{InspectReply, InspectRequest};
+pub use matchmaker::paros_matchmaker_client::ParosMatchmakerClient;
+pub(crate) use matchmaker::paros_matchmaker_server::ParosMatchmakerServer;
+pub use matchmaker::{
+    GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,
+    MatchReply as WireMatchReply, MatchRequest as WireMatchRequest,
+};
 pub use public::paros_client::ParosClient;
 pub(crate) use public::paros_server::ParosServer;
 pub use public::{Compact, CompactAck, Propose, ProposeAck, Read, ReadAck};
@@ -719,6 +733,264 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         dispatch(&self.inspect, request.into_inner())
             .await
             .map(Response::new)
+    }
+}
+
+// ---- the matchmaker contract ------------------------------------------------
+
+fn mm_ballot_to_proto(ballot: Ballot) -> matchmaker::Ballot {
+    matchmaker::Ballot {
+        round: ballot.round,
+        node: ballot.node.0,
+    }
+}
+
+fn mm_ballot_from_proto(ballot: Option<matchmaker::Ballot>) -> Result<Ballot, &'static str> {
+    let ballot = ballot.ok_or("missing ballot")?;
+    Ok(Ballot {
+        round: ballot.round,
+        node: NodeId(ballot.node),
+    })
+}
+
+fn acceptor_config_to_proto(config: &AcceptorConfig) -> matchmaker::AcceptorConfig {
+    matchmaker::AcceptorConfig {
+        members: config.members.iter().map(|n| n.0).collect(),
+        quorum_system: match config.quorum_system {
+            QuorumSystem::Majority => matchmaker::QuorumSystem::Majority.into(),
+        },
+    }
+}
+
+fn acceptor_config_from_proto(
+    config: Option<matchmaker::AcceptorConfig>,
+) -> Result<AcceptorConfig, &'static str> {
+    let config = config.ok_or("missing acceptor configuration")?;
+    let quorum_system = match matchmaker::QuorumSystem::try_from(config.quorum_system) {
+        Ok(matchmaker::QuorumSystem::Majority) => QuorumSystem::Majority,
+        Err(_) => return Err("unknown quorum system"),
+    };
+    if config.members.is_empty() {
+        return Err("empty acceptor configuration");
+    }
+    Ok(AcceptorConfig::new(
+        config.members.into_iter().map(NodeId).collect(),
+        quorum_system,
+    ))
+}
+
+/// Encode a matchmaking request for the wire.
+#[must_use]
+pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
+    WireMatchRequest {
+        from: request.from.0,
+        ballot: Some(mm_ballot_to_proto(request.ballot)),
+        config: Some(acceptor_config_to_proto(&request.config)),
+    }
+}
+
+/// Validate and decode a matchmaking request from the wire.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest, &'static str> {
+    Ok(MatchRequest::new(
+        NodeId(request.from),
+        mm_ballot_from_proto(request.ballot)?,
+        acceptor_config_from_proto(request.config)?,
+    ))
+}
+
+/// Encode a matchmaker's reply for the wire.
+#[must_use]
+pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
+    let outcome = match &reply.outcome {
+        MatchOutcome::Registered {
+            history,
+            gc_watermark,
+        } => matchmaker::match_reply::Outcome::Registered(matchmaker::Registered {
+            history: history
+                .iter()
+                .map(|(ballot, config)| matchmaker::Registration {
+                    ballot: Some(mm_ballot_to_proto(*ballot)),
+                    config: Some(acceptor_config_to_proto(config)),
+                })
+                .collect(),
+            gc_watermark: Some(mm_ballot_to_proto(*gc_watermark)),
+        }),
+        MatchOutcome::Refused(refusal) => {
+            let reason = match refusal {
+                MatchRefusal::Stale { highest } => {
+                    matchmaker::refused::Reason::StaleHighest(mm_ballot_to_proto(*highest))
+                }
+                MatchRefusal::BelowWatermark { watermark } => {
+                    matchmaker::refused::Reason::BelowWatermark(mm_ballot_to_proto(*watermark))
+                }
+            };
+            matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
+                reason: Some(reason),
+            })
+        }
+    };
+    WireMatchReply {
+        matchmaker: reply.matchmaker.0,
+        to: reply.to.0,
+        ballot: Some(mm_ballot_to_proto(reply.ballot)),
+        outcome: Some(outcome),
+    }
+}
+
+/// Validate and decode a matchmaker's reply from the wire.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'static str> {
+    let outcome = match reply.outcome.ok_or("missing match outcome")? {
+        matchmaker::match_reply::Outcome::Registered(registered) => {
+            let mut history = BTreeMap::new();
+            for entry in registered.history {
+                let ballot = mm_ballot_from_proto(entry.ballot)?;
+                if history
+                    .insert(ballot, acceptor_config_from_proto(entry.config)?)
+                    .is_some()
+                {
+                    return Err("duplicate ballot in history");
+                }
+            }
+            MatchOutcome::Registered {
+                history,
+                gc_watermark: mm_ballot_from_proto(registered.gc_watermark)?,
+            }
+        }
+        matchmaker::match_reply::Outcome::Refused(refused) => {
+            MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {
+                matchmaker::refused::Reason::StaleHighest(highest) => MatchRefusal::Stale {
+                    highest: mm_ballot_from_proto(Some(highest))?,
+                },
+                matchmaker::refused::Reason::BelowWatermark(watermark) => {
+                    MatchRefusal::BelowWatermark {
+                        watermark: mm_ballot_from_proto(Some(watermark))?,
+                    }
+                }
+            })
+        }
+    };
+    Ok(MatchReply {
+        matchmaker: MatchmakerId(reply.matchmaker),
+        to: NodeId(reply.to),
+        ballot: mm_ballot_from_proto(reply.ballot)?,
+        outcome,
+    })
+}
+
+/// Encode a garbage-collection request for the wire.
+#[must_use]
+pub fn wire_garbage_collect(from: NodeId, watermark: Ballot) -> WireGarbageCollect {
+    WireGarbageCollect {
+        from: from.0,
+        watermark: Some(mm_ballot_to_proto(watermark)),
+    }
+}
+
+/// Decode a garbage-collection request from the wire into `(from, watermark)`.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn garbage_collect_from_wire(
+    request: WireGarbageCollect,
+) -> Result<(NodeId, Ballot), &'static str> {
+    Ok((
+        NodeId(request.from),
+        mm_ballot_from_proto(request.watermark)?,
+    ))
+}
+
+/// Encode a garbage-collection acknowledgement for the wire.
+#[must_use]
+pub fn wire_garbage_collect_ack(
+    matchmaker: MatchmakerId,
+    watermark: Ballot,
+) -> WireGarbageCollectAck {
+    WireGarbageCollectAck {
+        matchmaker: matchmaker.0,
+        watermark: Some(mm_ballot_to_proto(watermark)),
+    }
+}
+
+/// Decode a garbage-collection acknowledgement into `(matchmaker, watermark)`.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn garbage_collect_ack_from_wire(
+    ack: WireGarbageCollectAck,
+) -> Result<(MatchmakerId, Ballot), &'static str> {
+    Ok((
+        MatchmakerId(ack.matchmaker),
+        mm_ballot_from_proto(ack.watermark)?,
+    ))
+}
+
+/// Matchmaker requests accepted concurrently by tonic and consumed serially by
+/// the matchmaker driver, which exclusively owns the sans-IO core.
+pub(crate) struct MatchmakerInbox {
+    pub(crate) requests: mpsc::Receiver<Call<MatchRequest, MatchReply>>,
+    pub(crate) collects: mpsc::Receiver<Call<(NodeId, Ballot), (MatchmakerId, Ballot)>>,
+}
+
+/// Cloneable tonic handler for the matchmaker contract; each method forwards
+/// into [`MatchmakerInbox`] and holds the response open until the driver
+/// answers.
+#[derive(Clone)]
+pub(crate) struct MatchmakerService {
+    requests: mpsc::Sender<Call<MatchRequest, MatchReply>>,
+    collects: mpsc::Sender<Call<(NodeId, Ballot), (MatchmakerId, Ballot)>>,
+}
+
+/// Construct a matchmaker handler/inbox pair; `capacity` bounds each queue
+/// (at least 1).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn matchmaker_channel(capacity: usize) -> (MatchmakerService, MatchmakerInbox) {
+    let (requests_tx, requests_rx) = mpsc::channel(capacity);
+    let (collects_tx, collects_rx) = mpsc::channel(capacity);
+    (
+        MatchmakerService {
+            requests: requests_tx,
+            collects: collects_tx,
+        },
+        MatchmakerInbox {
+            requests: requests_rx,
+            collects: collects_rx,
+        },
+    )
+}
+
+#[tonic::async_trait]
+impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService {
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn matchmake(
+        &self,
+        request: Request<WireMatchRequest>,
+    ) -> Result<Response<WireMatchReply>, Status> {
+        let request = match_request_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(format!("invalid match request: {error}")))?;
+        dispatch(&self.requests, request)
+            .await
+            .map(|reply| Response::new(wire_match_reply(&reply)))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn garbage_collect(
+        &self,
+        request: Request<WireGarbageCollect>,
+    ) -> Result<Response<WireGarbageCollectAck>, Status> {
+        let request = garbage_collect_from_wire(request.into_inner()).map_err(|error| {
+            Status::invalid_argument(format!("invalid garbage-collect request: {error}"))
+        })?;
+        dispatch(&self.collects, request)
+            .await
+            .map(|(matchmaker, watermark)| {
+                Response::new(wire_garbage_collect_ack(matchmaker, watermark))
+            })
     }
 }
 

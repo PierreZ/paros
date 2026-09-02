@@ -33,6 +33,7 @@ macro_rules! reach_once {
 }
 
 mod client;
+mod matchmaker;
 mod state;
 
 /// A stable label per message kind, for the failure print's send tally.
@@ -64,9 +65,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, EdgeRejection, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, Message, NodeId,
-    PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord,
-    command_hash,
+    Audit, Ballot, EdgeRejection, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal,
+    MatchmakerId, Message, NodeId, PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
+    StorageFaultDecision, StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -231,7 +232,7 @@ impl AuditWorld {
     pub(crate) fn diagnostics(&self) -> String {
         let st = self.lock();
         format!(
-            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={}",
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} matchmakers=[{}]",
             st.applied_max,
             st.cluster_applied_max,
             st.booted,
@@ -241,7 +242,8 @@ impl AuditWorld {
             st.promised,
             st.sent_kinds,
             st.delivery_failures,
-            st.edge_rejections
+            st.edge_rejections,
+            st.matchmaker.diagnostics()
         )
     }
 
@@ -266,6 +268,7 @@ impl AuditWorld {
         );
         st.check_protocol_gates();
         st.check_driver_hook_gates();
+        st.matchmaker.check_gates();
     }
 
     /// Merge one client's recorded history into the shared one and run the
@@ -1474,6 +1477,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after the boot replay and before its sync"
                 );
             }
+            // The matchmaker's seams are reported through
+            // `matchmaker_crashed`, in their own namespace.
+            Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
         }
     }
 
@@ -1956,6 +1962,79 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.prepare_below_floor,
             "a candidate prepares below a peer's compaction floor"
+        );
+    }
+
+    // ---- the matchmaker registry (see `matchmaker`) -------------------------
+
+    #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0))]
+    fn matchmaker_recovered(
+        &self,
+        matchmaker: MatchmakerId,
+        registry: &[(Ballot, u64)],
+        gc_watermark: Ballot,
+    ) {
+        self.state()
+            .matchmaker
+            .recovered(matchmaker, registry, gc_watermark);
+    }
+
+    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: u64) {
+        self.state()
+            .matchmaker
+            .registered(matchmaker, ballot, config);
+    }
+
+    fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {
+        self.state()
+            .matchmaker
+            .watermark_raised(matchmaker, watermark);
+    }
+
+    fn match_replied(
+        &self,
+        matchmaker: MatchmakerId,
+        _to: NodeId,
+        ballot: Ballot,
+        history: &[(Ballot, u64)],
+        gc_watermark: Ballot,
+    ) {
+        self.state()
+            .matchmaker
+            .replied(matchmaker, ballot, history, gc_watermark);
+    }
+
+    fn match_refused(
+        &self,
+        matchmaker: MatchmakerId,
+        _to: NodeId,
+        ballot: Ballot,
+        refusal: MatchRefusal,
+    ) {
+        self.state().matchmaker.refused(matchmaker, ballot, refusal);
+    }
+
+    fn matchmaker_crashed(&self, _matchmaker: MatchmakerId, seam: Seam) {
+        self.state().matchmaker.crashed(seam);
+    }
+
+    fn match_reply_dropped(&self, _matchmaker: MatchmakerId) {
+        self.state().matchmaker.reply_dropped();
+    }
+
+    fn matchmaker_storage_fault(
+        &self,
+        matchmaker: MatchmakerId,
+        _error: &StorageError,
+        decision: StorageFaultDecision,
+    ) {
+        // The sim's matchmaker store injects no faults (#119: the registry
+        // rides the generic record contract, with no fault story of its
+        // own), so a fault here is an uninjected detection — a bug.
+        assert_always!(
+            false,
+            "matchmaker: no storage fault is ever surfaced by the sim's registry store",
+            { "matchmaker" => matchmaker.0, "decision" => format!("{decision:?}") }
         );
     }
 }

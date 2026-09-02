@@ -28,14 +28,14 @@
 //!
 //! | hook | fired gate | recovery gate |
 //! |---|---|---|
-//! | `crash_at` (per seam) | audit `crashed`, one per seam | boot re-report checks in audit `recovered` |
+//! | `crash_at` (per seam) | audit `crashed` / `matchmaker_crashed`, one per seam | boot re-report checks in audit `recovered` / `matchmaker_recovered` |
 //! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
 //! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
 //! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
 //! | `shortest_election_timeout` / `longest_election_timeout` | audit `election_timeout_extreme` / inline | "a leader is elected" |
 //! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
 //! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
-//! | `drop_client_reply` (per kind) | audit `client_reply_dropped`, one per family | "…retry takes the dedup path", read retry |
+//! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
@@ -99,6 +99,16 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 // rate still crashes only a handful of boots per run — and
                 // each one is a second boot from the same durable state.
                 Seam::AfterBootReplayBeforeSync => buggify_with_prob!(0.25),
+                // The matchmaker's two durability points, each its own
+                // location. A matchmaker drains a batch only on a round
+                // change — a handful per run — so the per-batch rate is an
+                // order above the node seams' and still crashes only a few
+                // registrations per seed. The bias applies: both are write
+                // windows.
+                Seam::MatchBeforeSync => buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9)),
+                Seam::MatchAfterSyncBeforeReply => {
+                    buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9))
+                }
             };
         if fired && self.seam_crash_bias > 1.0 {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
@@ -439,6 +449,10 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // A lost compaction ack is the one ambiguity the compaction
             // client's re-ask loop must absorb without double-seeding.
             paros::Reply::Compact => buggify_with_prob!(0.10),
+            // A lost matchmaker reply after the registration is durable: the
+            // requester's retry is the same request again, the idempotent
+            // re-answer path. Gated in the audit (`match_reply_dropped`).
+            paros::Reply::Match => buggify_with_prob!(0.20),
         }
     }
 

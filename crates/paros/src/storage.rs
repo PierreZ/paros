@@ -53,6 +53,10 @@ pub enum StorageRecord {
     SnapChunk(Slot, u32),
     /// The staged application transition at this slot (the apply seam).
     Application(Slot),
+    /// A matchmaker's registration of a configuration under this ballot.
+    Registration(Ballot),
+    /// A matchmaker's durable GC watermark scalar.
+    GcWatermark,
     /// The whole staged batch: an fsync flushes every record staged since the
     /// last flush, so a failed fsync has no single-record identity.
     Batch,
@@ -75,6 +79,10 @@ impl fmt::Display for StorageRecord {
                 write!(f, "snap-chunk[{}#{chunk}]", at.0)
             }
             StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
+            StorageRecord::Registration(ballot) => {
+                write!(f, "registration[{}.{}]", ballot.round, ballot.node.0)
+            }
+            StorageRecord::GcWatermark => write!(f, "gc-watermark"),
             StorageRecord::Batch => write!(f, "batch"),
             StorageRecord::Store => write!(f, "store"),
         }

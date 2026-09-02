@@ -7,6 +7,7 @@
 //! like a real disk. Each node reaches it through a [`storage::DurableStorage`]
 //! handle; the boot-rot sites live in [`rot`].
 
+pub(crate) mod matchmaker;
 pub(crate) mod rot;
 pub(crate) mod storage;
 
@@ -269,6 +270,9 @@ pub(super) struct Stage7Flags {
 #[derive(Default)]
 pub(crate) struct StorageWorld {
     disks: BTreeMap<String, NodeDisk>,
+    /// The matchmakers' durable registries, keyed by IP (see
+    /// [`matchmaker::DurableMatchmakerStorage`]); empty on a plain seed.
+    matchmakers: BTreeMap<String, matchmaker::MatchmakerDisk>,
     /// Full cluster membership size, for the quorum bound (set once at boot;
     /// zero refuses every injection).
     cluster_size: usize,

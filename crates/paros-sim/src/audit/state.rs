@@ -11,6 +11,7 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_som
 use paros::{Ballot, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
+use super::matchmaker::MatchmakerAudit;
 
 /// Consecutive **deposed heartbeats** a leader may broadcast before the checker
 /// calls it a zombie (#95). **Never buggified**: an oracle threshold is the
@@ -217,6 +218,9 @@ pub(super) struct AuditState {
 
     // --- client history -----------------------------------------------------
     pub(super) lin: LinHistory,
+
+    // --- the matchmaker registry (#119) -------------------------------------
+    pub(super) matchmaker: MatchmakerAudit,
 
     // --- sticky coverage flags ---------------------------------------------
     pub(super) any_chosen: bool,

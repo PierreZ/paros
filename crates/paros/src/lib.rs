@@ -9,12 +9,18 @@
 //! simulation (`SimProviders`); the deterministic-simulation harness lives in
 //! `paros-sim` and adapts a moonpool `Process` to [`run_node`]. The client API
 //! and a `parosd` binary land here too, once the protocol stabilizes.
+//!
+//! [`run_matchmaker`] is the same shape for the **matchmaker** role (the
+//! per-ballot configuration registry of Matchmaker Paxos), driven over
+//! [`MatchmakerStorage`]. It is opt-in: a deployment without matchmakers never
+//! runs it, and [`run_node`] does not know it exists.
 
 mod audit;
 mod corruption;
 mod driver;
 mod grpc;
 mod hooks;
+mod matchmaker;
 mod storage;
 
 pub use audit::{Audit, NoAudit, StorageFaultDecision};
@@ -34,19 +40,29 @@ pub use driver::{
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, Propose, ProposeAck, Read, ReadAck, proposal_checksum,
+    ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck,
+    WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
+    garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
+    match_request_from_wire, proposal_checksum, wire_garbage_collect, wire_garbage_collect_ack,
+    wire_match_reply, wire_match_request,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
+pub use matchmaker::{
+    MatchmakerStorage, MemMatchmakerStorage, config_hash, matchmaker_storage_contract_suite,
+    run_matchmaker,
+};
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
 pub use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry, HANDOFF_BATCH,
-    HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult,
-    QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
+    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
+    Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Message,
+    MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
+    ReadIndexResult, ReadState, Ready, RegistryStorage, SessionEntry, Slot, Storage, Value,
     WriteOp, command_fingerprint,
 };
 
@@ -243,6 +259,99 @@ mod tests {
                 pending: BTreeMap::new(),
             },
         ]
+    }
+
+    /// The matchmaker contract: every outcome and refusal round-trips through
+    /// its typed protobuf losslessly.
+    #[test]
+    fn matchmaker_contract_round_trips() {
+        use paros_core::{
+            AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerId,
+            QuorumSystem,
+        };
+        let ballot = |round: u64, node: u64| Ballot {
+            round,
+            node: NodeId(node),
+        };
+        let config = |members: &[u64]| {
+            AcceptorConfig::new(
+                members.iter().map(|n| NodeId(*n)).collect(),
+                QuorumSystem::Majority,
+            )
+        };
+        let request = MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]));
+        let wire = crate::grpc::wire_match_request(&request);
+        let bytes = wire.encode_to_vec();
+        let decoded = crate::grpc::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(
+            crate::grpc::match_request_from_wire(decoded).expect("request"),
+            request
+        );
+
+        let replies = vec![
+            MatchReply {
+                matchmaker: MatchmakerId(1),
+                to: NodeId(4),
+                ballot: ballot(7, 4),
+                outcome: MatchOutcome::Registered {
+                    history: BTreeMap::from([
+                        (ballot(2, 1), config(&[0, 1, 2])),
+                        (ballot(5, 3), config(&[1, 2, 3, 4])),
+                    ]),
+                    gc_watermark: ballot(2, 1),
+                },
+            },
+            MatchReply {
+                matchmaker: MatchmakerId(2),
+                to: NodeId(4),
+                ballot: ballot(7, 4),
+                outcome: MatchOutcome::Registered {
+                    history: BTreeMap::new(),
+                    gc_watermark: Ballot::zero(),
+                },
+            },
+            MatchReply {
+                matchmaker: MatchmakerId(0),
+                to: NodeId(4),
+                ballot: ballot(7, 4),
+                outcome: MatchOutcome::Refused(MatchRefusal::Stale {
+                    highest: ballot(9, 2),
+                }),
+            },
+            MatchReply {
+                matchmaker: MatchmakerId(0),
+                to: NodeId(4),
+                ballot: ballot(1, 4),
+                outcome: MatchOutcome::Refused(MatchRefusal::BelowWatermark {
+                    watermark: ballot(3, 1),
+                }),
+            },
+        ];
+        for reply in replies {
+            let wire = crate::grpc::wire_match_reply(&reply);
+            let bytes = wire.encode_to_vec();
+            let decoded = crate::grpc::WireMatchReply::decode(bytes.as_slice()).expect("decode");
+            assert_eq!(
+                crate::grpc::match_reply_from_wire(decoded).expect("reply"),
+                reply,
+                "matchmaker reply round-trip must be lossless for {reply:?}"
+            );
+        }
+
+        let ack = crate::grpc::wire_garbage_collect_ack(MatchmakerId(2), ballot(3, 1));
+        let decoded = crate::grpc::WireGarbageCollectAck::decode(ack.encode_to_vec().as_slice())
+            .expect("decode");
+        assert_eq!(
+            crate::grpc::garbage_collect_ack_from_wire(decoded).expect("ack"),
+            (MatchmakerId(2), ballot(3, 1))
+        );
+        let gc = crate::grpc::wire_garbage_collect(NodeId(4), ballot(3, 1));
+        let decoded =
+            crate::grpc::WireGarbageCollect::decode(gc.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(
+            crate::grpc::garbage_collect_from_wire(decoded).expect("gc"),
+            (NodeId(4), ballot(3, 1))
+        );
     }
 
     /// Every domain variant must round-trip through the typed protobuf contract

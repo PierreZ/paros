@@ -57,6 +57,20 @@ pub enum Seam {
     /// attempt exactly as on the first, and nothing the first attempt staged
     /// may leak into what the second one reads.
     AfterBootReplayBeforeSync,
+    /// Inside the **matchmaker** driver: a registration (or a watermark raise)
+    /// is staged but **before** its fsync. A crash here loses the staged
+    /// write, and no reply was sent (replies come after the fsync), so it is a
+    /// clean "the request never happened" — the requester times out and asks
+    /// again.
+    MatchBeforeSync,
+    /// Inside the matchmaker driver: the registration is fsync-durable but
+    /// **before** its reply leaves. A crash here keeps the registration and
+    /// drops the reply; the restarted matchmaker answers the requester's
+    /// retried request idempotently, from the history it retains.
+    /// This is the persist-before-reply seam: with the order swapped (reply,
+    /// then fsync) a crash here lets a `Registered` reply escape for a ballot
+    /// the restarted matchmaker no longer holds — the registry's un-promise.
+    MatchAfterSyncBeforeReply,
 }
 
 /// What a cooperative leader handoff would transfer right now, handed to
@@ -98,6 +112,10 @@ pub enum Reply {
     ReadRedirect,
     /// A `CompactAck` (accepted or refused).
     Compact,
+    /// A matchmaker's `MatchReply` (registered or refused). Dropping it after
+    /// the registration is durable is what makes the requester's retry the
+    /// same request again — the idempotent re-answer path.
+    Match,
 }
 
 /// Optional driver-level fault and policy hooks.

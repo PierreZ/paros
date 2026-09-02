@@ -11,9 +11,11 @@
 //! Two axes, one check:
 //!
 //! - the **main campaign** ([`explore`], [`chain_smoke`], [`run_chain_seed`]):
-//!   a 3–5 node cluster under swarm network turbulence, crash/restart attrition,
-//!   buggified provider knobs, the driver's BUGGIFY hooks and the disk's fault
-//!   sites, driven by the Chain-of-Blocks workload;
+//!   a 3–6 process pool — ranked per seed into a 3–6 node cluster, or a 3–5
+//!   node cluster plus one or three matchmakers — under swarm network
+//!   turbulence, crash/restart attrition, buggified provider knobs, the
+//!   driver's BUGGIFY hooks and the disk's fault sites, driven by the
+//!   Chain-of-Blocks workload;
 //! - the **corpus** ([`corpus_hunt`], [`run_corpus_mask`], …): scripted,
 //!   analytically-judged recovery cases on a fixed three-node cluster.
 //!
@@ -25,7 +27,9 @@ mod chain_workload;
 mod corpus;
 mod hooks;
 mod lifecycle;
+mod matchmaking;
 mod process;
+mod roles;
 mod shape;
 mod world;
 
@@ -94,15 +98,23 @@ fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {
 
 // --- Schedule parameters and oracle clocks ------------------------------------
 
-/// Per-seed cluster-size draw (inclusive), resolved from the seeded RNG at
-/// topology-build time so every seed replays its own shape. Three is the
-/// smallest cluster that tolerates a failure; five (quorum 3) is the shape whose
-/// accept quorums can avoid any two pinned nodes (the #88 stale-ballot window).
-/// Four sits in between as three with an extra vote. Singletons and pairs are
-/// deliberately out: a pair loses quorum on every kill and a singleton cannot
-/// lose one, so neither exercises a regime a 3–5 node cluster under attrition
-/// does not, and each needed its own special cases in the checks.
-pub(crate) const CLUSTER_SIZE_RANGE: std::ops::RangeInclusive<usize> = 3..=5;
+/// Per-seed **process pool** draw (inclusive), resolved from the seeded RNG at
+/// topology-build time so every seed replays its own shape. The pool is what
+/// the deployment map (`crate::roles`) ranks into acceptors and matchmakers:
+/// on a plain seed (the default) every process is an acceptor, so the cluster
+/// is three to six nodes; a seed that draws a matchmaker set carves one or
+/// three matchmakers out of the pool, keeping at least three acceptors.
+///
+/// Three is the smallest cluster that tolerates a failure; five (quorum 3) is
+/// the shape whose accept quorums can avoid any two pinned nodes (the #88
+/// stale-ballot window); four and six sit beside them as three and five with
+/// an extra vote (six is the first even shape with a quorum of four). The
+/// ceiling is what lets a seed deploy three matchmakers *and* keep a
+/// three-node cluster. Singletons and pairs are deliberately out: a pair loses
+/// quorum on every kill and a singleton cannot lose one, so neither exercises
+/// a regime a 3–6 node cluster under attrition does not, and each needed its
+/// own special cases in the checks.
+pub(crate) const PROCESS_POOL_RANGE: std::ops::RangeInclusive<usize> = 3..=6;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -202,7 +214,7 @@ fn chaos_surfaces() -> [Chaos; 3] {
 fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
+        .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })
         .link_latency(LinkLatencyConfig::default())

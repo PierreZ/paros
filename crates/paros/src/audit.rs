@@ -17,7 +17,7 @@
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
-use paros_core::{Ballot, Handoff, Message, NodeId, Slot};
+use paros_core::{Ballot, Handoff, MatchRefusal, MatchmakerId, Message, NodeId, Slot};
 
 use crate::grpc::EdgeRejection;
 use crate::hooks::Seam;
@@ -333,6 +333,72 @@ pub trait Audit {
     /// batch. The refusal is the transport's own integrity gate; nothing
     /// inside the node changed.
     fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
+
+    // ---- the matchmaker (`run_matchmaker`), a distinct role and namespace ----
+
+    /// This matchmaker (re)booted from its durable registry: every
+    /// `(ballot, configuration hash)` it read back, and its watermark. Fires
+    /// on the first boot (an empty registry) and on every restart.
+    fn matchmaker_recovered(
+        &self,
+        matchmaker: MatchmakerId,
+        registry: &[(Ballot, u64)],
+        gc_watermark: Ballot,
+    ) {
+    }
+
+    /// This matchmaker durably registered the configuration hashed to
+    /// `config` under `ballot` (after the fsync).
+    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: u64) {}
+
+    /// This matchmaker durably raised its GC watermark (after the fsync),
+    /// dropping every registration below it.
+    fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {}
+
+    /// This matchmaker is answering `to`'s request for `ballot` with a
+    /// registration: `history` is every `(ballot, configuration hash)` the
+    /// reply names and `gc_watermark` the floor it reports. Reported at the
+    /// instant the reply leaves — after the registration's fsync and its
+    /// [`Audit::match_registered`] report, which is what lets a checker judge
+    /// persist-before-reply.
+    fn match_replied(
+        &self,
+        matchmaker: MatchmakerId,
+        to: NodeId,
+        ballot: Ballot,
+        history: &[(Ballot, u64)],
+        gc_watermark: Ballot,
+    ) {
+    }
+
+    /// This matchmaker refused `to`'s request for `ballot`; nothing was
+    /// written. Reported at the instant the refusal leaves.
+    fn match_refused(
+        &self,
+        matchmaker: MatchmakerId,
+        to: NodeId,
+        ballot: Ballot,
+        refusal: MatchRefusal,
+    ) {
+    }
+
+    /// This matchmaker crashed at a durability `seam` inside one batch.
+    fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
+
+    /// The driver deliberately dropped one matchmaker reply after the
+    /// registration was durable ([`DriverHooks::drop_client_reply`] with
+    /// [`Reply::Match`](crate::Reply::Match)).
+    fn match_reply_dropped(&self, matchmaker: MatchmakerId) {}
+
+    /// A [`MatchmakerStorage`](crate::MatchmakerStorage) call surfaced `error`
+    /// and the driver decided `decision` (see [`Audit::storage_fault`]).
+    fn matchmaker_storage_fault(
+        &self,
+        matchmaker: MatchmakerId,
+        error: &StorageError,
+        decision: StorageFaultDecision,
+    ) {
+    }
 }
 
 /// Inert production audit: every observation is dropped.
