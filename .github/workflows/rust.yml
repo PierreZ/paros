@@ -56,6 +56,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build paros-core for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
+      - name: Check paros-core builds for wasm with every feature off (zero deps)
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
 

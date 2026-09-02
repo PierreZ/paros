@@ -32,7 +32,7 @@ acceptors ever choose different values.
 
 | Crate | Role |
 |-------|------|
-| [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: zero deps, std-only, wasm-safe |
+| [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: std-only, wasm-safe, zero deps with `default-features = false` (only `tracing` spans on by default) |
 | [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
 | [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
 

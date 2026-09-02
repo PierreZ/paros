@@ -446,6 +446,7 @@ impl StorageWorld {
     }
 
     /// Terminally park a node: detect ⇒ crash, and it stays down.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     fn park(&mut self, key: &str, node: u64) {
         self.parked.insert(key.to_string());
         self.parked_ids.insert(node);
@@ -609,6 +610,7 @@ impl StorageWorld {
     /// promise-corruption test is one call. Returns whether the budget
     /// permitted it.
     #[allow(dead_code)] // armed for #21's targeted tests; the swarm sites drive it today
+    #[tracing::instrument(level = "debug", skip(self), fields(node_key = %node_key, node, record = %record))]
     pub(crate) fn corrupt(&mut self, node_key: &str, node: u64, record: StorageRecord) -> bool {
         if !self.may_park(node_key) {
             return false;
@@ -913,6 +915,7 @@ pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<Corpus
 /// intact. Unbudgeted like every corpus injection; below-floor slots are
 /// re-evaluated against the world's unrecoverable ground truth (the point is
 /// custody, so losing its last clean copy can strand a folded prefix).
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn corpus_corrupt_snap_chunk(
     handle: &StateHandle,
     ip: &str,
@@ -959,6 +962,7 @@ pub(crate) fn corpus_corrupt_snap_chunk(
 /// records the unrecoverable ground truth the analytic mask derivation
 /// cross-checks. Returns whether a clean record was
 /// there to corrupt.
+#[tracing::instrument(level = "debug", skip(handle), fields(ip = %ip, node, slot))]
 pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, slot: u64) -> bool {
     let world = storage_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -990,6 +994,7 @@ pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, sl
 /// Targeted corruption of one node's durable application snapshot. Slots the
 /// node had truncated past lose their only local custody, so each is
 /// re-evaluated against the world's unrecoverable ground truth.
+#[tracing::instrument(level = "debug", skip(handle), fields(ip = %ip, node))]
 pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64) -> bool {
     let world = storage_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1071,6 +1076,7 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
 /// The storage-fault coverage gates + the injected↔detected correlation,
 /// evaluated once per run from the workload's `check()` (the shared-gate
 /// doctrine in [`crate::audit`]).
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_storage_gates(handle: &StateHandle) {
     let stats = storage_fault_stats(handle);
     let corruption = corruption_stats(handle);

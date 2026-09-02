@@ -9,18 +9,29 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# paros-core is std-only with zero *default* dependencies — what keeps it
-# portable to wasm32-unknown-unknown and trivially deterministic. The optional
-# `serde` feature (below) only adds derives, no runtime; default builds (and the
-# wasm CI gate) stay dependency-free.
+# paros-core is std-only and portable to wasm32-unknown-unknown; every
+# dependency is optional and observation-only, so `default-features = false`
+# gives a dependency-free build (the wasm CI gate checks both). Neither feature
+# touches behavior: `serde` adds derives, `tracing` adds spans. See the
+# turbulence doctrine in AGENTS.md — the core is never buggified, and neither
+# feature is a perturbation.
 [features]
+default = ["tracing"]
 # Derive Serialize/Deserialize on the public protocol types so a driver can put
-# the *same* `Message` on the wire (no duplicate DTO). Off by default; enabled by
-# paros. serde is itself wasm-safe, so the portability guarantee holds.
+# the *same* `Message` on the wire (no duplicate DTO). Off by default; serde is
+# itself wasm-safe, so the portability guarantee holds.
 serde = ["dep:serde"]
+# `#[tracing::instrument]` spans on the state machine's entry points and
+# message handlers (`RawNode::step`/`tick`/`propose`/…, `on_prepare`, …). On by
+# default so `paros` and `paros-sim` see the core's spans under the driver's
+# own; disable with `default-features = false` for a zero-dependency build.
+# Spans only observe: with the feature off the generated code is the bare
+# function body, so the feature can never change a decision the core takes.
+tracing = ["dep:tracing"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
+tracing = { version = "0.1", optional = true }
 
 [lints]
 workspace = true

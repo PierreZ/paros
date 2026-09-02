@@ -250,6 +250,7 @@ impl CorpusClients {
     /// Propose `(seq, bytes)` until some node commits it, rotating targets and
     /// following leader hints. Returns the committed slot, or `None` at the
     /// deadline.
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn propose_until_acked(
         &self,
         ctx: &SimContext,
@@ -296,6 +297,7 @@ impl CorpusClients {
     }
 
     /// Ask for a decided `Truncate{up_to}` until a leader accepts it.
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn compact_until_accepted(
         &self,
         ctx: &SimContext,
@@ -343,6 +345,7 @@ impl CorpusClients {
     }
 
     /// One live application-state read from node `i` (`None` on timeout).
+    #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
     async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
         let time = ctx.time();
         let mut client = self.internal[i].clone();
@@ -356,6 +359,7 @@ impl CorpusClients {
 
     /// Wait until every live node's inspected state equals `want` (`true`), or
     /// the deadline passes (`false`).
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn wait_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
         let time = ctx.time();
         loop {
@@ -384,6 +388,7 @@ impl CorpusClients {
 
     /// Assert every node *stays* exactly at `want` for `hold`: any progress
     /// past it would be a fabricated value for a lost slot.
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn hold_all_at(&self, ctx: &SimContext, want: &ChainState, hold: Duration) -> bool {
         let time = ctx.time();
         let until = time.now() + hold;
@@ -411,6 +416,7 @@ impl CorpusClients {
 
 /// Wait until every node's durable world record shows the fully replicated,
 /// fully applied prefix (`slots` clean everywhere, application at `want`).
+#[tracing::instrument(level = "debug", skip_all)]
 async fn wait_replicated(
     ctx: &SimContext,
     servers: &[String],
@@ -457,6 +463,7 @@ async fn wait_until(ctx: &SimContext, deadline: Duration, ready: impl Fn() -> bo
 
 /// Prime `count` sequential user commands (seqs `0..count`), asserting each
 /// decides its expected slot, and return the committed command list.
+#[tracing::instrument(level = "debug", skip_all)]
 async fn prime_prefix(
     ctx: &SimContext,
     clients: &CorpusClients,
@@ -530,6 +537,7 @@ impl Workload for E1MaskWorkload {
     }
 
     #[allow(clippy::too_many_lines)] // one linear scripted case: prime → inject → derive → judge
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = sorted_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
@@ -702,6 +710,7 @@ impl Workload for E1MaskWorkload {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         assert_sometimes!(
             self.recovered_intact,
@@ -739,6 +748,7 @@ impl Workload for BareQuorumWorkload {
     }
 
     #[allow(clippy::too_many_lines)] // one linear scripted case
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = sorted_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
@@ -832,6 +842,7 @@ impl Workload for BareQuorumWorkload {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         assert_sometimes!(
             self.waited,
@@ -862,6 +873,7 @@ impl Workload for SnapshotLifecycleWorkload {
     }
 
     #[allow(clippy::too_many_lines)] // one linear scripted compound scenario
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = sorted_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
@@ -1055,6 +1067,7 @@ impl Workload for SnapshotLifecycleWorkload {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         assert_sometimes!(
             self.completed,
@@ -1111,6 +1124,7 @@ impl Workload for ChunkMaskWorkload {
     }
 
     #[allow(clippy::too_many_lines)] // one linear scripted case
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = sorted_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
@@ -1378,6 +1392,7 @@ impl Workload for ChunkMaskWorkload {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         assert_sometimes!(
             self.repaired_clean,

@@ -29,6 +29,7 @@ impl RawNode {
     /// here, via [`RawNode::advance_chosen_index`]). Confirmability is monotone
     /// in creation order — a later round's index and required seq are both at or
     /// above an earlier one's — so scanning the front suffices.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn try_confirm_reads(&mut self) {
         if self.role != NodeRole::Leader {
             return;

@@ -128,6 +128,7 @@ impl RawNode {
 
     /// Election clock fired: become a Candidate and run one Phase 1 (per ballot)
     /// over the whole uncommitted log suffix.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
             return;
@@ -226,6 +227,7 @@ impl RawNode {
     /// **leader** with an open [`RepairProbe`] also lands here: a straggler's
     /// late answer (or a re-queried peer's fresh one) is merged into the probe
     /// and may resolve a blocked slot.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_promise(
         &mut self,
         from: NodeId,
@@ -307,6 +309,7 @@ impl RawNode {
 
     /// Merge one straggler `Promise` page into the leader's open repair probe
     /// and resolve any blocked slot the refreshed tally now decides.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     fn on_probe_promise(
         &mut self,
         from: NodeId,
@@ -389,6 +392,7 @@ impl RawNode {
     /// (re-propose the best `have`) or Case 2 (a full Q1 of qualifying answers
     /// with no `have`: decide `Noop`). Closes the probe when nothing stays
     /// blocked.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
         let quorum = self.quorum();
         let mut decisions: Vec<(Slot, Command, bool)> = Vec::new();
@@ -464,6 +468,7 @@ impl RawNode {
     /// timeout campaigns at `max(max_promised_ballot.round, ..) + 1`
     /// (`on_check_leader`), above the promise that caused the refusal.
     #[allow(clippy::too_many_lines)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn try_become_leader(&mut self) {
         let quorum = self.quorum();
         let won = self.role == NodeRole::Candidate
@@ -637,6 +642,7 @@ impl RawNode {
     /// Start one bounded page of inherited Phase-2 rounds. The first page is
     /// created on election victory; [`RawNode::advance_recovery`] schedules at
     /// most one more page after the driver finishes the batch just processed.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn pump_leader_recovery(&mut self) {
         if self.role != NodeRole::Leader || self.pending_recovery_batch.is_some() {
             return;
@@ -741,6 +747,7 @@ impl RawNode {
     /// re-prepare: that (with the randomized timeout) is the dueling-proposer
     /// livelock fix. The reported promise is diagnostic only: retaining an
     /// arbitrary wire round would let one garbage Nack pin every future campaign.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, _promised: Ballot, slot: Slot) {
         if !self.config.peers.contains(&from) {
             return;

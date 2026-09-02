@@ -140,8 +140,9 @@ separation; #81 removed the message-class nemesis, which mixed them):
   (closed connections, degraded pair latency, clock skew, rotted records, killed processes) kept —
   so the workload's remaining lifetime is a genuine protocol-recovery tail and the liveness /
   convergence oracles apply to network faults too. Do not re-split the axis.
-- **`paros-core` is never buggified.** No cargo feature, no conditional compilation, no RNG, no
-  knob: the sans-IO core stays unconditionally pure, and it is perturbed **only through its public
+- **`paros-core` is never buggified.** No behavioral cargo feature, no conditional compilation, no
+  RNG, no knob: the sans-IO core stays unconditionally pure (its two features, `serde` and
+  `tracing`, add derives and spans — observation, never a decision), and it is perturbed **only through its public
   API** — the methods its caller chooses to call, and the data it is handed. Where a rare-but-valid
   decision needs to become reachable, the core's job is to *expose that decision as a method with an
   honest contract* (`RawNode::resend_pending` — "the driver is expected to call this each beat;
@@ -220,6 +221,24 @@ callback that reports it — never a scan over the event stream (it is O(trace²
 observability pumps). Preserve assertion **message strings** when moving a check — the assertion
 slot is the hash of its message, so a reworded message silently resets the sweep's saturation
 history.
+
+**Tracing spans.** Every important method carries a `#[tracing::instrument]` span, and the rule is
+by layer. In `paros` and `paros-sim` the spans are **non-optional**: the driver's loop stages
+(`run_node`, `drain_ready`, `persist_writes`, `maintain`, `replay_boot_state`, the peer-delivery
+task, the snapshot repair plane), the RPC handlers, the `NodeStorage` implementations, the process
+and workload lifecycles, the fault world's injections, and the audit's gate checks. In `paros-core`
+the same attribute is written `#[cfg_attr(feature = "tracing", tracing::instrument(..))]` behind
+the default-on `tracing` feature, so a `default-features = false` build is the bare state machine
+(the wasm gate checks both). Conventions: `skip_all` plus a few cheap, explicit `fields` — the node
+id (`node = self.config.id.0`, `node = self_id`) and a message's coordinates (`from`, `round`,
+`slot`), never a whole `Message`, `Command`, or storage handle; public entry points at
+`level = "debug"`, per-message handlers and per-tick internals at `level = "trace"`; no `ret` and
+no `err` (a seam crash is a deliberate exit, not an error to log). Spans nest under moonpool's
+`process`/`workload` spans and the sim layer resolves an event's source by walking outward, so an
+`#[instrument]` never changes what the timeline captures; and a span draws no randomness, so it
+never moves a seed. Nor does a span slow the sweep: since the moonpool pin at `3a73c8e` the sim
+subscriber is floored at `INFO`, so a `debug`/`trace` span is refused before the registry allocates
+it — one level compare per call. Spans, like events, are for humans: nothing reads them back.
 
 **Assertion doctrine (TigerBeetle-style).** Two assertion families, split by layer, and neither
 substitutes for the other:
@@ -407,11 +426,11 @@ Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
-- `crates/paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
-  optional `serde` feature adds derives only, and it is the crate's *only* feature — see the
-  turbulence doctrine above: the core is never buggified and gains no simulation-only conditional
-  compilation). Sancov crate-under-test; exempt from the global `#[instrument]`-on-pub-fns rule
-  (must stay zero-dep by default).
+- `crates/paros-core/` — sans-IO Multi-Paxos state machine: std-only, wasm-safe, and dependency-free
+  with `default-features = false` (CI checks that build too). Two features, both observation-only:
+  `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
+  *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no
+  simulation-only conditional compilation. Sancov crate-under-test.
 - `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:

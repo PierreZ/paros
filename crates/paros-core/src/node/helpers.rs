@@ -32,6 +32,7 @@ impl RawNode {
 
     /// Step down to Follower, abandoning any campaign or in-flight rounds, and
     /// ask the driver for a fresh randomized election timeout.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, leader = ?leader)))]
     pub(super) fn become_follower(&mut self, leader: Option<NodeId>) {
         self.role = NodeRole::Follower;
         self.leader = leader;

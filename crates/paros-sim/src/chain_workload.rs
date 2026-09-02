@@ -424,6 +424,7 @@ impl Workload for ChainWorkload {
         "chain-client"
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         tail(ctx.state())
             .lock()
@@ -433,6 +434,7 @@ impl Workload for ChainWorkload {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
         if servers.is_empty() {
@@ -1720,6 +1722,7 @@ impl Workload for ChainWorkload {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // The two perspectives, and nothing else: the client's own history
         // (linearizability over what it was told), and the audit's fold of

@@ -12,7 +12,9 @@ documentation = "https://docs.rs/paros"
 readme = "../../README.md"
 
 [dependencies]
-paros-core = { path = "../paros-core", version = "0.2.0" }
+# `tracing` is spelled out: the library's spans are non-optional, so the core's
+# spans under them must not depend on the core's default feature set.
+paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"] }
 
 # The driver is generic over moonpool's `Providers` abstraction + gRPC, so
 # the SAME code runs in production (TokioProviders) and simulation (SimProviders).
@@ -20,8 +22,8 @@ paros-core = { path = "../paros-core", version = "0.2.0" }
 # wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
 # release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27" }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "3a73c8e591ed35d67aa0e2506c7e9303be0bd497", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "3a73c8e591ed35d67aa0e2506c7e9303be0bd497" }
 
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
 # tonic's tokio-bound `transport` feature remains disabled.
@@ -29,7 +31,8 @@ http = "1"
 prost = "0.14"
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router"] }
 tonic-prost = "0.14"
-# The driver emits standard observability events (node_tick, peer_message_received).
+# The driver emits standard observability events (node_tick, peer_message_received)
+# and wraps every loop stage in an `#[instrument]` span carrying the node id.
 tracing = "0.1"
 # Runtime-neutral request queues between tonic handlers and the single-owner
 # driver loop. The runtime itself is supplied by the Moonpool providers.

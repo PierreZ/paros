@@ -215,6 +215,7 @@ impl RecoveryCase {
 /// classic exhaustive unit test is the right tool — it pins a pure function;
 /// the simulation still owns end-to-end correctness.
 #[must_use]
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn decide(evidence: EntryEvidence) -> RecoveryCase {
     match (evidence.entry_faulty, evidence.identifier) {
         (false, WitnessStatus::Present) => RecoveryCase::Intact,
@@ -273,6 +274,7 @@ pub struct SlotRecord {
 /// misdirected, out-of-order log must be surfaced as per-record evidence by
 /// the caller, never silently reordered here.
 #[must_use]
+#[tracing::instrument(level = "debug", skip_all, fields(records = records.len(), max_inflight))]
 pub fn classify_log(records: &[SlotRecord], max_inflight: usize) -> Vec<(Slot, RecoveryCase)> {
     for pair in records.windows(2) {
         assert!(

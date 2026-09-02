@@ -340,6 +340,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, target = target.0)))]
     pub fn relinquish_to(&mut self, target: NodeId) -> Option<Handoff> {
         if !self.can_relinquish()
             || target == self.config.id
@@ -442,6 +443,7 @@ impl RawNode {
     // other `step` handler; bundling them into a struct would only rename the
     // same seven fields.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_relinquish(
         &mut self,
         from: NodeId,
@@ -608,6 +610,7 @@ impl RawNode {
     /// fence, reads never confirm, and nothing here can fix it. Stepping down
     /// hands the problem to an ordinary election, which *does* run Phase 1 over
     /// exactly that range. Ordinary Paxos is always the fallback.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn tick_handoff_fence(&mut self) {
         if self.role != NodeRole::Leader
             || !matches!(self.leadership_origin, LeadershipOrigin::Handoff { .. })

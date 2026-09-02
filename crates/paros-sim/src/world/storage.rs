@@ -339,6 +339,7 @@ struct PendingApply {
 impl<T: TimeProvider> DurableStorage<T> {
     /// Build storage for `config`, seeding the read view from any durable records
     /// a prior boot of this node (same IP, same iteration) left in the world.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn restore(
         config: Config,
         world: Weak<Mutex<StorageWorld>>,
@@ -530,6 +531,7 @@ impl<T: TimeProvider> DurableStorage<T> {
     /// after a clean sync, per persist-before-send). The last torn record's
     /// bytes may themselves be damaged, so both `CrashTail` rows of the
     /// decision table are visited.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn torn_flush(&mut self) {
         let key = self.key.clone();
         let node = self.node_id;
@@ -698,6 +700,7 @@ impl<T: TimeProvider> DurableStorage<T> {
     // One linear flush in write order; the health-healing lines belong beside
     // the writes whose durability they mirror.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn flush_stage(&mut self) -> Result<(), StorageError> {
         let config_id = self.staged_config_id.take();
         let ballot = self.staged_ballot.take();
@@ -917,6 +920,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     /// crash") red. Detect ⇒ crash is the baseline; a crash-truncatable tail is
     /// the only thing a scan may ever discard.
     #[allow(clippy::too_many_lines)] // one linear scan: metadata → scalars → log
+    #[tracing::instrument(level = "debug", skip_all)]
     fn boot_scan(&mut self) -> Result<(), StorageError> {
         let evidence = std::mem::take(&mut self.evidence);
         let key = self.key.clone();
@@ -1306,6 +1310,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(must_sync = ?must_sync))]
     fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         // A relaxed (chosen-index-only) batch keeps its stage un-flushed: it is
         // durable only once a later Sync flushes it, and lost on a crash before
@@ -1367,6 +1372,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         self.flush_stage()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
     fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
         // Stage the floor like every other write: it reaches the durable world
         // only on the next Sync flush (Truncate classifies as MustSync::Sync).
@@ -1382,6 +1388,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         self.application.encode()
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn install_snapshot(
         &mut self,
         chosen_index: Slot,
@@ -1422,6 +1429,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn apply(
         &mut self,
         chosen_index: Slot,
@@ -1462,6 +1470,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         self.application.applied_slot()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
     fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
         // Captured at the apply seam, when the staged application state IS the
         // marker's boundary state; durable with the batch's application fsync.
@@ -1523,6 +1532,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         .flatten()
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn write_snap_chunk(
         &mut self,
         at: Slot,
@@ -1593,6 +1603,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         self.faulty_chunks.clone()
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
         let key = self.key.clone();
         let candidate = self.with_world(|w| {

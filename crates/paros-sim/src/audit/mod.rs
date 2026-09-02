@@ -119,6 +119,7 @@ impl AuditWorld {
     /// count), reaching `state`. Reported by the storage layer as the
     /// transition is made durable. Contiguous per node, one command and one
     /// state per index cluster-wide, and a user command traces to a submission.
+    #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) fn app_applied(
         &self,
         node: u64,
@@ -172,6 +173,7 @@ impl AuditWorld {
     /// The application jumped to `state` at `index` through a snapshot install
     /// or a decided-point restore. Never backward per node, and agreeing at its
     /// index with every apply and install that reached it.
+    #[tracing::instrument(level = "debug", skip(self), fields(node, index, state))]
     pub(crate) fn app_snapshot(&self, node: u64, index: u64, state: u64) {
         let mut st = self.lock();
         let previous = st.app_index.get(&node).copied();
@@ -201,6 +203,7 @@ impl AuditWorld {
     /// A corrupted application snapshot was reset for recovery: the node's
     /// applied index legally restarts from zero, and the replay that follows
     /// re-derives the same per-index states.
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
     pub(crate) fn app_reset(&self, node: u64) {
         self.lock().app_index.remove(&node);
     }
@@ -246,6 +249,7 @@ impl AuditWorld {
     /// from the `check()` phase; repeating it (several client workloads run
     /// concurrently) is idempotent — a `sometimes` slot only accumulates
     /// samples, and an `always` re-check of the same true fact is free.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_gates(&self) {
         let st = self.lock();
         // Liveness reachability: a value does get chosen.
@@ -268,6 +272,7 @@ impl AuditWorld {
     /// client-visible checks over everything merged so far. Every client
     /// workload calls this from `check()`; the merged history only grows, so a
     /// later caller sees a superset and the checks stay sound at every step.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_client_history(&self, history: &ClientHistory) {
         let mut st = self.lock();
         st.lin.merge(history);
@@ -294,6 +299,7 @@ impl AuditWorld {
     /// unavailability was actually observed (the asymmetric oracle:
     /// unavailable = pass, unsafe = fail — but *unexplained* unavailable is
     /// still a failure).
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
     pub(crate) fn note_storage_dead(&self, node: u64) {
         self.lock().storage_dead.insert(node);
     }
@@ -309,6 +315,7 @@ impl AuditWorld {
     ///
     /// Recorded here as coverage, never as a verdict: whether a seed draws both
     /// an attrition kill and a parking corruption is the swarm's business.
+    #[tracing::instrument(level = "debug", skip(self), fields(node, parked_peers, cluster_size))]
     pub(crate) fn note_process_restart(&self, node: u64, parked_peers: usize, cluster_size: usize) {
         let mut st = self.lock();
         if parked_peers == 0 {
@@ -447,6 +454,7 @@ impl AuditWorld {
     /// was ever applied has no frontier (then nothing may have been decided or
     /// acked either), and a parked node is excused from the per-node leg only
     /// when its parking was observed as a corruption crash.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
@@ -544,6 +552,7 @@ impl AuditWorld {
 /// storage world's injected⇔detected correlation, and the one liveness claim:
 /// every live node ends on the cluster's applied prefix, which covers every
 /// acked slot. Returns the run's digest for the determinism proof.
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
     let audit = audit_world(state);
     audit.check_client_history(history);
@@ -677,6 +686,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.persisted.insert((node.0, slot.0), vhash);
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
     fn truncated(&self, node: NodeId, first: Slot) {
         let now = self.now_ms();
         let mut st = self.state();
@@ -745,6 +755,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, chosen_index = chosen_index.0))]
     fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {
         let mut st = self.state();
         reach_once!(
@@ -969,6 +980,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, round = won.round))]
     fn elected(&self, node: NodeId, won: Ballot, promised: Ballot, _gap_fills: u64) {
         let now = self.now_ms();
         let mut st = self.state();
@@ -1012,6 +1024,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(st.resigned, "the driver voluntarily resigns leadership");
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0))]
     fn authority_relinquished(&self, node: NodeId, handoff: Handoff) {
         let mut st = self.state();
         // Shape and coverage only. The *bookkeeping* — who holds the authority
@@ -1070,6 +1083,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn authority_installed(
         &self,
         node: NodeId,
@@ -1266,6 +1280,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         *watermark = (*watermark).max(confirmed);
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn recovered(
         &self,
         node: NodeId,
@@ -1382,6 +1397,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, decision = ?decision))]
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {
         let mut st = self.state();
         // Stages 6/7 have exactly one honest reaction; a different decision
@@ -1422,6 +1438,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
     fn crashed(&self, _node: NodeId, seam: Seam) {
         let mut st = self.state();
         st.crashed_any = true;

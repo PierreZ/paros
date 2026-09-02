@@ -358,6 +358,7 @@ impl RawNode {
     /// here means corrupted storage or a broken storage implementation;
     /// crashing beats running on it.
     #[allow(clippy::too_many_lines)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
         // Config shape: quorum arithmetic and broadcast both assume a strictly
@@ -765,6 +766,7 @@ impl RawNode {
     ///
     /// Panics if processing exposes a broken internal invariant (a programmer
     /// error, never an operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step(&mut self, msg: Message) {
         // Wire guard, not an assert: a foreign configuration id is an operating
         // condition (a stale peer, a misconfigured cluster, a message from a
@@ -873,6 +875,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -934,6 +937,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -955,6 +959,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn propose_snap_marker(&mut self) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -979,6 +984,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition): read rounds must confirm in creation order.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
     pub fn read_index(&mut self, ctx: u64) -> ReadIndexResult {
         if self.role != NodeRole::Leader {
             return ReadIndexResult::NotLeader(self.leader);
@@ -1051,6 +1057,7 @@ impl RawNode {
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition): the floor must rise monotonically and stay
     /// clamped inside the chosen prefix.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
         let Some(ci) = self.hard_state.chosen_index else {
             return self.first_slot;
@@ -1139,6 +1146,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn tick(&mut self) {
         self.tick_count += 1;
         let me = self.config.id;
@@ -1203,6 +1211,7 @@ impl RawNode {
     /// Per-tick repair upkeep (Stage 8): drive the leader's open repair probe
     /// (straggler re-query + the CTRL §4.2 recovery-timeout resignation) and
     /// pull the application repair range from peers.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     fn tick_repair(&mut self) {
         // The leader's blocked-slot probe: re-send `Prepare` at our ballot to
         // every peer that has not yet answered its full suffix, once per tick
@@ -1299,6 +1308,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_pending(&mut self) {
         if self.role != NodeRole::Leader {
             return;
@@ -1347,6 +1357,7 @@ impl RawNode {
     /// # Panics
     ///
     /// If an internal role/recovery invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn advance_recovery(&mut self) {
         let writes_before = self.pending_writes.len();
         self.advance_chosen_index();
@@ -1391,6 +1402,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step_down(&mut self) {
         if self.role != NodeRole::Leader {
             return;
@@ -1414,6 +1426,7 @@ impl RawNode {
     ///
     /// If `from` lies past the contiguous chosen prefix — the driver may only
     /// name a slot the durable chosen index already covers.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0)))]
     pub fn open_app_repair(&mut self, from: Slot) {
         assert!(
             from <= self.first_unchosen(),
@@ -1433,6 +1446,7 @@ impl RawNode {
     /// heal below it) or at the first still-missing value (catch-up will bring
     /// it). Closes the repair when the cursor reaches the contiguous prefix
     /// walk's frontier.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(crate) fn pump_app_repair(&mut self) {
         let Some(mut cursor) = self.app_repair else {
             return;
@@ -1466,6 +1480,7 @@ impl RawNode {
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
     /// from its `RandomProvider`). Clears the [`RawNode::needs_election_timeout`]
     /// flag.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
     pub fn set_election_timeout(&mut self, ticks: u64) {
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
@@ -1474,6 +1489,7 @@ impl RawNode {
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
     /// the unique `&mut` borrow, so a second `ready()` before [`Ready::advance`]
     /// is a **compile error**.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub fn ready(&mut self) -> Ready<'_> {
         Ready::new(self)
     }

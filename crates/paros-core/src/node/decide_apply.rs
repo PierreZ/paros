@@ -17,6 +17,7 @@ impl RawNode {
     // ---- proposer / learner ----------------------------------------------
 
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot, vhash: u64) {
         // Quorum sets are keyed by NodeId: an id outside the configured
         // membership must never inflate one (wire hygiene; peers are trusted
@@ -42,6 +43,7 @@ impl RawNode {
         self.try_decide(slot);
     }
     /// Learner: a command was chosen elsewhere. Record it; advance the prefix.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_commit(&mut self, ballot: Ballot, slot: Slot, command: &Command) {
         if ballot >= self.ballot {
             self.election_elapsed = 0;
@@ -49,6 +51,7 @@ impl RawNode {
         self.mark_chosen(slot, command, ballot);
     }
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
     pub(super) fn start_accept_round(&mut self, slot: Slot, command: Command) {
         // Precondition stack (every caller is leader-gated and floor-guarded):
         // only a leader opens a Phase-2 round, and never below the compaction
@@ -111,6 +114,7 @@ impl RawNode {
 
     /// If an accept quorum holds for `slot`, the entry is chosen: record it and
     /// `Commit` to the peers.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
     pub(super) fn try_decide(&mut self, slot: Slot) {
         let quorum = self.quorum();
         let me = self.config.id;
@@ -171,6 +175,7 @@ impl RawNode {
     /// `applied_seq` bump lives in the contiguous walk
     /// ([`RawNode::advance_chosen_index`]) alongside `pending_committed`, which
     /// is the definition [`RawNode::new`]'s boot rebuild has always used.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, round = ballot.round)))]
     pub(super) fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it
         // (that would re-insert a record below the floor via `record_accepted`).
@@ -323,6 +328,7 @@ impl RawNode {
     /// `committed: true` to the client) without lying: the write really is in
     /// the applied prefix by then, and the slot it names really is one the node
     /// applied.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
         let mut next = self.first_unchosen();
         let mut advanced = 0_usize;

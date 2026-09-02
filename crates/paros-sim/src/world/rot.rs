@@ -86,6 +86,7 @@ impl RotRates {
 /// terminally parks the node (detect ⇒ crash, and restarting cannot help), so
 /// each is gated on [`StorageWorld::may_park`]'s dead-node budget.
 #[allow(clippy::too_many_lines)] // one flat block per independent BUGGIFY location
+#[tracing::instrument(level = "debug", skip(world), fields(key = %key, node))]
 pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
     // Rot density is workload-buggified config (prong 2), and **one knob per
     // family**: each multiplies its own family's *firing* probability toward
