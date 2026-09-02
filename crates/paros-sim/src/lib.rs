@@ -227,6 +227,7 @@ pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 /// (`CodeCoverage`). Returns the report so the caller can assert no
 /// `assertion_violations` and inspect progress.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn explore(max_iterations: usize) -> SimulationReport {
     chain_builder(None)
         .enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED))
@@ -237,6 +238,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for
 /// smoke and deterministic seed replay.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_chain_seed(seed: u64) -> SimulationReport {
     chain_builder(None)
         .set_iterations(1)
@@ -253,6 +255,7 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
 /// Panics if the run violated an assertion or produced no digest (the workload
 /// never reached its `check()` phase).
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn chain_seed_digest(seed: u64) -> u64 {
     let sink: DigestSink = Arc::new(Mutex::new(None));
     let report = chain_builder(Some(sink.clone()))
@@ -271,12 +274,14 @@ pub fn chain_seed_digest(seed: u64) -> u64 {
 /// Fast random-seed Chain smoke with no adaptive saturation or branch
 /// exploration. This is the only Chain sweep used by nextest.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
     chain_builder(None).set_iterations(iterations).run()
 }
 
 /// Replay an exploration recipe from a newly constructed campaign builder.
 #[must_use]
+#[tracing::instrument(level = "debug", skip(recipe), fields(recipe_len = recipe.len()))]
 pub fn replay_chain(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
     chain_builder(None).replay_timeline(seed, recipe).run()
 }
@@ -284,6 +289,7 @@ pub fn replay_chain(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
 /// Explore one known root seed. This is the focused recipe-discovery command;
 /// the registered campaign still explores every adaptive root seed.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
     chain_builder(None)
         .set_debug_seeds(vec![seed])
@@ -297,6 +303,7 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
 /// runs the identical suite as a `paros` unit test; together they keep the fake
 /// and the trait contract from drifting apart.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_storage_contract_suite() -> SimulationReport {
     SimulationBuilder::new()
         .processes(1, || Box::new(crate::process::IdleProcess))
@@ -352,6 +359,7 @@ pub fn corpus_canonical_masks() -> Vec<u16> {
 /// Run one explicit E1 mask case deterministically (seeded by the mask itself,
 /// so a failing case names its own replay).
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_corpus_mask(mask: u16) -> SimulationReport {
     corpus_builder(corpus::MaskSource::Fixed(mask))
         .set_iterations(1)
@@ -363,6 +371,7 @@ pub fn run_corpus_mask(mask: u16) -> SimulationReport {
 /// hunt densely samples the full 512-case space. Replay with
 /// [`run_corpus_seed`].
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn corpus_hunt(iterations: usize) -> SimulationReport {
     corpus_builder(corpus::MaskSource::Seeded)
         .set_iterations(iterations)
@@ -371,6 +380,7 @@ pub fn corpus_hunt(iterations: usize) -> SimulationReport {
 
 /// Replay one seeded E1 corpus case deterministically.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_corpus_seed(seed: u64) -> SimulationReport {
     corpus_builder(corpus::MaskSource::Seeded)
         .set_iterations(1)
@@ -383,6 +393,7 @@ pub fn run_corpus_seed(seed: u64) -> SimulationReport {
 /// Phase-1 tally that must WAIT, and the deterministic red target of CTRL
 /// §5.1.1's mutation (b) (a sub-Q1 `none` count no-op-filling a chosen slot).
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
@@ -399,6 +410,7 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
 /// snapshotted, and snapshotted-and-truncated nodes in one scripted run,
 /// reaching all four snapshot-recovery paths.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
@@ -447,6 +459,7 @@ pub fn chunk_corpus_canonical_masks() -> Vec<u32> {
 /// `rot_live_node0` additionally rots node 0's live snapshot, driving the
 /// point-restore / whole-blob race on top of the chunk repair.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_chunk_mask(mask: u32, rot_live_node0: bool) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), rot_live_node0)
         .set_iterations(1)
@@ -457,6 +470,7 @@ pub fn run_chunk_mask(mask: u32, rot_live_node0: bool) -> SimulationReport {
 /// Raw-volume chunk-mask sampling: each seed draws its mask from the seeded
 /// RNG. Replay with [`run_chunk_corpus_seed`].
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
         .set_iterations(iterations)
@@ -465,6 +479,7 @@ pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
 
 /// Replay one seeded chunk-mask corpus case deterministically.
 #[must_use]
+#[tracing::instrument(level = "debug")]
 pub fn run_chunk_corpus_seed(seed: u64) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
         .set_iterations(1)

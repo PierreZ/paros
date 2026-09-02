@@ -200,6 +200,7 @@ fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
 /// it now if this *is* the first incarnation. `perturb` selects the drawn
 /// (main-campaign) shape over the production one; it is a property of the
 /// campaign, so every incarnation of a node passes the same value.
+#[tracing::instrument(level = "debug", skip(state), fields(ip = %ip, perturb))]
 pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
@@ -247,6 +248,7 @@ pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
 /// went through. A second draw is what an attrition restart used to do
 /// silently; this keeps it a violation instead of a regression waiting to be
 /// noticed.
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_shape_gates(state: &StateHandle) {
     let registry = registry(state);
     let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);

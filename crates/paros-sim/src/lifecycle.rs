@@ -46,6 +46,7 @@ fn queue(state: &StateHandle) -> Arc<Mutex<Queue>> {
 
 /// Enqueue `op` and wait until the injector has executed it (the kill or
 /// restart event is then scheduled; it lands at the next simulator step).
+#[tracing::instrument(level = "debug", skip(ctx), fields(op = ?op))]
 async fn run(ctx: &SimContext, op: Op) {
     let queue = queue(ctx.state());
     let position = {
@@ -70,11 +71,13 @@ async fn run(ctx: &SimContext, op: Op) {
 }
 
 /// Crash `ip` and hold it down until [`restart`].
+#[tracing::instrument(level = "debug", skip(ctx))]
 pub(crate) async fn crash(ctx: &SimContext, ip: &str) {
     run(ctx, Op::Crash(ip.to_string())).await;
 }
 
 /// Restart `ip`: a held-down node boots again; a live one is rebooted.
+#[tracing::instrument(level = "debug", skip(ctx))]
 pub(crate) async fn restart(ctx: &SimContext, ip: &str) {
     run(ctx, Op::Restart(ip.to_string())).await;
 }
@@ -89,6 +92,7 @@ impl FaultInjector for ScriptedLifecycle {
         "paros-scripted-lifecycle"
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         let queue = queue(ctx.state());
         while !ctx.chaos_shutdown().is_cancelled() {

@@ -19,6 +19,7 @@ impl RawNode {
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
     /// Promote and reply `Promise` (carrying the accepted suffix) if strictly
     /// higher than our promise; otherwise `Nack`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, from_slot = from_slot.0)))]
     pub(super) fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
         let writes_at_entry = self.pending_writes.len();
@@ -144,6 +145,7 @@ impl RawNode {
 
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
         // Wire hygiene: this handler adopts the *sender* as the leader hint and
         // promises the ballot, so neither id may sit outside the configured
@@ -265,6 +267,7 @@ impl RawNode {
     /// Raise (or re-affirm) the promised ballot to `ballot`, recording a
     /// [`WriteOp::SetPromise`] delta only when it actually changes. Callers that
     /// must never lower the promise guard with `ballot >` first.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round)))]
     pub(super) fn set_promise(&mut self, ballot: Ballot) {
         // The single choke point for the promise-monotonicity contract every
         // caller guards individually: a promise is never lowered, across the
@@ -282,6 +285,7 @@ impl RawNode {
     /// Record `(ballot, command)` as accepted for `slot` in the working log and
     /// queue the matching [`WriteOp::AppendAccepted`] delta. An upsert-by-slot:
     /// a higher-ballot re-accept, or a chosen value overwriting a stale accept.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, round = ballot.round)))]
     pub(super) fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
         assert!(
             slot >= self.first_slot,

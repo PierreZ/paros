@@ -514,16 +514,19 @@ impl MemStorage {
 }
 
 impl NodeStorage for MemStorage {
+    #[tracing::instrument(level = "trace", skip_all, fields(config_id = config_id.0))]
     fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
         self.hard_state.config_id = config_id;
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.hard_state.max_promised_ballot = ballot;
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn append_accepted(
         &mut self,
         slot: Slot,
@@ -534,16 +537,19 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(slot = slot.0))]
     fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         self.hard_state.chosen_index = Some(slot);
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
     fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
         self.seal(sealed);
         self.first = self.first.max(first);
@@ -560,6 +566,7 @@ impl NodeStorage for MemStorage {
             .map_or_else(Vec::new, |ci| ci.0.to_le_bytes().to_vec())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn install_snapshot(
         &mut self,
         chosen_index: Slot,
@@ -576,6 +583,7 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn apply(
         &mut self,
         _chosen_index: Slot,
@@ -589,6 +597,7 @@ impl NodeStorage for MemStorage {
         self.hard_state.chosen_index
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
     fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
         self.snap_point = Some((at, self.snapshot()));
         Ok(())
@@ -618,6 +627,7 @@ impl NodeStorage for MemStorage {
         Some(blob[start..end].to_vec())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn write_snap_chunk(
         &mut self,
         at: Slot,
@@ -694,6 +704,7 @@ impl Storage for MemStorage {
 #[doc(hidden)]
 // One linear behavioral walk; splitting it would scatter the contract.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub fn storage_contract_suite<S: NodeStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,

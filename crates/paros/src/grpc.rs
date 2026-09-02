@@ -242,6 +242,7 @@ fn snapshot_to_proto(
 
 /// Convert one domain message into its typed protobuf representation.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn message_to_proto(
     message: &Message,
 ) -> Result<internal::ConsensusMessage, &'static str> {
@@ -444,6 +445,7 @@ pub(crate) fn message_to_proto(
 /// Validate and convert one typed protobuf message into the core domain type.
 // One arm per wire variant; splitting the decode table would scatter it.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn message_from_proto(
     message: internal::ConsensusMessage,
 ) -> Result<Message, &'static str> {
@@ -609,6 +611,7 @@ pub(crate) struct RpcService {
 /// Construct a handler/inbox pair for one node incarnation. `client_inbox`
 /// bounds each client-facing queue (propose, read, compact, inspect) and
 /// `peer_inbox` the peer-message queue; both must be at least 1.
+#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn rpc_channel(
     client_inbox: usize,
     peer_inbox: usize,
@@ -653,6 +656,7 @@ async fn dispatch<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U
 
 #[tonic::async_trait]
 impl public::paros_server::Paros for RpcService {
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn propose(&self, request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
         let request = request.into_inner();
         if proposal_checksum(request.client, request.seq, &request.command) != request.checksum {
@@ -667,12 +671,14 @@ impl public::paros_server::Paros for RpcService {
         dispatch(&self.propose, request).await.map(Response::new)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
         dispatch(&self.read, request.into_inner())
             .await
             .map(Response::new)
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn compact(&self, request: Request<Compact>) -> Result<Response<CompactAck>, Status> {
         dispatch(&self.compact, request.into_inner())
             .await
@@ -682,6 +688,7 @@ impl public::paros_server::Paros for RpcService {
 
 #[tonic::async_trait]
 impl internal::paros_internal_server::ParosInternal for RpcService {
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn deliver(
         &self,
         request: Request<internal::Deliver>,
@@ -704,6 +711,7 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         Ok(Response::new(internal::DeliverAck {}))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn inspect(
         &self,
         request: Request<InspectRequest>,

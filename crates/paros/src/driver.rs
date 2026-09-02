@@ -643,6 +643,7 @@ struct SnapRepair {
 // The repair layer's full context is exactly these handles; bundling them
 // would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0, to = to.0, at = at.0, chunks = chunks.len()))]
 fn handle_snap_chunk_request<S, H, A>(
     node: &RawNode,
     storage: &S,
@@ -741,6 +742,7 @@ fn handle_snap_chunk_request<S, H, A>(
 // The repair layer's full context is exactly these handles (see
 // `handle_snap_chunk_request`); bundling them would only rename them.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id, at = at.0, chunks = chunks.len()))]
 fn handle_snap_chunk_response<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
@@ -842,6 +844,7 @@ where
 /// Per-tick snapshot-repair upkeep (see [`SnapRepair`]): custody
 /// advertisement toward the leader, the leader's own tally and marker
 /// bookkeeping, and the chunk-repair pull.
+#[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 fn snap_repair_tick<S, H, A>(
     node: &RawNode,
     storage: &S,
@@ -1034,6 +1037,7 @@ impl PeerMailbox {
     /// instead of the back. Both are the driver-hook perturbations
     /// ([`DriverHooks::overtake_in_mailbox`], [`DriverHooks::evict_across_kinds`]);
     /// production passes `false` for both. Never blocks.
+    #[tracing::instrument(level = "trace", skip_all, fields(overtake, evict_across_kinds))]
     fn push(
         &self,
         message: internal::ConsensusMessage,
@@ -1113,6 +1117,7 @@ impl Outbound {
     /// `msg_sent` deliberately records the core's outbound decision even when
     /// the bounded mailbox or network later drops it; safety oracles inspect the
     /// messages a proposer attempted, independently of delivery.
+    #[tracing::instrument(level = "trace", skip_all, fields(node = self.self_id, to = to.0, kind = message_kind(msg)))]
     fn transmit<H: DriverHooks, A: Audit>(&self, hooks: &H, audit: &A, to: NodeId, msg: &Message) {
         audit.sent(NodeId(self.self_id), to, msg);
         let kind = message_kind(msg);
@@ -1263,6 +1268,7 @@ fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
 // lifecycle, queue, batch shape, and the audit identity for drop reports);
 // a bundle would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id, to = to.0))]
 async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
@@ -1320,6 +1326,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, to = to.0))]
 fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &PeerMailbox,
@@ -1392,6 +1399,7 @@ fn wire_message(message: internal::ConsensusMessage) -> internal::WireMessage {
 /// Materialize and send this batch's snapshot offers. An offered snapshot must
 /// describe exactly the application prefix named by the protocol message, so
 /// this runs only after the batch's committed entries are durably applied.
+#[tracing::instrument(level = "debug", skip_all, fields(offers = snapshot_offers.len()))]
 fn send_snapshot_offers<S, H, A>(
     storage: &mut S,
     out: &Outbound,
@@ -1515,6 +1523,7 @@ fn note_mid_election_snapshot<A: Audit>(
 /// waiter. The reply may be deliberately dropped at the reply seam
 /// ([`DriverHooks::drop_client_reply`]): the server state has advanced either
 /// way, and the client's retry takes the `(client, seq)` dedup path.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, committed = committed.len()))]
 fn ack_committed_waiters<S, H, A>(
     storage: &S,
     waiters: &mut ClientWaiters,
@@ -1587,6 +1596,7 @@ fn ack_committed_waiters<S, H, A>(
 /// (a TCP stream loses intervals, never one isolated message), with
 /// `resend_pending` re-deriving what matters — or sent twice (retransmission
 /// is legal transport behavior; set-based quorum counting must tolerate it).
+#[tracing::instrument(level = "trace", skip_all, fields(node = out.self_id, messages = messages.len()))]
 fn send_messages<H, A>(out: &Outbound, hooks: &H, audit: &A, messages: Vec<(NodeId, Message)>)
 where
     H: DriverHooks,
@@ -1619,6 +1629,7 @@ where
 // (persist → send → apply → app-fsync → truncate → offers → acks), so slicing
 // it into helpers would scatter the ordering contract this function *is*.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 fn drain_ready<S, H, A>(
     node: &mut RawNode,
     storage: &mut S,
@@ -1869,6 +1880,7 @@ where
 /// claim a write the `BeforeSync` crash seam then discards: a crash before the
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
 fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
@@ -1952,6 +1964,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
 /// Report a flushed batch's durable state — one audit callback and one tracing
 /// event per op. Split out of [`persist_writes`] so the staging half and the
 /// reporting half each stay readable; both loops walk `writes` in order.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn surface_persisted<A: Audit>(
     writes: &[WriteOp],
     promised: Ballot,
@@ -2095,6 +2108,7 @@ impl From<SimulationError> for RunError {
 /// Draw a randomized election timeout in `[T, 2T)` ticks from the provider's
 /// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
 /// deterministic and dependency-free while a seed still replays bit-identically.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id, base))]
 fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
     providers: &P,
     hooks: &H,
@@ -2130,6 +2144,7 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
 /// totals the wire guards accumulated, and the inherited-fence resignations.
 /// The relinquish half is reported at its own call site, at the instant the
 /// authority changes hands.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn report_handoff<A: Audit>(
     node: &RawNode,
     last: &mut HandoffCounters,
@@ -2196,6 +2211,7 @@ fn report_handoff<A: Audit>(
 // #94 suppressions, `CheckQuorum` step-downs); bundling them into a struct
 // would only rename the same nine things.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,
@@ -2318,6 +2334,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 // One linear boot replay: report → walk → repair; splitting it would scatter
 // the ordering contract between the three.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     storage: &mut S,
@@ -2534,7 +2551,7 @@ fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
 /// restart path as a seam crash; [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring (providers,

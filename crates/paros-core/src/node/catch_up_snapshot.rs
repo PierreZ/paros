@@ -9,6 +9,7 @@ const CATCHUP_BATCH: usize = 64;
 
 impl RawNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, from_slot = from_slot.0)))]
     pub(super) fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {
         self.serve_catchup(from, from_slot);
     }
@@ -20,6 +21,7 @@ impl RawNode {
     /// same safety a `Commit` relies on). Used both to answer a pull
     /// ([`Message::CatchUpRequest`]) and to push a decided prefix to a peer whose
     /// heartbeat `commit` shows it is behind us.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, to = to.0, from_slot = from_slot.0)))]
     pub(super) fn serve_catchup(&mut self, to: NodeId, from_slot: Slot) {
         let me = self.config.id;
         let Some(ci) = self.hard_state.chosen_index else {
@@ -100,6 +102,7 @@ impl RawNode {
     /// Learn every decided entry a peer replayed to us. Each is chosen (durable,
     /// quorum-decided), so `mark_chosen` records it authoritatively and advances
     /// the contiguous prefix — filling the hole a missed `Accept`+`Commit` left.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, entries = entries.len())))]
     pub(super) fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Command)>) {
         for (slot, (ballot, command)) in entries {
             self.mark_chosen(slot, &command, ballot);
@@ -112,6 +115,7 @@ impl RawNode {
     /// node from re-voting under a stale ballot), and fully compact the log up to
     /// the snapshot (its state is folded into the opaque bytes). A stale snapshot
     /// that would not advance us is ignored.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_install_snapshot(
         &mut self,
         ballot: Ballot,

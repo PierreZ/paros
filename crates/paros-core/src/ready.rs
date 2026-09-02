@@ -121,6 +121,7 @@ impl<'a> Ready<'a> {
     /// Acknowledge the batch: clears the pending buckets and releases the unique
     /// borrow, so the next [`RawNode::ready`] is allowed. Consumes `self` — the
     /// guard cannot be reused.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.node.config().id.0)))]
     pub fn advance(self) {
         self.node.clear_pending();
     }

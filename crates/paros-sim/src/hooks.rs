@@ -81,6 +81,7 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 }
 
 impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
+    #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
     fn crash_at(&self, seam: Seam) -> bool {
         let prob = 0.03 * self.seam_crash_bias;
         let fired = self.active()
@@ -215,6 +216,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.active() && buggify_with_prob!(0.004)
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn initiate_handoff(&self, ctx: HandoffContext) -> bool {
         if !self.active() {
             return false;
@@ -266,6 +268,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(candidates = candidates.len()))]
     fn handoff_target(&self, candidates: &[NodeId]) -> Option<NodeId> {
         if !self.active() || candidates.is_empty() {
             return None;
@@ -324,6 +327,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn drop_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
         if !self.active() {
             return false;
@@ -381,6 +385,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn duplicate_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
         if !self.active() {
             return false;

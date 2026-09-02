@@ -71,6 +71,7 @@ impl Process for IdleProcess {
         "paros-idle"
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         ctx.shutdown().cancelled().await;
         Ok(())
@@ -86,6 +87,7 @@ impl Process for NodeProcess {
     // One recovery loop with per-exit-kind handling; splitting the arms would
     // scatter the crash/park/restart contract this function *is*.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Build the full cluster membership. `all_process_ips()` excludes this
         // node, so add `my_ip` and sort numerically: every node derives the
@@ -297,6 +299,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         "storage-contract-suite"
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let world = storage_world(ctx.state());
         world

@@ -10,6 +10,7 @@ impl RawNode {
     /// per-ballot sequence number. Both the tick self-trigger and
     /// [`RawNode::read_index`] beat through here, so every broadcast beat
     /// carries a seq an ack can be matched against.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn broadcast_heartbeat(&mut self) {
         // Both callers (the tick self-trigger and `read_index`) are
         // leader-gated, and a self-addressed beat never arrives off the wire.
@@ -29,6 +30,7 @@ impl RawNode {
 
     /// Leader self-beat or a follower receiving a peer beat. The self event's
     /// `seq` is ignored (the real seq is assigned at broadcast).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_heartbeat(
         &mut self,
         from: NodeId,
@@ -134,6 +136,7 @@ impl RawNode {
     /// the round's required beat — an ack to an *earlier* beat proves nothing
     /// about leadership after the round began, so it never counts. Stale or
     /// cross-ballot acks are dropped whole.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, seq)))]
     pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
         // Quorum sets are keyed by NodeId: an id outside the configured
         // membership must never inflate one (wire hygiene; peers are trusted
