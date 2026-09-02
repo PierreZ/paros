@@ -870,13 +870,13 @@ impl Workload for ChainWorkload {
                             );
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
-                            self.history.record_write_failed();
+                            self.history.record_write_failed(seq);
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
                         ProposalResult::Ambiguous => {
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
-                            self.history.record_write_failed();
+                            self.history.record_write_failed(seq);
                         }
                     }
                 }
@@ -1319,7 +1319,7 @@ impl Workload for ChainWorkload {
                     } else {
                         // Ambiguous per convention: a timed-out read carries
                         // no constraint and is never assumed to have missed.
-                        self.history.record_read_failed();
+                        self.history.record_read_failed(seq);
                         tracing::info!(client_id, seq_id = seq, "chain_read_index_ambiguous");
                     }
                 }

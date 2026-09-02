@@ -272,6 +272,10 @@ pub(crate) struct StorageWorld {
     /// Full cluster membership size, for the quorum bound (set once at boot;
     /// zero refuses every injection).
     cluster_size: usize,
+    /// The application's digest-lane count for this run (see
+    /// [`ChainState::lane_count`]): every node's blob must slice identically,
+    /// so it is one per-run value, published by the first node to boot.
+    lane_count: Option<u8>,
     /// Ground truth of every permitted injection, in order.
     injected: Vec<InjectedFault>,
     /// Lost-leg fault marks per node: accepted-log records whose most recent
@@ -304,6 +308,32 @@ impl StorageWorld {
     /// Whether `ip` was terminally parked (see `crate::process`).
     pub(crate) fn is_parked(&self, ip: &str) -> bool {
         self.parked.contains(ip)
+    }
+
+    /// Fix this run's digest-lane count (first caller wins; the corpus pins
+    /// the default, the main campaign draws a knob).
+    pub(crate) fn set_lane_count(&mut self, lane_count: u8) {
+        if self.lane_count.is_none() {
+            self.lane_count = Some(lane_count);
+        }
+    }
+
+    /// The run's digest-lane count.
+    pub(crate) fn lane_count(&self) -> u8 {
+        self.lane_count.unwrap_or(crate::chain::DEFAULT_LANES)
+    }
+
+    /// The disk under `key`, created on first touch with an empty application
+    /// state at the run's lane count — every node's blob must slice
+    /// identically, so a disk is never born with the default count.
+    pub(super) fn disk_mut(&mut self, key: &str) -> &mut NodeDisk {
+        let lanes = self.lane_count();
+        self.disks
+            .entry(key.to_string())
+            .or_insert_with(|| NodeDisk {
+                chain: ChainState::empty(lanes),
+                ..NodeDisk::default()
+            })
     }
 
     /// Declare the unbudgeted (corpus) mode: masks may exceed the per-record

@@ -166,6 +166,16 @@ struct WritePathRates {
     fsync_fail: f64,
     force_torn_tail: f64,
     torn_tail: f64,
+    /// The fsyncgate coin of the write-`EIO` site: how often the effect
+    /// landed despite the error. Any value in (0, 1) keeps both quadrants
+    /// reachable across the sweep; the lost leg is what the budget guards.
+    eio_persisted: f64,
+    /// The same coin for the fsync site, its own knob (the two sites are
+    /// independent locations).
+    fsync_persisted: f64,
+    /// Whether the last torn record's bytes are damaged too (both `CrashTail`
+    /// rows of the decision table are legal at either extreme).
+    torn_entry_faulty: f64,
 }
 
 impl Default for WritePathRates {
@@ -175,6 +185,9 @@ impl Default for WritePathRates {
             fsync_fail: P_FSYNC_FAIL,
             force_torn_tail: P_FORCE_TORN_TAIL,
             torn_tail: P_TORN_TAIL,
+            eio_persisted: 0.5,
+            fsync_persisted: 0.5,
+            torn_entry_faulty: 0.5,
         }
     }
 }
@@ -205,6 +218,9 @@ impl WritePathRates {
         // seam crash before the fsync produces — so the knob only moves which
         // shape this seed's boots have to classify.
         let torn_tail = buggify_knob!(u64::from(PCT_TORN_TAIL), 25_u64..101_u64);
+        let eio_persisted = buggify_knob!(50_u64, 10_u64..91_u64);
+        let fsync_persisted = buggify_knob!(50_u64, 10_u64..91_u64);
+        let torn_entry_faulty = buggify_knob!(50_u64, 10_u64..91_u64);
         if write_eio != u64::from(PCT_WRITE_EIO) || fsync_fail != u64::from(PCT_FSYNC_FAIL) {
             // BUGGIFY pairing: a node genuinely runs on a dense-failure disk.
             assert_reachable!("storage: a node runs with a buggified write-fault rate");
@@ -222,6 +238,9 @@ impl WritePathRates {
             fsync_fail: pct(fsync_fail),
             force_torn_tail: pct(force_torn_tail),
             torn_tail: pct(torn_tail),
+            eio_persisted: pct(eio_persisted),
+            fsync_persisted: pct(fsync_persisted),
+            torn_entry_faulty: pct(torn_entry_faulty),
         }
     }
 }
@@ -335,6 +354,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let mut evidence = BootEvidence::default();
         if let Some(strong) = world.upgrade() {
             let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
+            application = ChainState::empty(guard.lane_count());
             // Stage 7 rot: latent faults that surfaced while the node was
             // down, rolled at the boot that immediately scans them. Gated on
             // the chaos window like every other injection.
@@ -423,6 +443,13 @@ impl<T: TimeProvider> DurableStorage<T> {
         }
     }
 
+    /// The run's digest-lane count (the world's, or the default when the
+    /// world is gone).
+    fn lane_count(&self) -> u8 {
+        self.with_world(|w| w.lane_count())
+            .unwrap_or(crate::chain::DEFAULT_LANES)
+    }
+
     /// Run `f` against the shared world.
     fn with_world<R>(&self, f: impl FnOnce(&mut StorageWorld) -> R) -> Result<R, StorageError> {
         let strong = self.world.upgrade().ok_or(StorageError::Io {
@@ -508,6 +535,7 @@ impl<T: TimeProvider> DurableStorage<T> {
     fn torn_flush(&mut self) {
         let key = self.key.clone();
         let node = self.node_id;
+        let torn_faulty_rate = self.faults.rates.torn_entry_faulty;
         let staged: Vec<(Slot, (Ballot, Command))> = self
             .staged_accepted
             .iter()
@@ -540,9 +568,9 @@ impl<T: TimeProvider> DurableStorage<T> {
             if torn.is_empty() {
                 return;
             }
-            let torn_entry_faulty = sim_random::<f64>() < 0.5;
+            let torn_entry_faulty = sim_random::<f64>() < torn_faulty_rate;
             let last = torn.len() - 1;
-            let d = w.disks.entry(key.clone()).or_default();
+            let d = w.disk_mut(&key);
             for (i, (slot, record)) in torn.iter().enumerate() {
                 d.accepted.insert(*slot, record.clone());
                 d.entry_health.insert(
@@ -581,7 +609,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         if !self.faults.active() || !buggify_with_prob!(self.faults.rates.write_eio) {
             return None;
         }
-        let persisted = sim_random::<f64>() < 0.5;
+        let persisted = sim_random::<f64>() < self.faults.rates.eio_persisted;
         let accepted_slots: Vec<u64> = match record {
             StorageRecord::Accepted(slot) => vec![slot.0],
             _ => Vec::new(),
@@ -618,7 +646,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         if !force_lost && !buggify_with_prob!(self.faults.rates.fsync_fail) {
             return None;
         }
-        let persisted = !force_lost && sim_random::<f64>() < 0.5;
+        let persisted = !force_lost && sim_random::<f64>() < self.faults.rates.fsync_persisted;
         let accepted_slots: Vec<u64> = self.staged_accepted.keys().map(|s| s.0).collect();
         let fault = InjectedFault {
             node: self.node_id,
@@ -691,7 +719,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let node = self.node_id;
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
-            let d = w.disks.entry(key.clone()).or_default();
+            let d = w.disk_mut(&key);
             if let Some(config_id) = config_id {
                 d.hard_state.config_id = config_id;
             }
@@ -1053,8 +1081,9 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                     } else {
                         w.s7.snapshot_reset_remote = true;
                     }
+                    let lanes = w.lane_count();
                     if let Some(disk) = w.disks.get_mut(&key) {
-                        disk.chain = ChainState::default();
+                        disk.chain = ChainState::empty(lanes);
                         disk.snapshot_health = RecordHealth::Clean;
                     }
                     w.resolve_corruption(
@@ -1063,7 +1092,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                         CorruptionOutcome::Reported,
                     );
                 });
-                self.application = ChainState::default();
+                self.application = ChainState::empty(self.lane_count());
                 self.checker.app_reset(node);
                 tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
                 if floor.0 == 0 {

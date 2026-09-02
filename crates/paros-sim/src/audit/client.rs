@@ -32,23 +32,25 @@ impl OpSpan {
 /// One client's own record of what it asked for and what came back. Owned by
 /// the workload — the client is the only party that knows its own program order
 /// — and merged into the shared [`LinHistory`] at `check()` time.
+///
+/// Everything is keyed by `seq`, so a retry, a duplicate re-proposal, or an
+/// ambiguous attempt that is later reconciled records one issue and at most
+/// one terminal outcome per identity: the first ack wins, and an ack retires
+/// an earlier failure of the same seq.
 #[derive(Default)]
 pub(crate) struct ClientHistory {
-    client: u64,
-    issued: usize,
-    acked: usize,
-    failed: usize,
-    read_issued: usize,
-    read_acked: usize,
-    read_failed: usize,
+    pub(super) client: u64,
     /// First issue time per write seq.
-    write_inv: BTreeMap<u64, u64>,
+    pub(super) write_inv: BTreeMap<u64, u64>,
     /// First committed ack per write seq: `(time, slot)`.
-    write_resp: BTreeMap<u64, (u64, Option<u64>)>,
-    read_inv: BTreeMap<u64, u64>,
+    pub(super) write_resp: BTreeMap<u64, (u64, Option<u64>)>,
+    /// Write seqs that ended without a committed ack (so far).
+    pub(super) write_failed: BTreeSet<u64>,
+    pub(super) read_inv: BTreeMap<u64, u64>,
     /// First committed ack per read seq: `(time, watermark)`.
-    read_resp: BTreeMap<u64, (u64, Option<u64>)>,
-    read_retried: bool,
+    pub(super) read_resp: BTreeMap<u64, (u64, Option<u64>)>,
+    pub(super) read_failed: BTreeSet<u64>,
+    pub(super) read_retried: bool,
 }
 
 impl ClientHistory {
@@ -57,21 +59,21 @@ impl ClientHistory {
     }
 
     pub(crate) fn record_write_issued(&mut self, seq: u64, now_ms: u64) {
-        self.issued += 1;
         self.write_inv.entry(seq).or_insert(now_ms);
     }
 
     pub(crate) fn record_write_ack(&mut self, seq: u64, slot: Option<u64>, now_ms: u64) {
-        self.acked += 1;
         self.write_resp.entry(seq).or_insert((now_ms, slot));
+        self.write_failed.remove(&seq);
     }
 
-    pub(crate) fn record_write_failed(&mut self) {
-        self.failed += 1;
+    pub(crate) fn record_write_failed(&mut self, seq: u64) {
+        if !self.write_resp.contains_key(&seq) {
+            self.write_failed.insert(seq);
+        }
     }
 
     pub(crate) fn record_read_issued(&mut self, seq: u64, now_ms: u64) {
-        self.read_issued += 1;
         self.read_inv.entry(seq).or_insert(now_ms);
     }
 
@@ -82,13 +84,15 @@ impl ClientHistory {
         attempts: u64,
         now_ms: u64,
     ) {
-        self.read_acked += 1;
         self.read_resp.entry(seq).or_insert((now_ms, watermark));
+        self.read_failed.remove(&seq);
         self.read_retried |= attempts > 1;
     }
 
-    pub(crate) fn record_read_failed(&mut self) {
-        self.read_failed += 1;
+    pub(crate) fn record_read_failed(&mut self, seq: u64) {
+        if !self.read_resp.contains_key(&seq) {
+            self.read_failed.insert(seq);
+        }
     }
 }
 
@@ -133,12 +137,12 @@ impl LinHistory {
     /// Fold one client's record in. Called once per client, from its `check()`.
     pub(super) fn merge(&mut self, h: &ClientHistory) {
         let c = h.client;
-        self.issued += h.issued;
-        self.acked += h.acked;
-        self.failed += h.failed;
-        self.read_issued += h.read_issued;
-        self.read_acked += h.read_acked;
-        self.read_failed += h.read_failed;
+        self.issued += h.write_inv.len();
+        self.acked += h.write_resp.len();
+        self.failed += h.write_failed.len();
+        self.read_issued += h.read_inv.len();
+        self.read_acked += h.read_resp.len();
+        self.read_failed += h.read_failed.len();
         self.read_retried |= h.read_retried;
         for (&seq, &(resp, slot)) in &h.write_resp {
             if let Some(s) = slot {
@@ -220,7 +224,15 @@ impl LinHistory {
 /// interval checks over committed operations, valid for any number of
 /// concurrent clients and any per-client mode, bounded by [`LIN_HISTORY_CAP`].
 pub(super) fn check_disclosed_order(h: &LinHistory) {
-    if h.writes.len() + h.reads.len() > LIN_HISTORY_CAP {
+    // The pairwise walk is bounded by the cap; a workload that outgrows it
+    // must raise it deliberately, never lose L1–L4 in silence.
+    let ops = h.writes.len() + h.reads.len();
+    assert_always!(
+        ops <= LIN_HISTORY_CAP,
+        "the linearizability history stays within the checker's cap",
+        { "ops" => ops, "cap" => LIN_HISTORY_CAP }
+    );
+    if ops > LIN_HISTORY_CAP {
         return;
     }
     // L1 — the log order of two committed writes agrees with their real-time

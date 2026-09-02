@@ -129,8 +129,16 @@ impl Process for NodeProcess {
         {
             let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
             guard.set_cluster_size(members.len());
-            if !perturb {
+            if perturb {
+                // The application's snapshot size, drawn once per run (the
+                // first node to boot fixes it): 1 to 128 digest lanes is a
+                // blob of 1 to 17 chunks, so the chunk-repair plane sees the
+                // single-chunk and the many-chunk shapes instead of always
+                // five. Floor 1: one lane is a complete, valid application.
+                guard.set_lane_count(buggify_knob!(crate::chain::DEFAULT_LANES, 1_u8..129_u8));
+            } else {
                 guard.set_unbudgeted();
+                guard.set_lane_count(crate::chain::DEFAULT_LANES);
             }
         }
         let hooks = BuggifyHooks::new(

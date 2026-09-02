@@ -162,13 +162,17 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             let id_faulty = sim_random::<f64>() < 0.5 && world.may_park(key);
             // The block sub-roll needs a contiguous clean run at the primary,
             // which short (frequently truncated) logs often lack, so it rolls
-            // generously to stay reachable across a bounded sweep.
+            // generously to stay reachable across a bounded sweep. The block's
+            // width is a knob: CTRL injects per FS block, and a block spans
+            // several records. Floor: every member still passes the
+            // per-record budget (`permitted` was filtered first).
             let block = sim_random::<f64>() < 0.4;
+            let width = buggify_knob!(3_u64, 2_u64..9_u64);
             let members: Vec<Slot> = if block {
                 permitted
                     .iter()
                     .copied()
-                    .filter(|s| s.0 >= primary.0.saturating_sub(2) && *s <= primary)
+                    .filter(|s| s.0 >= primary.0.saturating_sub(width - 1) && *s <= primary)
                     .collect()
             } else {
                 vec![primary]
@@ -347,8 +351,13 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
         && let Some((at, state)) = world.disks.get(key).and_then(|d| d.snap_point)
     {
         let chunks = snap_chunk_count(state.encode().len());
-        if chunks > 0 {
-            let chunk = u32::try_from(sim_random::<u64>()).unwrap_or(0) % chunks;
+        // How many chunks of the point rot at once: one by default, a knob
+        // toward all of them — each still passes the per-chunk clean-quorum
+        // check below, which is the floor.
+        let rotting = buggify_knob!(1_u32, 1_u32..17_u32).min(chunks);
+        let first = u32::try_from(sim_random::<u64>()).unwrap_or(0) % chunks.max(1);
+        for offset in 0..rotting {
+            let chunk = (first + offset) % chunks.max(1);
             let clean_copies = world
                 .disks
                 .iter()
@@ -393,12 +402,23 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
     // A transient EIO on the read path: collapses into the corruption channel
     // (one detection path), crashes the node once, and the retry — the next
     // boot — reads clean. The only Stage-7 family with no availability cost.
+    // The target record kind is drawn: any retained accepted record, or one
+    // of the scalars — every kind takes the same detection path.
     if buggify_with_prob!(rates.read_eio) && world.disks.contains_key(key) {
-        let record = world
+        let slots: Vec<Slot> = world
             .disks
             .get(key)
-            .and_then(|d| d.accepted.keys().next_back().copied())
-            .map_or(StorageRecord::Promise, StorageRecord::Accepted);
+            .map(|d| d.accepted.keys().copied().collect())
+            .unwrap_or_default();
+        let record = match sim_random::<u64>() % 5 {
+            0 => StorageRecord::ChosenIndex,
+            1 => StorageRecord::Truncation,
+            2 => StorageRecord::Snapshot,
+            _ if !slots.is_empty() => StorageRecord::Accepted(
+                slots[usize::try_from(sim_random::<u64>()).unwrap_or(0) % slots.len()],
+            ),
+            _ => StorageRecord::Promise,
+        };
         if let Some(disk) = world.disks.get_mut(key) {
             disk.read_eio = Some(record);
         }
