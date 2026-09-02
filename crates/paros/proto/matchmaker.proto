@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package paros.matchmaker.v1;
+
+// The matchmaker contract (Matchmaker Paxos §3.2): a per-ballot registry of
+// acceptor configurations, consulted only on a round change, never on the
+// command path. Separate from the consensus contract on purpose — a cluster
+// deployed without matchmakers never speaks it, and a node never steps it.
+//
+// Evolution rule: fields are only ever appended (a matchmaker-set generation
+// tag lands as a new field on every message here, not as a rewrite).
+service ParosMatchmaker {
+  // Register a configuration under a ballot and learn every configuration
+  // registered below it (the paper's MatchA / MatchB).
+  rpc Matchmake(.paros.matchmaker.v1.MatchRequest) returns (.paros.matchmaker.v1.MatchReply);
+  // Raise the garbage-collection watermark (the paper's GarbageA / GarbageB):
+  // registrations below it are dropped and nothing below it may register.
+  rpc GarbageCollect(.paros.matchmaker.v1.GarbageCollect) returns (.paros.matchmaker.v1.GarbageCollectAck);
+}
+
+message Ballot {
+  uint64 round = 1;
+  uint64 node = 2;
+}
+
+enum QuorumSystem {
+  QUORUM_SYSTEM_MAJORITY = 0;
+}
+
+// An acceptor configuration: a membership plus the quorum system over it.
+message AcceptorConfig {
+  repeated uint64 members = 1;
+  QuorumSystem quorum_system = 2;
+}
+
+message MatchRequest {
+  uint64 from = 1;
+  Ballot ballot = 2;
+  AcceptorConfig config = 3;
+}
+
+message Registration {
+  Ballot ballot = 1;
+  AcceptorConfig config = 2;
+}
+
+// The successful answer: every registration strictly below the request's
+// ballot and at or above the watermark, plus the watermark itself.
+message Registered {
+  repeated Registration history = 1;
+  Ballot gc_watermark = 2;
+}
+
+// A refusal, carrying what the requester needs to make progress. Diagnostics
+// only: the requester never adopts these ballots as trusted input.
+message Refused {
+  oneof reason {
+    Ballot stale_highest = 1;
+    Ballot below_watermark = 2;
+  }
+}
+
+message MatchReply {
+  uint64 matchmaker = 1;
+  uint64 to = 2;
+  Ballot ballot = 3;
+  oneof outcome {
+    Registered registered = 4;
+    Refused refused = 5;
+  }
+}
+
+message GarbageCollect {
+  uint64 from = 1;
+  Ballot watermark = 2;
+}
+
+message GarbageCollectAck {
+  uint64 matchmaker = 1;
+  // The durable watermark after the request (at least the requested one, or
+  // the higher floor already in force).
+  Ballot watermark = 2;
+}

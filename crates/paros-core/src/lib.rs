@@ -32,7 +32,14 @@
 //! error — not a runtime panic.
 //!
 //! Stage 0 pins this contract in the type system with **zero protocol logic**.
+//!
+//! Beside the node lives the sans-IO **matchmaker** ([`Matchmaker`], the
+//! per-ballot acceptor-configuration registry of Matchmaker Paxos), driven
+//! through the same `step` → `ready` → `advance` shape. It is a separate handle:
+//! a cluster deployed without matchmakers never constructs one, and [`RawNode`]
+//! never steps a matchmaker message.
 
+mod matchmaker;
 mod message;
 mod node;
 mod ready;
@@ -41,6 +48,10 @@ mod storage;
 mod types;
 mod write;
 
+pub use matchmaker::{
+    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, RegistryStorage,
+};
 pub use message::Message;
 pub use node::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
