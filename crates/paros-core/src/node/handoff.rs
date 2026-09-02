@@ -348,6 +348,13 @@ impl RawNode {
             return None;
         }
         let ballot = self.ballot;
+        // One hop only, restated at the send: `can_relinquish` admits an
+        // elected leadership alone, and an elected leader's ballot names the
+        // node that minted it — this one.
+        assert!(
+            ballot.node == self.config.id,
+            "only the node that minted a ballot relinquishes it"
+        );
         let from_slot = self.first_unchosen();
         let next_slot = self.next_slot;
         let mut decided: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
@@ -576,6 +583,17 @@ impl RawNode {
         assert!(
             self.next_slot >= self.first_unchosen(),
             "an inherited frontier sits at or past the chosen prefix"
+        );
+        // The durable half landed exactly on the inherited authority: the
+        // stale-authority guard refused anything below the promise, and the
+        // raise took it there.
+        assert!(
+            self.hard_state.max_promised_ballot == ballot,
+            "an installed authority sits exactly at this node's promise"
+        );
+        assert!(
+            self.next_slot == next_slot,
+            "an installed authority adopts the transferred frontier verbatim"
         );
     }
 

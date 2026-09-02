@@ -72,6 +72,14 @@ impl RawNode {
                 "an accept round never re-opens a chosen slot"
             );
         }
+        // One round per slot per leadership: the allocator only hands out
+        // fresh slots, a recovery visits each inherited slot once, and a
+        // blocked slot is opened only by the probe that resolves it. A second
+        // round would let one `(slot, ballot)` carry two commands.
+        assert!(
+            !self.proposer.contains_key(&slot),
+            "a slot has at most one open Phase-2 round"
+        );
         let me = self.config.id;
         let ballot = self.ballot;
         let mut accepted_by = BTreeSet::new();
@@ -113,7 +121,35 @@ impl RawNode {
         let Some((ballot, command)) = decided else {
             return;
         };
+        // Decision provenance: only this leadership's own tally decides, at
+        // its own ballot, and every vote in it came from a configured
+        // acceptor (`on_accepted` refuses any other sender; restated here so
+        // the quorum arithmetic is never fed an id that could not have made a
+        // durable promise). O(quorum) probes over a sorted membership.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader decides from its own accept tally"
+        );
+        assert!(
+            ballot == self.ballot,
+            "a decision is counted at the leadership ballot"
+        );
+        assert!(
+            self.proposer[&slot].accepted_by.iter().all(|n| self
+                .config
+                .peers
+                .binary_search(n)
+                .is_ok()),
+            "every vote behind a decision comes from a configured acceptor"
+        );
         self.mark_chosen(slot, &command, ballot);
+        // Post-decision: the slot now carries exactly the decided command
+        // (unless the decision arrived after the slot was chosen elsewhere
+        // and compacted away — then `mark_chosen` is a no-op below the floor).
+        assert!(
+            slot < self.first_slot || self.chosen.get(&slot) == Some(&command),
+            "a decided slot is chosen with the decided command"
+        );
         self.broadcast(&Message::Commit {
             config_id: self.hard_state.config_id,
             from: me,
@@ -141,7 +177,15 @@ impl RawNode {
         if slot < self.first_slot {
             return;
         }
-        if self.chosen.contains_key(&slot) {
+        if let Some(known) = self.chosen.get(&slot) {
+            // Agreement, locally: a slot is chosen once. Relearning it (a
+            // duplicated `Commit`, a catch-up replay, a handoff's decided
+            // tail) must bring the same value back; a different one is the
+            // two-values-for-one-slot violation, caught where it lands.
+            assert!(
+                known == command,
+                "a slot already chosen here is relearned with the same value"
+            );
             // Known value, nothing to relearn — but still re-drive the walk: a
             // snapshot install (or a boot) can leave `chosen_index` *below* a
             // slot already present in `chosen`, and a catch-up replay of that
@@ -149,6 +193,17 @@ impl RawNode {
             // the walk here wedged that node in a forever catch-up loop.
             self.advance_chosen_index();
             return;
+        }
+        // A decision at the ballot of this node's own open round must be the
+        // round's command: one proposer per ballot (P2b), and a handoff
+        // successor re-proposes its inherited rounds verbatim.
+        if let Some(round) = self.proposer.get(&slot)
+            && round.ballot == ballot
+        {
+            assert!(
+                round.command == *command,
+                "a decision at the open round's ballot carries the round's command"
+            );
         }
         // Record the *chosen* value as the authoritative accepted command. Using
         // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
@@ -285,6 +340,13 @@ impl RawNode {
             assert!(
                 next == self.first_unchosen(),
                 "the chosen prefix advances one slot at a time"
+            );
+            // The chosen/accepted coupling, per applied slot: what the
+            // application is handed is what the authoritative record holds
+            // (the value a Phase 1 would report for this slot).
+            assert!(
+                self.accepted.get(&next).map(|(_, c)| c) == Some(&command),
+                "an applied slot's accepted record carries the applied command"
             );
             self.hard_state.chosen_index = Some(next);
             self.pending_writes.push(WriteOp::SetChosenIndex(next));

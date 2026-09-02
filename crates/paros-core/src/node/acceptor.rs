@@ -21,6 +21,7 @@ impl RawNode {
     /// higher than our promise; otherwise `Nack`.
     pub(super) fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
         let me = self.config.id;
+        let writes_at_entry = self.pending_writes.len();
         // A Promise continuation is valid only for the configured proposer
         // named by the ballot. This also prevents replies to arbitrary wire ids.
         if !self.config.peers.contains(&from) || ballot.node != from {
@@ -35,16 +36,13 @@ impl RawNode {
         // a healthy leader); those slots are chosen, and the candidate must recover
         // them out of band.
         if from_slot < self.first_slot {
-            self.pending_messages.push((
-                from,
-                Message::Nack {
-                    config_id: self.hard_state.config_id,
-                    from: me,
-                    ballot,
-                    promised: self.hard_state.max_promised_ballot,
-                    slot: from_slot,
-                },
-            ));
+            // Negative space: a below-floor Nack is a pure reply — nothing
+            // durable moved.
+            assert!(
+                self.pending_writes.len() == writes_at_entry,
+                "a nacked prepare queues no durable write"
+            );
+            self.push_nack(from, ballot, from_slot);
             return;
         }
         let raises_promise = ballot > self.hard_state.max_promised_ballot;
@@ -136,16 +134,11 @@ impl RawNode {
                 ballot <= self.hard_state.max_promised_ballot,
                 "a nacked prepare never raises the promise"
             );
-            self.pending_messages.push((
-                from,
-                Message::Nack {
-                    config_id: self.hard_state.config_id,
-                    from: me,
-                    ballot,
-                    promised: self.hard_state.max_promised_ballot,
-                    slot: from_slot,
-                },
-            ));
+            assert!(
+                self.pending_writes.len() == writes_at_entry,
+                "a nacked prepare queues no durable write"
+            );
+            self.push_nack(from, ballot, from_slot);
         }
     }
 
@@ -170,6 +163,7 @@ impl RawNode {
         }
         let me = self.config.id;
         let promise_at_entry = self.hard_state.max_promised_ballot;
+        let writes_at_entry = self.pending_writes.len();
         if ballot >= self.hard_state.max_promised_ballot {
             // The redirect hint is the **sender**, never `ballot.node`. They are
             // the same node for an elected leader, and deliberately different
@@ -242,18 +236,32 @@ impl RawNode {
                 self.hard_state.max_promised_ballot == promise_at_entry,
                 "a nacked accept never moves the promise"
             );
-            self.pending_messages.push((
-                from,
-                Message::Nack {
-                    config_id: self.hard_state.config_id,
-                    from: me,
-                    ballot,
-                    promised: self.hard_state.max_promised_ballot,
-                    slot,
-                },
-            ));
+            // ...and the accepted log is untouched: a refusal is a pure reply,
+            // so nothing was staged for the disk (the append is the only way
+            // the working log changes on this path).
+            assert!(
+                self.pending_writes.len() == writes_at_entry,
+                "a nacked accept queues no durable write"
+            );
+            self.push_nack(from, ballot, slot);
         }
     }
+
+    /// Queue a `Nack` for `ballot` at `slot` to `to`, reporting the promise
+    /// that won.
+    fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
+        self.pending_messages.push((
+            to,
+            Message::Nack {
+                config_id: self.hard_state.config_id,
+                from: self.config.id,
+                ballot,
+                promised: self.hard_state.max_promised_ballot,
+                slot,
+            },
+        ));
+    }
+
     /// Raise (or re-affirm) the promised ballot to `ballot`, recording a
     /// [`WriteOp::SetPromise`] delta only when it actually changes. Callers that
     /// must never lower the promise guard with `ballot >` first.
@@ -289,6 +297,25 @@ impl RawNode {
         if self.faulty.remove(&slot).is_some() {
             self.faulty_repaired += 1;
             self.repair_bytes += command_payload_bytes(&command);
+        }
+        // The acceptor-side agreement rule, at the one place a record changes.
+        // A record is replaced either by a *higher* ballot (a re-accept after
+        // a newer Phase 1; a gap-filled `Noop` over a value no quorum ever
+        // chose), which may carry anything, or at-or-below the recorded ballot
+        // only by the *chosen* value (`mark_chosen` learning a decision made
+        // at a ballot this node had already accepted past), which P2c makes
+        // identical to whatever was accepted here at any ballot at or above
+        // the choosing one. And one ballot has one proposer (P2b — a handoff
+        // successor re-proposes verbatim), so an equal-ballot re-accept is the
+        // same command again. The ballot may therefore regress; the command
+        // never changes underneath it.
+        if let Some((recorded_ballot, recorded)) = self.accepted.get(&slot)
+            && ballot <= *recorded_ballot
+        {
+            assert!(
+                *recorded == command,
+                "an accept at or below the recorded ballot carries the recorded command"
+            );
         }
         self.accepted.insert(slot, (ballot, command.clone()));
         self.pending_writes.push(WriteOp::AppendAccepted {

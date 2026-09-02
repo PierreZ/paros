@@ -228,6 +228,7 @@ mod catch_up_snapshot;
 mod decide_apply;
 mod election;
 mod handoff;
+mod invariants;
 mod reads;
 mod recovery;
 mod replication;

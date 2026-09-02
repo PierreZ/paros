@@ -258,9 +258,22 @@ impl RawNode {
                 return;
             }
             for (slot, (ab, command)) in accepted {
-                let supersedes = e.recovered.get(&slot).is_none_or(|(rb, _)| ab > *rb);
-                if supersedes {
-                    e.recovered.insert(slot, (ab, command));
+                // The P2c selection rule, at the merge: a slot's recovered
+                // value is the one accepted at the highest ballot any promise
+                // reported. A lower report never replaces it, and two reports
+                // at one ballot are the same command (one proposer per ballot,
+                // P2b) — a disagreement is a protocol violation, not a tie.
+                match e.recovered.get(&slot) {
+                    Some((rb, _)) if ab < *rb => {}
+                    Some((rb, recorded)) if ab == *rb => {
+                        assert!(
+                            *recorded == command,
+                            "two Phase-1 reports of one (slot, ballot) agree on the command"
+                        );
+                    }
+                    _ => {
+                        e.recovered.insert(slot, (ab, command));
+                    }
                 }
             }
             for (slot, fb) in faulty {
@@ -322,10 +335,22 @@ impl RawNode {
             // Only the still-blocked slots matter: everything else was decided
             // or re-proposed when the election closed.
             for (slot, (ab, command)) in accepted {
-                if probe.blocked.contains(slot)
-                    && probe.best_have.get(slot).is_none_or(|(rb, _)| ab > rb)
-                {
-                    probe.best_have.insert(*slot, (*ab, command.clone()));
+                if !probe.blocked.contains(slot) {
+                    continue;
+                }
+                // Same P2c/P2b rule as the election merge, over the probe's
+                // `have` tally.
+                match probe.best_have.get(slot) {
+                    Some((rb, _)) if ab < rb => {}
+                    Some((rb, recorded)) if ab == rb => {
+                        assert!(
+                            recorded == command,
+                            "two Phase-1 reports of one (slot, ballot) agree on the command"
+                        );
+                    }
+                    _ => {
+                        probe.best_have.insert(*slot, (*ab, command.clone()));
+                    }
                 }
             }
             for (slot, fb) in faulty {
@@ -400,6 +425,15 @@ impl RawNode {
             if is_have {
                 self.repair_case1 += 1;
             } else {
+                // Case 2 invents a `Noop` from a full Q1 of qualifying `none`.
+                // A slot inside this node's own chosen prefix was decided by
+                // some Q2, which intersects that Q1 — so at least one answer
+                // would have been a `have` or a disqualifying `faulty`. A Q1
+                // of `none` there is a broken tally, never a repair.
+                assert!(
+                    slot >= self.first_unchosen(),
+                    "a quorum of none never resolves a slot inside the chosen prefix"
+                );
                 self.repair_case2 += 1;
             }
             if let Command::User(entry) = &command
@@ -651,6 +685,20 @@ impl RawNode {
                 continue;
             }
             if is_gap {
+                // Only a Phase-1-backed recovery may invent a value: the
+                // promise quorum's silence is the licence. A handoff-installed
+                // leadership ran no Phase 1 (`gap_fill` is off there), and the
+                // fill never reaches into the chosen prefix — the cursor
+                // starts at its frontier and a slot the prefix absorbed since
+                // is skipped as chosen above.
+                assert!(
+                    matches!(self.leadership_origin, LeadershipOrigin::Elected),
+                    "only an elected leader gap-fills a slot its promise quorum never reported"
+                );
+                assert!(
+                    slot >= self.first_unchosen(),
+                    "a no-op gap fill never targets a slot inside the chosen prefix"
+                );
                 gap_fills += 1;
                 self.election_gap_fills = self.election_gap_fills.saturating_add(1);
             }
