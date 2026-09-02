@@ -425,11 +425,6 @@ pub trait Audit {
     ) {
     }
 
-    /// This candidate's history named a configuration newer than the one it
-    /// registered for `ballot`: the campaign was abandoned and the
-    /// configuration registered at `newest` adopted as the node's belief.
-    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
-
     /// This node declined to campaign because it is not a member of the
     /// configuration it would have registered (a spare, or a removed node).
     /// `count` is the monotone total for this incarnation.

@@ -165,8 +165,13 @@ the same treatment when it lands.
 matchmakers, every campaign is *matchmaking, then Phase 1*: the candidate registers `(b, C_b)`
 with the matchmakers (`Ready::match_requests`, `RawNode::on_match_reply`) and sends no `Prepare`
 until a matchmaker quorum answered; the replies' histories are unioned above the **maximum**
-watermark into `H_b`; a refusal abandons the campaign (next one a round up); a history whose
-newest entry is not `C_b` is a stale belief the candidate adopts before re-campaigning. Phase 1
+watermark into `H_b`; a refusal abandons the campaign (the next one opens above the refuser's
+highest round); a campaign whose matchmakers are slow is re-asked on every election timeout,
+never abandoned by the clock. A candidate registers the configuration it *believes* in force —
+learned only from a leader's `Prepare`, `Heartbeat` or `Relinquish` — and the ledger never
+changes that belief: it records every registration, aborted ones included, so "adopt the newest
+registered configuration" flip-flopped a candidate between two beliefs forever (a stale belief
+is safe — Phase 1 still covers `H_b`). Phase 1
 then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
 in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
 `C_b` alone. A **reconfiguration is a round change** (`RawNode::reconfigure`, the `Reconfigure`

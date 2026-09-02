@@ -2168,10 +2168,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .campaign_refused(node, ballot, refusal);
     }
 
-    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, _newest: Ballot) {
-        self.state().matchmaker.campaign_stale(node, ballot);
-    }
-
     fn campaign_skipped_non_member(&self, _node: NodeId, _count: u64) {
         let mut st = self.state();
         reach_once!(

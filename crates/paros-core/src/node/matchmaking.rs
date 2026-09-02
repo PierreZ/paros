@@ -121,13 +121,6 @@ pub enum MatchStep {
     /// A matchmaker refused the registration: the campaign is abandoned and
     /// this node is a follower again.
     Refused(MatchRefusal),
-    /// The history named a configuration newer than the one this campaign
-    /// registered: the campaign is abandoned, the newest configuration is
-    /// adopted as this node's belief, and the next campaign registers it.
-    StaleConfiguration {
-        /// The ballot the adopted configuration was registered under.
-        newest: Ballot,
-    },
 }
 
 impl Matchmaking {
@@ -188,21 +181,6 @@ impl Matchmaking {
             }
         }
         prior
-    }
-
-    /// The newest registered `(ballot, configuration)` the history names,
-    /// when it differs from this campaign's own configuration — the
-    /// stale-belief signal. `None` when the history is empty or its newest
-    /// entry is exactly `C_b`.
-    pub(super) fn newer_than_registered(&self) -> Option<(Ballot, AcceptorConfig)> {
-        let (ballot, configs) = self.history.iter().next_back()?;
-        // A disagreement at the newest ballot is treated as "not ours": the
-        // conservative reading, since only one of them can be current.
-        let newest = configs.first()?;
-        if configs.len() == 1 && *newest == self.config {
-            return None;
-        }
-        Some((*ballot, newest.clone()))
     }
 }
 

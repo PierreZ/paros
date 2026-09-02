@@ -106,7 +106,6 @@ pub(super) struct MatchmakerAudit {
     campaign_opened: bool,
     campaign_completed: bool,
     campaign_refused: bool,
-    campaign_stale: bool,
     campaign_empty_history: bool,
     campaign_union_several: bool,
     campaign_disagreeing_histories: bool,
@@ -669,25 +668,10 @@ impl MatchmakerAudit {
         );
     }
 
-    /// The candidate abandoned the campaign for a newer configuration.
-    pub(super) fn campaign_stale(&mut self, node: NodeId, ballot: Ballot) {
-        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        assert_always!(
-            !campaign.completed,
-            "matchmaking: a stale-configuration abort never follows Phase 1",
-            { "node" => node.0, "round" => ballot.round }
-        );
-        campaign.refused = true;
-        reach_once!(
-            self.campaign_stale,
-            "matchmaking: a candidate adopts a newer configuration and re-campaigns"
-        );
-    }
-
     /// The `sometimes` gates, evaluated once per run: both deployment modes are
     /// visited, and a deployed registry genuinely registers, reports a past,
     /// and licenses a leadership. Everything rarer (each refusal leg, the
-    /// duplicate re-answer, a GC raise, a restart, a stale abort) is a
+    /// duplicate re-answer, a GC raise, a restart) is a
     /// `reachable` recorded at its transition — each is conditioned on the
     /// deployment draw *and* a rarer event, and a per-sweep gate on such a
     /// conjunction would starve saturation.

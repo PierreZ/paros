@@ -2384,15 +2384,6 @@ fn report_match_step<A: Audit>(
                 "matchmaking_refused"
             );
         }
-        MatchStep::StaleConfiguration { newest } => {
-            audit.matchmaking_stale_configuration(NodeId(self_id), ballot, *newest);
-            tracing::info!(
-                node = self_id,
-                round = ballot.round,
-                newest_round = newest.round,
-                "matchmaking_stale_configuration"
-            );
-        }
     }
 }
 

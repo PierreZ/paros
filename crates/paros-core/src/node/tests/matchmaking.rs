@@ -174,7 +174,6 @@ fn a_refused_registration_never_becomes_a_leadership() {
 /// once.
 #[test]
 fn the_prior_set_is_the_union_above_the_maximum_watermark() {
-    // The candidate believes in {0,1,2}, registered most recently at round 4.
     let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 3);
     campaign(&mut n);
     let b = n.ballot();
@@ -182,27 +181,18 @@ fn the_prior_set_is_the_union_above_the_maximum_watermark() {
     let c_a = cfg(&[0, 1, 2]);
     let c_b = cfg(&[2, 3, 4]);
     let c_old = cfg(&[1, 2, 3]);
-    // Matchmaker 0 saw the old config at round 1, A at round 2 and A again at
-    // round 4; matchmaker 1 saw A at round 2, B at round 3 and A at round 4,
-    // and has GC'd below round 2.
+    // Matchmaker 0 saw the old config at round 1 and A at round 2; matchmaker
+    // 1 saw A at round 2 and B at round 3 and has GC'd below round 2.
     let r0 = registered(
         0,
         b,
-        &[
-            (ballot(1, 1), c_old.clone()),
-            (ballot(2, 1), c_a.clone()),
-            (ballot(4, 1), c_a.clone()),
-        ],
+        &[(ballot(1, 1), c_old.clone()), (ballot(2, 1), c_a.clone())],
         Ballot::zero(),
     );
     let r1 = registered(
         1,
         b,
-        &[
-            (ballot(2, 1), c_a.clone()),
-            (ballot(3, 2), c_b.clone()),
-            (ballot(4, 1), c_a.clone()),
-        ],
+        &[(ballot(2, 1), c_a.clone()), (ballot(3, 2), c_b.clone())],
         ballot(2, 1),
     );
     assert_eq!(
@@ -238,37 +228,37 @@ fn the_prior_set_is_the_union_above_the_maximum_watermark() {
     assert_eq!(targets, vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)]);
 }
 
-/// The stale-belief abort: a candidate whose history names a newer
-/// configuration than the one it registered abandons the campaign, adopts
-/// the newest, and registers it on its next campaign.
+/// A history naming a configuration other than the registered one is `H_b`
+/// to cover, never a reason to abandon the campaign or change the node's
+/// belief (the ledger records every registration, aborted ones included —
+/// adopting "the newest" flip-flopped a candidate between two beliefs
+/// forever). The campaign completes, Phase 1 covers both, and the
+/// leadership runs under the configuration it registered.
 #[test]
-fn a_stale_belief_adopts_the_newest_configuration_and_re_campaigns() {
+fn a_history_naming_another_configuration_is_covered_not_adopted() {
     let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
     campaign(&mut n);
     let b = n.ballot();
     drain_match_requests(&mut n);
-    let newest = cfg(&[2, 3, 4]);
+    let other = cfg(&[2, 3, 4]);
     let step = n.on_match_reply(registered(
         0,
         b,
         &[
             (ballot(1, 0), cfg(&[0, 1, 2])),
-            (ballot(4, 1), newest.clone()),
+            (ballot(4, 1), other.clone()),
         ],
         Ballot::zero(),
     ));
-    assert_eq!(
-        step,
-        MatchStep::StaleConfiguration {
-            newest: ballot(4, 1)
-        }
-    );
-    assert_eq!(n.role(), NodeRole::Follower);
-    assert_eq!(*n.acceptors(), newest);
-    assert_eq!(n.acceptors_since(), ballot(4, 1));
-    campaign(&mut n);
-    let requests = drain_match_requests(&mut n);
-    assert!(requests.iter().all(|(_, r)| r.config == newest));
+    let MatchStep::Completed { prior, .. } = step else {
+        panic!("the campaign completes: {step:?}");
+    };
+    assert_eq!(prior, vec![cfg(&[0, 1, 2]), other]);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]), "the belief is untouched");
+    let mut targets = prepares(&drain(&mut n));
+    targets.sort_unstable();
+    assert_eq!(targets, vec![NodeId(0), NodeId(1), NodeId(3), NodeId(4)]);
 }
 
 /// Re-sending targets only the matchmakers that have not answered, and is a
@@ -340,18 +330,11 @@ fn open_phase1(n: &mut RawNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
     campaign(n);
     let b = n.ballot();
     drain_match_requests(n);
-    // A non-empty history ends on the candidate's own configuration (its
-    // belief is current), so the campaign completes instead of aborting as
-    // stale; an empty one stays empty.
-    let mut history: Vec<(Ballot, AcceptorConfig)> = prior
+    let history: Vec<(Ballot, AcceptorConfig)> = prior
         .iter()
         .enumerate()
         .map(|(i, c)| (ballot(u64::try_from(i).unwrap() + 1, 9), c.clone()))
         .collect();
-    if !prior.is_empty() {
-        let top = ballot(u64::try_from(prior.len()).unwrap() + 1, 9);
-        history.push((top, n.acceptors().clone()));
-    }
     let step = n.on_match_reply(registered(0, b, &history, Ballot::zero()));
     assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
     let mut targets = prepares(&drain(n));

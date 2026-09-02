@@ -1353,8 +1353,8 @@ impl RawNode {
                 if self.matchmaking.is_some() {
                     // A campaign still waiting on its matchmakers is not
                     // abandoned by the clock: its ballot is promised and
-                    // registered, and only a refusal, a stale belief, or a
-                    // higher ballot on the wire retires it. The timeout is
+                    // registered, and only a refusal or a higher ballot on
+                    // the wire retires it. The timeout is
                     // the retry cadence — re-ask every matchmaker that has
                     // not answered — never a new round. Abandoning here made
                     // a matchmaker link slower than one election timeout an
@@ -1623,17 +1623,22 @@ impl RawNode {
                         MatchStep::Registered {
                             remaining: quorum - registered,
                         }
-                    } else if let Some((newest, config)) = (!m.reconfiguration)
-                        .then(|| m.newer_than_registered())
-                        .flatten()
-                    {
-                        // Stale belief: adopt the newest configuration and
-                        // abandon this campaign.
-                        self.acceptors = config;
-                        self.acceptors_since = newest;
-                        self.become_follower(None);
-                        MatchStep::StaleConfiguration { newest }
                     } else {
+                        // The history is `H_b`, the prior set Phase 1 must
+                        // cover — never a reason to change this node's own
+                        // belief about the configuration in force. The ledger
+                        // records every *registration*, aborted campaigns
+                        // included, so "adopt the newest registered
+                        // configuration" made a candidate re-adopt its own
+                        // and its rival's abandoned beliefs and flip-flop
+                        // between two configurations one round per election
+                        // timeout (seed 7519660681720567139: 182 aborts, no
+                        // leader for a 50 s tail). A belief changes only on
+                        // a fact from a leader — a `Prepare`, `Heartbeat` or
+                        // `Relinquish` carrying its configuration — and a
+                        // stale belief is safe: Phase 1 still covers `H_b`,
+                        // and the leadership simply runs under the
+                        // configuration it registered.
                         let prior = m.prior();
                         let watermark = m.watermark;
                         let config = m.config.clone();
@@ -1670,11 +1675,11 @@ impl RawNode {
                 }
             }
         };
-        // Post-step restatements of invariants 1 and 4: a refused or stale
-        // campaign left nothing Phase-1-shaped behind, and a completed one
+        // Post-step restatements of invariants 1 and 4: a refused campaign
+        // left nothing Phase-1-shaped behind, and a completed one
         // closed the matchmaking phase before opening Phase 1.
         match &step {
-            MatchStep::Refused(_) | MatchStep::StaleConfiguration { .. } => {
+            MatchStep::Refused(_) => {
                 assert!(
                     self.role == NodeRole::Follower,
                     "a refused registration never becomes a leadership"
