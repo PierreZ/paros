@@ -24,7 +24,6 @@ mod chain;
 mod chain_workload;
 mod corpus;
 mod node;
-mod oracle;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
 pub use node::NodeProcess;
@@ -38,7 +37,6 @@ use moonpool_sim::{
 };
 
 use crate::chain_workload::ChainWorkload;
-use crate::oracle::ChainAgreement;
 
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
@@ -178,7 +176,6 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         })
         .link_latency(LinkLatencyConfig::default())
         .workload_factory(move || Box::new(ChainWorkload::new(digest.clone())))
-        .invariant(ChainAgreement::new())
         .enable_chaos(chaos_surfaces())
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
@@ -278,8 +275,7 @@ pub fn run_storage_contract_suite() -> SimulationReport {
 // --- the CTRL evaluation corpus ----------------------------------------------
 
 /// The corpus cluster: three scripted-lifecycle nodes, no swarm chaos (every
-/// fault is a targeted injection from the workload), the application-safety
-/// invariant continuously pumped. See `crate::corpus`.
+/// fault is a targeted injection from the workload). See `crate::corpus`.
 fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
@@ -287,7 +283,6 @@ fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
-        .invariant(ChainAgreement::safety_only())
 }
 
 /// The canonical E1 mask cases the nextest corpus runner enumerates: the
@@ -362,7 +357,6 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
-        .invariant(ChainAgreement::safety_only())
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()
@@ -379,7 +373,6 @@ pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
-        .invariant(ChainAgreement::safety_only())
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()
@@ -396,7 +389,6 @@ fn chunk_corpus_builder(
             Box::new(crate::node::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
-        .invariant(ChainAgreement::safety_only())
 }
 
 /// The canonical chunk-mask cases (bit index `node * 5 + chunk` over the

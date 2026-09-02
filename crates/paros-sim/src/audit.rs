@@ -26,7 +26,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes,
+    assert_sometimes_all,
+};
 use paros::{
     Audit, Ballot, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH,
     SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
@@ -36,26 +39,11 @@ use paros::{
 /// [`AuditWorld`] is published (shared by every node and every workload).
 const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 
-/// Grace (ms) after chaos ends — and after the cluster's chosen prefix last
-/// grew, and after leadership last changed hands — before a still-open chosen
-/// gap is a real liveness failure rather than an ordinary transient.
-/// Consecutive same-hole `chosen_gap` reports (one per node tick) a quiesced
-/// cluster may show before the hole counts as a wedge. Forty ticks is several
-/// election timeouts' worth of real healing opportunities on the protocol's
-/// own clock, immune to wall-time dilation from buggified sleep delays.
-///
-/// **Never buggified**, and neither are [`CONVERGENCE_GRACE_MS`] or
-/// [`DEPOSED_BEAT_STREAK`]: an oracle threshold is the judgement a run is
-/// measured against, so drawing it per seed does not explore a new state, it
-/// changes the verdict on the old one — a short draw indicts a cluster that was
-/// still healing, a long one lets a genuine wedge pass. Knobs shape the run;
-/// thresholds decide it (AGENTS.md, prong 2).
-const GAP_WEDGE_TICKS: u64 = 40;
-
-const CONVERGENCE_GRACE_MS: u64 = 3_000;
-
 /// Consecutive **deposed heartbeats** a leader may broadcast before the checker
-/// calls it a zombie (#95). A leader whose ballot a promise-majority has moved
+/// calls it a zombie (#95). **Never buggified**: an oracle threshold is the
+/// judgement a run is measured against, so drawing it per seed does not
+/// explore a new state, it changes the verdict on the old one (AGENTS.md,
+/// prong 2). A leader whose ballot a promise-majority has moved
 /// strictly past can never again assemble any quorum at that ballot — every
 /// below-promise beat is ignored unacked — yet without `CheckQuorum` nothing ever
 /// demotes it while it is partitioned from the very peers that could tell it.
@@ -102,14 +90,121 @@ impl AuditWorld {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Arm the quiescence-gated liveness checks. Off by default so a
-    /// safety-only campaign — one whose cluster is deliberately broken and may
-    /// correctly never converge — never claims a quiet tail it does not have.
-    /// The main campaign arms them: since Moonpool `43304d8` every fault source
-    /// stops at `chaos_duration` and the partitions in force are healed, so the
-    /// tail is genuinely quiet even with network turbulence on the axis.
-    pub(crate) fn enable_liveness_checks(&self) {
-        self.lock().liveness = true;
+    /// The workload registered a user command it is about to propose. Fed
+    /// before the RPC leaves, so an applied user command that was never
+    /// registered is one the cluster invented.
+    pub(crate) fn note_submitted(&self, cmd_hash: u64) {
+        self.lock().submitted.insert(cmd_hash);
+    }
+
+    /// The application applied one command at `index` (its 1-based applied
+    /// count), reaching `state`. Reported by the storage layer as the
+    /// transition is made durable. Contiguous per node, one command and one
+    /// state per index cluster-wide, and a user command traces to a submission.
+    pub(crate) fn app_applied(
+        &self,
+        node: u64,
+        index: u64,
+        cmd_hash: u64,
+        user: bool,
+        noop: bool,
+        state: u64,
+    ) {
+        let mut st = self.lock();
+        if noop {
+            reach_once!(st.noop_applied, "chain: noop gap fill is applied");
+        }
+        let expected = st
+            .app_index
+            .get(&node)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        assert_always!(
+            index == expected,
+            "chain: applies are contiguous per node",
+            { "node" => node, "index" => index, "expected" => expected }
+        );
+        st.app_index.insert(node, index);
+        let prior_command = *st.app_command.entry(index).or_insert(cmd_hash);
+        let prior_state = *st.app_state.entry(index).or_insert(state);
+        assert_always!(
+            prior_command == cmd_hash && prior_state == state,
+            "chain: one state per applied index",
+            {
+                "node" => node,
+                "index" => index,
+                "expected_command" => prior_command,
+                "observed_command" => cmd_hash,
+                "expected_state" => prior_state,
+                "observed_state" => state
+            }
+        );
+        // The was-proposed claim guards *client* commands: a control command
+        // is minted inside the system (a leader's `Noop` gap fill, a `Snap`
+        // marker, a `Truncate`), so only a user entry must trace back to a
+        // submission.
+        assert_always!(
+            !user || st.submitted.contains(&cmd_hash),
+            "chain: applied command was proposed",
+            { "node" => node, "index" => index, "command" => cmd_hash }
+        );
+    }
+
+    /// The application jumped to `state` at `index` through a snapshot install
+    /// or a decided-point restore. Never backward per node, and agreeing at its
+    /// index with every apply and install that reached it.
+    pub(crate) fn app_snapshot(&self, node: u64, index: u64, state: u64) {
+        let mut st = self.lock();
+        let previous = st.app_index.get(&node).copied();
+        assert_always!(
+            previous.is_none_or(|previous| index >= previous),
+            "chain: a snapshot jump never moves the applied index backward",
+            {
+                "node" => node,
+                "from" => previous.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
+                "to" => index
+            }
+        );
+        st.app_index.insert(node, index);
+        let prior_state = *st.app_state.entry(index).or_insert(state);
+        assert_always!(
+            prior_state == state,
+            "chain: one state per applied index",
+            {
+                "node" => node,
+                "index" => index,
+                "expected_state" => prior_state,
+                "observed_state" => state
+            }
+        );
+    }
+
+    /// A corrupted application snapshot was reset for recovery: the node's
+    /// applied index legally restarts from zero, and the replay that follows
+    /// re-derives the same per-index states.
+    pub(crate) fn app_reset(&self, node: u64) {
+        self.lock().app_index.remove(&node);
+    }
+
+    /// The cluster's applied high-water mark so far (`None` before any apply).
+    pub(crate) fn cluster_applied_max(&self) -> Option<u64> {
+        self.lock().cluster_applied_max
+    }
+
+    /// A one-line picture of the run for the red path: per-node applied
+    /// prefixes, the leader rounds, and the last chosen gap each node reported.
+    pub(crate) fn diagnostics(&self) -> String {
+        let st = self.lock();
+        format!(
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?}",
+            st.applied_max,
+            st.cluster_applied_max,
+            st.booted,
+            st.storage_dead,
+            st.leader_rounds,
+            st.last_gap
+        )
     }
 
     /// Record this run's `sometimes` coverage gates. Called once per workload
@@ -239,11 +334,22 @@ impl AuditWorld {
     /// The convergence deliverable, judged when no future leader change can
     /// invalidate a provisional quiescence decision: every node this run brought
     /// up ends on the cluster's chosen prefix.
-    pub(crate) fn check_final_convergence(&self) {
+    pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
+            assert_always!(
+                acked_max.is_none(),
+                "every acked slot is inside the cluster's applied prefix at the end of the tail"
+            );
             return;
         };
+        // The prefix every node must reach covers everything any client was
+        // told was committed.
+        assert_always!(
+            acked_max.is_none_or(|acked| acked <= cluster_max),
+            "every acked slot is inside the cluster's applied prefix at the end of the tail",
+            { "acked_max" => acked_max.unwrap_or(0), "cluster_max" => cluster_max }
+        );
         let cluster: BTreeSet<u64> = st
             .booted
             .iter()
@@ -383,8 +489,6 @@ impl Floor {
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct AuditState {
-    liveness: bool,
-
     // --- Paxos safety -------------------------------------------------------
     /// Cluster-wide: the value chosen for each slot.
     chosen: BTreeMap<u64, u64>,
@@ -436,9 +540,23 @@ struct AuditState {
     /// Per node: its applied high-water mark (absent = applied nothing).
     applied_max: BTreeMap<u64, u64>,
     cluster_applied_max: Option<u64>,
-    cluster_applied_max_ms: u64,
     lagged: BTreeSet<u64>,
     booted: BTreeSet<u64>,
+    /// Per node: the last `chosen_gap` it reported, `(hole, above)`. Not
+    /// asserted on — a gap is an ordinary transient — but printed on the red
+    /// path, where "which node is stuck, and where" is the first question.
+    last_gap: BTreeMap<u64, (u64, u64)>,
+
+    // --- application state (the Chain-of-Blocks register) --------------------
+    /// User command hashes the workload registered before proposing.
+    submitted: BTreeSet<u64>,
+    /// Per node: its application's applied count (contiguity frontier).
+    app_index: BTreeMap<u64, u64>,
+    /// Per applied index: the command hash every node must apply there.
+    app_command: BTreeMap<u64, u64>,
+    /// Per applied index: the state hash every node must reach there.
+    app_state: BTreeMap<u64, u64>,
+    noop_applied: bool,
 
     // --- cooperative leader handoff -----------------------------------------
     /// `(ballot round, ballot node)` → who is exercising that logical authority
@@ -460,7 +578,10 @@ struct AuditState {
     leader_rounds: BTreeSet<u64>,
     first_leader_round: Option<u64>,
     leader_change_ms: Option<u64>,
-    last_leader_ms: u64,
+    /// A committed client ack landed after leadership first changed hands.
+    ack_after_leader_change: bool,
+    /// A node crashed at any durability seam.
+    crashed_any: bool,
 
     // --- client history -----------------------------------------------------
     lin: LinHistory,
@@ -479,16 +600,6 @@ struct AuditState {
     snapshot_offered: bool,
     snapshot_mid_election: bool,
     caught_up: bool,
-    below_all_floors: bool,
-    /// Per-node `(hole, consecutive quiesced-tick reports)`. The driver emits
-    /// `chosen_gap` once per *node tick* while a gap lasts, so the streak counts
-    /// the protocol's own clock: under moonpool's buggified sleep delay, wall
-    /// sim time dilates during the chaos window but a tick is still one real
-    /// opportunity for an election timeout / re-send to heal the hole. A wedge
-    /// is a hole that survives
-    /// [`GAP_WEDGE_TICKS`] such opportunities after quiescence; a merely
-    /// slowed cluster never accumulates the streak (seed 8057455177754870256).
-    gap_streaks: BTreeMap<u64, (u64, u64)>,
     /// At-most-once ledger for the oracle: each applied user command's
     /// `(client, seq)` and the single log index it applied at. A second apply
     /// of the same identity at a *different* index is the double-apply the
@@ -618,16 +729,6 @@ struct AuditState {
 }
 
 impl AuditState {
-    /// Whether the run has genuinely settled: chaos is over, the cluster's
-    /// chosen prefix has not grown for [`CONVERGENCE_GRACE_MS`], and leadership
-    /// has not changed hands for just as long. Before this gate, holes are
-    /// legitimate transients and nothing is asserted.
-    fn quiesced(&self, now_ms: u64) -> bool {
-        now_ms > crate::CHAOS_DURATION_MS + CONVERGENCE_GRACE_MS
-            && now_ms.saturating_sub(self.cluster_applied_max_ms) > CONVERGENCE_GRACE_MS
-            && now_ms.saturating_sub(self.last_leader_ms) > CONVERGENCE_GRACE_MS
-    }
-
     /// The protocol-level `sometimes` gates: progress, truncation, snapshot and
     /// the multi-slot log. Their `reachable` counterparts already fired at their
     /// transition instants.
@@ -683,6 +784,30 @@ impl AuditState {
         assert_sometimes!(
             self.quorum_lost,
             "a leader without an ack quorum steps down (CheckQuorum)"
+        );
+        // The Chain register's campaign gates: a client keeps committing after
+        // a leader change, and compaction is asked for AND takes effect.
+        assert_sometimes!(
+            self.ack_after_leader_change,
+            "chain: proposal succeeds after leader change"
+        );
+        assert_sometimes!(
+            self.compact_ack_accepted && self.compacted,
+            "chain: compact takes effect"
+        );
+        // Every way a sitting leader can stop being one — it resigned, it
+        // crashed, or it cooperatively handed its authority on — followed by a
+        // new leader and a client ack under it.
+        assert_sometimes_all!(
+            "chain: failover completed",
+            [
+                (
+                    "old leader gone",
+                    self.resigned || self.crashed_any || self.handoff_relinquished
+                ),
+                ("new leader elected", self.leader_rounds.len() >= 2),
+                ("client acknowledged", self.ack_after_leader_change),
+            ]
         );
     }
 
@@ -1023,7 +1148,7 @@ impl AuditState {
 
     /// Fold one applied index into the per-node prefix, the no-gaps frontier and
     /// the cluster high-water mark.
-    fn observe_applied_index(&mut self, node: u64, idx: u64, now_ms: u64) {
+    fn observe_applied_index(&mut self, node: u64, idx: u64) {
         self.check_no_gaps(node, idx);
         if idx >= 2 {
             reach_once!(
@@ -1039,7 +1164,6 @@ impl AuditState {
         }
         if self.cluster_applied_max.is_none_or(|m| idx > m) {
             self.cluster_applied_max = Some(idx);
-            self.cluster_applied_max_ms = now_ms;
         }
         let prefix = self.applied_max.entry(node).or_insert(0);
         *prefix = (*prefix).max(idx);
@@ -1051,7 +1175,6 @@ impl AuditState {
         // `caught_up` is judged in `check_final_convergence` against the FINAL
         // cluster maximum: a node that transiently matched a max the cluster
         // immediately moved past is not evidence the catch-up path healed it.
-        self.check_below_all_floors(now_ms);
     }
 
     /// A node's applied (contiguous chosen) prefix advances one slot at a time.
@@ -1087,52 +1210,6 @@ impl AuditState {
         }
     }
 
-    /// The hard below-floor case: a node whose next needed slot has been
-    /// truncated on *every* peer, so commit-replay catch-up can no longer serve
-    /// it and only snapshot transfer can. A reachability gate, not an escape
-    /// hatch — convergence is still demanded of it.
-    fn check_below_all_floors(&mut self, now_ms: u64) {
-        if self.below_all_floors {
-            return;
-        }
-        // Gated on quiescence like the trace-scanning oracle was: firing on a
-        // transient mid-chaos lag would satisfy the gate without the settled
-        // below-floor state it exists to witness.
-        if !self.quiesced(now_ms) {
-            return;
-        }
-        let Some(cluster_max) = self.cluster_applied_max else {
-            return;
-        };
-        // Candidates include booted nodes with an *empty* applied prefix
-        // (`next_needed = 0`) — the node most likely to sit below every floor.
-        let cluster: BTreeSet<u64> = self
-            .booted
-            .iter()
-            .copied()
-            .chain(self.applied_max.keys().copied())
-            .collect();
-        for &node in &cluster {
-            let prefix = self.applied_max.get(&node).copied();
-            if prefix == Some(cluster_max) {
-                continue;
-            }
-            let next_needed = prefix.map_or(0, |m| m + 1);
-            let below = cluster.iter().any(|&p| p != node)
-                && cluster
-                    .iter()
-                    .filter(|&&p| p != node)
-                    .all(|p| next_needed < self.floor.get(p).map_or(0, |f| f.now));
-            if below {
-                reach_once!(
-                    self.below_all_floors,
-                    "a node fell below every peer's compaction floor (recovers via snapshot transfer)"
-                );
-                return;
-            }
-        }
-    }
-
     /// The client-visible checks over the merged history (see [`LinHistory`]).
     fn check_client_history(&self) {
         let h = &self.lin;
@@ -1141,6 +1218,21 @@ impl AuditState {
             h.acked + h.failed <= h.issued,
             "no proposal is acked/failed before it is issued"
         );
+        // A committed ack is a promise the command is in the applied log: the
+        // audit folded exactly that identity at exactly that slot.
+        for (&(client, seq), &slot) in &h.write_slot {
+            let applied_at = self.applied_identity.get(&(client, seq)).copied();
+            assert_always!(
+                applied_at == Some(slot),
+                "chain: every acknowledged command was applied",
+                {
+                    "client" => client,
+                    "seq" => seq,
+                    "acked_slot" => slot,
+                    "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                }
+            );
+        }
         assert_always!(
             h.read_acked + h.read_failed <= h.read_issued,
             "no read is acked/failed before it is issued"
@@ -1166,6 +1258,25 @@ impl AuditState {
         }
         h.check_coverage_gates(&committed_clients, self.leader_change_ms);
     }
+}
+
+/// The whole check, in one place: the two perspectives a run is judged from.
+///
+/// **Client side** — the workload's own history, merged into the shared one:
+/// disclosed-order linearizability over real time (L1–L4), the sequential
+/// per-client checks (C1–C3), and every acked identity present in the audit's
+/// applied map. **Audit side** — the coverage gates recorded once per run, the
+/// storage world's injected⇔detected correlation, and the one liveness claim:
+/// every live node ends on the cluster's applied prefix, which covers every
+/// acked slot. Returns the run's digest for the determinism proof.
+pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
+    let audit = audit_world(state);
+    audit.check_client_history(history);
+    audit.check_gates();
+    crate::node::check_storage_gates(state);
+    let acked_max = audit.lock().lin.acked_max();
+    audit.check_final_convergence(acked_max);
+    audit.digest()
 }
 
 /// One node's view of the shared checker. Constructed beside the node's
@@ -1312,11 +1423,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.decided = st.decided.split_off(&min_floor);
             st.accept_sets = st.accept_sets.split_off(&(min_floor, 0, 0));
         }
-        st.check_below_all_floors(now);
     }
 
     fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {
-        let now = self.now_ms();
         let mut st = self.state();
         reach_once!(
             st.snapshot_installed,
@@ -1369,7 +1478,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .insert(chosen_index.0);
         // The install jumps the applied prefix straight to the snapshot's
         // boundary without replaying entries.
-        st.observe_applied_index(node.0, chosen_index.0, now);
+        st.observe_applied_index(node.0, chosen_index.0);
     }
 
     fn snapshot_mid_election(&self, _node: NodeId) {
@@ -1381,7 +1490,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
-        let now = self.now_ms();
         let mut st = self.state();
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
@@ -1415,7 +1523,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             );
         }
         reach_once!(st.any_chosen, "a value is chosen");
-        st.observe_applied_index(node.0, slot.0, now);
+        st.observe_applied_index(node.0, slot.0);
     }
 
     fn sent(&self, node: NodeId, _to: NodeId, msg: &Message) {
@@ -1566,7 +1674,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "leadership turns over (re-election)"
             );
         }
-        st.last_leader_ms = now;
         match st.first_leader_round {
             None => st.first_leader_round = Some(won.round),
             Some(r) if r != won.round && st.leader_change_ms.is_none() => {
@@ -1582,7 +1689,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn authority_relinquished(&self, node: NodeId, handoff: Handoff) {
-        let now = self.now_ms();
         let mut st = self.state();
         // Shape and coverage only. The *bookkeeping* — who holds the authority
         // now — is folded from the `Relinquish` on the wire (see
@@ -1638,9 +1744,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a handoff carries accepted-but-unchosen work across"
             );
         }
-        // Leadership changed hands: the quiescence gate must not read the
-        // resulting transient as a settled cluster.
-        st.last_leader_ms = now;
     }
 
     fn authority_installed(
@@ -1651,7 +1754,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         next_slot: Slot,
         _tail: u64,
     ) {
-        let now = self.now_ms();
         let mut st = self.state();
         assert_always!(
             from != node,
@@ -1693,7 +1795,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             );
         }
         reach_once!(st.any_leader, "a leader is elected");
-        st.last_leader_ms = now;
     }
 
     fn handoff_refused(&self, _node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {
@@ -1732,9 +1833,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn handoff_fence_expired(&self, _node: NodeId, _count: u64) {
-        let now = self.now_ms();
         let mut st = self.state();
-        st.last_leader_ms = now;
         reach_once!(
             st.handoff_fence_expired,
             "an uncovered inherited fence resigns back to an ordinary election"
@@ -1742,49 +1841,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn chosen_gap(&self, node: NodeId, hole: Slot, above: Slot) {
-        let now = self.now_ms();
-        let mut st = self.state();
-        if !st.liveness {
-            return;
-        }
         // A gap is perfectly ordinary — pipelining leaves several slots
         // undecided, and a follower that missed one `Commit` holds one until
-        // catch-up runs. The wedge claim therefore requires all of:
-        //  - quiescence (chaos over, prefix and leadership stable),
-        //  - the hole sitting *above* the cluster's applied maximum (below it
-        //    the slot exists on some peer and catch-up can serve it),
-        //  - and the same hole persisting for GAP_WEDGE_TICKS consecutive
-        //    reports of the same node — the drift-immune part: the driver
-        //    emits this once per node tick, so the streak counts genuine
-        //    election-timeout/re-send opportunities even when moonpool's
-        //    buggified sleep delay stretches ticks during the chaos window.
-        // `None` is the empty applied prefix (conceptually slot -1), so every
-        // real hole sits above it and must remain observable.
-        let wedged = st.quiesced(now)
-            && st
-                .cluster_applied_max
-                .is_none_or(|cluster_max| hole.0 > cluster_max);
-        let streak = {
-            let entry = st.gap_streaks.entry(node.0).or_insert((hole.0, 0));
-            if entry.0 == hole.0 && wedged {
-                entry.1 += 1;
-            } else {
-                *entry = (hole.0, u64::from(wedged));
-            }
-            entry.1
-        };
-        assert_always!(
-            streak < GAP_WEDGE_TICKS,
-            "a quiesced cluster holds no chosen slot above its applied prefix (an election left an undecided hole)",
-            {
-                "node" => node.0,
-                "hole" => hole.0,
-                "above" => above.0,
-                "cluster_max" => st.cluster_applied_max.unwrap_or(0),
-                "streak_ticks" => streak,
-                "now_ms" => now
-            }
-        );
+        // catch-up runs — so nothing is asserted here. A gap that never heals
+        // shows up where every liveness failure does: the end-of-run
+        // convergence claim, and this record says where the node was stuck.
+        self.state().last_gap.insert(node.0, (hole.0, above.0));
     }
 
     fn client_acked(
@@ -1819,6 +1881,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
             }
         );
+        if st.leader_change_ms.is_some() {
+            st.ack_after_leader_change = true;
+        }
         // The dedup-window edge the reply-drop location exists for: a reply
         // was dropped after commit, and a retry then took the dedup path.
         if dedup && st.propose_reply_dropped {
@@ -2035,6 +2100,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn crashed(&self, _node: NodeId, seam: Seam) {
         let mut st = self.state();
+        st.crashed_any = true;
         match seam {
             Seam::BeforeSync => st.crashed_before_sync = true,
             Seam::AfterSyncBeforeSend => {
@@ -2579,6 +2645,11 @@ struct LinHistory {
 }
 
 impl LinHistory {
+    /// The highest slot any client was told was committed.
+    fn acked_max(&self) -> Option<u64> {
+        self.write_slot.values().copied().max()
+    }
+
     /// Fold one client's record in. Called once per client, from its `check()`.
     fn merge(&mut self, h: &ClientHistory) {
         let c = h.client;

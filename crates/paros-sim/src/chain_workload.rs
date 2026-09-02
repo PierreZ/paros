@@ -1,23 +1,22 @@
 //! Chain-of-Blocks client workload.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::join_all;
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
-    RandomProvider, SIM_FAULT_EVENT_NAME, SimContext, SimulationError, SimulationResult,
-    TimeProvider, TraceQuery, Workload, assert_always, assert_reachable, assert_sometimes,
-    assert_sometimes_greater_than, buggify_knob, buggify_with_prob, sim::config_random_f64,
-    swarm_op_enabled,
+    RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
+    assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
+    buggify_with_prob, sim::config_random_f64, swarm_op_enabled,
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
     Slot, parse_addr, proposal_checksum,
 };
 
-use crate::audit::{ClientHistory, audit_world};
+use crate::audit::{ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 use crate::{CHAOS_DURATION_MS, DigestSink};
 
@@ -33,8 +32,6 @@ const COMPACT_STORM: u8 = 7;
 /// read), as opposed to [`READ_STATE`]'s internal inspect probe.
 const READ_INDEX: u8 = 8;
 const OP_COUNT: u8 = 9;
-
-const EV_APPLIED: &str = "command_applied";
 
 #[derive(Clone, Copy, Debug)]
 struct ChainConfig {
@@ -186,8 +183,6 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
 pub(crate) struct ChainWorkload {
     /// Per `seq`: the payload's `cmd_hash` and the terminal client outcome.
     outcomes: BTreeMap<u64, (u64, Outcome)>,
-    /// Per `seq`: the submitted payload's `cmd_hash`.
-    submitted: BTreeMap<u64, u64>,
     final_state: Option<ChainState>,
     issued_count: u64,
     external_digests_compared: bool,
@@ -204,7 +199,6 @@ impl ChainWorkload {
     pub(crate) fn new(digest: Option<DigestSink>) -> Self {
         Self {
             outcomes: BTreeMap::new(),
-            submitted: BTreeMap::new(),
             final_state: None,
             issued_count: 0,
             external_digests_compared: false,
@@ -282,16 +276,6 @@ impl Workload for ChainWorkload {
         "chain-client"
     }
 
-    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // This campaign has a genuinely quiet settle tail, network turbulence
-        // included: Moonpool `43304d8` stops every fault source at
-        // `chaos_duration` and heals the partitions in force, so the tail that
-        // follows is a real recovery window and the quiescence-gated liveness
-        // claims apply.
-        audit_world(ctx.state()).enable_liveness_checks();
-        Ok(())
-    }
-
     #[allow(clippy::too_many_lines)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let servers = ctx.topology().all_process_ips().to_vec();
@@ -334,6 +318,7 @@ impl Workload for ChainWorkload {
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         self.history.set_client(client_id);
+        let audit = audit_world(ctx.state());
         let now_ms = {
             let time = time.clone();
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
@@ -472,7 +457,7 @@ impl Workload for ChainWorkload {
                     raw,
                 );
                 let cmd_hash = user_command_hash(&payload);
-                self.submitted.insert(seq, cmd_hash);
+                audit.note_submitted(cmd_hash);
                 self.history.record_write_issued(seq, now_ms());
                 tracing::info!(
                     cmd = %hash_text(cmd_hash),
@@ -594,7 +579,7 @@ impl Workload for ChainWorkload {
                         raw_payload,
                     );
                     let cmd_hash = user_command_hash(&payload);
-                    self.submitted.insert(seq, cmd_hash);
+                    audit.note_submitted(cmd_hash);
                     self.history.record_write_issued(seq, now_ms());
                     tracing::info!(
                         cmd = %hash_text(cmd_hash),
@@ -832,7 +817,7 @@ impl Workload for ChainWorkload {
                             raw_payload,
                         );
                         let cmd_hash = user_command_hash(&payload);
-                        self.submitted.insert(seq, cmd_hash);
+                        audit.note_submitted(cmd_hash);
                         self.history.record_write_issued(seq, now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
@@ -1282,13 +1267,9 @@ impl Workload for ChainWorkload {
                 .await
                 .ok();
         }
-        let pre_tail_count = ctx
-            .observability()
-            .snapshot(EV_APPLIED)
-            .iter()
-            .filter_map(|event| event.u64("index"))
-            .max()
-            .unwrap_or(0);
+        // The applied count the tail must move past (the audit tracks the
+        // applied *slot*; the count is one past it).
+        let pre_tail_count = audit.cluster_applied_max().map_or(0, |slot| slot + 1);
 
         // A small recovery batch proves post-chaos forward progress and gives
         // the state frontier useful depth even when the swarmed operation mask
@@ -1306,7 +1287,7 @@ impl Workload for ChainWorkload {
                 seq ^ recovery_offset ^ 0xa5a5_5a5a,
             );
             let cmd_hash = user_command_hash(&payload);
-            self.submitted.insert(seq, cmd_hash);
+            audit.note_submitted(cmd_hash);
             self.history.record_write_issued(seq, now_ms());
             tracing::info!(
                 cmd = %hash_text(cmd_hash),
@@ -1457,171 +1438,27 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        // The combined-campaign evidence (Moonpool #194): this axis genuinely
-        // injects environmental network faults, and the tail after the cutoff
-        // is genuinely where the cluster recovers from them. Without the first
-        // gate a unified campaign could go green having only ever run the
-        // attrition surface; without the second, nothing would prove that
-        // Moonpool's recovery-mode heal is what makes the tail claimable.
-        let faults = ctx.observability().snapshot(SIM_FAULT_EVENT_NAME);
-        let is_kind = |event: &moonpool_sim::TraceEvent, kinds: &[&str]| {
-            event.str("kind").is_some_and(|kind| kinds.contains(&kind))
-        };
-        let network_faults = faults
-            .iter()
-            .filter(|event| {
-                is_kind(
-                    event,
-                    &[
-                        "partition_created",
-                        "send_partition_created",
-                        "recv_partition_created",
-                        "random_close",
-                    ],
-                )
-            })
-            .count();
-        assert_sometimes!(
-            network_faults > 0 && converged,
-            "chain: a run injects network faults and still converges"
-        );
-        if faults.iter().any(|event| {
-            event.time_ms >= CHAOS_DURATION_MS
-                && is_kind(
-                    event,
-                    &[
-                        "partition_healed",
-                        "send_partition_healed",
-                        "recv_partition_healed",
-                    ],
-                )
-        }) {
-            assert_reachable!("chain: the chaos cutoff heals a partition still in force");
-        }
-
         if !converged {
             // Failure diagnostic (fires only on the red path): which node is
             // stuck, and where. `None` = the node did not answer the inspect
-            // probe inside its timeout.
-            let q = ctx.observability();
-            let last_applied: BTreeMap<u64, u64> = q
-                .snapshot(EV_APPLIED)
-                .iter()
-                .filter_map(|e| Some((e.u64("node")?, e.time_ms)))
-                .fold(BTreeMap::new(), |mut m, (n, t)| {
-                    let entry = m.entry(n).or_insert(0);
-                    *entry = (*entry).max(t);
-                    m
-                });
-            let count_by_node = |name: &str| -> BTreeMap<u64, usize> {
-                q.snapshot(name).iter().filter_map(|e| e.u64("node")).fold(
-                    BTreeMap::new(),
-                    |mut m, n| {
-                        *m.entry(n).or_insert(0) += 1;
-                        m
-                    },
-                )
-            };
+            // probe inside its timeout. The seed's buggified shape is printed
+            // too — a knob at its extreme is one of the things that can
+            // produce a red.
+            let parked_now = crate::node::parked_nodes(ctx.state());
             eprintln!(
-                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): \
-                 per-node states = {:?}; last command_applied per node = {:?}; \
-                 boots per node = {:?}; seam crashes per node = {:?}",
+                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node states = {:?}",
                 time.now().as_millis(),
                 recovery_deadline.as_millis(),
                 pre_tail_count,
                 last_probe,
-                last_applied,
-                count_by_node("booted"),
-                count_by_node("crashed"),
             );
-            // The seed's buggified shape. Without it a red seed's *config* is
-            // invisible, and a knob at its extreme is one of the things that
-            // can produce a red — a probe timeout below the cluster's settled
-            // round trip reads as "the node never answered" even on a fully
-            // converged cluster.
             eprintln!("  CONFIG {config:?}");
-            // Which nodes the probe was even allowed to ask. `per-node states`
-            // is empty in two very different situations — every live node
-            // timed out, or there were no live nodes to ask because the whole
-            // cluster is parked — and telling them apart from the outside is
-            // otherwise guesswork.
-            let parked_now = crate::node::parked_nodes(ctx.state());
-            let live_now: Vec<usize> = (0..server_count)
-                .filter(|i| !parked_now.contains(&servers[*i]))
-                .collect();
-            eprintln!("  PROBE live={live_now:?} parked={parked_now:?} servers={server_count}");
-            eprintln!(
-                "  ticks={} leader_elected={} prepares_sent={} msg_sent={} msg_received={} check_leader_evts={}",
-                q.len("node_tick"),
-                q.len("leader_elected"),
-                q.snapshot("msg_sent")
-                    .iter()
-                    .filter(|e| e.str("kind") == Some("prepare"))
-                    .count(),
-                q.len("msg_sent"),
-                q.len("msg_received"),
-                q.len("election_timeout_extreme"),
-            );
-            let kind_count = |name: &str, kind: &str| -> usize {
-                q.snapshot(name)
-                    .iter()
-                    .filter(|e| e.str("kind") == Some(kind))
-                    .count()
-            };
-            eprintln!(
-                "  SNAP-DIAG offers={} offers_skipped={} installs={} install_sent={} cu_req_sent={} cu_resp_sent={} cu_req_recv={} cu_resp_recv={} hb_sent={} hb_recv={} snap_ack_sent={} chunk_req_sent={} chunk_resp_sent={} compacted={} coupled={} chosen_gap={} gap_filled={} below_floor={}",
-                q.len("snapshot_offered"),
-                q.len("snapshot_offer_skipped"),
-                q.len("snapshot_installed"),
-                kind_count("msg_sent", "install_snapshot"),
-                kind_count("msg_sent", "catchup_request"),
-                kind_count("msg_sent", "catchup_response"),
-                kind_count("msg_received", "catchup_request"),
-                kind_count("msg_received", "catchup_response"),
-                kind_count("msg_sent", "heartbeat"),
-                kind_count("msg_received", "heartbeat"),
-                kind_count("msg_sent", "snap_ack"),
-                kind_count("msg_sent", "snap_chunk_request"),
-                kind_count("msg_sent", "snap_chunk_response"),
-                q.len("compacted"),
-                q.len("truncate_coupled_to_snap_point"),
-                q.len("chosen_gap"),
-                q.len("election_gap_filled"),
-                q.len("prepare_below_floor"),
-            );
-            for gap in q.snapshot("chosen_gap").iter().rev().take(3) {
-                eprintln!(
-                    "  GAP-DIAG t={}ms node={:?} hole={:?} above={:?}",
-                    gap.time_ms,
-                    gap.u64("node"),
-                    gap.u64("hole"),
-                    gap.u64("above"),
-                );
-            }
-            for name in ["booted", "crashed", "storage_fault", "recovered"] {
-                for ev in q.snapshot(name).iter().rev().take(6) {
-                    eprintln!(
-                        "  EV-DIAG {name} t={}ms node={:?} kind={:?} slot={:?} error={:?} decision={:?}",
-                        ev.time_ms,
-                        ev.u64("node"),
-                        ev.str("kind"),
-                        ev.u64("slot"),
-                        ev.str("error"),
-                        ev.str("decision"),
-                    );
-                }
-            }
-            for lead in q.snapshot("leader_elected").iter().rev().take(3) {
-                eprintln!(
-                    "  LEADER-DIAG t={}ms node={:?}",
-                    lead.time_ms,
-                    lead.u64("node"),
-                );
-            }
+            eprintln!("  PROBE parked={parked_now:?} servers={server_count}");
+            eprintln!("  AUDIT {}", audit.diagnostics());
             for ip in &servers {
                 if let Some(probe) = crate::node::corpus_disk_probe(ctx.state(), ip) {
                     eprintln!(
-                        "  DISK-DIAG {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
+                        "  DISK {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
                         probe.floor,
                         probe.applied_count,
                         probe.snap_point,
@@ -1636,20 +1473,6 @@ impl Workload for ChainWorkload {
             recovery_acked > 0 && converged,
             "chain: cluster converged after chaos"
         );
-        let applied_hashes: BTreeSet<String> = ctx
-            .observability()
-            .snapshot(EV_APPLIED)
-            .iter()
-            .filter_map(|event| event.str("cmd").map(str::to_owned))
-            .collect();
-        for (cmd_hash, outcome) in self.outcomes.values() {
-            if matches!(outcome, Outcome::Acked { .. }) {
-                assert_always!(
-                    applied_hashes.contains(&hash_text(*cmd_hash)),
-                    "chain: every acknowledged command was applied"
-                );
-            }
-        }
         if let Some(state) = self.final_state {
             assert_sometimes_greater_than!(
                 state.applied_count,
@@ -1664,15 +1487,11 @@ impl Workload for ChainWorkload {
         // The two perspectives, and nothing else: the client's own history
         // (linearizability over what it was told), and the audit's fold of
         // every driver transition (safety, restart, and the one liveness claim).
-        let audit = audit_world(ctx.state());
-        audit.check_client_history(&self.history);
-        audit.check_gates();
-        crate::node::check_storage_gates(ctx.state());
-        audit.check_final_convergence();
+        let digest = check_run(ctx.state(), &self.history);
         if let Some(sink) = &self.digest {
             *sink
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audit.digest());
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(digest);
         }
         assert_always!(
             self.outcomes

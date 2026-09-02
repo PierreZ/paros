@@ -45,6 +45,7 @@ use paros::{
     Slot, Value, parse_addr, proposal_checksum, snap_chunk_count,
 };
 
+use crate::audit::audit_world;
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 use crate::node::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
@@ -477,6 +478,9 @@ async fn prime_prefix(
     for offset in 0..count {
         let seq = seq_base + offset;
         let bytes = payload(seq);
+        // Registered before the RPC leaves: an applied user command the audit
+        // never saw submitted is one the cluster invented.
+        audit_world(ctx.state()).note_submitted(user_command_hash(&bytes));
         tracing::info!(
             cmd = %hash_text(user_command_hash(&bytes)),
             seq,

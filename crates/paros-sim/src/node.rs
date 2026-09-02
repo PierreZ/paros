@@ -2425,7 +2425,12 @@ impl<T: TimeProvider> DurableStorage<T> {
             landing,
         );
 
+        // The application-state facts, reported to the audit as they become
+        // durable (and traced for humans). An install is a jump; every apply
+        // is one contiguous transition.
         if let Some(installed) = snapshot {
+            self.checker
+                .app_snapshot(self.node_id, installed.applied_count, installed.chain_hash);
             tracing::info!(
                 node = self.node_id,
                 index = installed.applied_count,
@@ -2435,6 +2440,14 @@ impl<T: TimeProvider> DurableStorage<T> {
         }
         for pending in applies {
             let next = pending.transition.next;
+            self.checker.app_applied(
+                self.node_id,
+                next.applied_count,
+                pending.transition.cmd_hash,
+                pending.transition.kind == "user",
+                pending.transition.kind == "noop",
+                next.chain_hash,
+            );
             tracing::info!(
                 target: "chain",
                 node = self.node_id,
@@ -2613,6 +2626,9 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                 // pre-crash prefix may sit past the point, so the jump can go
                 // backward) followed by an install-shaped landing at the
                 // point; the re-walk from there is contiguous again.
+                self.checker.app_reset(node);
+                self.checker
+                    .app_snapshot(node, state.applied_count, state.chain_hash);
                 tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
                 tracing::info!(
                     node,
@@ -2642,6 +2658,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                     );
                 });
                 self.application = ChainState::default();
+                self.checker.app_reset(node);
                 tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
                 if floor.0 == 0 {
                     assert_reachable!(
