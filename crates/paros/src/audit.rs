@@ -385,6 +385,12 @@ pub trait Audit {
     /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
     fn matchmaking_resend_skipped(&self, node: NodeId) {}
 
+    /// This candidate's election clock fired while its matchmaking was still
+    /// open and re-asked the unanswered matchmakers instead of abandoning the
+    /// campaign (`RawNode::tick`). `count` is the monotone total for this
+    /// incarnation; the campaign's ballot is unchanged.
+    fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, count: u64) {}
+
     /// This candidate folded a `Registered` reply from `matchmaker` for
     /// `ballot`; `remaining` registrations are still needed for the quorum.
     fn match_registered_by(

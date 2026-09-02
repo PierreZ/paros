@@ -2229,6 +2229,7 @@ struct Deltas {
     handoff: HandoffCounters,
     membership: (u64, u64),
     matchmaking: Option<Ballot>,
+    matchmaking_timeouts: u64,
 }
 
 /// The driver's **matchmaker links** (#120): one reconnecting channel per
@@ -2444,6 +2445,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         handoff: last_handoff,
         membership: last_membership,
         matchmaking: _,
+        matchmaking_timeouts: last_matchmaking_timeouts,
     } = last;
     if node.needs_election_timeout() {
         node.set_election_timeout(draw_election_timeout(
@@ -2482,6 +2484,21 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     }
     let installed_now = report_handoff(node, last_handoff, self_id, audit);
     report_membership(node, last_membership, self_id, audit);
+    // Surface an election timeout that re-asked an open matchmaking (#120)
+    // instead of abandoning it: the campaign's ballot travels with it so the
+    // audit can hold the clock to "moved nothing".
+    let timeouts = node.matchmaking_timeouts();
+    if timeouts != *last_matchmaking_timeouts {
+        *last_matchmaking_timeouts = timeouts;
+        let ballot = node.ballot();
+        audit.matchmaking_timeout(NodeId(self_id), ballot, timeouts);
+        tracing::info!(
+            node = self_id,
+            round = ballot.round,
+            count = timeouts,
+            "matchmaking_timeout"
+        );
+    }
     // Surface any CheckQuorum step-down the batch's tick performed (#95).
     let quorum_lost = node.quorum_lost_step_downs();
     if quorum_lost > *last_quorum_lost {
@@ -2999,6 +3016,7 @@ where
         handoff: node.handoff_counters(),
         membership: node.membership_counters(),
         matchmaking: None,
+        matchmaking_timeouts: node.matchmaking_timeouts(),
     };
     // Ticks since the open matchmaking request was last (re-)sent.
     let mut match_resend_elapsed: u64 = 0;

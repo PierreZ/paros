@@ -1362,8 +1362,23 @@ impl RawNode {
                     // round higher and none ever reached Phase 1 (the hunt
                     // saw 203 registrations at one matchmaker for 3
                     // completed campaigns and no leader in a 50 s tail).
+                    let ballot = self.ballot;
                     self.matchmaking_timeouts = self.matchmaking_timeouts.saturating_add(1);
                     self.resend_matchmaking();
+                    // Postconditions: the clock moved nothing — same ballot,
+                    // same open phase, still a candidate — and only re-asked.
+                    assert!(
+                        self.ballot == ballot,
+                        "an election timeout never moves a pending matchmaking's ballot"
+                    );
+                    assert!(
+                        self.role == NodeRole::Candidate && self.matchmaking.is_some(),
+                        "an election timeout keeps a pending matchmaking open"
+                    );
+                    assert!(
+                        self.election.is_none(),
+                        "a re-asked matchmaking opens no Phase 1"
+                    );
                 } else {
                     self.step(Message::CheckLeader { from: me });
                 }

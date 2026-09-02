@@ -106,6 +106,18 @@ pub(super) struct MatchmakerAudit {
     campaign_opened: bool,
     campaign_completed: bool,
     campaign_refused: bool,
+    clock_reasked: bool,
+    refloored: bool,
+    /// Every configuration some completed campaign or started reconfiguration
+    /// put on the wire — the only sources a candidate may learn a belief from
+    /// (a leader's `Prepare`, `Heartbeat` or `Relinquish`), beside the
+    /// bootstrap.
+    wire_configs: BTreeSet<AcceptorConfig>,
+    /// The bootstrap configuration, from the boot reports.
+    bootstrap: Option<AcceptorConfig>,
+    /// Per node: the highest round a `Stale` refusal named to it, which its
+    /// next campaign must open strictly above.
+    refused_floor: BTreeMap<u64, u64>,
     campaign_empty_history: bool,
     campaign_union_several: bool,
     campaign_disagreeing_histories: bool,
@@ -457,6 +469,11 @@ impl MatchmakerAudit {
 
     // ---- the leader-side matchmaking phase (#120) ---------------------------
 
+    /// The bootstrap configuration every node boots with.
+    pub(super) fn note_bootstrap(&mut self, bootstrap: &AcceptorConfig) {
+        self.bootstrap.get_or_insert_with(|| bootstrap.clone());
+    }
+
     /// A candidate opened matchmaking for `ballot`, registering `config`.
     pub(super) fn campaign_started(
         &mut self,
@@ -465,6 +482,38 @@ impl MatchmakerAudit {
         config: &AcceptorConfig,
         reconfiguration: bool,
     ) {
+        // A refused candidate re-campaigns strictly above the round that
+        // refused it — never one round up from its own, which the same
+        // registration would refuse again (the leapfrog livelock).
+        if let Some(floor) = self.refused_floor.get(&node.0).copied() {
+            assert_always!(
+                ballot.round > floor,
+                "matchmaking: a refused candidate re-campaigns above the refuser's highest round",
+                { "node" => node.0, "round" => ballot.round, "floor" => floor }
+            );
+            self.refused_floor.remove(&node.0);
+            reach_once!(
+                self.refloored,
+                "matchmaking: a refused candidate re-campaigns above the refuser's round"
+            );
+        }
+        // A belief comes from a leader's wire or the bootstrap, never from
+        // the ledger: a plain campaign registers only a configuration some
+        // completed campaign or started reconfiguration already put on the
+        // wire (a `Prepare`, `Heartbeat` or `Relinquish` carries it), or the
+        // one every node boots with.
+        if !reconfiguration && self.bootstrap.is_some() {
+            let known =
+                self.bootstrap.as_ref() == Some(config) || self.wire_configs.contains(config);
+            assert_always!(
+                known,
+                "matchmaking: a candidate registers only the bootstrap or a configuration a leader put on the wire",
+                { "node" => node.0, "round" => ballot.round, "members" => config.members.len() }
+            );
+        }
+        if reconfiguration {
+            self.wire_configs.insert(config.clone());
+        }
         // A campaign is opened once per ballot: the ballot is fresh.
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         assert_always!(
@@ -510,6 +559,22 @@ impl MatchmakerAudit {
                 "matchmaking: a request is re-sent to a matchmaker that already answered"
             );
         }
+    }
+
+    /// The candidate's election clock fired on an open matchmaking and
+    /// re-asked instead of abandoning: the campaign it reports is the one
+    /// still open — never completed, never refused, at the same ballot.
+    pub(super) fn clock_reasked(&mut self, node: NodeId, ballot: Ballot) {
+        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
+        assert_always!(
+            campaign.config.is_some() && !campaign.completed && !campaign.refused,
+            "matchmaking: the election clock re-asks an open campaign and moves nothing",
+            { "node" => node.0, "round" => ballot.round }
+        );
+        reach_once!(
+            self.clock_reasked,
+            "matchmaking: the election clock re-asks a pending matchmaking instead of abandoning it"
+        );
     }
 
     /// The candidate deliberately skipped a due re-send.
@@ -628,6 +693,11 @@ impl MatchmakerAudit {
             }
         );
         campaign.completed = true;
+        if let Some(config) = campaign.config.clone() {
+            // From here the configuration rides this campaign's `Prepare`s
+            // (and its heartbeats, if it wins): a belief others may learn.
+            self.wire_configs.insert(config);
+        }
         reach_once!(
             self.campaign_completed,
             "matchmaking: a campaign closes with a matchmaker quorum"
@@ -661,7 +731,10 @@ impl MatchmakerAudit {
             { "node" => node.0, "round" => ballot.round }
         );
         campaign.refused = true;
-        let _ = refusal;
+        if let MatchRefusal::Stale { highest } = refusal {
+            let floor = self.refused_floor.entry(node.0).or_default();
+            *floor = (*floor).max(highest.round);
+        }
         reach_once!(
             self.campaign_refused,
             "matchmaking: a campaign is refused by a matchmaker"

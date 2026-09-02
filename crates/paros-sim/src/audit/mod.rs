@@ -1395,6 +1395,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "pool" => pool.len() }
         );
         st.matchmaker.note_deployment(deployment.matchmakers.len());
+        st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.observe_promise(node.0, promised);
         // The boot report is the incarnation edge: swap in the faulty
         // classifications staged by *this* boot's scan and drop the previous
@@ -2123,6 +2124,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state()
             .matchmaker
             .request_sent(node, matchmaker, ballot);
+    }
+
+    fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, _count: u64) {
+        self.state().matchmaker.clock_reasked(node, ballot);
     }
 
     fn matchmaking_resend_skipped(&self, _node: NodeId) {

@@ -249,6 +249,12 @@ impl RawNode {
             self.hard_state.max_promised_ballot == self.ballot,
             "a candidate promises the ballot it campaigns at"
         );
+        // A refused campaign's floor is honoured: the fresh round sits
+        // strictly above the highest round that refused this node.
+        assert!(
+            self.ballot.round > self.round_floor,
+            "a campaign opens above the round floor a stale refusal set"
+        );
         let reconfiguration = target.is_some();
         let config = target.unwrap_or_else(|| self.acceptors.clone());
         if self.config.has_matchmakers() {
