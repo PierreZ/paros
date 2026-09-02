@@ -76,7 +76,7 @@ const GRPC_PEER_INBOX_CAPACITY: usize = 1024;
 /// duration at least non-zero, and the election base at least
 /// `2 * HEARTBEAT_TICKS` so a live leader always beats before a follower's
 /// election clock fires.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DriverTunables {
     /// How often the node advances its logical clock. Pacing, not a protocol
     /// bound: every timeout the core owns is counted in ticks, so a slower
@@ -669,6 +669,7 @@ fn handle_snap_chunk_request<S, H, A>(
                     // re-asks every tick. Consulted only for a chunk that
                     // would otherwise be served.
                     if hooks.withhold_snap_chunk(to) {
+                        audit.snap_chunk_withheld(me, to);
                         tracing::info!(node = me.0, at = at.0, chunk, "snap_chunk_withheld");
                         return None;
                     }
@@ -3111,13 +3112,19 @@ where
                 // early-expiry hook (consulted only while reads are parked)
                 // takes the same exit before the deadline.
                 let expire_all = !waiters.pending_reads.is_empty() && hooks.expire_parked_read_early();
-                let overdue: Vec<u64> = waiters.pending_reads
+                // `(ctx, early)`: `early` marks a read the hook expired while
+                // its deadline still had ticks left — the audit keeps the two
+                // exits apart.
+                let overdue: Vec<(u64, bool)> = waiters.pending_reads
                     .iter()
-                    .filter(|(_, (_, parked_at, _))| expire_all || ticks.saturating_sub(*parked_at) > tunables.read_retry_ticks)
-                    .map(|(ctx, _)| *ctx)
+                    .filter_map(|(ctx, (_, parked_at, _))| {
+                        let by_deadline = ticks.saturating_sub(*parked_at) > tunables.read_retry_ticks;
+                        (expire_all || by_deadline).then_some((*ctx, !by_deadline))
+                    })
                     .collect();
-                for ctx in overdue {
+                for (ctx, early) in overdue {
                     if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
+                        audit.read_expired(NodeId(self_id), early);
                         if hooks.drop_client_reply(Reply::ReadRedirect) {
                             audit.client_reply_dropped(NodeId(self_id), Reply::ReadRedirect);
                             tracing::info!(node = self_id, reply = "read_redirect", "client_reply_dropped");

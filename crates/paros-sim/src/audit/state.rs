@@ -267,6 +267,14 @@ pub(super) struct AuditState {
     pub(super) corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
+    /// A process-level restart (attrition, or the corpus script) booted while
+    /// at least one *other* node sat terminally parked: a transient process
+    /// loss overlapped a persistent storage loss.
+    pub(super) parked_overlap: bool,
+    /// The overlap above cost the cluster its quorum (the parked set plus the
+    /// node that was down left fewer live nodes than a majority), and the
+    /// restart that reported it is what returned the quorum.
+    pub(super) parked_overlap_quorum_returned: bool,
     /// Stage 8: per node, the slots its boot scan classified recoverable and
     /// reported into the tri-state — the second explanation the divergence
     /// and no-gaps checks accept (#71's explained-only rule). Scoped to the
@@ -297,6 +305,19 @@ pub(super) struct AuditState {
     pub(super) snap_restore_seen: bool,
     pub(super) resend_skipped: bool,
     pub(super) resigned: bool,
+    /// The `withhold_snap_chunk` hook family: it fired somewhere, the
+    /// requesters it was silent toward, and whether one of them still
+    /// completed its chunk repair — the recovery path the silence tests.
+    pub(super) chunk_withheld: bool,
+    pub(super) withheld_from: BTreeSet<u64>,
+    pub(super) repaired_after_withhold: bool,
+    /// Parked reads redirected: by the deadline, and by the early-expiry hook.
+    pub(super) read_expired_overdue: bool,
+    pub(super) read_expired_early: bool,
+    /// A compaction ack lost at the reply seam (its own gate beside the
+    /// redirect family: the compaction client's re-ask loop is a different
+    /// recovery path from a blind retry after a lost redirect).
+    pub(super) compact_reply_dropped: bool,
     /// Cooperative-handoff coverage: one sticky bit per distinct fact.
     pub(super) handoff_relinquished: bool,
     pub(super) handoff_installed: bool,

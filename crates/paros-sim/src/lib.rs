@@ -26,6 +26,7 @@ mod corpus;
 mod hooks;
 mod lifecycle;
 mod process;
+mod shape;
 mod world;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
