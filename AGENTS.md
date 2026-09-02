@@ -146,6 +146,16 @@ separation; #81 removed the message-class nemesis, which mixed them):
   when the choice can have an observable effect (for example, only ask to skip when accepts are
   pending), trace the action that actually happened, and disable disruptive hooks after the chaos
   window so recovery gets a quiet tail.
+
+  **Consult a hook only from the node loop, never from a spawned task.** A hook answer is a
+  randomness draw, and moonpool's BUGGIFY state is a thread-local whose draw order is stable only
+  for a stable *call sequence*; the node loop is where the simulation steps deterministically,
+  while a `spawn_task(..).detach()`ed task can outlive its simulation and shift the **next** run's
+  stream. That is not theoretical: consulting two hooks from inside the peer-delivery task broke
+  `same_seed_replays_identically` on CI (a seed's first in-process replay diverged from its second)
+  while replaying clean locally, because whether the leftover task got polled was environment-
+  dependent. A decision a spawned task needs is taken on the loop and *carried* to it — the peer
+  mailbox's `hold_next` / `reverse_next` flags are the pattern.
 - **BUGGIFY, prong 2 — tunables are workload-buggified config.** Anything that *shapes* a run — the
   cluster size, request counts, timing windows, fault firing rates, attrition knobs (the #61 swarm
   surface) — belongs in plain config data that the **workload/harness layer** randomizes

@@ -45,21 +45,62 @@ use crate::oracle::{
 use crate::protocol_bounds::{ProtocolBoundsIdleProcess, ProtocolBoundsWorkload};
 use crate::workload::ProposeClient;
 
-/// Client-side gRPC channel config for the sim workloads. Mirrors the driver's
-/// peer channels: h2 PING keep-alive so a connection left half-open by a node
-/// restart is detected and replaced deterministically instead of swallowing
-/// requests forever. Without it, a workload probe channel established before an
-/// attrition restart can stay dead for the entire recovery tail (the seed
-/// 6442591786636745658 convergence false-negative: every node had applied and
-/// agreed by t=12.7s, and the probe to one restarted node then timed out for 74
-/// simulated seconds).
+/// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
+/// a connection left half-open by a node restart is detected and replaced
+/// deterministically instead of swallowing requests forever. Without it, a
+/// workload probe channel established before an attrition restart can stay dead
+/// for the entire recovery tail (the original witness: every node had applied
+/// and agreed by t=12.7s, and the probe to one restarted node then timed out
+/// for 74 simulated seconds).
+///
+/// **`while_idle` must be `true` here.**
+/// A workload channel is idle by construction — it sends one probe, waits for
+/// the answer, sleeps, repeats — and each probe is raced against
+/// `request_timeout_ms` and *cancelled* when that fires. With `while_idle:
+/// false` an idle connection is "left alone until it is used again", so the
+/// only chance to ping is while a stream is open; but the probe timeout
+/// (1500 ms by default, and as low as 350 ms at its knob's extreme) is always
+/// shorter than the 2 s ping interval, so the stream is always gone before a
+/// ping is due. The keep-alive could therefore never fire *at all* on these
+/// channels, and the half-open connection it exists to catch stayed
+/// undetectable — the failure mode the config was added to fix, surviving
+/// inside the fix.
+///
+/// Found by the raw hunt as a convergence false negative on an n=2 cluster
+/// (one red in 10,000): both nodes were provably converged on disk (identical
+/// floor, identical applied prefix, both applying until t=69s), and the run
+/// was still called unavailable because the probe channel to the node that had
+/// restarted at t=3.9s never came back for the remaining 80 simulated seconds.
+/// That witness replays green with `while_idle: true`.
+///
+/// **This closes a hole; it does not close the family.** A second witness of
+/// the same shape survives the fix: an n=2 cluster, both nodes converged on
+/// disk, and the probe to a node that had *never* restarted — and that was
+/// demonstrably alive and applying at t=54.8s — never answered for the whole
+/// 60s tail. Raising just that probe's timeout to 20s does not help either, so
+/// there the request is not slow, it never completes: a client channel that
+/// stays unusable against a live server. The residual cause is in the
+/// reconnecting client channel's recovery from Moonpool's *persistent* network
+/// damage (the damage a chaos cutoff deliberately keeps), not in this keep-alive
+/// and not in the protocol — the workload's probe loop cannot tell "this node
+/// is behind" from "I cannot reach this node", and treats the second as the
+/// first.
+///
+/// Whether the driver's own peer channels share the keep-alive hole is
+/// **open**: their delivery timeout (1 s) is below the same 2 s interval, so
+/// the argument above applies structurally — but peer traffic is continuous
+/// rather than sparse, and inter-node delivery demonstrably recovered across
+/// the very restart that stranded the first probe, so some other path replaces
+/// a dead peer connection. Not changed here: that is production transport
+/// behavior, and it deserves its own investigation rather than a speculative
+/// flip.
 pub(crate) fn client_channel_config() -> moonpool_hyper::ChannelConfig {
     moonpool_hyper::ChannelConfig {
         connection_timeout: Duration::from_secs(1),
         keep_alive: Some(moonpool_hyper::KeepAlive {
             interval: Duration::from_secs(2),
             timeout: Duration::from_secs(1),
-            while_idle: false,
+            while_idle: true,
         }),
         ..moonpool_hyper::ChannelConfig::default()
     }

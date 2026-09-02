@@ -5,10 +5,17 @@
 //! persist/send seam within one. [`DriverHooks`] also exposes the driver's
 //! optional policy decisions: delaying an `Accept` re-send, resigning
 //! leadership, choosing the shortest valid election timeout, the peer mailbox's
-//! enqueue-side choices (overtake the queue, evict across kinds) and its
-//! drain-side ones (hold a batch, reverse it), skipping a snapshot offer, and
-//! stretching a tick.
+//! choices (overtake the queue, evict across kinds, and — armed at enqueue,
+//! applied at the drain — hold a batch or reverse it), skipping a snapshot
+//! offer, and stretching a tick.
 //! Production passes [`NoHooks`], whose defaults never perturb the driver.
+//!
+//! **Every hook is consulted from the driver's node loop, never from a spawned
+//! task.** A hook answer is a randomness draw in simulation, and the node loop
+//! is where the simulation steps deterministically; a draw taken inside a
+//! detached task can outlive its simulation and shift the next run's stream.
+//! `PeerMailbox` in `crate::driver` carries the CI failure that established
+//! this.
 
 use paros_core::{Message, NodeId, Slot};
 
@@ -206,27 +213,36 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether the peer-delivery task should **hold** a drained batch for one
-    /// tick before putting it on the wire. Always safe: the transport is
-    /// allowed to take arbitrarily long (a reconnect, a congested link, a
+    /// Whether the peer-delivery task should **hold** its next drained batch
+    /// for one tick before putting it on the wire. Always safe: the transport
+    /// is allowed to take arbitrarily long (a reconnect, a congested link, a
     /// stalled h2 window all do exactly this), and the mailbox is lossy by
     /// contract, so a delayed batch is weaker than a dropped one. What it
-    /// reaches is the *concurrency window* the enqueue-side hooks cannot: while
-    /// the drain is parked the mailbox keeps filling, so the backlog crosses
-    /// the shed threshold and the batcher's keep-newest path runs against a
-    /// genuinely stale head instead of a one-message queue. Consulted once per
-    /// drained batch.
+    /// reaches is the *concurrency window* the other mailbox hooks cannot:
+    /// while the drain is parked the mailbox keeps filling, so the backlog
+    /// crosses the shed threshold and the batcher's keep-newest path runs
+    /// against a genuinely stale head instead of a one-message queue.
+    ///
+    /// Consulted at **enqueue** time, on a mailbox that already holds
+    /// something, and applied by the delivery task — this message's arrival is
+    /// what makes the next batch worth holding. The split is a determinism
+    /// requirement rather than a convenience: see `PeerMailbox` in
+    /// `paros::driver`.
     fn hold_peer_delivery(&self, _to: NodeId) -> bool {
         false
     }
 
-    /// Whether this delivery batch should be handed to the peer in **reverse**
-    /// enqueue order. Always safe, and for the same reason
+    /// Whether the next delivery batch should be handed to the peer in
+    /// **reverse** enqueue order. Always safe, and for the same reason
     /// [`DriverHooks::overtake_in_mailbox`] is: the peer transport never
     /// promised ordering. It is the drain-side half of that location — overtake
     /// reorders one message against a queue, this reorders a whole batch at
     /// once, which is the shape a retried RPC or a re-established stream
-    /// produces. Consulted only when the batch holds more than one message.
+    /// produces.
+    ///
+    /// Consulted at **enqueue** time, once this message makes a reorderable
+    /// (two-message) batch possible, and applied by the delivery task only
+    /// when the batch it drains really does hold more than one message.
     fn reverse_delivery_batch(&self, _to: NodeId) -> bool {
         false
     }

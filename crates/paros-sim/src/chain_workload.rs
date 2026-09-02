@@ -36,7 +36,7 @@ const OP_COUNT: u8 = 9;
 
 const EV_APPLIED: &str = "command_applied";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct ChainConfig {
     steps: u64,
     command_bytes: usize,
@@ -1511,6 +1511,22 @@ impl Workload for ChainWorkload {
                 count_by_node("booted"),
                 count_by_node("crashed"),
             );
+            // The seed's buggified shape. Without it a red seed's *config* is
+            // invisible, and a knob at its extreme is one of the things that
+            // can produce a red — a probe timeout below the cluster's settled
+            // round trip reads as "the node never answered" even on a fully
+            // converged cluster.
+            eprintln!("  CONFIG {config:?}");
+            // Which nodes the probe was even allowed to ask. `per-node states`
+            // is empty in two very different situations — every live node
+            // timed out, or there were no live nodes to ask because the whole
+            // cluster is parked — and telling them apart from the outside is
+            // otherwise guesswork.
+            let parked_now = crate::node::parked_nodes(ctx.state());
+            let live_now: Vec<usize> = (0..server_count)
+                .filter(|i| !parked_now.contains(&servers[*i]))
+                .collect();
+            eprintln!("  PROBE live={live_now:?} parked={parked_now:?} servers={server_count}");
             eprintln!(
                 "  ticks={} leader_elected={} prepares_sent={} msg_sent={} msg_received={} check_leader_evts={}",
                 q.len("node_tick"),

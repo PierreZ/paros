@@ -3250,11 +3250,11 @@ impl<T: TimeProvider> Storage for DurableStorage<T> {
 /// independent and replayable. All hooks turn off with the chaos window, leaving
 /// the settle tail genuinely quiet for convergence.
 ///
-/// `Clone` because two of the driver's decisions (hold a drained peer batch,
-/// reverse it) live inside the per-peer delivery tasks, so each task carries
-/// its own handle. The clone shares nothing mutable: every decision is a fresh
-/// draw against Moonpool's iteration-owned BUGGIFY state.
-#[derive(Clone)]
+/// Every method is consulted from the driver's node loop and nowhere else.
+/// That is load-bearing for replay, not incidental: a BUGGIFY decision is a
+/// randomness draw, and a draw taken inside a detached task can outlive its
+/// simulation and shift the *next* run's stream (see `PeerMailbox` in
+/// `paros::driver` for the CI failure that proved it).
 struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
@@ -3322,13 +3322,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn hold_peer_delivery(&self, _to: NodeId) -> bool {
-        // Per drained batch, and the drain is the *hot* path — every peer, many
-        // times a tick — so the rate stays low: holding most drains would cap
-        // per-peer throughput for the whole chaos window, which is a partition
-        // in disguise (moonpool's job) rather than a delay. One tick per hold
-        // is the bound, so the backlog it builds is exactly one tick's traffic:
-        // enough to cross the shed threshold, never enough to wedge a link.
-        let fired = self.active() && buggify_with_prob!(0.05);
+        // Per enqueue onto a non-empty mailbox, arming the next drain — and
+        // the arm is a *latch*, so this rate does not compose the way a
+        // per-drain rate would: a leader that enqueues a dozen messages in one
+        // tick rolls this a dozen times and the arms collapse into one hold.
+        // The effective per-drain hold frequency is therefore far above the
+        // per-call rate, which is why the per-call rate is an order of
+        // magnitude below the drain-side rate this started as. Holding most
+        // drains would halve per-peer throughput for the whole chaos window —
+        // a partition in disguise (moonpool's job) rather than a delay. One
+        // tick per hold is the bound, so the backlog one hold builds is
+        // exactly one tick's traffic: enough to cross the shed threshold,
+        // never enough to wedge a link.
+        let fired = self.active() && buggify_with_prob!(0.01);
         if fired {
             // BUGGIFY pairing: a drain genuinely parked for a tick.
             assert_reachable!("mailbox: a peer drain is held for a tick");
@@ -3337,12 +3343,15 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn reverse_delivery_batch(&self, _to: NodeId) -> bool {
-        // Per multi-message batch — the drain-side twin of `overtake_in_mailbox`
-        // and, like it, kept occasional: the unary batch RPC otherwise preserves
-        // enqueue order end to end, so this is the only whole-batch reorder, and
-        // reversing *every* batch would make the per-peer stream systematically
-        // backwards rather than occasionally so.
-        let fired = self.active() && buggify_with_prob!(0.05);
+        // Per enqueue that makes a reorderable batch possible — the drain-side
+        // twin of `overtake_in_mailbox`. Same latch composition as
+        // `hold_peer_delivery`, and the ceiling matters more here: the arm
+        // survives until a batch with something to reorder actually drains, so
+        // a rate that arms on most ticks reverses *most* batches, which makes
+        // the per-peer stream systematically backwards instead of occasionally
+        // so — a fixed reordering the protocol could be tuned around rather
+        // than the sporadic one it has to tolerate.
+        let fired = self.active() && buggify_with_prob!(0.01);
         if fired {
             // BUGGIFY pairing: a delivery batch genuinely arrives reversed.
             assert_reachable!("mailbox: a delivery batch is reversed");
