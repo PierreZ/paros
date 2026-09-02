@@ -438,6 +438,40 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             DurableMatchmakerStorage::restore(Arc::downgrade(&world), key)
         };
         paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry);
+        // The crash half the shared suite cannot express (an in-memory store
+        // has no un-synced stage): a registration or a watermark raise that
+        // was staged but never fsynced does not survive the incarnation, so a
+        // reboot reads back exactly the last flush — the read-side pair of
+        // the driver's persist-before-reply ordering.
+        {
+            use paros::{AcceptorConfig, Ballot, MatchmakerStorage, NodeId, RegistryStorage};
+            let config = AcceptorConfig::new(vec![NodeId(0)], paros::QuorumSystem::Majority);
+            let ballot = |round: u64| Ballot {
+                round,
+                node: NodeId(1),
+            };
+            let key = "10.9.7.1".to_string();
+            let mut store = DurableMatchmakerStorage::restore(Arc::downgrade(&world), key.clone());
+            store.register(ballot(1), &config).expect("register 1");
+            store.sync().expect("sync 1");
+            store
+                .register(ballot(2), &config)
+                .expect("register 2 (never synced)");
+            store
+                .set_gc_watermark(ballot(1))
+                .expect("raise (never synced)");
+            drop(store);
+            let rebooted = DurableMatchmakerStorage::restore(Arc::downgrade(&world), key);
+            assert_always!(
+                rebooted.registered_ballots() == vec![ballot(1)]
+                    && rebooted.registration(ballot(2)).is_none(),
+                "matchmaker: an un-synced registration does not survive a crash"
+            );
+            assert_always!(
+                rebooted.initial_state().gc_watermark == Ballot::zero(),
+                "matchmaker: an un-synced watermark raise does not survive a crash"
+            );
+        }
         Ok(())
     }
 }

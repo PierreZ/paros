@@ -327,7 +327,8 @@ where
                 if let Some(answer) = answer {
                     report_reply(audit, &answer);
                     // A lost reply is a legal outcome: the registration stands
-                    // and the requester's retry is a verbatim duplicate.
+                    // and the requester's retry is the same request again,
+                    // answered from the retained history.
                     if hooks.drop_client_reply(Reply::Match) {
                         audit.match_reply_dropped(id);
                         tracing::info!(matchmaker = id.0, reply = "match", "match_reply_dropped");
@@ -337,10 +338,13 @@ where
                 }
             }
             Some(((from, watermark), reply)) = inbox.collects.recv() => {
-                // The GC primitive: raise the floor (a no-op at or below the
-                // current one), persist it, and only then acknowledge with the
-                // floor in force.
-                let raised = matchmaker.garbage_collect(watermark);
+                // The GC *primitive*, not the GC protocol: raise the floor (a
+                // no-op at or below the current one), persist it, and only
+                // then acknowledge with the floor in force. Nothing here
+                // establishes that the dropped configurations are no longer
+                // needed — see `Matchmaker::advance_gc_watermark`: the
+                // caller owns the paper's §3.5 preconditions.
+                let raised = matchmaker.advance_gc_watermark(watermark);
                 tracing::info!(
                     matchmaker = id.0,
                     from = from.0,

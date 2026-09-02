@@ -27,16 +27,28 @@
 //! registry is therefore keyed on the whole [`Ballot`] (`{ round, node }`,
 //! totally ordered by `Ord for Ballot`): the ballot's `node` carries the
 //! proposer identity, and the paper's no-disagreement property holds for the
-//! same reason — **one ballot has exactly one proposer**.
+//! same reason — **one ballot has exactly one proposer**. Concretely: two
+//! candidates at the same round, `{5, node 1}` and `{5, node 2}`, occupy two
+//! distinct registry keys (the lower one is a strict ancestor in the other's
+//! history), and no path in this module ever keys on a bare round. This is the
+//! one place paros diverges from the paper's model, and the tests pin it.
 //!
 //! # The contract, in one sentence each
 //!
 //! - **Write-once per ballot.** A ballot registered with configuration `C` is
 //!   never observed later with a different configuration, by anyone, ever.
 //! - **Registration is strictly monotone.** After registering `b`, a request
-//!   at any `b' <= b` is refused (a verbatim duplicate is answered again,
-//!   idempotently, without a second registration), never quietly registered.
-//!   This is what makes the returned history complete for every later ballot.
+//!   at any `b' <= b` is refused, never quietly registered. The one exception
+//!   is the *same request again* — `b` with the configuration already
+//!   registered under it — which is answered idempotently from the **currently
+//!   retained** history, without a second registration. That re-answer is not
+//!   a replay of the first reply: GC between the two may have raised the
+//!   watermark, so the retry's history can be a strict subset of the original
+//!   (never a superset — the registry only ever grows *above* `b`). Whether a
+//!   proposer may still act on such a shrunk history is the GC protocol's
+//!   contract (§3.4–§3.5), not this state machine's.
+//!   Monotonicity is what makes the returned history complete for every later
+//!   ballot.
 //! - **The history is complete below the request.** The reply for `b` names
 //!   every configuration this matchmaker holds at a ballot `< b` and at or
 //!   above its watermark. Under-reporting is the bug class the whole protocol
@@ -47,6 +59,20 @@
 //!   [`MatchmakerReady`]'s ordering (writes first, then replies); the exact
 //!   analogue of the acceptor's persist-before-`Promise` rule on
 //!   [`crate::HardState`].
+//!
+//! # What this proves, and what it does not
+//!
+//! Everything above is a property of **one matchmaker**: each registry, taken
+//! alone, is write-once, monotone, complete below any ballot it answers, and
+//! durable before it answers. That is the whole of M4.1 (#119). The paper's
+//! safety argument (§3.3) rests on something more: a proposer collects
+//! `MatchB` from `f + 1` of the `2f + 1` matchmakers and runs Phase 1 against
+//! the **union** of their histories, and it is the intersection of any two
+//! such `f + 1` sets that guarantees no configuration used below the
+//! proposer's ballot is missed. That union, the quorum it needs, and the
+//! cross-configuration Phase 1 it feeds belong to the leader-side matchmaking
+//! phase, the next issue; nothing here claims them, and the simulation that
+//! exercises this module proves per-matchmaker correctness only.
 
 use std::collections::BTreeMap;
 
@@ -120,8 +146,8 @@ pub struct MatchmakerHardState {
     /// The GC watermark (§3.4): a monotone floor below which no request may
     /// register and below which registrations have been dropped. This stage
     /// only *stores, enforces and reports* it — the protocol that decides when
-    /// raising it is safe is a separate issue; [`Matchmaker::garbage_collect`]
-    /// is the primitive it will call. [`Ballot::zero`] is the "nothing
+    /// raising it is safe is a separate issue;
+    /// [`Matchmaker::advance_gc_watermark`] is the primitive it will call. [`Ballot::zero`] is the "nothing
     /// collected" floor: no ballot sits below it.
     pub gc_watermark: Ballot,
 }
@@ -410,21 +436,23 @@ impl Matchmaker {
     /// Answer one matchmaking request (the paper's `MatchA` handler, §3.2):
     ///
     /// - below the watermark → [`MatchRefusal::BelowWatermark`];
-    /// - not strictly above the highest registered ballot → a verbatim
-    ///   duplicate of an existing registration is answered again with the same
-    ///   history (idempotent, no write); anything else is
-    ///   [`MatchRefusal::Stale`];
+    /// - not strictly above the highest registered ballot → the same request
+    ///   again (the ballot is registered with exactly this configuration) is
+    ///   answered idempotently from the currently retained history, with no
+    ///   write; anything else is [`MatchRefusal::Stale`];
     /// - otherwise the history of configurations registered in
     ///   `[gc_watermark, ballot)` is computed, `config` is registered under
     ///   `ballot` (a [`MatchmakerWriteOp::Register`] the driver must fsync
     ///   before the reply leaves), and the reply carries that history plus the
     ///   watermark.
     ///
-    /// The idempotent re-answer is safe because the registry only ever grows
-    /// *above* an existing key: the set of registrations below a registered
-    /// ballot can only shrink through GC (which the reply's watermark reports),
-    /// never gain a member, so a re-answer is the first answer restricted to
-    /// the current watermark.
+    /// The re-answer is **not** a replay of the first reply. The registry only
+    /// ever grows *above* an existing key, so the set of registrations below a
+    /// registered ballot never gains a member — but GC can drop members below
+    /// a raised watermark. A retry after GC therefore receives the first
+    /// answer restricted to the current watermark (a strict subset, with the
+    /// higher watermark reported beside it); the GC protocol, not this
+    /// handler, is what makes acting on that subset safe.
     ///
     /// # Panics
     ///
@@ -445,7 +473,9 @@ impl Matchmaker {
             })
         } else if let Some(highest) = self.highest().filter(|highest| ballot <= *highest) {
             match self.registry.get(&ballot) {
-                // The verbatim duplicate: answered again, registered once.
+                // The same request again: answered from the retained history
+                // (which GC may have shrunk since the first answer),
+                // registered once.
                 Some(registered) if *registered == config => MatchOutcome::Registered {
                     history: self.history_below(ballot),
                     gc_watermark: self.hard_state.gc_watermark,
@@ -497,21 +527,33 @@ impl Matchmaker {
         self.assert_invariants();
     }
 
-    /// Raise the GC watermark to `watermark` (§3.4: `w = max(w, i)`), dropping
-    /// every registration below it, and stage the durable write. Returns
-    /// whether the watermark actually rose; a request at or below the current
-    /// floor is a no-op (monotone by construction, never an error).
+    /// Advance the GC watermark to `watermark` (§3.4: `w = max(w, i)`),
+    /// dropping every registration below it, and stage the durable write.
+    /// Returns whether the watermark actually rose; a request at or below the
+    /// current floor is a no-op (monotone by construction, never an error).
     ///
-    /// This is the *primitive* the GC protocol calls once it has established
-    /// that no future matchmaking phase needs the collected configurations
-    /// (§3.5's three scenarios); deciding *when* that holds is the protocol's
-    /// business, not this method's, and it is not part of this stage.
+    /// # This is a correctness-critical primitive, not the GC protocol
+    ///
+    /// Nothing here checks that the collected configurations are no longer
+    /// needed. The paper's garbage collection (§3.4–§3.5) is a *protocol*: a
+    /// proposer may send `GarbageA⟨i⟩` only after establishing one of three
+    /// conditions (a value chosen in round `i`; Phase 1 at `i` found nothing
+    /// chosen below; or the chosen value is safely replicated and a Phase 2
+    /// quorum of `Ci` informed), and only then do the matchmakers drop rounds
+    /// below `i`. **The caller must have established those preconditions**;
+    /// a floor raised above a configuration some future proposer still has to
+    /// contact makes that proposer's history incomplete, which is a safety
+    /// violation of the whole protocol — one this state machine can neither
+    /// detect nor refuse, because the knowledge lives with the proposer.
+    /// Until the GC protocol lands (a later issue), the only callers are the
+    /// driver's `GarbageCollect` RPC and the simulation that drives it, where
+    /// no leader depends on the registry yet.
     ///
     /// # Panics
     ///
     /// If raising the floor exposes a broken internal invariant.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.id.0, round = watermark.round)))]
-    pub fn garbage_collect(&mut self, watermark: Ballot) -> bool {
+    pub fn advance_gc_watermark(&mut self, watermark: Ballot) -> bool {
         self.assert_invariants();
         if watermark <= self.hard_state.gc_watermark {
             return false;
@@ -708,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn a_verbatim_duplicate_is_answered_again_without_a_second_registration() {
+    fn the_same_request_again_is_answered_without_a_second_registration() {
         let mut mm = fresh(0);
         mm.step(MatchRequest::new(
             NodeId(1),
@@ -769,9 +811,15 @@ mod tests {
             ));
         }
         drain(&mut mm);
-        assert!(mm.garbage_collect(ballot(3, 1)));
-        assert!(!mm.garbage_collect(ballot(2, 1)), "the floor never lowers");
-        assert!(!mm.garbage_collect(ballot(3, 1)), "re-raising is a no-op");
+        assert!(mm.advance_gc_watermark(ballot(3, 1)));
+        assert!(
+            !mm.advance_gc_watermark(ballot(2, 1)),
+            "the floor never lowers"
+        );
+        assert!(
+            !mm.advance_gc_watermark(ballot(3, 1)),
+            "re-raising is a no-op"
+        );
         let (writes, _) = drain(&mut mm);
         assert_eq!(
             writes,
@@ -806,6 +854,102 @@ mod tests {
             history.keys().copied().collect::<Vec<_>>(),
             vec![ballot(3, 1), ballot(4, 1)]
         );
+    }
+
+    /// The must-fix of #131's review: a retry after GC is answered from the
+    /// *retained* history — a strict subset of the first answer, with the
+    /// raised watermark beside it — and still registers nothing.
+    #[test]
+    fn a_retry_after_gc_is_answered_from_the_retained_history() {
+        let mut mm = fresh(0);
+        for round in 1..=3 {
+            mm.step(MatchRequest::new(
+                NodeId(1),
+                ballot(round, 1),
+                config(&[0, 1, 2]),
+            ));
+        }
+        let (_, replies) = drain(&mut mm);
+        let (first, watermark) = registered(&replies[2]);
+        assert_eq!(
+            first.keys().copied().collect::<Vec<_>>(),
+            vec![ballot(1, 1), ballot(2, 1)]
+        );
+        assert_eq!(watermark, Ballot::zero());
+
+        // The first reply is lost; GC moves the floor; the client retries.
+        assert!(mm.advance_gc_watermark(ballot(2, 1)));
+        drain(&mut mm);
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(3, 1),
+            config(&[0, 1, 2]),
+        ));
+        let (writes, replies) = drain(&mut mm);
+        assert!(writes.is_empty(), "a retry never re-registers");
+        let (retry, watermark) = registered(&replies[0]);
+        assert_eq!(
+            retry.keys().copied().collect::<Vec<_>>(),
+            vec![ballot(2, 1)],
+            "the retry sees the retained window only"
+        );
+        assert_eq!(watermark, ballot(2, 1), "and the raised floor beside it");
+        assert!(
+            retry.iter().all(|(b, c)| first.get(b) == Some(c)),
+            "a re-answer is a subset of the first answer, never a superset"
+        );
+    }
+
+    /// The paros-specific keying: two proposers at the *same round* hold two
+    /// distinct registry keys, ordered by node, so neither can overwrite the
+    /// other and the lower one is an ancestor in the higher one's history. A
+    /// registry keyed on the bare round would give them one key.
+    #[test]
+    fn ballots_at_one_round_from_two_proposers_are_distinct_keys() {
+        let mut mm = fresh(0);
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(5, 1),
+            config(&[0, 1, 2]),
+        ));
+        mm.step(MatchRequest::new(
+            NodeId(2),
+            ballot(5, 2),
+            config(&[3, 4, 5]),
+        ));
+        let (writes, replies) = drain(&mut mm);
+        assert_eq!(writes.len(), 2, "two keys, two registrations");
+        let (history, _) = registered(&replies[1]);
+        assert_eq!(
+            history.get(&ballot(5, 1)),
+            Some(&config(&[0, 1, 2])),
+            "the same-round lower ballot is in the higher one's history"
+        );
+        assert_eq!(mm.registry().len(), 2);
+        assert_eq!(mm.registry()[&ballot(5, 1)], config(&[0, 1, 2]));
+        assert_eq!(mm.registry()[&ballot(5, 2)], config(&[3, 4, 5]));
+
+        // The reverse arrival order: the lower node's ballot is stale once
+        // the higher node's is registered, and refused — never merged into it.
+        let mut mm = fresh(1);
+        mm.step(MatchRequest::new(
+            NodeId(2),
+            ballot(5, 2),
+            config(&[3, 4, 5]),
+        ));
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(5, 1),
+            config(&[0, 1, 2]),
+        ));
+        let (_, replies) = drain(&mut mm);
+        assert_eq!(
+            replies[1].outcome,
+            MatchOutcome::Refused(MatchRefusal::Stale {
+                highest: ballot(5, 2)
+            })
+        );
+        assert_eq!(mm.registry().len(), 1);
     }
 
     #[test]

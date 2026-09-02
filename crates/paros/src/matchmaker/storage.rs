@@ -153,10 +153,44 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,
 ) {
-    use paros_core::{NodeId, QuorumSystem};
+    use paros_core::{Matchmaker, MatchmakerId, NodeId, QuorumSystem};
     let ballot = |round: u64| Ballot {
         round,
         node: NodeId(1),
+    };
+    // What every reopen must satisfy: the durable records and the durable
+    // scalars are mutually consistent (no record below the watermark, every
+    // walked ballot readable), and — the recovery contract itself — a
+    // matchmaker booted from the port holds exactly what the port serves.
+    let consistent = |s: &S| {
+        let state = s.initial_state();
+        let ballots = s.registered_ballots();
+        assert!(
+            ballots.windows(2).all(|w| w[0] < w[1]),
+            "registered ballots are strictly ascending"
+        );
+        assert!(
+            ballots.iter().all(|b| *b >= state.gc_watermark),
+            "no registration survives below the durable watermark"
+        );
+        let booted = Matchmaker::new(MatchmakerId(0), s);
+        assert_eq!(
+            *booted.hard_state(),
+            state,
+            "a boot adopts the durable scalars"
+        );
+        assert_eq!(
+            booted.registry().keys().copied().collect::<Vec<_>>(),
+            ballots,
+            "a boot walks back every durable registration"
+        );
+        for ballot in &ballots {
+            assert_eq!(
+                booted.registry().get(ballot).cloned(),
+                s.registration(*ballot),
+                "a boot reads each registration back byte for byte"
+            );
+        }
     };
     let config = |n: u64| {
         AcceptorConfig::new(
@@ -177,11 +211,13 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         s.registered_ballots().is_empty(),
         "a fresh store holds no registration"
     );
+    consistent(&s);
     let mut s = reopen(s);
     s.register(ballot(1), &config(3)).expect("register 1");
     s.register(ballot(2), &config(4)).expect("register 2");
     s.sync().expect("sync");
     let mut s = reopen(s);
+    consistent(&s);
     assert_eq!(
         s.registered_ballots(),
         vec![ballot(1), ballot(2)],
@@ -201,6 +237,7 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     s.set_gc_watermark(ballot(2)).expect("raise");
     s.sync().expect("sync raise");
     let mut s = reopen(s);
+    consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
         ballot(2),
@@ -221,6 +258,7 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     s.set_gc_watermark(ballot(1)).expect("re-raise lower");
     s.sync().expect("sync no-op");
     let s = reopen(s);
+    consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
         ballot(2),

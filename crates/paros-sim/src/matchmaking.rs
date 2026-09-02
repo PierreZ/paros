@@ -5,9 +5,10 @@
 //! The client acts as a proposer: it mints ballots `{ round, node: proposer }`
 //! (one proposer per client identity, so the ballot's `node` carries the
 //! proposer identity the registry keys on), registers the seed's acceptor
-//! configuration under them, and deliberately walks every refusal leg — a
-//! verbatim duplicate, the same ballot with different bytes, a ballot below
-//! its own last one, and a request below a watermark it raised. Every
+//! configuration under them, and deliberately walks every refusal leg — the
+//! same request again (answered from the retained history, which a GC in
+//! between may have shrunk), the same ballot with different bytes, a ballot
+//! below its own last one, and a request below a watermark it raised. Every
 //! outcome is judged twice: here, against what this client itself was told
 //! earlier by the same matchmaker (client-visible consistency), and in
 //! `crate::audit::matchmaker`, against what the matchmaker durably holds.
@@ -85,7 +86,8 @@ pub(crate) struct MatchmakingClient {
 enum Policy {
     /// A new ballot above every one this client minted.
     Fresh,
-    /// The last request, verbatim (the idempotent re-answer).
+    /// The last request, again (the idempotent re-answer from the retained
+    /// history).
     Duplicate,
     /// The last ballot with different bytes (must be refused).
     Conflict,

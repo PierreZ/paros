@@ -66,7 +66,7 @@ pub enum Seam {
     /// Inside the matchmaker driver: the registration is fsync-durable but
     /// **before** its reply leaves. A crash here keeps the registration and
     /// drops the reply; the restarted matchmaker answers the requester's
-    /// retry as a verbatim duplicate (idempotently, with the same history).
+    /// retried request idempotently, from the history it retains.
     /// This is the persist-before-reply seam: with the order swapped (reply,
     /// then fsync) a crash here lets a `Registered` reply escape for a ballot
     /// the restarted matchmaker no longer holds — the registry's un-promise.
@@ -113,8 +113,8 @@ pub enum Reply {
     /// A `CompactAck` (accepted or refused).
     Compact,
     /// A matchmaker's `MatchReply` (registered or refused). Dropping it after
-    /// the registration is durable is what makes the requester's retry a
-    /// verbatim duplicate — the idempotent re-answer path.
+    /// the registration is durable is what makes the requester's retry the
+    /// same request again — the idempotent re-answer path.
     Match,
 }
 

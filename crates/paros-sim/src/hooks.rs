@@ -450,7 +450,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // client's re-ask loop must absorb without double-seeding.
             paros::Reply::Compact => buggify_with_prob!(0.10),
             // A lost matchmaker reply after the registration is durable: the
-            // requester's retry is a verbatim duplicate, the idempotent
+            // requester's retry is the same request again, the idempotent
             // re-answer path. Gated in the audit (`match_reply_dropped`).
             paros::Reply::Match => buggify_with_prob!(0.20),
         }
