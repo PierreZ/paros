@@ -39,20 +39,27 @@ oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
 **The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-six process pool of `NodeProcess::chaotic()` under every moonpool fault plus the driver
-hooks and the disk's fault coins, driven by one to three `ChainWorkload` clients whose every
-tunable is a `buggify_knob!`; the *corpus* is a scripted three-node cluster with every fault a
-targeted injection (`NodeProcess::scripted()`, kills and restarts through moonpool's
-`fault_factory`) and an analytically known outcome per mask. Which process plays which role is
-the **deployment/role map** (`paros_sim::roles`, factory-created per seed, published on the
-`StateHandle` beside the storage world): membership is never "every process in the topology" but
-the map's acceptor list, and the map's matchmaker list is a per-seed `buggify_knob!` draw whose
-default — no matchmakers, every process an acceptor — is the plain Multi-Paxos deployment and
-the shape of every existing axis (the corpus never draws). Every run is judged by the same two
-things: the client's own history (`ClientHistory`, linearizability and sequential-client
-consistency) and the shared `AuditWorld` (protocol safety, the application state machine, the
-storage gates, the matchmaker registry, and one convergence claim at the end of the recovery
-tail). There is no third workload, no per-scenario process type, and no check that reads a trace.
+three-to-six process pool of `NodeProcess::chaotic()` plus zero to three `MatchmakerProcess`es
+under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
+three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
+three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
+restarts through moonpool's `fault_factory`) and an analytically known outcome per mask. Which
+process plays which role is the **deployment/role map** (`paros_sim::roles`), read off moonpool's
+**process groups** (moonpool #197: one `.processes()` registration per role, each with its own
+per-seed count and IP range — `paros-node` is the acceptor pool, `paros-matchmaker` the
+matchmakers — and attrition scoped per group with `AttritionVictims::group`), so every process
+and every client derives the same map without coordination. Membership is never "every process
+in the topology": the pool is the map's acceptor list, and the **bootstrap configuration** is
+protocol data drawn once per seed (`paros_sim::shape::bootstrap_ranks`) — the whole pool by
+default, or on a matchmaker seed a subset of at least `MIN_BOOTSTRAP` nodes that leaves the rest
+as *spares* a `Reconfigure` pulls in. A seed whose matchmaker group drew zero members — no
+matchmakers, every node an acceptor — is the plain Multi-Paxos deployment and the shape of every
+existing axis (the corpus registers no matchmaker group and never draws). Every run is judged by
+the same two things: the client's own history (`ClientHistory`, linearizability and
+sequential-client consistency) and the shared `AuditWorld` (protocol safety, the application
+state machine, the storage gates, the matchmaker registry, the leader-side matchmaking and
+reconfiguration oracles, and one convergence claim at the end of the recovery tail). There is no
+third workload, no per-scenario process type, and no check that reads a trace.
 
 **Pinned seeds are not a regression mechanism.** A seed does not name a scenario, it names a
 *draw schedule*, and every randomness draw the tree gains or loses — a new BUGGIFY location's
@@ -77,10 +84,12 @@ the commit, and let it go; it is evidence, not an artifact to keep.
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
 operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,
 `DUP_REPROPOSE=5`, `DUAL_SUBMIT=6`, `COMPACT_STORM=7`, `READ_INDEX=8` (the public
-leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe), `MATCHMAKE=9` (a
-matchmaking request — fresh, duplicate, conflicting, or stale — to every matchmaker of a seed
-that deploys them; a no-op otherwise), `MATCH_GC=10` (raise the matchmakers' GC watermark, then
-ask below it).
+leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe), `MATCHMAKE=9` and
+`MATCH_GC=10` (**retired** no-ops: the client-side matchmaking stand-ins of #119, superseded by
+the leader's own phase — the ids stay reserved so the alphabet never shifts), `RECONFIGURE=11`
+(read the acceptor set in force, compose a new one — grow onto a spare, shrink, replace, remove
+the leader, rotate the whole set — and ask the leader; on a seed without matchmakers the request
+is still sent and must be refused).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
@@ -151,6 +160,25 @@ to support both rather than assumed to. The "matchmakers off" seeds are the plai
 of today and must keep behaving identically; the "matchmakers on" seeds add the registry, the
 matchmaking phase and the cross-configuration Phase 1 on top. Every later feature in the list gets
 the same treatment when it lands.
+
+**Matchmaking and reconfiguration doctrine (M4.2–M4.4).** On a deployment that names
+matchmakers, every campaign is *matchmaking, then Phase 1*: the candidate registers `(b, C_b)`
+with the matchmakers (`Ready::match_requests`, `RawNode::on_match_reply`) and sends no `Prepare`
+until a matchmaker quorum answered; the replies' histories are unioned above the **maximum**
+watermark into `H_b`; a refusal abandons the campaign (next one a round up); a history whose
+newest entry is not `C_b` is a stale belief the candidate adopts before re-campaigning. Phase 1
+then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
+in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
+`C_b` alone. A **reconfiguration is a round change** (`RawNode::reconfigure`, the `Reconfigure`
+RPC): a configuration is bound to a ballot and never edited, so the leader moves to a fresh ballot
+registered with `C_new`, stalls command issuance for one matchmaking round trip plus one Phase 1
+(the accepted trade — `FrankenPaxos`'s zero-stall overlap is deliberately not implemented), and
+resigns afterwards if the change removed it. A joining node promises the new ballot before Phase 2
+reaches it and heals as a replica; a removed node keeps answering Phase 1 for the ballots it took
+part in ("removed" is not "shut down"; acceptor guards are pool-based, never configuration-based).
+The harness treats membership as protocol data: the bootstrap size is the **floor** of every
+configuration a run puts in force, because the storage world's copy budget is sized by it. Module
+docs: `crates/paros-core/src/node/matchmaking.rs`, `crates/paros-core/src/node/reconfigure.rs`.
 
 **Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
 what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
@@ -458,9 +486,11 @@ Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
-- `crates/paros-core/` — sans-IO Multi-Paxos state machine (`RawNode`) and, beside it, the
-  sans-IO matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate
-  handle the caller drives, never stepped by `RawNode`): std-only, wasm-safe, and dependency-free
+- `crates/paros-core/` — sans-IO Multi-Paxos state machine (`RawNode`, with its leader-side
+  matchmaking phase in `node/matchmaking.rs` and reconfiguration entry point in
+  `node/reconfigure.rs`) and, beside it, the sans-IO matchmaker registry (`Matchmaker`,
+  `crates/paros-core/src/matchmaker.rs` — a separate handle the caller drives, never stepped by
+  `RawNode`): std-only, wasm-safe, and dependency-free
   with `default-features = false` (CI checks that build too). Two features, both observation-only:
   `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
   *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no

@@ -159,9 +159,11 @@ async fn run_acceptor(
     perturb: bool,
 ) -> SimulationResult<()> {
     // The node pool is the map's acceptor list, in `NodeId` order — never
-    // "every process in the topology" — and the bootstrap membership is the
-    // whole pool (a reconfiguration draws from it). The matchmaker set is the
-    // map's matchmaker list, empty on a plain seed.
+    // "every process in the topology". The matchmaker set is the map's
+    // matchmaker list, empty on a plain seed. The bootstrap membership is
+    // protocol data drawn once per seed (`crate::shape::bootstrap_ranks`):
+    // the whole pool by default, and on a matchmaker seed possibly a subset
+    // that leaves spares for a reconfiguration to pull in.
     let members = deployment
         .acceptors()
         .iter()
@@ -185,9 +187,14 @@ async fn run_acceptor(
         })
         .collect::<SimulationResult<Vec<_>>>()?;
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
+    let bootstrap: Vec<NodeId> =
+        crate::shape::bootstrap_ranks(ctx.state(), pool.len(), !matchmakers.is_empty(), perturb)
+            .into_iter()
+            .map(NodeId)
+            .collect();
     let config = Config {
         id: self_rank,
-        peers: pool.clone(),
+        peers: bootstrap.clone(),
         nodes: pool,
         matchmakers: matchmakers.iter().map(|(id, _)| *id).collect(),
         ..Config::default()
@@ -210,7 +217,13 @@ async fn run_acceptor(
     let shape = incarnation.shape;
     {
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.set_cluster_size(members.len());
+        // The copy budget is sized by the run's configuration floor
+        // (`crate::shape::config_floor`): the whole pool on a plain seed, the
+        // smallest set a reconfiguration may shrink to on a matchmaker seed.
+        guard.set_cluster_size(crate::shape::config_floor(
+            config.pool().len(),
+            config.has_matchmakers(),
+        ));
         if !perturb {
             guard.set_unbudgeted();
         }
@@ -249,7 +262,11 @@ async fn run_acceptor(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .parked_count_excluding(my_ip);
-        checker.note_process_restart(self_rank.0, parked_peers, members.len());
+        checker.note_process_restart(
+            self_rank.0,
+            parked_peers,
+            crate::shape::config_floor(config.pool().len(), config.has_matchmakers()),
+        );
     }
 
     // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we

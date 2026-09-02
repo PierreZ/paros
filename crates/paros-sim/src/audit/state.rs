@@ -139,6 +139,11 @@ pub(super) struct AuditState {
     /// Per `(node, ballot)`: the prior configurations its matchmaking closed
     /// with (`H_b`), for the cross-configuration Phase-1 oracle.
     pub(super) prior: BTreeMap<(u64, u64, u64), Vec<AcceptorConfig>>,
+    /// Per ballot `(round, node)`: every node whose `Promise` for it left the
+    /// wire — the Phase-1 answers its leader could possibly have counted
+    /// (sends are a superset of receipts, so a quorum the leader claims must
+    /// show here first).
+    pub(super) promise_senders: BTreeMap<(u64, u64), BTreeSet<u64>>,
     /// `(slot, ballot round, ballot node)` → the nodes holding a durable
     /// accept for it — the acceptor tally behind the quorum-decided oracle.
     /// Fed by both the live accept fold and the boot re-reports (idempotent).
@@ -411,6 +416,13 @@ pub(super) struct AuditState {
     pub(super) reconfigure_refused: bool,
     pub(super) non_member_campaign_skipped: bool,
     pub(super) non_member_leader_resigned: bool,
+    /// A leadership under a configuration other than the bootstrap one: a
+    /// reconfiguration went all the way through matchmaking and the
+    /// cross-configuration Phase 1.
+    pub(super) reconfiguration_completed: bool,
+    pub(super) joined_member_accepted: bool,
+    pub(super) removed_member_promised: bool,
+    pub(super) cross_config_phase1_checked: bool,
 }
 
 impl AuditState {
@@ -441,6 +453,111 @@ impl AuditState {
             .insert((node, ballot.round, ballot.node.0), prior.to_vec());
     }
 
+    /// The prior configurations (`H_b`) the owner of `ballot` closed its
+    /// matchmaking with, if that phase ran (never on plain Multi-Paxos).
+    fn prior_of(&self, ballot: Ballot) -> Option<&[AcceptorConfig]> {
+        self.prior
+            .get(&(ballot.node.0, ballot.round, ballot.node.0))
+            .map(Vec::as_slice)
+    }
+
+    /// Fold one `Prepare` leaving `node` for `to` at `ballot` (#122): Phase 1
+    /// fans out to the ballot's configuration and its prior configurations,
+    /// and to nothing else — a node in neither has nothing to report and no
+    /// ballot to learn.
+    pub(super) fn observe_prepare_send(&mut self, node: u64, to: u64, ballot: Ballot) {
+        let in_config = self
+            .config_of(ballot)
+            .is_some_and(|c| c.contains(paros::NodeId(to)));
+        let prior = self.prior_of(ballot);
+        if self.config_of(ballot).is_none() && prior.is_none() {
+            return;
+        }
+        let in_prior = prior.is_some_and(|p| p.iter().any(|c| c.contains(paros::NodeId(to))));
+        assert_always!(
+            in_config || in_prior,
+            "reconfiguration: a Prepare reaches only the ballot's configuration and its prior configurations",
+            { "node" => node, "to" => to, "round" => ballot.round }
+        );
+    }
+
+    /// Fold one `Promise` leaving `node` at `ballot`: the Phase-1 answer the
+    /// ballot's leader may count, and — when the node sits outside the
+    /// ballot's own configuration — the proof that a removed member keeps
+    /// answering Phase 1 for the ballots it took part in.
+    pub(super) fn observe_promise_send(&mut self, node: u64, ballot: Ballot) {
+        self.promise_senders
+            .entry((ballot.round, ballot.node.0))
+            .or_default()
+            .insert(node);
+        if self
+            .config_of(ballot)
+            .is_some_and(|c| !c.contains(paros::NodeId(node)))
+        {
+            reach_once!(
+                self.removed_member_promised,
+                "reconfiguration: a node outside the ballot's configuration answers its Phase 1"
+            );
+        }
+    }
+
+    /// Fold one `Accept` leaving `node` for `to` at `ballot` (#121, #122),
+    /// judged on the wire. Two claims: Phase 2 addresses only the ballot's
+    /// own acceptors (a removed member is never asked to vote at a ballot it
+    /// is not in), and it opens only once **every** prior configuration has
+    /// a promise quorum for the ballot — counted per configuration over the
+    /// promises that actually left the wire plus the owner's own vote, never
+    /// over their union. The union rule would count here and be wrong: it is
+    /// exactly what the negative core test refuses.
+    pub(super) fn observe_accept_send(&mut self, node: u64, to: u64, ballot: Ballot) {
+        let Some(config) = self.config_of(ballot).cloned() else {
+            return;
+        };
+        assert_always!(
+            config.contains(paros::NodeId(to)),
+            "reconfiguration: an Accept reaches only the ballot's own acceptors",
+            { "node" => node, "to" => to, "round" => ballot.round }
+        );
+        if self
+            .bootstrap
+            .as_ref()
+            .is_some_and(|b| !b.contains(paros::NodeId(to)))
+        {
+            reach_once!(
+                self.joined_member_accepted,
+                "reconfiguration: a node outside the bootstrap configuration is asked to accept"
+            );
+        }
+        let Some(prior) = self.prior_of(ballot) else {
+            return;
+        };
+        let senders = self.promise_senders.get(&(ballot.round, ballot.node.0));
+        let uncovered = prior
+            .iter()
+            .filter(|c| {
+                let own = usize::from(c.contains(ballot.node));
+                let answered = senders.map_or(0, |s| {
+                    s.iter().filter(|n| c.contains(paros::NodeId(**n))).count()
+                });
+                own + answered < c.quorum_size()
+            })
+            .count();
+        assert_always!(
+            uncovered == 0,
+            "reconfiguration: no Accept leaves before every prior configuration promised a quorum",
+            {
+                "node" => node,
+                "round" => ballot.round,
+                "prior" => prior.len(),
+                "uncovered" => uncovered
+            }
+        );
+        reach_once!(
+            self.cross_config_phase1_checked,
+            "reconfiguration: an Accept is checked against every prior configuration's promises"
+        );
+    }
+
     /// The protocol-level `sometimes` gates: progress, truncation, snapshot and
     /// the multi-slot log. Their `reachable` counterparts already fired at their
     /// transition instants.
@@ -454,6 +571,10 @@ impl AuditState {
             "leadership turns over and the cluster recovers"
         );
         assert_sometimes!(self.any_leader, "a leader is elected");
+        assert_sometimes!(
+            self.reconfiguration_completed,
+            "reconfiguration: a leader is elected under a reconfigured acceptor set"
+        );
         if self.config_tagged_protocol_message {
             assert_reachable!("a protocol message carries a configuration identity");
         }

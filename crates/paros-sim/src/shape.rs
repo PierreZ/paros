@@ -189,6 +189,9 @@ struct Registry {
     /// Run-level: the application's digest-lane count, fixed by the first
     /// node to boot.
     lanes: Option<u8>,
+    /// Run-level: the bootstrap acceptor ranks (see [`bootstrap_ranks`]),
+    /// fixed by the first caller — a node or a client.
+    bootstrap: Option<Vec<u64>>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -246,6 +249,86 @@ pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
             crate::chain::DEFAULT_LANES
         }
     })
+}
+
+/// The smallest acceptor configuration a matchmaker seed ever puts in force
+/// — the bootstrap never draws below it and no reconfiguration shrinks below
+/// it. Not a tunable: it is the size the storage world's copy budget is
+/// computed over on such a seed (see [`config_floor`]). Three is the smallest
+/// set where one loss keeps a quorum (the dead-node budget's own floor).
+pub(crate) const MIN_BOOTSTRAP: usize = 3;
+
+/// The **configuration floor** of a run, and the size the storage world's
+/// copy budget (`StorageWorld::set_cluster_size`) is computed over. On a
+/// plain deployment the membership is fixed at the whole pool, so the budget
+/// is sized by it, exactly as before matchmakers existed. On a matchmaker
+/// deployment the acceptor set may shrink as far as [`MIN_BOOTSTRAP`], and the
+/// budget is sized by *that*: a budget that keeps a clean quorum of the
+/// smallest configuration keeps one of every larger configuration too (the
+/// tolerated loss `⌊(n-1)/2⌋` only grows with `n`), so it stays conservative
+/// through every reconfiguration at the cost of fewer storage-fault
+/// injections on the larger matchmaker seeds.
+pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
+    if has_matchmakers {
+        MIN_BOOTSTRAP.min(pool)
+    } else {
+        pool
+    }
+}
+
+/// The run's **bootstrap acceptor ranks** — membership as protocol data,
+/// drawn once per seed by whichever process or workload asks first and
+/// handed back unchanged to every later caller (an attrition restart must
+/// boot the same node into the same bootstrap configuration).
+///
+/// The default is the whole pool: every node an acceptor, the plain
+/// Multi-Paxos deployment and the shape of every existing axis. A perturbing
+/// seed that deploys matchmakers may instead draw a **subset** (a run with
+/// `has_matchmakers == false` never draws — a plain deployment's membership
+/// must include every node, per `paros::Config::peers`), leaving the other
+/// nodes as *spares*: addressable pool members outside every configuration
+/// until a `Reconfigure` pulls them in. Two knob locations, each its own
+/// per-seed activation: the subset *size* (floor [`MIN_BOOTSTRAP`], ceiling
+/// the pool) and the *rotation* that decides which ranks are the spares, so
+/// a seed can bootstrap on `{2, 3, 4}` of a five-node pool and leave
+/// `{0, 1}` — the lowest ranks, the ones every "first node" heuristic would
+/// pick — outside.
+#[tracing::instrument(level = "debug", skip(state), fields(pool, has_matchmakers, perturb))]
+pub(crate) fn bootstrap_ranks(
+    state: &StateHandle,
+    pool: usize,
+    has_matchmakers: bool,
+    perturb: bool,
+) -> Vec<u64> {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .bootstrap
+        .get_or_insert_with(|| {
+            let all: Vec<u64> = (0..pool)
+                .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
+                .collect();
+            if !(perturb && has_matchmakers && pool > MIN_BOOTSTRAP) {
+                return all;
+            }
+            let size = buggify_knob!(pool, MIN_BOOTSTRAP..pool);
+            if size == pool {
+                return all;
+            }
+            // BUGGIFY pairing: a seed genuinely bootstraps on a subset.
+            assert_reachable!("a run bootstraps on a subset of the node pool, leaving spares");
+            let rotation = buggify_knob!(0_usize, 1_usize..pool);
+            if rotation != 0 {
+                // BUGGIFY pairing: the spares are not simply the highest ranks.
+                assert_reachable!("a run's spares are drawn from the low ranks");
+            }
+            let mut ranks: Vec<u64> = (0..size)
+                .map(|i| u64::try_from((rotation + i) % pool).unwrap_or(u64::MAX))
+                .collect();
+            ranks.sort_unstable();
+            ranks
+        })
+        .clone()
 }
 
 /// The shape gate, evaluated once per run from the workload's `check()`: every

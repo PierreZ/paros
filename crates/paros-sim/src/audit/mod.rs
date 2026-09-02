@@ -589,7 +589,6 @@ impl<T: Clone> Clone for NodeAudit<T> {
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
-
     /// Matchmaking invariant 1 (#120): on a deployment with matchmakers, no
     /// `Prepare` leaves a node for a ballot whose matchmaking this fold has
     /// not seen close with a quorum, and it carries exactly the registered
@@ -914,6 +913,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .or_default() += 1;
         if let Message::Prepare { ballot, config, .. } = msg {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
+            self.state().observe_prepare_send(node.0, to.0, *ballot);
         }
         if msg.config_id().is_some() {
             let mut st = self.state();
@@ -962,6 +962,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 }
             );
         }
+        if let Message::Promise { ballot, .. } = msg {
+            self.state().observe_promise_send(node.0, *ballot);
+        }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
@@ -1006,6 +1009,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // explains a violation of the second, so ordering them this way
             // makes the root cause the one that fires.
             st.observe_authority_use(node.0, *ballot);
+            // Then *whom* it addresses and *on what Phase-1 licence* (#121,
+            // #122): the ballot's own acceptors, once every prior
+            // configuration promised a quorum.
+            st.observe_accept_send(node.0, to.0, *ballot);
             reach_once!(
                 st.any_proposal_checked,
                 "a proposed command is checked against its ballot's other proposals"
@@ -1058,6 +1065,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             );
         }
         st.bind_config(won, config);
+        if st.bootstrap.as_ref().is_some_and(|b| b != config) {
+            st.reconfiguration_completed = true;
+        }
         if let Some(prev) = st.leader_round.insert(node.0, won.round) {
             assert_always!(
                 won.round > prev,
