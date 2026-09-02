@@ -139,7 +139,8 @@ impl RawNode {
             .hard_state
             .max_promised_ballot
             .round
-            .max(self.ballot.round);
+            .max(self.ballot.round)
+            .max(self.round_floor);
         if base_round.checked_add(1).is_none() {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);
         }

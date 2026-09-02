@@ -160,10 +160,12 @@ fn a_refused_registration_never_becomes_a_leadership() {
     assert_eq!(n.role(), NodeRole::Follower);
     assert!(!n.matchmaking_pending());
     assert!(prepares(&drain(&mut n)).is_empty());
-    // The refusal's `highest` is diagnostic only: the next campaign is one
-    // round up, not at the refuser's round.
+    // The refusal's `highest` lifts the next campaign strictly above the
+    // round that refused this one — never one round up from our own, which
+    // the same registration would refuse again (the leapfrog livelock).
     campaign(&mut n);
-    assert_eq!(n.ballot().round, first_round + 1);
+    assert!(n.ballot().round > first_round);
+    assert_eq!(n.ballot().round, 8, "one above the refuser's highest (7)");
 }
 
 /// Invariants 2 and 3: `H_b` is the union of every replying matchmaker's
@@ -291,26 +293,43 @@ fn resend_targets_only_the_unanswered_matchmakers() {
     assert!(drain_match_requests(&mut n).is_empty());
 }
 
-/// The election timeout abandons a campaign stuck in matchmaking (lost
-/// replies) and re-campaigns at a higher round with a fresh phase.
+/// The election timeout does **not** abandon a campaign stuck in
+/// matchmaking (lost replies, a slow matchmaker link): the ballot is promised
+/// and registered, so the clock re-sends the requests to every unanswered
+/// matchmaker and the campaign stays at its ballot. A late reply still
+/// completes it. (Abandoning made a matchmaker link slower than one election
+/// timeout an unwinnable deployment: every campaign re-registered one round
+/// higher, forever.)
 #[test]
-fn the_election_clock_abandons_a_stuck_matchmaking() {
+fn the_election_clock_re_sends_a_stuck_matchmaking() {
     let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
     campaign(&mut n);
     let first = n.ballot();
     drain_match_requests(&mut n);
+    n.on_match_reply(registered(1, first, &[], Ballot::zero()));
     n.set_election_timeout(2);
     n.tick();
     n.tick();
     assert_eq!(n.role(), NodeRole::Candidate);
-    assert_eq!(n.ballot().round, first.round + 1);
-    let requests = drain_match_requests(&mut n);
-    assert_eq!(requests.len(), 3);
-    // A reply for the abandoned ballot is ignored.
+    assert_eq!(n.ballot(), first, "the clock never moves the ballot");
+    assert!(n.matchmaking_pending());
+    assert_eq!(n.matchmaking_timeouts(), 1);
+    let mut targets: Vec<u64> = drain_match_requests(&mut n)
+        .into_iter()
+        .map(|(mm, _)| mm.0)
+        .collect();
+    targets.sort_unstable();
     assert_eq!(
-        n.on_match_reply(registered(0, first, &[], Ballot::zero())),
-        MatchStep::Ignored
+        targets,
+        vec![0, 2],
+        "only the unanswered matchmakers are re-asked"
     );
+    // A late reply completes the same campaign.
+    assert!(matches!(
+        n.on_match_reply(registered(2, first, &[], Ballot::zero())),
+        MatchStep::Completed { .. }
+    ));
+    assert_eq!(n.ballot(), first);
 }
 
 // ---- cross-configuration Phase 1 (#121) --------------------------------------

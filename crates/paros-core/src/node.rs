@@ -24,7 +24,7 @@ use self::matchmaking::Matchmaking;
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 use self::replication::HEARTBEAT_TICKS;
-use crate::matchmaker::{AcceptorConfig, MatchReply, MatchRequest, MatchmakerId};
+use crate::matchmaker::{AcceptorConfig, MatchRefusal, MatchReply, MatchRequest, MatchmakerId};
 use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
@@ -272,6 +272,19 @@ pub struct RawNode {
     /// resigned once its own reconfiguration removed it from the acceptor set.
     non_member_campaigns_skipped: u64,
     non_member_step_downs: u64,
+    /// The round every later campaign opens strictly above, raised by a
+    /// `Stale` matchmaking refusal to the refuser's highest registered round.
+    /// Volatile: a restart starts from the durable promise again. Without it
+    /// a candidate refused at round `r` re-registers at `r + 1`, is refused
+    /// again by the same higher registration, and leapfrogs one round per
+    /// election timeout behind a rival that never has to move — the
+    /// matchmaking cousin of the dueling-proposer livelock, seen in the
+    /// hunt as two hundred registrations for three completed campaigns.
+    round_floor: u64,
+    /// Election timeouts that found a matchmaking phase still open and
+    /// re-sent its requests instead of abandoning the campaign (see
+    /// [`RawNode::tick`]). Observability only.
+    matchmaking_timeouts: u64,
     /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
     election: Option<Election>,
     /// The leader's open **distributed commitment determination** (Stage 8,
@@ -599,6 +612,8 @@ impl RawNode {
             pending_match_requests: Vec::new(),
             non_member_campaigns_skipped: 0,
             non_member_step_downs: 0,
+            round_floor: 0,
+            matchmaking_timeouts: 0,
             election: None,
             repair_probe: None,
             repair_elapsed: 0,
@@ -1335,7 +1350,23 @@ impl RawNode {
             if self.election_timeout != 0 && self.election_elapsed >= self.election_timeout {
                 self.election_elapsed = 0;
                 self.needs_election_timeout = true;
-                self.step(Message::CheckLeader { from: me });
+                if self.matchmaking.is_some() {
+                    // A campaign still waiting on its matchmakers is not
+                    // abandoned by the clock: its ballot is promised and
+                    // registered, and only a refusal, a stale belief, or a
+                    // higher ballot on the wire retires it. The timeout is
+                    // the retry cadence — re-ask every matchmaker that has
+                    // not answered — never a new round. Abandoning here made
+                    // a matchmaker link slower than one election timeout an
+                    // unwinnable deployment: every campaign re-registered a
+                    // round higher and none ever reached Phase 1 (the hunt
+                    // saw 203 registrations at one matchmaker for 3
+                    // completed campaigns and no leader in a 50 s tail).
+                    self.matchmaking_timeouts = self.matchmaking_timeouts.saturating_add(1);
+                    self.resend_matchmaking();
+                } else {
+                    self.step(Message::CheckLeader { from: me });
+                }
             }
         }
         self.tick_handoff_fence();
@@ -1629,6 +1660,11 @@ impl RawNode {
                     }
                 }
                 Err(refusal) => {
+                    if let MatchRefusal::Stale { highest } = refusal {
+                        // The next campaign opens above the round that
+                        // refused this one (see `round_floor`).
+                        self.round_floor = self.round_floor.max(highest.round);
+                    }
                     self.become_follower(None);
                     MatchStep::Refused(refusal)
                 }
@@ -1849,6 +1885,14 @@ impl RawNode {
             self.non_member_campaigns_skipped,
             self.non_member_step_downs,
         )
+    }
+
+    /// Election timeouts this incarnation that re-sent an open matchmaking
+    /// phase's requests instead of abandoning the campaign. Observability
+    /// only (see [`RawNode::tick`]).
+    #[must_use]
+    pub fn matchmaking_timeouts(&self) -> u64 {
+        self.matchmaking_timeouts
     }
 
     /// How many matchmaker disagreements (two configurations reported at one

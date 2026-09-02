@@ -225,7 +225,8 @@ impl RawNode {
             .hard_state
             .max_promised_ballot
             .round
-            .max(self.ballot.round);
+            .max(self.ballot.round)
+            .max(self.round_floor);
         let Some(round) = base_round.checked_add(1) else {
             // The wire/domain round space is exhausted. There is no strictly
             // higher valid ballot to campaign at, so remain a follower rather
