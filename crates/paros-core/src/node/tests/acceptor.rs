@@ -12,6 +12,7 @@ fn matching_configuration_message_is_processed_and_reply_is_tagged() {
         from: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
+        config: None,
     });
 
     let out = drain(&mut n);
@@ -42,6 +43,7 @@ fn mismatching_configuration_message_is_ignored_before_dispatch() {
         from: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
+        config: None,
     });
 
     let out = drain(&mut n);
@@ -68,6 +70,7 @@ fn promise_and_accept_batches_require_fsync() {
         from: NodeId(1),
         ballot: ballot(3, 1),
         from_slot: Slot(0),
+        config: None,
     });
     {
         let r = n.ready();
@@ -106,6 +109,7 @@ fn acceptor_rejects_below_promised_ballot() {
         from: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
+        config: None,
     });
     let _ = drain(&mut n);
     n.step(Message::Accept {
@@ -185,6 +189,7 @@ fn prepare_below_floor_is_nacked_not_promised() {
         from: NodeId(1),
         ballot: ballot(9, 1),
         from_slot: Slot(0),
+        config: None,
     });
     let out = drain(n);
     assert!(

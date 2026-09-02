@@ -69,6 +69,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
             from: NodeId(1),
             ballot,
             from_slot: cursor,
+            config: None,
         });
         let (messages, _) = take_ready(&mut acceptor);
         let Some(Message::Promise {
@@ -265,6 +266,7 @@ fn nack_hints_and_stale_campaigns_are_isolated() {
         from: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
+        config: None,
     });
     assert_eq!(
         stale.role(),

@@ -270,6 +270,7 @@ fn step_down_drops_pending_read_rounds() {
         from: NodeId(2),
         ballot: ballot(b.round + 1, 2),
         from_slot: Slot(3),
+        config: None,
     });
     assert!(!nodes[0].is_leader());
     assert!(

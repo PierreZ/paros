@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{Ballot, Slot};
+use paros::{AcceptorConfig, Ballot, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -124,9 +124,21 @@ pub(super) struct AuditState {
     pub(super) accepted: BTreeMap<(u64, u64, u64), u64>,
     /// Per `(node, slot)`: the last value the node made durable.
     pub(super) persisted: BTreeMap<(u64, u64), u64>,
-    /// The configured cluster size (full membership), from the boot reports.
-    /// One shared configuration per run, so the max across reports is it.
-    pub(super) cluster_size: Option<u64>,
+    /// The bootstrap acceptor configuration, from the boot reports (one
+    /// shared deployment per run). The configuration of every ballot on plain
+    /// Multi-Paxos, and of the ballots below the first registration on a
+    /// matchmaker deployment.
+    pub(super) bootstrap: Option<AcceptorConfig>,
+    /// The addressable node pool, from the boot reports.
+    pub(super) pool: Option<BTreeSet<u64>>,
+    /// Per registered ballot `(round, node)`: the acceptor configuration
+    /// bound to it — what that ballot's Phase-2 quorums are counted over.
+    /// Bound at the matchmaker's durable registration (before any leader can
+    /// exercise the ballot) and re-asserted at the election.
+    pub(super) configs: BTreeMap<(u64, u64), AcceptorConfig>,
+    /// Per `(node, ballot)`: the prior configurations its matchmaking closed
+    /// with (`H_b`), for the cross-configuration Phase-1 oracle.
+    pub(super) prior: BTreeMap<(u64, u64, u64), Vec<AcceptorConfig>>,
     /// `(slot, ballot round, ballot node)` → the nodes holding a durable
     /// accept for it — the acceptor tally behind the quorum-decided oracle.
     /// Fed by both the live accept fold and the boot re-reports (idempotent).
@@ -393,9 +405,42 @@ pub(super) struct AuditState {
     pub(super) propose_reply_dropped: bool,
     pub(super) read_reply_dropped: bool,
     pub(super) dedup_after_dropped_reply: bool,
+    /// Reconfiguration coverage (#122): a request started / refused, a
+    /// non-member declined to campaign, a removed leader resigned.
+    pub(super) reconfigure_started: bool,
+    pub(super) reconfigure_refused: bool,
+    pub(super) non_member_campaign_skipped: bool,
+    pub(super) non_member_leader_resigned: bool,
 }
 
 impl AuditState {
+    /// Bind `config` to `ballot` — once; a second binding must agree (a
+    /// configuration is bound to a ballot and never edited).
+    pub(super) fn bind_config(&mut self, ballot: Ballot, config: &AcceptorConfig) {
+        let key = (ballot.round, ballot.node.0);
+        let bound = self.configs.entry(key).or_insert_with(|| config.clone());
+        assert_always!(
+            *bound == *config,
+            "a configuration is bound to a ballot and never edited",
+            { "round" => ballot.round, "bnode" => ballot.node.0 }
+        );
+    }
+
+    /// The acceptor configuration of `ballot`: the one bound to it, else the
+    /// bootstrap membership (every ballot on plain Multi-Paxos).
+    pub(super) fn config_of(&self, ballot: Ballot) -> Option<&AcceptorConfig> {
+        self.configs
+            .get(&(ballot.round, ballot.node.0))
+            .or(self.bootstrap.as_ref())
+    }
+
+    /// Record the prior configurations `node`'s matchmaking for `ballot`
+    /// closed with.
+    pub(super) fn note_prior(&mut self, node: u64, ballot: Ballot, prior: &[AcceptorConfig]) {
+        self.prior
+            .insert((node, ballot.round, ballot.node.0), prior.to_vec());
+    }
+
     /// The protocol-level `sometimes` gates: progress, truncation, snapshot and
     /// the multi-slot log. Their `reachable` counterparts already fired at their
     /// transition instants.
@@ -646,10 +691,20 @@ impl AuditState {
                 }
             );
         }
+        // The tally is counted over the ballot's *own* configuration — a
+        // learner outside it (a spare, a removed member replaying a commit)
+        // holds the same bytes but casts no vote (#122).
+        let config = self.config_of(ballot).cloned();
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
-        let quorum = self.cluster_size.map(|n| n / 2 + 1);
-        if quorum.is_some_and(|q| u64::try_from(holders.len()).unwrap_or(u64::MAX) >= q) {
+        let quorum = config.as_ref().map(AcceptorConfig::quorum_size);
+        let votes = config.as_ref().map_or(0, |c| {
+            holders
+                .iter()
+                .filter(|n| c.contains(paros::NodeId(**n)))
+                .count()
+        });
+        if quorum.is_some_and(|q| votes >= q) {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -691,9 +746,18 @@ impl AuditState {
     /// fan-out) and must reset well inside [`DEPOSED_BEAT_STREAK`].
     ///
     pub(super) fn observe_beat(&mut self, node: u64, ballot: Ballot, seq: u64) {
-        let n = self.booted.len();
-        let majority = n / 2 + 1;
-        let above = self.promised.values().filter(|p| **p > ballot).count();
+        // A promise-majority *of the ballot's own configuration*: only its
+        // members' promises decide whether the leader can still assemble a
+        // quorum at that ballot.
+        let Some(config) = self.config_of(ballot).cloned() else {
+            return;
+        };
+        let majority = config.quorum_size();
+        let above = self
+            .promised
+            .iter()
+            .filter(|(n, p)| config.contains(paros::NodeId(**n)) && **p > ballot)
+            .count();
         let entry = self.deposed_streaks.entry(node).or_default();
         if entry.round != ballot.round || entry.node != ballot.node.0 {
             *entry = DeposedStreak {

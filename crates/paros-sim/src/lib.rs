@@ -27,7 +27,6 @@ mod chain_workload;
 mod corpus;
 mod hooks;
 mod lifecycle;
-mod matchmaking;
 mod process;
 mod roles;
 mod shape;

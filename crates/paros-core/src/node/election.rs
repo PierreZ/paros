@@ -1,15 +1,44 @@
+use super::matchmaking::Matchmaking;
 use super::{
     BTreeMap, BTreeSet, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message,
     NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot,
 };
+use crate::matchmaker::{AcceptorConfig, MatchRequest};
 
 /// Volatile per-ballot Phase-1 state while a Candidate recovers the log suffix.
+///
+/// # Cross-configuration completion (#121)
+///
+/// Phase 1 is complete when **every** prior configuration in `prior` holds a
+/// Phase-1 quorum of promises at `ballot` — `quorum(C1) AND quorum(C2) AND …`,
+/// never `quorum(union(C1, C2, …))`. The two are not equivalent: a large
+/// promise set drawn mostly from `C1` satisfies the union's quorum while
+/// failing to intersect a Phase-2 quorum of `C2`, so a value `C2` already
+/// chose stays invisible and the new leader proposes another — two values
+/// chosen for one slot. One promise counts toward every configuration that
+/// contains its sender (the normal case: consecutive configurations overlap
+/// heavily), through one shared `promised_by` pool with a per-configuration
+/// tally ([`Election::covered`]). Value selection runs over *all* gathered
+/// promises regardless of configuration (`recovered`), exactly as before.
+///
+/// On a plain deployment `prior` is the one static configuration, so the
+/// predicate is today's single quorum comparison.
 pub(super) struct Election {
     /// The ballot this election runs under.
     pub(super) ballot: Ballot,
+    /// `C_b`: the configuration this ballot runs Phase 2 with once won —
+    /// registered with the matchmakers before this election opened, or the
+    /// static configuration on a plain deployment.
+    pub(super) config: AcceptorConfig,
+    /// `H_b`: every distinct prior configuration whose Phase-1 quorum this
+    /// election must independently obtain. Empty means nothing below this
+    /// ballot survives the matchmakers' watermark, so Phase 1 is trivially
+    /// complete (an explicit, gated case, never an accident).
+    pub(super) prior: Vec<AcceptorConfig>,
     /// First slot this election recovers (`chosen_index + 1`, or `Slot(0)`).
     pub(super) from_slot: Slot,
-    /// Acceptors (incl. self) that have promised `ballot`.
+    /// Acceptors (incl. self) that have promised `ballot` — the one shared
+    /// promise pool every configuration's tally is drawn from.
     pub(super) promised_by: BTreeSet<NodeId>,
     /// Highest-ballot accepted command per slot seen across the promise quorum,
     /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
@@ -58,6 +87,11 @@ pub(super) struct LeaderRecovery {
 pub(super) struct RepairProbe {
     /// The leadership ballot the probe queries at.
     pub(super) ballot: Ballot,
+    /// The prior configurations the election covered: a blocked slot is
+    /// decidable only once a full Q1 of qualifying answers holds in **every**
+    /// one of them (the same predicate as the election's), and the
+    /// straggler re-query fans out to their union.
+    pub(super) prior: Vec<AcceptorConfig>,
     /// First slot the original Phase 1 covered (re-sent `Prepare`s echo it).
     pub(super) from_slot: Slot,
     /// Acceptors (incl. self) whose complete suffix answer has been merged.
@@ -72,30 +106,59 @@ pub(super) struct RepairProbe {
     pub(super) promise_next: BTreeMap<NodeId, Slot>,
 }
 
-/// Whether a faulty-reported slot is decidable, and with what.
+/// How many members of `config` among `answered` gave a **qualifying**
+/// answer for a faulty-reported slot.
 ///
 /// The unified CTRL restatement (R2/R3): let `threshold` be the highest
 /// reported `have` ballot at the slot (`None` when nothing was reported). A
 /// chosen value at or below `threshold` is value-identical to the best `have`
 /// (the P2c chain), and a value chosen *above* it would leave a record at
-/// ballot `> threshold` on some member of every Q2 — so the slot is decidable
-/// the moment a full Q1 of answered acceptors each reported either nothing
-/// (`none`) or a record at ballot `<= threshold`: quorum intersection then
-/// rules out any hidden chosen value. Decide the best `have` (Case 1) or
-/// `Noop` (Case 2, `threshold = None` degenerates to a full Q1 of `none`).
-/// Anything less is Case 3: wait.
+/// ballot `> threshold` on some member of every Q2 — so an acceptor's answer
+/// qualifies when it reported either nothing (`none`) or a record at ballot
+/// `<= threshold`.
 fn qualifying_answers(
+    config: &AcceptorConfig,
     answered: &BTreeSet<NodeId>,
     reporters: Option<&BTreeMap<NodeId, Ballot>>,
     threshold: Option<Ballot>,
 ) -> usize {
-    let disqualified = reporters.map_or(0, |reporters| {
-        reporters
+    answered
+        .iter()
+        .filter(|node| config.contains(**node))
+        .filter(|node| {
+            reporters
+                .and_then(|reporters| reporters.get(*node))
+                .is_none_or(|ballot| Some(*ballot) <= threshold)
+        })
+        .count()
+}
+
+/// Whether a faulty-reported slot is decidable: a full Q1 of qualifying
+/// answers holds in **every** prior configuration, so quorum intersection
+/// rules out a hidden chosen value in each of them. Then the best `have` is
+/// decided (Case 1) or, with no `have` at all, `Noop` (Case 2 — a full Q1 of
+/// `none` per configuration). Anything less is Case 3: wait. With no prior
+/// configuration at all nothing could have been chosen below this ballot, so
+/// the slot is decidable outright.
+fn slot_decidable(
+    prior: &[AcceptorConfig],
+    answered: &BTreeSet<NodeId>,
+    reporters: Option<&BTreeMap<NodeId, Ballot>>,
+    threshold: Option<Ballot>,
+) -> bool {
+    prior.iter().all(|config| {
+        qualifying_answers(config, answered, reporters, threshold) >= config.quorum_size()
+    })
+}
+
+impl Election {
+    /// Whether every prior configuration holds a Phase-1 quorum of promises —
+    /// the completion predicate, in one readable place (see the type doc).
+    pub(super) fn covered(&self) -> bool {
+        self.prior
             .iter()
-            .filter(|(node, ballot)| answered.contains(node) && Some(**ballot) > threshold)
-            .count()
-    });
-    answered.len().saturating_sub(disqualified)
+            .all(|config| config.count_members(&self.promised_by) >= config.quorum_size())
+    }
 }
 
 /// A `Promise` page is useful only at the exact requested cursor, carries at
@@ -126,13 +189,37 @@ fn promise_page_shape_valid(
 impl RawNode {
     // ---- election / leadership --------------------------------------------
 
-    /// Election clock fired: become a Candidate and run one Phase 1 (per ballot)
-    /// over the whole uncommitted log suffix.
+    /// Election clock fired: campaign for leadership at a fresh ballot with
+    /// the acceptor configuration this node believes is the latest.
+    ///
+    /// On a deployment with matchmakers a node campaigns only when it is a
+    /// **member** of that configuration: leadership belongs inside the
+    /// acceptor set (a removed node that campaigned would lead a cluster it
+    /// is not part of, and a spare that campaigned would register a
+    /// configuration nobody asked for). A reconfiguration that removes the
+    /// sitting leader is the one deliberate exception, and it runs through
+    /// [`RawNode::reconfigure`], not here.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
             return;
         }
+        if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
+            self.non_member_campaigns_skipped = self.non_member_campaigns_skipped.saturating_add(1);
+            return;
+        }
+        self.campaign(None);
+    }
+
+    /// Open a campaign at a fresh ballot: bump the round, promise it durably,
+    /// drop every leadership state, then either register `(b, C_b)` with the
+    /// matchmakers (a deployment that names them) or go straight to Phase 1
+    /// against the one static configuration (plain Multi-Paxos).
+    ///
+    /// `target` is `Some` for a reconfiguration ([`RawNode::reconfigure`]):
+    /// the configuration to register instead of this node's current belief.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = target.is_some())))]
+    pub(super) fn campaign(&mut self, target: Option<AcceptorConfig>) {
         let me = self.config.id;
         let base_round = self
             .hard_state
@@ -146,10 +233,74 @@ impl RawNode {
             self.become_follower(None);
             return;
         };
+        // Leadership state dies whole — a reconfiguring leader abandons its
+        // in-flight rounds exactly as a deposed one does (the accepted stall
+        // window of #122: the successor ballot's Phase 1 recovers them).
+        self.clear_leadership_state();
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };
         self.set_promise(self.ballot);
+        // A campaign opens at a ballot this node itself just promised: the
+        // fresh round is strictly above every round in the max above, so the
+        // promise landed exactly on the campaign ballot.
+        assert!(
+            self.hard_state.max_promised_ballot == self.ballot,
+            "a candidate promises the ballot it campaigns at"
+        );
+        let reconfiguration = target.is_some();
+        let config = target.unwrap_or_else(|| self.acceptors.clone());
+        if self.config.has_matchmakers() {
+            // The matchmaking phase: register first, prepare only once a
+            // matchmaker quorum has answered (see `super::matchmaking`).
+            self.matchmaking = Some(Matchmaking::new(
+                self.ballot,
+                config.clone(),
+                reconfiguration,
+            ));
+            let request = MatchRequest::new(me, self.ballot, config);
+            for matchmaker in self.config.matchmakers.clone() {
+                self.pending_match_requests
+                    .push((matchmaker, request.clone()));
+            }
+            // Negative space of invariant 1 (#120): nothing Phase-1-shaped
+            // left this call — no `Prepare` before a matchmaker quorum.
+            assert!(
+                !self
+                    .pending_messages
+                    .iter()
+                    .any(|(_, m)| matches!(m, Message::Prepare { .. })),
+                "a campaign sends no Prepare before its matchmaker quorum"
+            );
+            assert!(self.election.is_none(), "matchmaking opens before Phase 1");
+        } else {
+            // Plain Multi-Paxos: `H_b` is implicitly the static configuration.
+            self.start_phase1(config.clone(), vec![config]);
+        }
+    }
+
+    /// The **Phase-1 boundary**: matchmaking (or the plain path) hands over
+    /// `config` (`C_b`) and `prior` (`H_b`), and one Phase 1 per ballot opens
+    /// over the whole uncommitted log suffix against every prior
+    /// configuration.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, prior = prior.len())))]
+    pub(super) fn start_phase1(&mut self, config: AcceptorConfig, prior: Vec<AcceptorConfig>) {
+        let me = self.config.id;
+        // Precondition stack: Phase 1 opens on a candidate at its own promised
+        // ballot, with no other campaign phase open.
+        assert!(
+            self.role == NodeRole::Candidate,
+            "Phase 1 opens on a candidate"
+        );
+        assert!(
+            self.hard_state.max_promised_ballot == self.ballot,
+            "Phase 1 opens at the ballot the candidate promised"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "Phase 1 opens once matchmaking has closed"
+        );
+        assert!(self.election.is_none(), "one Phase 1 per ballot");
 
         // The campaign's recovery range starts at this node's first *faulty*
         // slot when that sits below the contiguous prefix (Stage 8): a rotted
@@ -178,34 +329,45 @@ impl RawNode {
         for (slot, ballot) in self.faulty.range(from_slot..) {
             faulty_reports.entry(*slot).or_default().insert(me, *ballot);
         }
+        // The candidate is its own first acceptor. Its promise counts toward
+        // every prior configuration that contains it, and toward none when it
+        // is in none of them (a fresh member of `C_b`, or a reconfiguring
+        // leader that removed itself): the per-configuration tally decides.
         let mut promised_by = BTreeSet::new();
         promised_by.insert(me);
+        // Phase 1 fans out to the union of every prior configuration — the
+        // addressee list *is* a union, only the completion predicate is not —
+        // plus `C_b` itself, so the incoming members promise the ballot (and
+        // learn the configuration) before Phase 2 reaches them.
+        let mut targets: Vec<NodeId> = prior
+            .iter()
+            .chain(std::iter::once(&config))
+            .flat_map(|c| c.members.iter().copied())
+            .filter(|p| *p != me)
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let wire_config = self.config.has_matchmakers().then(|| config.clone());
         self.election = Some(Election {
             ballot: self.ballot,
+            config,
+            prior,
             from_slot,
             promised_by,
             recovered,
             faulty_reports,
             promise_next: BTreeMap::new(),
         });
-        self.proposer.clear();
-        self.leader_recovery = None;
-        self.repair_probe = None;
-        self.repair_elapsed = 0;
-        self.resend_cursor = None;
-        // A campaign opens at a ballot this node itself just promised: the
-        // fresh round is strictly above every round in the max above, so the
-        // promise landed exactly on the campaign ballot.
-        assert!(
-            self.hard_state.max_promised_ballot == self.ballot,
-            "a candidate promises the ballot it campaigns at"
-        );
-        self.broadcast(&Message::Prepare {
+        let prepare = Message::Prepare {
             config_id: self.hard_state.config_id,
             from: me,
             ballot: self.ballot,
             from_slot,
-        });
+            config: wire_config,
+        };
+        for to in targets {
+            self.pending_messages.push((to, prepare.clone()));
+        }
         // Proactive catch-up probe. The election clock fires precisely when we have
         // *not* heard a satisfactory leader — the same condition under which we may
         // be silently behind: a stale or absent leader beat never reveals a decided
@@ -237,10 +399,12 @@ impl RawNode {
         faulty: BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) {
-        // Quorum sets are keyed by NodeId: an id outside the configured
-        // membership must never inflate one (wire hygiene; peers are trusted
-        // but a misrouted or misconfigured sender is not a quorum member).
-        if !self.config.peers.contains(&from) {
+        // Quorum sets are keyed by NodeId: an id outside the addressable pool
+        // must never inflate one (wire hygiene; peers are trusted but a
+        // misrouted or misconfigured sender is not a quorum member). Which
+        // *configurations* the promise counts toward is the per-configuration
+        // tally's business, not this guard's.
+        if !self.in_pool(from) {
             return;
         }
         if self.role == NodeRole::Leader {
@@ -293,6 +457,7 @@ impl RawNode {
             }
         }
         if let Some(next) = request_next {
+            let config = self.phase1_wire_config();
             self.pending_messages.push((
                 from,
                 Message::Prepare {
@@ -300,6 +465,7 @@ impl RawNode {
                     from: self.config.id,
                     ballot,
                     from_slot: next,
+                    config,
                 },
             ));
             return;
@@ -374,6 +540,7 @@ impl RawNode {
             }
         }
         if let Some(next) = request_next {
+            let config = self.phase1_wire_config();
             self.pending_messages.push((
                 from,
                 Message::Prepare {
@@ -381,6 +548,7 @@ impl RawNode {
                     from: self.config.id,
                     ballot,
                     from_slot: next,
+                    config,
                 },
             ));
             return;
@@ -394,7 +562,6 @@ impl RawNode {
     /// blocked.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
-        let quorum = self.quorum();
         let mut decisions: Vec<(Slot, Command, bool)> = Vec::new();
         {
             let Some(probe) = self.repair_probe.as_mut() else {
@@ -403,9 +570,12 @@ impl RawNode {
             for slot in probe.blocked.clone() {
                 let have = probe.best_have.get(&slot);
                 let threshold = have.map(|(b, _)| *b);
-                let qualifying =
-                    qualifying_answers(&probe.answered, probe.faulty_reports.get(&slot), threshold);
-                if qualifying < quorum {
+                if !slot_decidable(
+                    &probe.prior,
+                    &probe.answered,
+                    probe.faulty_reports.get(&slot),
+                    threshold,
+                ) {
                     continue;
                 }
                 let (command, is_have) = have.map_or_else(
@@ -470,11 +640,14 @@ impl RawNode {
     #[allow(clippy::too_many_lines)]
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn try_become_leader(&mut self) {
-        let quorum = self.quorum();
+        // The win gate (#121): every prior configuration covered — one
+        // predicate, in one place (`Election::covered`) — at a ballot the
+        // node's own promise has not moved past.
         let won = self.role == NodeRole::Candidate
-            && self.election.as_ref().is_some_and(|e| {
-                e.promised_by.len() >= quorum && e.ballot >= self.hard_state.max_promised_ballot
-            });
+            && self
+                .election
+                .as_ref()
+                .is_some_and(|e| e.covered() && e.ballot >= self.hard_state.max_promised_ballot);
         if !won {
             return;
         }
@@ -482,14 +655,31 @@ impl RawNode {
         let e = self.election.take().expect("won implies an election");
         // Post-win restatement of the quorum half of the win condition (the
         // ballot half is restated in the postcondition block below): the
-        // campaign that just closed really held a promise quorum.
+        // campaign that just closed really held a Phase-1 quorum of *every*
+        // prior configuration, and every counted promise came from the pool.
         assert!(
-            e.promised_by.len() >= quorum,
-            "a won election holds a promise quorum"
+            e.covered(),
+            "a won election holds a promise quorum of every prior configuration"
+        );
+        assert!(
+            e.promised_by.iter().all(|n| self.in_pool(*n)),
+            "every counted promise comes from the addressable pool"
         );
         self.role = NodeRole::Leader;
         self.leader = Some(me);
         self.ballot = e.ballot;
+        // Registration precedes exercise (#120, invariant 5): Phase 2 runs
+        // under exactly the configuration this ballot was registered with.
+        // The plain path's static configuration stays bound to no ballot.
+        if self.config.has_matchmakers() {
+            self.acceptors = e.config.clone();
+            self.acceptors_since = e.ballot;
+        } else {
+            assert!(
+                self.acceptors == e.config,
+                "a plain campaign runs Phase 1 for its static configuration"
+            );
+        }
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
         self.proposer.clear();
@@ -540,7 +730,6 @@ impl RawNode {
         // reported `have` re-proposes normally and an all-`none` slot no-op
         // fills normally. Anything else is **blocked** — Case 3: wait — and
         // moves to the repair probe, which keeps querying stragglers.
-        let quorum = self.quorum();
         let mut blocked: BTreeSet<Slot> = BTreeSet::new();
         let mut probe_have: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut probe_faulty: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
@@ -552,8 +741,7 @@ impl RawNode {
             }
             let have = e.recovered.get(slot);
             let threshold = have.map(|(b, _)| *b);
-            let qualifying = qualifying_answers(&e.promised_by, Some(reporters), threshold);
-            if qualifying >= quorum {
+            if slot_decidable(&e.prior, &e.promised_by, Some(reporters), threshold) {
                 continue;
             }
             blocked.insert(*slot);
@@ -583,6 +771,7 @@ impl RawNode {
         } else {
             self.repair_probe = Some(RepairProbe {
                 ballot: e.ballot,
+                prior: e.prior.clone(),
                 from_slot: e.from_slot,
                 answered: e.promised_by.clone(),
                 faulty_reports: probe_faulty,
@@ -619,10 +808,12 @@ impl RawNode {
         self.heartbeat_seq = 0;
         self.read_rounds.clear();
         // CheckQuorum: a fresh leadership starts a fresh ack window (self is
-        // always reachable).
+        // always reachable — when it is an acceptor at all).
         self.quorum_elapsed = 0;
         self.quorum_acked_by.clear();
-        self.quorum_acked_by.insert(me);
+        if self.is_acceptor() {
+            self.quorum_acked_by.insert(me);
+        }
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.
@@ -749,7 +940,7 @@ impl RawNode {
     /// arbitrary wire round would let one garbage Nack pin every future campaign.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, _promised: Ballot, slot: Slot) {
-        if !self.config.peers.contains(&from) {
+        if !self.in_pool(from) {
             return;
         }
         let superseded = self.election.as_ref().is_some_and(|e| e.ballot == ballot)

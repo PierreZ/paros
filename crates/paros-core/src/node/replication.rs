@@ -1,4 +1,5 @@
 use super::{Ballot, Message, NodeId, NodeRole, RawNode, Slot};
+use crate::matchmaker::AcceptorConfig;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
 /// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
@@ -19,12 +20,21 @@ impl RawNode {
             "only a leader broadcasts beats"
         );
         self.heartbeat_seq += 1;
+        // Beats reach the whole pool, not only the active configuration: a
+        // spare or a removed member is still a replica that learns the chosen
+        // prefix through the commit watermark and catch-up. Only members' acks
+        // count (`on_heartbeat_ack`).
+        let config = self
+            .config
+            .has_matchmakers()
+            .then(|| self.acceptors.clone());
         self.broadcast(&Message::Heartbeat {
             config_id: self.hard_state.config_id,
             from: self.config.id,
             ballot: self.ballot,
             commit: self.hard_state.chosen_index,
             seq: self.heartbeat_seq,
+            config,
         });
     }
 
@@ -37,14 +47,15 @@ impl RawNode {
         ballot: Ballot,
         commit: Option<Slot>,
         seq: u64,
+        config: Option<AcceptorConfig>,
     ) {
         let me = self.config.id;
         // Wire hygiene: a beat adopts its sender as leader (and triggers
-        // catch-up toward it), so an id outside the configured membership must
-        // never be followed — the same refusal every quorum-counting handler
-        // already applies. The tick-injected self-beat passes trivially:
-        // membership always includes this node's own id.
-        if !self.config.peers.contains(&from) {
+        // catch-up toward it), so an id outside the pool must never be
+        // followed — the same refusal every quorum-counting handler already
+        // applies. The tick-injected self-beat passes trivially: the pool
+        // always includes this node's own id.
+        if !self.in_pool(from) {
             return;
         }
         if from == me {
@@ -66,6 +77,9 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
+            // The leader's configuration rides on its beats, so a follower
+            // that missed the `Prepare` still learns the latest one.
+            self.learn_config(ballot, config);
             // Ack the beat, echoing `(ballot, seq)`: the leader counts these
             // toward read-index confirmation quorums. Below-promise beats fall
             // through unacked, so a deposed leader's read rounds starve instead
@@ -138,10 +152,11 @@ impl RawNode {
     /// cross-ballot acks are dropped whole.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, seq)))]
     pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
-        // Quorum sets are keyed by NodeId: an id outside the configured
-        // membership must never inflate one (wire hygiene; peers are trusted
-        // but a misrouted or misconfigured sender is not a quorum member).
-        if !self.config.peers.contains(&from) {
+        // Quorum sets are keyed by NodeId, over the **active configuration**:
+        // a beat reaches the whole pool, but only a member's ack may count
+        // toward a read round or the `CheckQuorum` window (a joining acceptor
+        // never inflates a quorum it is not in, #122).
+        if !self.acceptors.contains(from) {
             return;
         }
         if self.role != NodeRole::Leader || ballot != self.ballot {

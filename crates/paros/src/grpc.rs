@@ -42,7 +42,9 @@ pub use matchmaker::{
 };
 pub use public::paros_client::ParosClient;
 pub(crate) use public::paros_server::ParosServer;
-pub use public::{Compact, CompactAck, Propose, ProposeAck, Read, ReadAck};
+pub use public::{
+    Compact, CompactAck, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
+};
 
 pub(crate) type ReplySender<T> = oneshot::Sender<T>;
 type Call<T, U> = (T, ReplySender<U>);
@@ -91,6 +93,34 @@ fn ballot_from_proto(ballot: Option<internal::Ballot>) -> Result<Ballot, &'stati
         round: ballot.round,
         node: NodeId(ballot.node),
     })
+}
+
+fn config_to_proto(config: &AcceptorConfig) -> internal::AcceptorConfig {
+    internal::AcceptorConfig {
+        members: config.members.iter().map(|n| n.0).collect(),
+        quorum_system: match config.quorum_system {
+            QuorumSystem::Majority => internal::QuorumSystem::Majority.into(),
+        },
+    }
+}
+
+fn config_from_proto(
+    config: Option<internal::AcceptorConfig>,
+) -> Result<Option<AcceptorConfig>, &'static str> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let quorum_system = match internal::QuorumSystem::try_from(config.quorum_system) {
+        Ok(internal::QuorumSystem::Majority) => QuorumSystem::Majority,
+        Err(_) => return Err("unknown quorum system"),
+    };
+    if config.members.is_empty() {
+        return Err("empty acceptor configuration");
+    }
+    Ok(Some(AcceptorConfig::new(
+        config.members.into_iter().map(NodeId).collect(),
+        quorum_system,
+    )))
 }
 
 fn command_to_proto(command: &Command) -> internal::Command {
@@ -268,11 +298,13 @@ pub(crate) fn message_to_proto(
             from,
             ballot,
             from_slot,
+            config,
         } => Kind::Prepare(internal::Prepare {
             config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
+            config: config.as_ref().map(config_to_proto),
         }),
         Message::Promise {
             config_id,
@@ -377,12 +409,14 @@ pub(crate) fn message_to_proto(
             ballot,
             commit,
             seq,
+            config,
         } => Kind::Heartbeat(internal::Heartbeat {
             config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
             seq: *seq,
+            config: config.as_ref().map(config_to_proto),
         }),
         Message::HeartbeatAck {
             config_id,
@@ -441,6 +475,7 @@ pub(crate) fn message_to_proto(
             next_slot,
             decided,
             pending,
+            config,
         } => Kind::Relinquish(internal::Relinquish {
             config_id: config_id.0,
             from: from.0,
@@ -450,6 +485,7 @@ pub(crate) fn message_to_proto(
             next_slot: next_slot.0,
             decided: slot_commands_to_proto(decided),
             pending: pending_commands_to_proto(pending),
+            config: config.as_ref().map(config_to_proto),
         }),
         _ => return Err("unsupported Paxos message variant"),
     };
@@ -471,6 +507,7 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
+            config: config_from_proto(message.config)?,
         }),
         Kind::Promise(message) => Ok(Message::Promise {
             config_id: ConfigId(message.config_id),
@@ -544,6 +581,7 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             commit: message.commit.map(Slot),
             seq: message.seq,
+            config: config_from_proto(message.config)?,
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
             config_id: ConfigId(message.config_id),
@@ -581,6 +619,7 @@ pub(crate) fn message_from_proto(
             next_slot: Slot(message.next_slot),
             decided: slot_commands_from_proto(message.decided)?,
             pending: pending_commands_from_proto(message.pending)?,
+            config: config_from_proto(message.config)?,
         }),
     }
 }
@@ -592,6 +631,7 @@ pub(crate) struct RpcInbox {
     pub(crate) read: mpsc::Receiver<Call<Read, ReadAck>>,
     pub(crate) deliver: mpsc::Receiver<Call<Message, ()>>,
     pub(crate) compact: mpsc::Receiver<Call<Compact, CompactAck>>,
+    pub(crate) reconfigure: mpsc::Receiver<Call<Reconfigure, ReconfigureAck>>,
     pub(crate) inspect: mpsc::Receiver<Call<InspectRequest, InspectReply>>,
 }
 
@@ -618,6 +658,7 @@ pub(crate) struct RpcService {
     read: mpsc::Sender<Call<Read, ReadAck>>,
     deliver: mpsc::Sender<Call<Message, ()>>,
     compact: mpsc::Sender<Call<Compact, CompactAck>>,
+    reconfigure: mpsc::Sender<Call<Reconfigure, ReconfigureAck>>,
     inspect: mpsc::Sender<Call<InspectRequest, InspectReply>>,
     on_reject: OnReject,
 }
@@ -637,6 +678,7 @@ pub(crate) fn rpc_channel(
     let (read_tx, read_rx) = mpsc::channel(client_inbox);
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
     let (compact_tx, compact_rx) = mpsc::channel(client_inbox);
+    let (reconfigure_tx, reconfigure_rx) = mpsc::channel(client_inbox);
     let (inspect_tx, inspect_rx) = mpsc::channel(client_inbox);
     (
         RpcService {
@@ -644,6 +686,7 @@ pub(crate) fn rpc_channel(
             read: read_tx,
             deliver: deliver_tx,
             compact: compact_tx,
+            reconfigure: reconfigure_tx,
             inspect: inspect_tx,
             on_reject,
         },
@@ -652,6 +695,7 @@ pub(crate) fn rpc_channel(
             read: read_rx,
             deliver: deliver_rx,
             compact: compact_rx,
+            reconfigure: reconfigure_rx,
             inspect: inspect_rx,
         },
     )
@@ -695,6 +739,16 @@ impl public::paros_server::Paros for RpcService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn compact(&self, request: Request<Compact>) -> Result<Response<CompactAck>, Status> {
         dispatch(&self.compact, request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure(
+        &self,
+        request: Request<Reconfigure>,
+    ) -> Result<Response<ReconfigureAck>, Status> {
+        dispatch(&self.reconfigure, request.into_inner())
             .await
             .map(Response::new)
     }

@@ -896,14 +896,14 @@ pub fn storage_contract_suite<S: NodeStorage>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{ConfigId, NodeId, QuorumSystem};
+    use paros_core::{ConfigId, NodeId};
 
     #[test]
     fn config_id_round_trips_through_storage() {
         let mut storage = MemStorage::new(Config {
             id: NodeId(1),
             peers: vec![NodeId(1)],
-            quorum_system: QuorumSystem::Majority,
+            ..Config::default()
         });
 
         storage
@@ -925,7 +925,7 @@ mod tests {
                 MemStorage::new(Config {
                     id: NodeId(0),
                     peers: vec![NodeId(0)],
-                    quorum_system: QuorumSystem::Majority,
+                    ..Config::default()
                 })
             },
             // In-memory writes are immediately visible: a reboot is the same

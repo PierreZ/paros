@@ -134,14 +134,13 @@ where
         for op in &writes {
             match op {
                 MatchmakerWriteOp::Register { ballot, config } => {
-                    let hash = config_hash(config);
-                    audit.match_registered(id, *ballot, hash);
+                    audit.match_registered(id, *ballot, config);
                     tracing::info!(
                         matchmaker = id.0,
                         round = ballot.round,
                         bnode = ballot.node.0,
                         members = config.members.len() as u64,
-                        config = hash,
+                        config = config_hash(config),
                         "match_registered"
                     );
                 }
@@ -179,9 +178,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
             history,
             gc_watermark,
         } => {
-            let history: Vec<(Ballot, u64)> = history
+            let history: Vec<(Ballot, AcceptorConfig)> = history
                 .iter()
-                .map(|(ballot, config)| (*ballot, config_hash(config)))
+                .map(|(ballot, config)| (*ballot, config.clone()))
                 .collect();
             audit.match_replied(id, reply.to, reply.ballot, &history, *gc_watermark);
             tracing::info!(
@@ -271,10 +270,10 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(id, &storage);
-    let recovered: Vec<(Ballot, u64)> = matchmaker
+    let recovered: Vec<(Ballot, AcceptorConfig)> = matchmaker
         .registry()
         .iter()
-        .map(|(ballot, config)| (*ballot, config_hash(config)))
+        .map(|(ballot, config)| (*ballot, config.clone()))
         .collect();
     let watermark = matchmaker.hard_state().gc_watermark;
     audit.matchmaker_recovered(id, &recovered, watermark);

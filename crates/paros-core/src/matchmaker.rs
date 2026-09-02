@@ -90,7 +90,7 @@ pub struct MatchmakerId(pub u64);
 /// per-node `id`. The core never interprets it beyond storing and reporting it;
 /// the leader-side matchmaking phase (a later issue) is what runs Phase 1
 /// against it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcceptorConfig {
     /// The full membership, sorted and deduplicated (a [`Vec`] keeps iteration
@@ -123,9 +123,33 @@ impl AcceptorConfig {
     }
 
     /// The number of acceptors that form a quorum over this configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the quorum system cannot self-intersect over this membership: Paxos
+    /// safety rests on any two quorums of one configuration sharing an
+    /// acceptor (for the majority system, `2q > n`), and a configuration that
+    /// breaks it must fail loudly rather than let two values be chosen for
+    /// one slot.
     #[must_use]
     pub fn quorum_size(&self) -> usize {
-        self.quorum_system.quorum_size(self.members.len())
+        let n = self.members.len();
+        let q = self.quorum_system.quorum_size(n);
+        assert!(q >= 1, "a quorum requires at least one acceptor");
+        assert!(2 * q > n, "any two quorums must intersect");
+        q
+    }
+
+    /// Whether `node` is a member of this configuration.
+    #[must_use]
+    pub fn contains(&self, node: NodeId) -> bool {
+        self.members.binary_search(&node).is_ok()
+    }
+
+    /// How many of `nodes` are members of this configuration.
+    #[must_use]
+    pub fn count_members<'a>(&self, nodes: impl IntoIterator<Item = &'a NodeId>) -> usize {
+        nodes.into_iter().filter(|n| self.contains(**n)).count()
     }
 }
 

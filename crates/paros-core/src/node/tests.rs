@@ -4,8 +4,12 @@
 use std::collections::BTreeMap;
 
 use super::{
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin, NodeRole,
-    PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode, ReadIndexResult, ReadState,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep,
+    NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode, ReadIndexResult,
+    ReadState, ReconfigureRefusal, ReconfigureResult,
+};
+use crate::matchmaker::{
+    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerId,
 };
 use crate::message::Message;
 use crate::state::{Config, HardState};
@@ -35,6 +39,8 @@ impl TestStorage {
                 id: NodeId(id),
                 peers: members.iter().copied().map(NodeId).collect(),
                 quorum_system: crate::state::QuorumSystem::Majority,
+                nodes: Vec::new(),
+                matchmakers: Vec::new(),
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
@@ -85,6 +91,71 @@ impl Storage for TestStorage {
 
 fn node(id: u64, members: &[u64]) -> RawNode {
     RawNode::new(&TestStorage::new(id, members))
+}
+
+/// A node of a **matchmaker deployment**: bootstrap membership `members`,
+/// addressable pool `pool` (a superset holding the spares), and `matchmakers`
+/// matchmakers.
+fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> RawNode {
+    let mut storage = TestStorage::new(id, members);
+    storage.config.nodes = pool.iter().copied().map(NodeId).collect();
+    storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
+    RawNode::new(&storage)
+}
+
+/// Drain a node's pending matchmaking requests and clear the batch.
+fn drain_match_requests(n: &mut RawNode) -> Vec<(MatchmakerId, MatchRequest)> {
+    let ready = n.ready();
+    let requests = ready.match_requests().to_vec();
+    ready.advance();
+    requests
+}
+
+/// Answer `requests` from the given registries, returning every reply.
+fn matchmake(
+    matchmakers: &mut [Matchmaker],
+    requests: Vec<(MatchmakerId, MatchRequest)>,
+) -> Vec<MatchReply> {
+    let mut replies = Vec::new();
+    for (id, request) in requests {
+        let mm = &mut matchmakers[usize::try_from(id.0).expect("matchmaker index")];
+        mm.step(request);
+        let ready = mm.ready();
+        replies.extend(ready.replies().to_vec());
+        ready.advance();
+    }
+    replies
+}
+
+/// Fresh in-memory registries, `MatchmakerId(0..n)`.
+fn registries(n: u64) -> Vec<Matchmaker> {
+    (0..n)
+        .map(|i| Matchmaker::new(MatchmakerId(i), &MemRegistry))
+        .collect()
+}
+
+/// An empty registry port for [`registries`].
+#[derive(Default)]
+struct MemRegistry;
+
+impl crate::matchmaker::RegistryStorage for MemRegistry {
+    fn initial_state(&self) -> crate::matchmaker::MatchmakerHardState {
+        crate::matchmaker::MatchmakerHardState::default()
+    }
+    fn registration(&self, _ballot: Ballot) -> Option<AcceptorConfig> {
+        None
+    }
+    fn registered_ballots(&self) -> Vec<Ballot> {
+        Vec::new()
+    }
+}
+
+/// `AcceptorConfig` over `members` under the majority system.
+fn cfg(members: &[u64]) -> AcceptorConfig {
+    AcceptorConfig::new(
+        members.iter().copied().map(NodeId).collect(),
+        crate::state::QuorumSystem::Majority,
+    )
 }
 
 fn val(b: u8) -> Value {
@@ -229,6 +300,8 @@ mod decide_apply;
 mod election;
 mod handoff;
 mod invariants;
+mod matchmaking;
 mod reads;
+mod reconfigure;
 mod recovery;
 mod replication;

@@ -7,7 +7,9 @@ mod decide_apply;
 mod election;
 mod handoff;
 mod helpers;
+mod matchmaking;
 mod reads;
+mod reconfigure;
 mod replication;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,8 +19,12 @@ use self::election::{Election, LeaderRecovery, RepairProbe};
 pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
+pub use self::matchmaking::MatchStep;
+use self::matchmaking::Matchmaking;
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
+pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 use self::replication::HEARTBEAT_TICKS;
+use crate::matchmaker::{AcceptorConfig, MatchReply, MatchRequest, MatchmakerId};
 use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
@@ -127,8 +133,22 @@ pub struct ReadState {
 /// a node step down (the dueling-proposer livelock fix). Client requests are
 /// deduplicated by `(ClientId, ClientSeq)` for at-most-once execution.
 pub struct RawNode {
-    /// This node's static identity and membership.
+    /// This node's static identity, bootstrap membership, pool and matchmaker
+    /// set.
     config: Config,
+    /// The acceptor configuration bound to the highest ballot this node has
+    /// seen registered — on a leader, the configuration its own ballot was
+    /// registered with (what Phase 2 quorums are counted over); on a
+    /// follower, its belief about the latest configuration (what its next
+    /// campaign registers). Learned from `Prepare`/`Heartbeat` on a
+    /// deployment with matchmakers; on plain Multi-Paxos it is the bootstrap
+    /// configuration for the node's whole life. Never edited underneath a
+    /// live ballot: a configuration is bound to a ballot, and a change is a
+    /// round change ([`RawNode::reconfigure`]).
+    acceptors: AcceptorConfig,
+    /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
+    /// bootstrap configuration).
+    acceptors_since: Ballot,
     /// The must-be-durable scalars (promised ballot + chosen index), surfaced for
     /// persistence via [`Ready`].
     hard_state: HardState,
@@ -236,6 +256,22 @@ pub struct RawNode {
     // ---- proposer (multi-decree) ----
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
     proposer: BTreeMap<Slot, Proposing>,
+    /// The **matchmaking phase** while a Candidate registers its ballot's
+    /// configuration with the matchmakers (#120) — the campaign state that
+    /// precedes `election`, and never coexists with it. `None` on a plain
+    /// deployment, always.
+    matchmaking: Option<Matchmaking>,
+    /// Matchmaking requests to send this batch, drained via
+    /// [`Ready::match_requests`]. A separate wire from `pending_messages`:
+    /// the matchmaker contract is its own RPC service, spoken only by a
+    /// deployment that names matchmakers.
+    pending_match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    /// Monotone campaign-phase counters this incarnation, for the driver's
+    /// audit report: campaigns this node declined to open because it is not
+    /// a member of the configuration it would register, and leaderships it
+    /// resigned once its own reconfiguration removed it from the acceptor set.
+    non_member_campaigns_skipped: u64,
+    non_member_step_downs: u64,
     /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
     election: Option<Election>,
     /// The leader's open **distributed commitment determination** (Stage 8,
@@ -362,20 +398,47 @@ impl RawNode {
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
         // Config shape: quorum arithmetic and broadcast both assume a strictly
-        // sorted, deduplicated membership that includes this node. A duplicated
-        // peer silently inflates the quorum; a missing self silently deflates it.
+        // sorted, deduplicated membership. A duplicated peer silently inflates
+        // the quorum; a missing self silently deflates it.
         assert!(
             !config.peers.is_empty(),
-            "membership includes at least self"
+            "the bootstrap membership names at least one acceptor"
         );
         assert!(
             config.peers.windows(2).all(|w| w[0] < w[1]),
             "membership is sorted and deduplicated"
         );
         assert!(
-            config.peers.binary_search(&config.id).is_ok(),
-            "membership includes this node's own id"
+            config.nodes.windows(2).all(|w| w[0] < w[1]),
+            "the node pool is sorted and deduplicated"
         );
+        assert!(
+            config.matchmakers.windows(2).all(|w| w[0] < w[1]),
+            "the matchmaker set is sorted and deduplicated"
+        );
+        // The bootstrap membership is drawn from the pool, and this node is
+        // in the pool. On a plain deployment (no `nodes`, no matchmakers) the
+        // pool *is* the membership, so this is today's "membership includes
+        // this node's own id": a node outside the acceptor set exists only
+        // where a reconfiguration could add or remove it.
+        assert!(
+            config
+                .peers
+                .iter()
+                .all(|p| config.pool().binary_search(p).is_ok()),
+            "the bootstrap membership is drawn from the node pool"
+        );
+        assert!(
+            config.pool().binary_search(&config.id).is_ok(),
+            "the node pool includes this node's own id"
+        );
+        if !config.has_matchmakers() {
+            assert!(
+                config.peers.binary_search(&config.id).is_ok(),
+                "a plain deployment's membership includes this node's own id"
+            );
+        }
+        let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
         let ballot = hard_state.max_promised_ballot;
 
         // Rebuild the working accepted log by scanning the durable per-slot log
@@ -503,6 +566,8 @@ impl RawNode {
 
         let node = Self {
             config,
+            acceptors,
+            acceptors_since: Ballot::zero(),
             hard_state,
             accepted,
             first_slot,
@@ -530,6 +595,10 @@ impl RawNode {
             read_floor: None,
             read_rounds: Vec::new(),
             proposer: BTreeMap::new(),
+            matchmaking: None,
+            pending_match_requests: Vec::new(),
+            non_member_campaigns_skipped: 0,
+            non_member_step_downs: 0,
             election: None,
             repair_probe: None,
             repair_elapsed: 0,
@@ -642,9 +711,34 @@ impl RawNode {
         // message arrives — `start_accept_round`'s self-accept guard is the
         // designed defense. It holds only for a *fresh* leader
         // (see `try_become_leader`).
+        // The deployment couplings: plain Multi-Paxos never matchmakes and
+        // never leaves its bootstrap configuration; a matchmaker deployment
+        // runs Phase 2 under a configuration drawn from the pool.
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.matchmaking.is_none(),
+                "a plain deployment never opens a matchmaking phase"
+            );
+            assert!(
+                self.acceptors.members == self.config.peers,
+                "a plain deployment keeps its bootstrap configuration"
+            );
+            assert!(
+                self.acceptors_since == Ballot::zero(),
+                "a plain deployment's configuration is bound to no ballot"
+            );
+        }
+        assert!(
+            self.acceptors.members.iter().all(|m| self.in_pool(*m)),
+            "the active configuration is drawn from the node pool"
+        );
         match self.role {
             NodeRole::Leader => {
                 assert!(self.election.is_none(), "a leader has no open campaign");
+                assert!(
+                    self.matchmaking.is_none(),
+                    "a leader has no open matchmaking phase"
+                );
                 assert!(
                     self.leader == Some(self.config.id),
                     "a leader knows itself as leader"
@@ -667,8 +761,8 @@ impl RawNode {
                             "a handoff leader inherited its authority from another node"
                         );
                         assert!(
-                            self.config.peers.binary_search(&from).is_ok(),
-                            "a handoff leader inherited from a configured member"
+                            self.in_pool(from),
+                            "a handoff leader inherited from a pooled node"
                         );
                     }
                 }
@@ -703,15 +797,25 @@ impl RawNode {
                 );
             }
             NodeRole::Candidate => {
+                // Exactly one campaign phase is open: matchmaking (the
+                // registration round trip, #120) or Phase 1 — never both,
+                // never neither. The boundary between them is
+                // `start_phase1`.
                 assert!(
-                    self.election.is_some(),
-                    "a candidate holds an open campaign"
+                    self.election.is_some() != self.matchmaking.is_some(),
+                    "a candidate holds exactly one open campaign phase"
                 );
                 assert!(
                     self.election
                         .as_ref()
-                        .is_some_and(|e| e.ballot == self.ballot),
+                        .is_none_or(|e| e.ballot == self.ballot),
                     "a candidate's campaign runs at its own operating ballot"
+                );
+                assert!(
+                    self.matchmaking
+                        .as_ref()
+                        .is_none_or(|m| m.ballot == self.ballot),
+                    "a candidate's matchmaking runs at its own operating ballot"
                 );
                 assert!(
                     self.ballot.node == self.config.id,
@@ -720,6 +824,10 @@ impl RawNode {
             }
             NodeRole::Follower => {
                 assert!(self.election.is_none(), "a follower has no open campaign");
+                assert!(
+                    self.matchmaking.is_none(),
+                    "a follower has no open matchmaking phase"
+                );
             }
         }
         // A leadership origin is leadership state: it is cleared with the rest
@@ -785,8 +893,9 @@ impl RawNode {
                 from,
                 ballot,
                 from_slot,
+                config,
                 ..
-            } => self.on_prepare(from, ballot, from_slot),
+            } => self.on_prepare(from, ballot, from_slot, config),
             Message::Promise {
                 from,
                 ballot,
@@ -840,16 +949,22 @@ impl RawNode {
                 next_slot,
                 decided,
                 pending,
+                config,
                 ..
-            } => self.on_relinquish(from, to, ballot, from_slot, next_slot, decided, pending),
+            } => {
+                self.on_relinquish(
+                    from, to, ballot, from_slot, next_slot, decided, pending, config,
+                );
+            }
             Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
                 ballot,
                 commit,
                 seq,
+                config,
                 ..
-            } => self.on_heartbeat(from, ballot, commit, seq),
+            } => self.on_heartbeat(from, ballot, commit, seq, config),
             Message::HeartbeatAck {
                 from, ballot, seq, ..
             } => {
@@ -1002,7 +1117,10 @@ impl RawNode {
         // collect at most `q - 1` peer acks once an intersecting majority has
         // promised higher. A future asymmetric quorum system must replace this
         // cardinality check and explicit own vote with read-quorum membership.
-        acked_by.insert(self.config.id);
+        // A leader outside its own configuration has no acceptor vote to cast.
+        if self.is_acceptor() {
+            acked_by.insert(self.config.id);
+        }
         self.read_rounds.push(ReadRound {
             ctx,
             index,
@@ -1160,6 +1278,7 @@ impl RawNode {
                     ballot: self.ballot,
                     commit: self.hard_state.chosen_index,
                     seq: 0,
+                    config: None,
                 });
             }
             // GC read rounds that outlived their TTL (lost acks, an unreachable
@@ -1185,15 +1304,31 @@ impl RawNode {
             if self.election_timeout != 0 {
                 self.quorum_elapsed += 1;
                 if self.quorum_elapsed >= self.election_timeout {
-                    if self.quorum_acked_by.len() >= self.quorum() {
+                    if self.quorum_acked_by.len() >= self.phase2_quorum() {
                         self.quorum_elapsed = 0;
                         self.quorum_acked_by.clear();
-                        self.quorum_acked_by.insert(me);
+                        if self.is_acceptor() {
+                            self.quorum_acked_by.insert(me);
+                        }
                     } else {
                         self.quorum_lost_step_downs += 1;
                         self.become_follower(None);
                     }
                 }
+            }
+            // A leader its own reconfiguration removed from the acceptor set
+            // (#122): it drives the change to completion — its inherited
+            // rounds decided, its recovery and repair closed — and then
+            // resigns, so an ordinary election lands leadership inside the
+            // new configuration (a node campaigns only as a member).
+            if self.role == NodeRole::Leader
+                && !self.is_acceptor()
+                && self.leader_recovery.is_none()
+                && self.repair_probe.is_none()
+                && self.proposer.is_empty()
+            {
+                self.non_member_step_downs = self.non_member_step_downs.saturating_add(1);
+                self.become_follower(None);
             }
         } else {
             self.election_elapsed += 1;
@@ -1230,15 +1365,21 @@ impl RawNode {
             } else {
                 let (ballot, from_slot, unanswered) = {
                     let probe = self.repair_probe.as_ref().expect("checked above");
-                    let unanswered: Vec<NodeId> = self
-                        .config
-                        .peers
+                    // The stragglers are the members of the prior
+                    // configurations the election covered — the Phase-1
+                    // addressee union — that have not answered their full
+                    // suffix.
+                    let mut unanswered: Vec<NodeId> = probe
+                        .prior
                         .iter()
-                        .copied()
+                        .flat_map(|c| c.members.iter().copied())
                         .filter(|p| *p != self.config.id && !probe.answered.contains(p))
                         .collect();
+                    unanswered.sort_unstable();
+                    unanswered.dedup();
                     (probe.ballot, probe.from_slot, unanswered)
                 };
+                let config = self.phase1_wire_config();
                 for to in unanswered {
                     self.pending_messages.push((
                         to,
@@ -1247,6 +1388,7 @@ impl RawNode {
                             from: self.config.id,
                             ballot,
                             from_slot,
+                            config: config.clone(),
                         },
                     ));
                 }
@@ -1334,7 +1476,7 @@ impl RawNode {
             .last()
             .and_then(|(slot, _, _)| slot.0.checked_add(1).map(Slot));
         for (slot, ballot, command) in pending {
-            self.broadcast(&Message::Accept {
+            self.broadcast_acceptors(&Message::Accept {
                 config_id: self.hard_state.config_id,
                 from: me,
                 ballot,
@@ -1343,6 +1485,179 @@ impl RawNode {
             });
         }
         self.assert_invariants();
+    }
+
+    /// Re-queue the open matchmaking request toward every matchmaker that has
+    /// not answered yet. A no-op on a node with no open matchmaking phase.
+    ///
+    /// **The driver is expected to call this on a steady cadence** while
+    /// [`RawNode::matchmaking_pending`] reports an open phase, so a request
+    /// or reply the transport lost does not stall the campaign until the
+    /// election timeout abandons it.
+    ///
+    /// **Skipping a call is always safe.** Re-sending is pure optimization,
+    /// exactly like [`RawNode::resend_pending`]: the matchmaker answers a
+    /// repeated request idempotently from its retained history (it registers
+    /// nothing twice), and a campaign that never completes its matchmaking is
+    /// simply abandoned at the next election timeout and retried at a higher
+    /// round. The deterministic simulation skips calls to reach exactly those
+    /// abandoned campaigns; production never skips.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
+    pub fn resend_matchmaking(&mut self) {
+        let Some(m) = self.matchmaking.as_ref() else {
+            return;
+        };
+        let request = MatchRequest::new(self.config.id, m.ballot, m.config.clone());
+        let unanswered: Vec<MatchmakerId> = self
+            .config
+            .matchmakers
+            .iter()
+            .copied()
+            .filter(|mm| !m.registered_by.contains(mm))
+            .collect();
+        for matchmaker in unanswered {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+        self.assert_invariants();
+    }
+
+    /// Whether a matchmaking phase is open — the driver's cue to pace
+    /// [`RawNode::resend_matchmaking`], consulted only where a re-send can
+    /// have an effect.
+    #[must_use]
+    pub fn matchmaking_pending(&self) -> bool {
+        self.matchmaking.is_some()
+    }
+
+    /// The open matchmaking phase, if any: its ballot, the configuration it
+    /// registers, and whether it was opened by a reconfiguration. A read view
+    /// for the driver's audit report.
+    #[must_use]
+    pub fn matchmaking(&self) -> Option<(Ballot, &AcceptorConfig, bool)> {
+        self.matchmaking
+            .as_ref()
+            .map(|m| (m.ballot, &m.config, m.reconfiguration))
+    }
+
+    /// Fold one matchmaker's answer into the open matchmaking phase — the
+    /// leader-side half of the matchmaker contract (#120). A reply for another
+    /// ballot, another node, or a matchmaker that already answered is ignored
+    /// whole (wire input, never asserted). Returns what the reply did, so the
+    /// driver can report the transition it caused.
+    ///
+    /// - `Registered`: the history is unioned and the watermark maxed; once a
+    ///   **quorum of matchmakers** has registered the ballot, `H_b` is
+    ///   computed (the union, filtered by the maximum watermark) and handed to
+    ///   Phase 1 through [`RawNode::start_phase1`] — no `Prepare` ever leaves
+    ///   before that instant (invariant 1). An ordinary campaign whose history
+    ///   names a configuration newer than the one it registered abandons the
+    ///   campaign and adopts that configuration instead (see
+    ///   `super::matchmaking`).
+    /// - `Refused`: the campaign is abandoned and this node steps back to
+    ///   follower; the refusal's payload is diagnostic only. A refused
+    ///   registration never becomes a leadership (invariant 4).
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
+    pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        let (matchmaker, to, ballot, answer) = matchmaking::split_reply(reply);
+        let me = self.config.id;
+        if to != me || !self.config.matchmakers.contains(&matchmaker) {
+            return MatchStep::Ignored;
+        }
+        let quorum = Matchmaking::quorum(self.config.matchmakers.len());
+        let step = {
+            let Some(m) = self.matchmaking.as_mut() else {
+                return MatchStep::Ignored;
+            };
+            if m.ballot != ballot {
+                return MatchStep::Ignored;
+            }
+            match answer {
+                Ok((history, watermark)) => {
+                    if !m.fold(matchmaker, history, watermark) {
+                        return MatchStep::Ignored;
+                    }
+                    let registered = m.registered_by.len();
+                    if registered < quorum {
+                        MatchStep::Registered {
+                            remaining: quorum - registered,
+                        }
+                    } else if let Some((newest, config)) = (!m.reconfiguration)
+                        .then(|| m.newer_than_registered())
+                        .flatten()
+                    {
+                        // Stale belief: adopt the newest configuration and
+                        // abandon this campaign.
+                        self.acceptors = config;
+                        self.acceptors_since = newest;
+                        self.become_follower(None);
+                        MatchStep::StaleConfiguration { newest }
+                    } else {
+                        let prior = m.prior();
+                        let watermark = m.watermark;
+                        let config = m.config.clone();
+                        // The matchmaking → Phase 1 boundary. The registered
+                        // quorum is restated here, at the one place Phase 1
+                        // can open on a matchmaker deployment.
+                        assert!(
+                            registered >= quorum,
+                            "Phase 1 opens only once a matchmaker quorum registered the ballot"
+                        );
+                        assert!(
+                            prior
+                                .iter()
+                                .all(|c| c.members.iter().all(|n| self.in_pool(*n))),
+                            "every prior configuration is drawn from the node pool"
+                        );
+                        self.matchmaking = None;
+                        self.start_phase1(config, prior.clone());
+                        MatchStep::Completed {
+                            prior,
+                            watermark,
+                            registered_by: registered,
+                        }
+                    }
+                }
+                Err(refusal) => {
+                    self.become_follower(None);
+                    MatchStep::Refused(refusal)
+                }
+            }
+        };
+        // Post-step restatements of invariants 1 and 4: a refused or stale
+        // campaign left nothing Phase-1-shaped behind, and a completed one
+        // closed the matchmaking phase before opening Phase 1.
+        match &step {
+            MatchStep::Refused(_) | MatchStep::StaleConfiguration { .. } => {
+                assert!(
+                    self.role == NodeRole::Follower,
+                    "a refused registration never becomes a leadership"
+                );
+                assert!(
+                    self.election.is_none() && self.matchmaking.is_none(),
+                    "an abandoned campaign leaves no phase open"
+                );
+            }
+            MatchStep::Completed { .. } => {
+                assert!(
+                    self.matchmaking.is_none(),
+                    "a completed matchmaking phase is closed"
+                );
+            }
+            MatchStep::Registered { .. } | MatchStep::Ignored => {}
+        }
+        self.assert_invariants();
+        step
     }
 
     /// Advance the next bounded page of deferred chosen-prefix application or
@@ -1496,10 +1811,53 @@ impl RawNode {
 
     // ---- accessors --------------------------------------------------------
 
-    /// This node's configuration (identity + membership).
+    /// This node's static configuration (identity, bootstrap membership, pool
+    /// and matchmaker set).
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The acceptor configuration in force for the highest ballot this node
+    /// has seen registered: on a leader, the one its Phase 2 quorums are
+    /// counted over; on a follower, its belief about the latest one. The
+    /// bootstrap configuration on plain Multi-Paxos, always.
+    #[must_use]
+    pub fn acceptors(&self) -> &AcceptorConfig {
+        &self.acceptors
+    }
+
+    /// The ballot [`RawNode::acceptors`] was registered under
+    /// (`Ballot::zero()` for the bootstrap configuration).
+    #[must_use]
+    pub fn acceptors_since(&self) -> Ballot {
+        self.acceptors_since
+    }
+
+    /// Whether this node is a member of its active configuration
+    /// ([`RawNode::acceptors`]) — a real acceptor whose own vote counts.
+    #[must_use]
+    pub fn is_acceptor(&self) -> bool {
+        self.acceptors.contains(self.config.id)
+    }
+
+    /// Monotone campaign-phase counters this incarnation, for the driver's
+    /// audit report: `(non-member campaigns skipped, non-member step-downs)`.
+    #[must_use]
+    pub fn membership_counters(&self) -> (u64, u64) {
+        (
+            self.non_member_campaigns_skipped,
+            self.non_member_step_downs,
+        )
+    }
+
+    /// How many matchmaker disagreements (two configurations reported at one
+    /// ballot) the open matchmaking phase has unioned so far — 0 when none is
+    /// open. Observability only: the union keeps both, so safety never
+    /// depends on the count.
+    #[must_use]
+    pub fn matchmaking_disagreements(&self) -> u64 {
+        self.matchmaking.as_ref().map_or(0, |m| m.disagreements)
     }
 
     /// The current durable scalars (promised ballot + chosen index).
@@ -1727,6 +2085,10 @@ impl RawNode {
         &self.pending_read_states
     }
 
+    pub(crate) fn pending_match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
+        &self.pending_match_requests
+    }
+
     pub(crate) fn pending_recovery_batch(&self) -> Option<(usize, usize, usize)> {
         self.pending_recovery_batch
     }
@@ -1737,6 +2099,7 @@ impl RawNode {
         self.pending_committed.clear();
         self.pending_snapshot_offers.clear();
         self.pending_read_states.clear();
+        self.pending_match_requests.clear();
         self.pending_recovery_batch = None;
     }
 }

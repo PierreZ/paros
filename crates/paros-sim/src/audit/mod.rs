@@ -65,9 +65,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, EdgeRejection, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal,
-    MatchmakerId, Message, NodeId, PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
-    StorageFaultDecision, StorageRecord, command_hash,
+    AcceptorConfig, Audit, Ballot, Deployment, EdgeRejection, HANDOFF_BATCH, Handoff,
+    LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerId, Message, NodeId, PROMISE_BATCH,
+    ReconfigureResult, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
+    StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -588,6 +589,41 @@ impl<T: Clone> Clone for NodeAudit<T> {
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
+
+    /// Matchmaking invariant 1 (#120): on a deployment with matchmakers, no
+    /// `Prepare` leaves a node for a ballot whose matchmaking this fold has
+    /// not seen close with a quorum, and it carries exactly the registered
+    /// configuration. The re-sent probe `Prepare`s of a leader's repair probe
+    /// run at the leadership ballot, which was licensed the same way. On plain
+    /// Multi-Paxos a `Prepare` carries no configuration at all.
+    fn check_prepare_licence(
+        &self,
+        node: NodeId,
+        to: NodeId,
+        ballot: Ballot,
+        config: Option<&AcceptorConfig>,
+    ) {
+        let st = self.state();
+        if st.matchmaker.has_matchmakers() {
+            assert_always!(
+                st.matchmaker.phase1_licensed(node.0, ballot),
+                "matchmaking: no Prepare leaves before a matchmaker quorum registered its ballot",
+                { "node" => node.0, "round" => ballot.round, "to" => to.0 }
+            );
+            let registered = st.matchmaker.registered_config(ballot);
+            assert_always!(
+                config.is_some_and(|c| registered == Some(c)),
+                "matchmaking: a Prepare carries the configuration registered for its ballot",
+                { "node" => node.0, "round" => ballot.round }
+            );
+        } else {
+            assert_always!(
+                config.is_none(),
+                "plain: a Prepare on a deployment without matchmakers carries no configuration",
+                { "node" => node.0, "round" => ballot.round }
+            );
+        }
+    }
     pub(crate) fn new(time: T, world: Arc<AuditWorld>) -> Self {
         Self { time, world }
     }
@@ -870,12 +906,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.observe_applied_index(node.0, slot.0);
     }
 
-    fn sent(&self, node: NodeId, _to: NodeId, msg: &Message) {
+    fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {
         *self
             .state()
             .sent_kinds
             .entry(message_kind(msg))
             .or_default() += 1;
+        if let Message::Prepare { ballot, config, .. } = msg {
+            self.check_prepare_licence(node, to, *ballot, config.as_ref());
+        }
         if msg.config_id().is_some() {
             let mut st = self.state();
             reach_once!(
@@ -984,9 +1023,41 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, round = won.round))]
-    fn elected(&self, node: NodeId, won: Ballot, promised: Ballot, _gap_fills: u64) {
+    fn elected(
+        &self,
+        node: NodeId,
+        won: Ballot,
+        promised: Ballot,
+        _gap_fills: u64,
+        config: &AcceptorConfig,
+    ) {
         let now = self.now_ms();
         let mut st = self.state();
+        // Matchmaking invariants 4 and 5 (#120): a leadership on a matchmaker
+        // deployment stands on a campaign that closed with a quorum and was
+        // never refused, and runs Phase 2 under exactly the configuration
+        // some matchmaker durably registered for the ballot. On plain
+        // Multi-Paxos the configuration is the bootstrap membership, always.
+        if st.matchmaker.has_matchmakers() {
+            assert_always!(
+                st.matchmaker.phase1_licensed(node.0, won),
+                "matchmaking: a refused or unregistered ballot never becomes a leadership",
+                { "node" => node.0, "round" => won.round }
+            );
+            let registered = st.matchmaker.registered_config(won);
+            assert_always!(
+                registered == Some(config),
+                "matchmaking: a leader runs Phase 2 under the configuration registered for its ballot",
+                { "node" => node.0, "round" => won.round }
+            );
+        } else {
+            assert_always!(
+                st.bootstrap.as_ref() == Some(config),
+                "plain: a leader on a deployment without matchmakers keeps the bootstrap configuration",
+                { "node" => node.0, "round" => won.round }
+            );
+        }
+        st.bind_config(won, config);
         if let Some(prev) = st.leader_round.insert(node.0, won.round) {
             assert_always!(
                 won.round > prev,
@@ -1289,16 +1360,31 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         promised: Ballot,
         chosen_index: Option<Slot>,
-        cluster_size: u64,
+        deployment: &Deployment,
         accepted: &[(Slot, Ballot, u64)],
     ) {
         let now = self.now_ms();
         let mut st = self.state();
         st.booted.insert(node.0);
-        st.cluster_size = Some(
-            st.cluster_size
-                .map_or(cluster_size, |n| n.max(cluster_size)),
+        // One shared deployment per run: every node's durable configuration
+        // names the same bootstrap membership, pool and matchmaker set.
+        let bootstrap = st
+            .bootstrap
+            .get_or_insert_with(|| deployment.bootstrap.clone())
+            .clone();
+        assert_always!(
+            bootstrap == deployment.bootstrap,
+            "every node derives the same bootstrap configuration",
+            { "node" => node.0, "members" => deployment.bootstrap.members.len() }
         );
+        let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
+        let known = st.pool.get_or_insert_with(|| pool.clone()).clone();
+        assert_always!(
+            known == pool,
+            "every node derives the same node pool",
+            { "node" => node.0, "pool" => pool.len() }
+        );
+        st.matchmaker.note_deployment(deployment.matchmakers.len());
         st.observe_promise(node.0, promised);
         // The boot report is the incarnation edge: swap in the faulty
         // classifications staged by *this* boot's scan and drop the previous
@@ -1652,7 +1738,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
         if matches!(
             reply,
-            paros::Reply::ProposeRedirect | paros::Reply::ReadRedirect | paros::Reply::Compact
+            paros::Reply::ProposeRedirect
+                | paros::Reply::ReadRedirect
+                | paros::Reply::Compact
+                | paros::Reply::Reconfigure
         ) {
             // Nothing committed behind these: the client sees a deadline and
             // retries blind. No dedup edge to track, only the reach.
@@ -1971,7 +2060,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
-        registry: &[(Ballot, u64)],
+        registry: &[(Ballot, AcceptorConfig)],
         gc_watermark: Ballot,
     ) {
         self.state()
@@ -1979,10 +2068,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .recovered(matchmaker, registry, gc_watermark);
     }
 
-    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: u64) {
-        self.state()
-            .matchmaker
-            .registered(matchmaker, ballot, config);
+    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: &AcceptorConfig) {
+        let mut st = self.state();
+        st.matchmaker.registered(matchmaker, ballot, config);
+        // The per-ballot configuration the quorum oracles count over: bound
+        // at its durable registration, before any leader could exercise it.
+        st.bind_config(ballot, config);
     }
 
     fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {
@@ -1994,14 +2085,120 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn match_replied(
         &self,
         matchmaker: MatchmakerId,
-        _to: NodeId,
+        to: NodeId,
         ballot: Ballot,
-        history: &[(Ballot, u64)],
+        history: &[(Ballot, AcceptorConfig)],
         gc_watermark: Ballot,
     ) {
         self.state()
             .matchmaker
-            .replied(matchmaker, ballot, history, gc_watermark);
+            .replied(matchmaker, to, ballot, history, gc_watermark);
+    }
+
+    // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
+
+    fn matchmaking_started(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        config: &AcceptorConfig,
+        reconfiguration: bool,
+    ) {
+        self.state()
+            .matchmaker
+            .campaign_started(node, ballot, config, reconfiguration);
+    }
+
+    fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {
+        self.state()
+            .matchmaker
+            .request_sent(node, matchmaker, ballot);
+    }
+
+    fn matchmaking_resend_skipped(&self, _node: NodeId) {
+        self.state().matchmaker.resend_skipped();
+    }
+
+    fn match_registered_by(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        remaining: usize,
+    ) {
+        self.state()
+            .matchmaker
+            .registered_by(node, matchmaker, ballot, remaining);
+    }
+
+    fn matchmaking_completed(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        prior: &[AcceptorConfig],
+        watermark: Ballot,
+        registered_by: usize,
+        disagreements: u64,
+    ) {
+        let mut st = self.state();
+        st.matchmaker
+            .completed(node, ballot, prior, watermark, registered_by, disagreements);
+        st.note_prior(node.0, ballot, prior);
+    }
+
+    fn matchmaking_refused(
+        &self,
+        node: NodeId,
+        _matchmaker: MatchmakerId,
+        ballot: Ballot,
+        refusal: MatchRefusal,
+    ) {
+        self.state()
+            .matchmaker
+            .campaign_refused(node, ballot, refusal);
+    }
+
+    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, _newest: Ballot) {
+        self.state().matchmaker.campaign_stale(node, ballot);
+    }
+
+    fn campaign_skipped_non_member(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.non_member_campaign_skipped,
+            "reconfiguration: a node outside the acceptor set declines to campaign"
+        );
+    }
+
+    fn non_member_leader_resigned(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.non_member_leader_resigned,
+            "reconfiguration: a leader its own reconfiguration removed resigns"
+        );
+    }
+
+    fn reconfigure_acked(&self, node: NodeId, _members: &[NodeId], result: ReconfigureResult) {
+        let mut st = self.state();
+        match result {
+            ReconfigureResult::Started(_) => {
+                assert_always!(
+                    st.matchmaker.has_matchmakers(),
+                    "reconfiguration: a deployment without matchmakers never starts one",
+                    { "node" => node.0 }
+                );
+                reach_once!(
+                    st.reconfigure_started,
+                    "reconfiguration: a reconfiguration request is started"
+                );
+            }
+            ReconfigureResult::Refused(_) | ReconfigureResult::NotLeader(_) => {
+                reach_once!(
+                    st.reconfigure_refused,
+                    "reconfiguration: a reconfiguration request is refused or redirected"
+                );
+            }
+        }
     }
 
     fn match_refused(

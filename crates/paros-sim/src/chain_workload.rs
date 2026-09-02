@@ -19,7 +19,6 @@ use paros::{
 
 use crate::audit::{ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
-use crate::matchmaking::MatchmakingClient;
 use crate::{CHAOS_DURATION_MS, DigestSink};
 
 const PROPOSE: u8 = 0;
@@ -33,12 +32,15 @@ const COMPACT_STORM: u8 = 7;
 /// The PUBLIC read-index RPC (the driver's leadership-confirmed linearizable
 /// read), as opposed to [`READ_STATE`]'s internal inspect probe.
 const READ_INDEX: u8 = 8;
-/// A matchmaking request to every matchmaker of a seed that deploys them —
-/// fresh, duplicate, conflicting or stale by the step's policy draw (see
-/// `crate::matchmaking`). A no-op on a plain seed.
+/// **Retired.** Once a client-side stand-in for the leader's matchmaking
+/// phase (#119); superseded by the real phase in `paros_core::RawNode`
+/// (#120), which a client must not race — a client-minted registration above
+/// the leader's round would refuse every campaign. The id stays reserved so
+/// the alphabet's ids never shift; the operation is a no-op.
 const MATCHMAKE: u8 = 9;
-/// Raise the matchmakers' GC watermark to a ballot this client saw
-/// registered, then ask below it. A no-op on a plain seed.
+/// **Retired** with [`MATCHMAKE`]: raising the GC watermark from a client is
+/// unsafe once leaders depend on the registry (the GC protocol is #123). A
+/// no-op that keeps its id.
 const MATCH_GC: u8 = 10;
 const OP_COUNT: u8 = 11;
 
@@ -142,7 +144,7 @@ impl ChainConfig {
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
-            // MATCHMAKE, MATCH_GC
+            // MATCHMAKE (retired), MATCH_GC (retired)
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -153,8 +155,8 @@ impl ChainConfig {
                 buggify_knob!(11_u64, 0_u64..41_u64),
                 buggify_knob!(13_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
-                buggify_knob!(10_u64, 0_u64..41_u64),
-                buggify_knob!(4_u64, 0_u64..41_u64),
+                0,
+                0,
             ],
         }
     }
@@ -448,7 +450,7 @@ impl Workload for ChainWorkload {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // The seed's deployment map: the acceptor pool this client proposes
-        // to and the matchmakers it matchmakes with (none on a plain seed).
+        // to.
         let deployment = crate::roles::deployment(ctx.topology());
         let servers = deployment.acceptors().to_vec();
         if servers.is_empty() {
@@ -492,20 +494,6 @@ impl Workload for ChainWorkload {
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-        // The matchmaking side of this client, on a seed that deploys
-        // matchmakers: the stand-in proposer for the leader's matchmaking
-        // phase, with its own channels and its own client-side model.
-        let mut matchmaking = if deployment.has_matchmakers() {
-            Some(MatchmakingClient::new(
-                ctx,
-                deployment.matchmakers(),
-                deployment.acceptors(),
-                client_id,
-                &channel_config,
-            )?)
-        } else {
-            None
-        };
         self.history.set_client(client_id);
         let audit = audit_world(ctx.state());
         let now_ms = {
@@ -1430,24 +1418,9 @@ impl Workload for ChainWorkload {
                         () = shutdown.cancelled() => {}
                     }
                 }
-                MATCHMAKE => {
-                    if let Some(matchmaking) = matchmaking.as_mut() {
-                        matchmaking
-                            .matchmake(
-                                ctx,
-                                raw_policy,
-                                Duration::from_millis(config.request_timeout_ms),
-                            )
-                            .await;
-                    }
-                }
-                MATCH_GC => {
-                    if let Some(matchmaking) = matchmaking.as_mut() {
-                        matchmaking
-                            .garbage_collect(ctx, Duration::from_millis(config.request_timeout_ms))
-                            .await;
-                    }
-                }
+                // Retired ids (see the constants): no-ops that keep the
+                // alphabet stable.
+                MATCHMAKE | MATCH_GC => {}
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }

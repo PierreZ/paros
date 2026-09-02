@@ -1,6 +1,7 @@
 //! The [`Ready`] borrow guard: one batch of work, and the compile-time gate that
 //! enforces "one batch in flight".
 
+use crate::matchmaker::{MatchRequest, MatchmakerId};
 use crate::message::Message;
 use crate::node::{RawNode, ReadState};
 use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
@@ -116,6 +117,17 @@ impl<'a> Ready<'a> {
     #[must_use]
     pub fn recovery_batch(&self) -> Option<(usize, usize, usize)> {
         self.node.pending_recovery_batch()
+    }
+
+    /// Matchmaking requests to send this batch, one per addressed matchmaker
+    /// (the leader-side half of the matchmaker contract, #120). Sent **after**
+    /// step 1 like every message — the candidate's promise raise travels in
+    /// the same batch — over the matchmaker RPC service, never the peer wire;
+    /// the answers come back through [`RawNode::on_match_reply`]. Always empty
+    /// on plain Multi-Paxos.
+    #[must_use]
+    pub fn match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
+        self.node.pending_match_requests()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

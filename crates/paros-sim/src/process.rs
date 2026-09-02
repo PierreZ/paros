@@ -158,8 +158,10 @@ async fn run_acceptor(
     my_ip: &str,
     perturb: bool,
 ) -> SimulationResult<()> {
-    // The cluster membership is the map's acceptor list, in `NodeId` order —
-    // never "every process in the topology".
+    // The node pool is the map's acceptor list, in `NodeId` order — never
+    // "every process in the topology" — and the bootstrap membership is the
+    // whole pool (a reconfiguration draws from it). The matchmaker set is the
+    // map's matchmaker list, empty on a plain seed.
     let members = deployment
         .acceptors()
         .iter()
@@ -169,9 +171,25 @@ async fn run_acceptor(
                 .map(|addr| (NodeId(u64::try_from(i).expect("node index fits u64")), addr))
         })
         .collect::<SimulationResult<Vec<_>>>()?;
+    let matchmakers = deployment
+        .matchmakers()
+        .iter()
+        .enumerate()
+        .map(|(i, ip)| {
+            parse_addr(ip).map(|addr| {
+                (
+                    MatchmakerId(u64::try_from(i).expect("matchmaker index fits u64")),
+                    addr,
+                )
+            })
+        })
+        .collect::<SimulationResult<Vec<_>>>()?;
+    let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
     let config = Config {
         id: self_rank,
-        peers: members.iter().map(|(id, _)| *id).collect(),
+        peers: pool.clone(),
+        nodes: pool,
+        matchmakers: matchmakers.iter().map(|(id, _)| *id).collect(),
         ..Config::default()
     };
 
@@ -267,6 +285,7 @@ async fn run_acceptor(
             storage,
             parse_addr(my_ip)?,
             members.clone(),
+            matchmakers.clone(),
             tunables,
             ctx.shutdown().clone(),
             &hooks,

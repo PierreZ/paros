@@ -80,11 +80,6 @@ impl Deployment {
     pub(crate) fn matchmakers(&self) -> &[String] {
         &self.matchmakers
     }
-
-    /// Whether this seed deploys matchmakers at all.
-    pub(crate) fn has_matchmakers(&self) -> bool {
-        !self.matchmakers.is_empty()
-    }
 }
 
 fn sort_ips(ips: &mut Vec<String>) {
@@ -135,7 +130,7 @@ mod tests {
             vec!["10.0.2.2".to_string(), "10.0.2.1".to_string()],
         );
         assert_eq!(map.acceptors(), pool(4).as_slice());
-        assert!(map.has_matchmakers());
+        assert_eq!(map.matchmakers().len(), 2);
         assert_eq!(map.role_of("10.0.1.3"), Some(Role::Acceptor(NodeId(2))));
         assert_eq!(
             map.role_of("10.0.2.2"),
@@ -148,7 +143,7 @@ mod tests {
     #[test]
     fn an_empty_matchmaker_group_is_the_plain_deployment() {
         let map = Deployment::from_groups(pool(3), Vec::new());
-        assert!(!map.has_matchmakers());
+        assert!(map.matchmakers().is_empty());
         assert_eq!(map.acceptors().len(), 3);
     }
 }

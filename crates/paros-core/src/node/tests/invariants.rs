@@ -104,6 +104,7 @@ fn a_nacked_accept_leaves_the_accepted_log_and_the_batch_untouched() {
         from: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
+        config: None,
     });
     drain(&mut n);
     n.step(accept(2, ballot(3, 2), 0, ucmd(1, 1, 10)));

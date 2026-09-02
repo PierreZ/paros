@@ -30,6 +30,7 @@
 //! |---|---|---|
 //! | `crash_at` (per seam) | audit `crashed` / `matchmaker_crashed`, one per seam | boot re-report checks in audit `recovered` / `matchmaker_recovered` |
 //! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
+//! | `skip_matchmaking_resend` | audit `matchmaking_resend_skipped` | "matchmaking: a campaign closes with a matchmaker quorum" |
 //! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
 //! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
 //! | `shortest_election_timeout` / `longest_election_timeout` | audit `election_timeout_extreme` / inline | "a leader is elected" |
@@ -122,6 +123,14 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // Consulted only with accepts pending; gated in the audit
         // (`resend_skipped`).
         self.active() && buggify_with_prob!(0.95)
+    }
+
+    fn skip_matchmaking_resend(&self) -> bool {
+        // Consulted only when a matchmaking re-send is due; gated in the
+        // audit (`matchmaking_resend_skipped`). Generous: a skipped beat only
+        // stretches an open campaign, and the state worth reaching is the
+        // campaign the election timeout abandons mid-matchmaking.
+        self.active() && buggify_with_prob!(0.5)
     }
 
     fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
@@ -453,6 +462,10 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // requester's retry is the same request again, the idempotent
             // re-answer path. Gated in the audit (`match_reply_dropped`).
             paros::Reply::Match => buggify_with_prob!(0.20),
+            // A lost reconfiguration ack: the client re-asks and meets the
+            // change already under way (refused `not_leader`, then
+            // `unchanged`).
+            paros::Reply::Reconfigure => buggify_with_prob!(0.10),
         }
     }
 

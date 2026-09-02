@@ -139,6 +139,11 @@ impl NodeShape {
             peer_inbox_capacity: buggify_knob!(1024_usize, 1_usize..65_usize),
             peer_queue_capacity,
             delivery_batch,
+            // The matchmaking re-send cadence: from every tick (floor 1) to a
+            // handful of election-timeout bases. A slow cadence stretches
+            // every campaign that lost a reply; the election timeout still
+            // bounds it.
+            match_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
         };
         // The crash bias is a plain multiplier with no floor to defend: at
         // its extreme the seams crash on one batch in three inside the

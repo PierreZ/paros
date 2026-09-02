@@ -195,6 +195,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
         ballot: b,
         commit: None,
         seq: 0,
+        config: None,
     });
     nodes[0].resend_pending();
     let q = drain(&mut nodes[0]);
@@ -377,6 +378,8 @@ fn restart_rebuilds_state_from_hard_state() {
             id: NodeId(1),
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
             quorum_system: crate::state::QuorumSystem::Majority,
+            nodes: Vec::new(),
+            matchmakers: Vec::new(),
         },
         first_slot: Slot(0),
         faulty: Vec::new(),
