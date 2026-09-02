@@ -236,7 +236,7 @@ id (`node = self.config.id.0`, `node = self_id`) and a message's coordinates (`f
 no `err` (a seam crash is a deliberate exit, not an error to log). Spans nest under moonpool's
 `process`/`workload` spans and the sim layer resolves an event's source by walking outward, so an
 `#[instrument]` never changes what the timeline captures; and a span draws no randomness, so it
-never moves a seed. Nor does a span slow the sweep: since the moonpool pin at `3a6d9d2` the sim
+never moves a seed. Nor does a span slow the sweep: since the moonpool pin at `3a73c8e` the sim
 subscriber is floored at `INFO`, so a `debug`/`trace` span is refused before the registry allocates
 it — one level compare per call. Spans, like events, are for humans: nothing reads them back.
 
