@@ -1380,38 +1380,30 @@ impl Workload for ChainWorkload {
             self.adversarial.duplicate_across_leader_change,
             "a duplicate is suppressed across a leader change"
         );
-        assert_sometimes!(
-            self.adversarial.dual_submitted,
-            "chain: concurrent dual-submit is exercised"
-        );
-        assert_sometimes!(
-            self.adversarial.compact_storm_modes[0],
-            "chain: compact-storm overask is exercised"
-        );
-        assert_sometimes!(
-            self.adversarial.compact_storm_modes[1],
-            "chain: compact-storm follower targeting is exercised"
-        );
-        assert_sometimes!(
-            self.adversarial.compact_storm_modes[2],
-            "chain: compact-storm stale-leader targeting is exercised"
-        );
-        assert_sometimes!(
-            self.adversarial.payload_classes[0],
-            "chain: an empty payload is acknowledged"
-        );
-        assert_sometimes!(
-            self.adversarial.payload_classes[1],
-            "chain: a one-byte payload is acknowledged"
-        );
-        assert_sometimes!(
-            self.adversarial.payload_classes[2],
-            "chain: a boundary-sized payload is acknowledged"
-        );
-        assert_sometimes!(
-            self.adversarial.payload_classes[3],
-            "chain: a large payload is acknowledged"
-        );
+        if self.adversarial.dual_submitted {
+            assert_reachable!("chain: concurrent dual-submit is exercised");
+        }
+        if self.adversarial.compact_storm_modes[0] {
+            assert_reachable!("chain: compact-storm overask is exercised");
+        }
+        if self.adversarial.compact_storm_modes[1] {
+            assert_reachable!("chain: compact-storm follower targeting is exercised");
+        }
+        if self.adversarial.compact_storm_modes[2] {
+            assert_reachable!("chain: compact-storm stale-leader targeting is exercised");
+        }
+        if self.adversarial.payload_classes[0] {
+            assert_reachable!("chain: an empty payload is acknowledged");
+        }
+        if self.adversarial.payload_classes[1] {
+            assert_reachable!("chain: a one-byte payload is acknowledged");
+        }
+        if self.adversarial.payload_classes[2] {
+            assert_reachable!("chain: a boundary-sized payload is acknowledged");
+        }
+        if self.adversarial.payload_classes[3] {
+            assert_reachable!("chain: a large payload is acknowledged");
+        }
         assert_sometimes!(
             self.adversarial.read_index_committed,
             "chain: a committed read-index observes the applied frontier"

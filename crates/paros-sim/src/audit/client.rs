@@ -169,10 +169,9 @@ impl LinHistory {
         leader_change_ms: Option<u64>,
     ) {
         let multi_client = committed_clients.len() > 1;
-        assert_sometimes!(
-            multi_client,
-            "a run drives concurrent clients against one register"
-        );
+        if multi_client {
+            assert_reachable!("a run drives concurrent clients against one register");
+        }
         if multi_client {
             assert_reachable!("a run drives concurrent clients against one register");
         }

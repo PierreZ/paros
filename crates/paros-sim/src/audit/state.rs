@@ -379,10 +379,9 @@ impl AuditState {
             "leadership turns over and the cluster recovers"
         );
         assert_sometimes!(self.any_leader, "a leader is elected");
-        assert_sometimes!(
-            self.config_tagged_protocol_message,
-            "a protocol message carries a configuration identity"
-        );
+        if self.config_tagged_protocol_message {
+            assert_reachable!("a protocol message carries a configuration identity");
+        }
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -393,7 +392,9 @@ impl AuditState {
         // actually visited. Every node boots at start, so the booted set is
         // the drawn topology.
         let n = self.booted.len();
-        assert_sometimes!(n >= 5, "a run drives a five-node cluster");
+        if n >= 5 {
+            assert_reachable!("a run drives a five-node cluster");
+        }
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
         // The #101 coupling's other half: compaction implies a decided
@@ -453,75 +454,63 @@ impl AuditState {
     /// the hooks are still connected, since perturbations that stopped firing
     /// would leave a sweep looking green while quietly testing less.
     pub(super) fn check_driver_hook_gates(&self) {
-        assert_sometimes!(
-            self.crashed_after_sync,
-            "the driver crashes after sync and before sending a batch"
-        );
-        assert_sometimes!(
-            self.crashed_before_sync,
-            "the driver crashes before syncing a staged batch"
-        );
+        if self.crashed_after_sync {
+            assert_reachable!("the driver crashes after sync and before sending a batch");
+        }
+        if self.crashed_before_sync {
+            assert_reachable!("the driver crashes before syncing a staged batch");
+        }
         assert_sometimes!(
             self.snapshot_offered,
             "a snapshot offer enters the driver's common outbound path"
         );
-        assert_sometimes!(
-            self.shortest_timeout,
-            "the driver selects the shortest valid election timeout"
-        );
-        assert_sometimes!(
-            self.resend_skipped,
-            "the driver skips a pending accept re-send"
-        );
-        assert_sometimes!(self.resigned, "the driver voluntarily resigns leadership");
-        assert_sometimes!(
-            self.dropped_accept,
-            "the driver drops one isolated accept at the send seam"
-        );
-        assert_sometimes!(
-            self.dropped_election,
-            "the driver drops an election message at the send seam"
-        );
-        assert_sometimes!(
-            self.dropped_commit,
-            "the driver drops a commit at the send seam"
-        );
-        assert_sometimes!(
-            self.dropped_accepted,
-            "the driver drops an accepted ack at the send seam"
-        );
-        assert_sometimes!(
-            self.dropped_heartbeat,
-            "the driver drops a heartbeat at the send seam"
-        );
-        assert_sometimes!(
-            self.dropped_repair,
-            "the driver drops a repair message at the send seam"
-        );
-        assert_sometimes!(
-            self.crashed_after_apply,
-            "the driver crashes after applying a batch and before its application fsync"
-        );
-        assert_sometimes!(
-            self.duplicated_any,
-            "the driver duplicates a message at the send seam"
-        );
-        assert_sometimes!(
-            self.duplicated_quorum_kind,
-            "the driver duplicates a quorum-counting message at the send seam"
-        );
-        assert_sometimes!(
-            self.duplicated_commit,
-            "the driver duplicates a commit at the send seam"
-        );
-        assert_sometimes!(
-            self.duplicated_repair,
-            "the driver duplicates a repair message at the send seam"
-        );
-        assert_sometimes!(
-            self.reply_dropped,
-            "a committed client reply is dropped at the reply seam"
-        );
+        if self.shortest_timeout {
+            assert_reachable!("the driver selects the shortest valid election timeout");
+        }
+        if self.resend_skipped {
+            assert_reachable!("the driver skips a pending accept re-send");
+        }
+        if self.resigned {
+            assert_reachable!("the driver voluntarily resigns leadership");
+        }
+        if self.dropped_accept {
+            assert_reachable!("the driver drops one isolated accept at the send seam");
+        }
+        if self.dropped_election {
+            assert_reachable!("the driver drops an election message at the send seam");
+        }
+        if self.dropped_commit {
+            assert_reachable!("the driver drops a commit at the send seam");
+        }
+        if self.dropped_accepted {
+            assert_reachable!("the driver drops an accepted ack at the send seam");
+        }
+        if self.dropped_heartbeat {
+            assert_reachable!("the driver drops a heartbeat at the send seam");
+        }
+        if self.dropped_repair {
+            assert_reachable!("the driver drops a repair message at the send seam");
+        }
+        if self.crashed_after_apply {
+            assert_reachable!(
+                "the driver crashes after applying a batch and before its application fsync"
+            );
+        }
+        if self.duplicated_any {
+            assert_reachable!("the driver duplicates a message at the send seam");
+        }
+        if self.duplicated_quorum_kind {
+            assert_reachable!("the driver duplicates a quorum-counting message at the send seam");
+        }
+        if self.duplicated_commit {
+            assert_reachable!("the driver duplicates a commit at the send seam");
+        }
+        if self.duplicated_repair {
+            assert_reachable!("the driver duplicates a repair message at the send seam");
+        }
+        if self.reply_dropped {
+            assert_reachable!("a committed client reply is dropped at the reply seam");
+        }
         assert_sometimes!(
             self.dedup_after_dropped_reply,
             "a committed proposal ack is lost and the retry takes the dedup path"
@@ -552,10 +541,9 @@ impl AuditState {
     /// two rare draws is what makes a sweep spend its whole seed budget chasing
     /// one bit, so those are recorded when they happen and never demanded.
     pub(super) fn check_handoff_gates(&self) {
-        assert_sometimes!(
-            self.handoff_relinquished,
-            "a leader cooperatively hands its authority on"
-        );
+        if self.handoff_relinquished {
+            assert_reachable!("a leader cooperatively hands its authority on");
+        }
         assert_sometimes!(
             self.handoff_installed,
             "a successor installs a transferred authority"
@@ -564,10 +552,9 @@ impl AuditState {
             self.handoff_streamed_without_phase1,
             "a handed-over authority continues Phase 2 without another Phase 1"
         );
-        assert_sometimes!(
-            self.handoff_carried_tail,
-            "a handoff carries accepted-but-unchosen work"
-        );
+        if self.handoff_carried_tail {
+            assert_reachable!("a handoff carries accepted-but-unchosen work");
+        }
     }
 
     /// A node's promised ballot is monotonic — it never decreases, including
