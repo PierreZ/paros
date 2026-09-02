@@ -39,15 +39,20 @@ oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
 **The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-five node cluster of `NodeProcess::chaotic()` under every moonpool fault plus the driver
+three-to-six process pool of `NodeProcess::chaotic()` under every moonpool fault plus the driver
 hooks and the disk's fault coins, driven by one to three `ChainWorkload` clients whose every
 tunable is a `buggify_knob!`; the *corpus* is a scripted three-node cluster with every fault a
 targeted injection (`NodeProcess::scripted()`, kills and restarts through moonpool's
-`fault_factory`) and an analytically known outcome per mask. Every run is judged by the same two
+`fault_factory`) and an analytically known outcome per mask. Which process plays which role is
+the **deployment/role map** (`paros_sim::roles`, factory-created per seed, published on the
+`StateHandle` beside the storage world): membership is never "every process in the topology" but
+the map's acceptor list, and the map's matchmaker list is a per-seed `buggify_knob!` draw whose
+default — no matchmakers, every process an acceptor — is the plain Multi-Paxos deployment and
+the shape of every existing axis (the corpus never draws). Every run is judged by the same two
 things: the client's own history (`ClientHistory`, linearizability and sequential-client
 consistency) and the shared `AuditWorld` (protocol safety, the application state machine, the
-storage gates, and one convergence claim at the end of the recovery tail). There is no third
-workload, no per-scenario process type, and no check that reads a trace.
+storage gates, the matchmaker registry, and one convergence claim at the end of the recovery
+tail). There is no third workload, no per-scenario process type, and no check that reads a trace.
 
 **Pinned seeds are not a regression mechanism.** A seed does not name a scenario, it names a
 *draw schedule*, and every randomness draw the tree gains or loses — a new BUGGIFY location's
@@ -72,7 +77,10 @@ the commit, and let it go; it is evidence, not an artifact to keep.
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
 operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,
 `DUP_REPROPOSE=5`, `DUAL_SUBMIT=6`, `COMPACT_STORM=7`, `READ_INDEX=8` (the public
-leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe).
+leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe), `MATCHMAKE=9` (a
+matchmaking request — fresh, duplicate, conflicting, or stale — to every matchmaker of a seed
+that deploys them; a no-op otherwise), `MATCH_GC=10` (raise the matchmakers' GC watermark, then
+ask below it).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
@@ -450,19 +458,23 @@ Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
-- `crates/paros-core/` — sans-IO Multi-Paxos state machine: std-only, wasm-safe, and dependency-free
+- `crates/paros-core/` — sans-IO Multi-Paxos state machine (`RawNode`) and, beside it, the
+  sans-IO matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate
+  handle the caller drives, never stepped by `RawNode`): std-only, wasm-safe, and dependency-free
   with `default-features = false` (CI checks that build too). Two features, both observation-only:
   `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
   *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no
   simulation-only conditional compilation. Sancov crate-under-test.
 - `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
-  (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, and the
-  node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
-  `paros-core`, `moonpool-core` + `moonpool-hyper` and runtime-free tonic (wasm-safe). No
-  dedicated storage crate — the Stage-4+ faulty fake lands here or in the harness.
+  (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, the
+  node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
+  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
+  + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-hyper` and
+  runtime-free tonic (wasm-safe). No dedicated storage crate — the Stage-4+ faulty fake lands
+  here or in the harness.
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
-  fault world, the one client workload, the audit, and the scripted corpus. Depends on `paros` +
-  `moonpool-sim`.
+  deployment/role map, the fault world, the one client workload, the audit, and the scripted
+  corpus. Depends on `paros` + `moonpool-sim`.
 - `crates/paros-sim-runner/` — native sim runner + hunt binaries (`publish = false`).
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
