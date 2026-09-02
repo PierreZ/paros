@@ -160,6 +160,8 @@ pub(super) struct AuditState {
     pub(super) frontier: BTreeMap<u64, u64>,
     /// Per node: every index it jumped to through a snapshot install.
     pub(super) snap_landings: BTreeMap<u64, BTreeSet<u64>>,
+    /// Per acceptor: below-floor `Prepare`s it refused (a corpus probe).
+    pub(super) below_floor_refusals: BTreeMap<u64, u64>,
     /// Per node: its applied high-water mark (absent = applied nothing).
     pub(super) applied_max: BTreeMap<u64, u64>,
     pub(super) cluster_applied_max: Option<u64>,

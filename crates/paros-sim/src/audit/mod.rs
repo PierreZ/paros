@@ -37,7 +37,7 @@ mod state;
 
 pub(crate) use client::ClientHistory;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
@@ -180,6 +180,19 @@ impl AuditWorld {
     /// re-derives the same per-index states.
     pub(crate) fn app_reset(&self, node: u64) {
         self.lock().app_index.remove(&node);
+    }
+
+    /// How many below-floor `Prepare`s each acceptor has refused so far.
+    pub(crate) fn below_floor_refusals(&self) -> BTreeMap<u64, u64> {
+        self.lock().below_floor_refusals.clone()
+    }
+
+    /// Whether `node` installed a snapshot landing at or past `index`.
+    pub(crate) fn snapshot_landed_at_least(&self, node: u64, index: u64) -> bool {
+        self.lock()
+            .snap_landings
+            .get(&node)
+            .is_some_and(|landings| landings.iter().any(|landing| *landing >= index))
     }
 
     /// The cluster's applied high-water mark so far (`None` before any apply).
@@ -1655,8 +1668,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn prepare_below_floor(&self, _node: NodeId, _from_slot: Slot, _floor: Slot) {
+    fn prepare_below_floor(&self, node: NodeId, _from_slot: Slot, _floor: Slot) {
         let mut st = self.state();
+        *st.below_floor_refusals.entry(node.0).or_insert(0) += 1;
         // Rare (only a lagging node below a compacted peer's floor triggers it),
         // so reachable-only: it must be hit at least once across exploration,
         // not on every seed.

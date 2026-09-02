@@ -7,12 +7,15 @@
 //! disk), and runs the same `run_node` a production `tokio::main` would — inside a
 //! recovery loop that turns a `buggify`-injected seam crash into a real
 //! crash+restart: `run_node` unwinds, the volatile `RawNode` is dropped, and the
-//! next iteration rebuilds it from the durable [`StorageWorld`].
+//! next iteration rebuilds it from the durable [`StorageWorld`]. A process kill
+//! — moonpool attrition on the main campaign, the scripted lifecycle on the
+//! corpus — aborts the task outright; the next incarnation restores the same
+//! way.
 //!
 //! [`StorageWorld`]: crate::world::StorageWorld
 
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,11 +26,40 @@ use moonpool_sim::{
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::hooks::BuggifyHooks;
 use crate::world::storage::{DurableStorage, StorageFaults};
-use crate::world::{StorageWorld, storage_world};
+use crate::world::storage_world;
 use paros::{Config, DriverTunables, NodeId, RunError, parse_addr, run_node};
 
 /// A paros node in the simulation.
-pub struct NodeProcess;
+pub(crate) struct NodeProcess {
+    mode: NodeMode,
+}
+
+/// How a node is perturbed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeMode {
+    /// The main campaign: the driver's BUGGIFY hooks, the disk's fault sites
+    /// and the transport knobs are all live inside the chaos window.
+    Chaotic,
+    /// The corpus: every fault is a targeted injection from the workload, so
+    /// the swarm sites and the hooks stay dark (a case replays as
+    /// choreographed) and the world runs unbudgeted (masks may exceed the
+    /// per-record budget; the world records the unrecoverable ground truth).
+    Scripted,
+}
+
+impl NodeProcess {
+    pub(crate) fn chaotic() -> Self {
+        Self {
+            mode: NodeMode::Chaotic,
+        }
+    }
+
+    pub(crate) fn scripted() -> Self {
+        Self {
+            mode: NodeMode::Scripted,
+        }
+    }
+}
 
 /// One inert topology member that keeps the simulator lifecycle open while a
 /// workload drives something else (the storage contract suite).
@@ -42,174 +74,6 @@ impl Process for IdleProcess {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         ctx.shutdown().cancelled().await;
         Ok(())
-    }
-}
-
-/// A paros node for the **#113 evaluation corpus**: no BUGGIFY perturbation and
-/// no swarm fault sites (every fault is a scripted, targeted injection from the
-/// corpus workload), the per-record budget lifted (masks may exceed it, and the
-/// world records the unrecoverable ground truth the analytic derivation
-/// cross-checks), and a **scripted lifecycle** — the workload deterministically
-/// restarts, holds, and releases each node through the world's restart epochs.
-pub(crate) struct CorpusNodeProcess;
-
-#[async_trait]
-impl Process for CorpusNodeProcess {
-    fn name(&self) -> &'static str {
-        "paros-node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        scripted_corpus_loop(ctx).await
-    }
-}
-
-/// The corpus node loop: [`NodeProcess`]'s recovery loop with the swarm fault
-/// sites dark and the crash/restart schedule owned by the corpus workload
-/// (via [`StorageWorld::restart_epochs`] / [`StorageWorld::held`]) instead of
-/// moonpool attrition. Dropping a `run_node` incarnation mid-await is a
-/// faithful clean crash: the staged, un-synced writes die with the handle and
-/// the incarnation guard cancels its spawned tasks.
-// One recovery loop with per-exit-kind handling, mirroring `NodeProcess::run`:
-// splitting the arms would scatter the crash/hold/restart contract it *is*.
-#[allow(clippy::too_many_lines)]
-async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
-    let my_ip = ctx.my_ip().to_string();
-    let mut ips: Vec<String> = ctx.topology().all_process_ips().to_vec();
-    ips.push(my_ip.clone());
-    ips.sort_by_key(|ip| ip.parse::<IpAddr>().ok());
-    ips.dedup();
-    let members = ips
-        .iter()
-        .enumerate()
-        .map(|(i, ip)| {
-            parse_addr(ip)
-                .map(|addr| (NodeId(u64::try_from(i).expect("node index fits u64")), addr))
-        })
-        .collect::<SimulationResult<Vec<_>>>()?;
-    let self_rank = NodeId(
-        u64::try_from(
-            ips.iter()
-                .position(|ip| ip == &my_ip)
-                .expect("self is a member"),
-        )
-        .expect("node index fits u64"),
-    );
-    let config = Config {
-        id: self_rank,
-        peers: members.iter().map(|(id, _)| *id).collect(),
-        ..Config::default()
-    };
-
-    let world = storage_world(ctx.state());
-    {
-        let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.set_cluster_size(members.len());
-        // The corpus's declared mode: masks may exceed the per-record budget,
-        // and every injection records the unrecoverable ground truth.
-        guard.set_unbudgeted();
-    }
-    // Every fault on this axis is a scripted injection: the swarm sites and
-    // the driver's BUGGIFY hooks stay dark so a case replays as choreographed.
-    let faults = StorageFaults::new(ctx.time().clone(), Duration::ZERO, false);
-    let hooks = BuggifyHooks::new(ctx.time().clone(), Duration::ZERO, false);
-    let checker = audit_world(ctx.state());
-    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
-
-    loop {
-        // Hold gate: a held node stays down between incarnations until the
-        // workload releases it. Terminal parking keeps its ordinary contract.
-        loop {
-            let (held, parked) = {
-                let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-                (guard.is_held(&my_ip), guard.is_parked(&my_ip))
-            };
-            if parked {
-                checker.note_storage_dead(self_rank.0);
-                tracing::info!(node = self_rank.0, "storage_parked");
-                return Ok(());
-            }
-            if !held {
-                break;
-            }
-            if ctx.shutdown().is_cancelled() {
-                return Ok(());
-            }
-            ctx.time().sleep(Duration::from_millis(10)).await.ok();
-        }
-        let boot_epoch = world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .restart_epoch(&my_ip);
-        let storage = DurableStorage::restore(
-            config.clone(),
-            Arc::downgrade(&world),
-            my_ip.clone(),
-            self_rank.0,
-            faults.clone(),
-            checker.clone(),
-        );
-        let restart = scripted_restart_signal(ctx, &world, &my_ip, boot_epoch);
-        let exited = moonpool_sim::select! {
-            result = run_node(
-                ctx.providers().clone(),
-                storage,
-                parse_addr(&my_ip)?,
-                members.clone(),
-                // Scripted corpus runs keep the production transport shape:
-                // every perturbation on this axis is a targeted injection.
-                DriverTunables::default(),
-                ctx.shutdown().clone(),
-                &hooks,
-                &audit,
-            ) => Some(result),
-            () = restart => None,
-        };
-        match exited {
-            // Scripted restart: the incarnation was dropped mid-await — a
-            // clean crash — and the next loop pass re-restores (or waits held).
-            None => {
-                tracing::info!(node = self_rank.0, "corpus_scripted_restart");
-            }
-            Some(Err(RunError::SeamCrash(_))) => {}
-            Some(Err(RunError::Storage(_))) => {
-                let parked = world
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_parked(&my_ip);
-                if parked {
-                    checker.note_storage_dead(self_rank.0);
-                    tracing::info!(node = self_rank.0, "storage_parked");
-                    return Ok(());
-                }
-            }
-            Some(Err(RunError::Infra(e))) => return Err(e),
-            Some(Ok(())) => return Ok(()),
-        }
-    }
-}
-
-/// Resolve when the workload bumps `ip`'s restart epoch past `boot_epoch`.
-/// Provider-time polling keeps the wake-up deterministic per seed.
-async fn scripted_restart_signal(
-    ctx: &SimContext,
-    world: &Arc<Mutex<StorageWorld>>,
-    ip: &str,
-    boot_epoch: u64,
-) {
-    loop {
-        let current = world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .restart_epoch(ip);
-        if current > boot_epoch {
-            return;
-        }
-        if ctx.time().sleep(Duration::from_millis(10)).await.is_err() {
-            // Sleep only fails on teardown; let the run_node arm observe the
-            // shutdown instead of spinning.
-            std::future::pending::<()>().await;
-        }
     }
 }
 
@@ -261,14 +125,18 @@ impl Process for NodeProcess {
         // but stable across a process's reboots). Each node reaches it through a
         // `Weak` handle upgraded per op.
         let world = storage_world(ctx.state());
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_cluster_size(members.len());
+        let perturb = self.mode == NodeMode::Chaotic;
+        {
+            let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.set_cluster_size(members.len());
+            if !perturb {
+                guard.set_unbudgeted();
+            }
+        }
         let hooks = BuggifyHooks::new(
             ctx.time().clone(),
             Duration::from_millis(crate::CHAOS_DURATION_MS),
-            true,
+            perturb,
         );
         // The budgeted storage-fault layer (issue #19 B/C) shares the driver
         // hooks' chaos window: after the cutoff the world stops injecting
@@ -277,7 +145,7 @@ impl Process for NodeProcess {
         let faults = StorageFaults::new(
             ctx.time().clone(),
             Duration::from_millis(crate::CHAOS_DURATION_MS),
-            true,
+            perturb,
         );
         // The per-iteration shared audit: pure observation, published beside the
         // storage world so every node folds its transitions into one incremental
@@ -300,7 +168,7 @@ impl Process for NodeProcess {
         // gap). A one-message delivery batch maximizes framing pressure. Two
         // independent knob locations; drawn once per node per seed, stable
         // across this node's restarts.
-        let tunables = {
+        let tunables = if perturb {
             let defaults = DriverTunables::default();
             let peer_queue_capacity =
                 buggify_knob!(defaults.peer_queue_capacity, 4_usize..17_usize);
@@ -327,6 +195,10 @@ impl Process for NodeProcess {
                 peer_queue_capacity,
                 delivery_batch,
             }
+        } else {
+            // Scripted runs keep the production transport shape: every
+            // perturbation on that axis is a targeted injection.
+            DriverTunables::default()
         };
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we

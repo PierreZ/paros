@@ -24,11 +24,11 @@ mod chain;
 mod chain_workload;
 mod corpus;
 mod hooks;
+mod lifecycle;
 mod process;
 mod world;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
-pub use process::NodeProcess;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -39,6 +39,8 @@ use moonpool_sim::{
 };
 
 use crate::chain_workload::ChainWorkload;
+use crate::lifecycle::ScriptedLifecycle;
+use crate::process::NodeProcess;
 
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
@@ -132,6 +134,10 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// measured against, not a shape the run takes.
 pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
 const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
+/// The corpus keeps its "chaos window" open for the whole scripted run: its
+/// only fault injector is the scripted lifecycle, which must be able to crash
+/// and restart nodes at every phase of the script.
+const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 
 /// The main campaign's chaos surfaces: swarm network turbulence, single-node
 /// crash/restart attrition, and buggified provider knobs — one combined axis.
@@ -174,7 +180,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .cluster(LocalityConfig::new(CLUSTER_SIZE_RANGE, 1, 1, 1), || {
-            Box::new(NodeProcess)
+            Box::new(NodeProcess::chaotic())
         })
         .link_latency(LinkLatencyConfig::default())
         .workload_factory(move || Box::new(ChainWorkload::new(digest.clone())))
@@ -281,9 +287,9 @@ pub fn run_storage_contract_suite() -> SimulationReport {
 fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::process::CorpusNodeProcess)
-        })
+        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
+        .fault_factory(|| Box::new(ScriptedLifecycle))
+        .chaos_duration(CORPUS_CHAOS)
         .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
 }
 
@@ -355,9 +361,9 @@ pub fn run_corpus_seed(seed: u64) -> SimulationReport {
 pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::process::CorpusNodeProcess)
-        })
+        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
+        .fault_factory(|| Box::new(ScriptedLifecycle))
+        .chaos_duration(CORPUS_CHAOS)
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -371,9 +377,9 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
 pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::process::CorpusNodeProcess)
-        })
+        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
+        .fault_factory(|| Box::new(ScriptedLifecycle))
+        .chaos_duration(CORPUS_CHAOS)
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -387,9 +393,9 @@ fn chunk_corpus_builder(
 ) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::process::CorpusNodeProcess)
-        })
+        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
+        .fault_factory(|| Box::new(ScriptedLifecycle))
+        .chaos_duration(CORPUS_CHAOS)
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
 }
 

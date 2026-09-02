@@ -10,8 +10,9 @@
 //! generous never fails a random run, but fails an enumerated case whose
 //! ground truth says "this mask is recoverable" (or "this mask must wait").
 //!
-//! Three case families, all on a fixed three-node cluster with scripted
-//! lifecycle (no swarm chaos — every fault is a targeted injection):
+//! Three case families, all on a fixed three-node cluster with a scripted
+//! lifecycle (moonpool's `fault_factory` driven through `crate::lifecycle`; no
+//! swarm chaos — every fault is a targeted injection):
 //!
 //! - [`E1MaskWorkload`]: a short fully-replicated decided prefix, every
 //!   application snapshot rotted (so the log is the only custody), then a
@@ -37,8 +38,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
-    RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, TraceEvent,
-    TraceQuery, Workload, assert_always, assert_sometimes,
+    RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
+    assert_always, assert_sometimes,
 };
 use paros::{
     Command, Compact, Control, Entry, InspectRequest, ParosClient, ParosInternalClient, Propose,
@@ -47,9 +48,10 @@ use paros::{
 
 use crate::audit::audit_world;
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
+use crate::lifecycle;
 use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
-    corpus_hold_node, corpus_release_node, corpus_restart_node, unrecoverable_slots,
+    unrecoverable_slots,
 };
 
 /// Fixed corpus cluster size. The mask grid and the analytic derivation both
@@ -435,28 +437,16 @@ async fn wait_replicated(
     }
 }
 
-/// Wait for one matching trace event (the lifecycle compound's evidence gates).
-async fn wait_event<F>(
-    ctx: &SimContext,
-    name: &str,
-    deadline: Duration,
-    predicate: F,
-) -> Option<TraceEvent>
-where
-    F: Fn(&TraceEvent) -> bool,
-{
+/// Poll `ready` on the simulated clock until it holds (`true`) or the deadline
+/// passes (`false`).
+async fn wait_until(ctx: &SimContext, deadline: Duration, ready: impl Fn() -> bool) -> bool {
     let time = ctx.time();
     loop {
-        if let Some(event) = ctx
-            .observability()
-            .snapshot(name)
-            .into_iter()
-            .find(&predicate)
-        {
-            return Some(event);
+        if ready() {
+            return true;
         }
         if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-            return None;
+            return false;
         }
         time.sleep(POLL_INTERVAL).await.ok();
     }
@@ -611,16 +601,15 @@ impl Workload for E1MaskWorkload {
             }
         );
         // The E1 model counts *durable* custody only, so the restart must be a
-        // simultaneous cluster death: hold every node, wait out the node
-        // loop's epoch-poll window so every live incarnation is genuinely
-        // gone (a node still serving its volatile chosen state would
-        // legitimately heal a peer's rotted record and break the enumerated
-        // ground truth — found by hunt seed 13939994950726385685), then
-        // release them into boots that can only read disks.
+        // simultaneous cluster death: crash every node and let the kills land
+        // so every live incarnation is genuinely gone (a node still serving
+        // its volatile chosen state would legitimately heal a peer's rotted
+        // record and break the enumerated ground truth), then restart them
+        // into boots that can only read disks.
         for ip in &servers {
-            corpus_hold_node(ctx.state(), ip);
+            lifecycle::crash(ctx, ip).await;
         }
-        time.sleep(Duration::from_millis(100)).await.ok();
+        time.sleep(POLL_INTERVAL).await.ok();
         // Death-time mask integrity: the injection raced the tail of ordinary
         // replication traffic (a still-in-flight resent `Accept` re-persists
         // its record, and a clean re-write legitimately clears the fault mark
@@ -641,7 +630,7 @@ impl Workload for E1MaskWorkload {
             })
         });
         for ip in &servers {
-            corpus_release_node(ctx.state(), ip);
+            lifecycle::restart(ctx, ip).await;
         }
         if !mask_held {
             tracing::info!(mask, "corpus_mask_superseded_by_late_write");
@@ -679,28 +668,10 @@ impl Workload for E1MaskWorkload {
                     full.applied_count,
                     full.chain_hash,
                 );
-                for name in [
-                    "value_chosen",
-                    "recovered",
-                    "election_gap_filled",
-                    "command_applied",
-                    "persist",
-                    "synced",
-                    "corpus_mask_selected",
-                ] {
-                    for ev in ctx.observability().snapshot(name).iter().rev().take(12) {
-                        eprintln!(
-                            "CORPUS-DIAG ev {name} t={}ms node={:?} slot={:?} idx={:?} kind={:?} cmd={:?} ballot={:?}",
-                            ev.time_ms,
-                            ev.u64("node"),
-                            ev.u64("slot"),
-                            ev.u64("index"),
-                            ev.str("kind"),
-                            ev.str("cmd"),
-                            ev.u64("ballot"),
-                        );
-                    }
-                }
+                eprintln!(
+                    "CORPUS-DIAG audit: {}",
+                    audit_world(ctx.state()).diagnostics()
+                );
             }
             assert_always!(
                 reached,
@@ -792,8 +763,9 @@ impl Workload for BareQuorumWorkload {
             return Err(invalid("bare-quorum priming did not replicate"));
         }
 
-        // Phase 2: hold the third node down; decide slot 2 on the bare quorum.
-        corpus_hold_node(ctx.state(), &servers[absent]);
+        // Phase 2: crash the third node and hold it down; decide slot 2 on
+        // the bare quorum.
+        lifecycle::crash(ctx, &servers[absent]).await;
         let survivors: Vec<String> = servers[..absent].to_vec();
         commands.extend(prime_prefix(ctx, &clients, client_id, 1, Some(absent), 2, 2).await?);
         let expected3 = expected_states(&commands)[3];
@@ -832,9 +804,9 @@ impl Workload for BareQuorumWorkload {
             { "world" => ground_truth.len() }
         );
         for ip in &survivors {
-            corpus_restart_node(ctx.state(), ip);
+            lifecycle::restart(ctx, ip).await;
         }
-        corpus_release_node(ctx.state(), &servers[absent]);
+        lifecycle::restart(ctx, &servers[absent]).await;
 
         // Phase 4: every node — the `none` reporter included — must settle at
         // the two-slot prefix and WAIT at slot 2. A `Noop` fill here (the
@@ -918,7 +890,7 @@ impl Workload for SnapshotLifecycleWorkload {
         // snapshot (making it log-only) and restart it; the boot scan resets
         // the application and the local log rebuilds the exact state.
         corpus_corrupt_snapshot(state, &servers[2], 2);
-        corpus_restart_node(state, &servers[2]);
+        lifecycle::restart(ctx, &servers[2]).await;
         let replayed = wait_replicated(
             ctx,
             &servers[2..],
@@ -932,9 +904,9 @@ impl Workload for SnapshotLifecycleWorkload {
             "corpus: a log-only node replays its exact state from its local log"
         );
 
-        // Phase C: hold node 0 down; the survivors decide three more slots and
-        // a Truncate past all of them, raising both floors.
-        corpus_hold_node(state, &servers[0]);
+        // Phase C: crash node 0 and hold it down; the survivors decide three
+        // more slots and a Truncate past all of them, raising both floors.
+        lifecycle::crash(ctx, &servers[0]).await;
         commands.extend(prime_prefix(ctx, &clients, client_id, 3, Some(0), 5, 5).await?);
         let compacted = clients
             .compact_until_accepted(ctx, 7, Some(0), time.now() + PRIME_BUDGET)
@@ -973,51 +945,51 @@ impl Workload for SnapshotLifecycleWorkload {
             return Err(invalid("survivors did not truncate"));
         }
 
-        // Phase D: hold both survivors; rot the held node's snapshot and
-        // release it alone. It re-replays its retained log locally (floor 0)
-        // and campaigns unanswered, its ballot and promise climbing.
-        corpus_hold_node(state, &servers[1]);
-        corpus_hold_node(state, &servers[2]);
+        // Phase D: crash both survivors and hold them down; rot the held
+        // node's snapshot and restart it alone. It re-replays its retained log
+        // locally (floor 0) and campaigns unanswered, its ballot and promise
+        // climbing.
+        lifecycle::crash(ctx, &servers[1]).await;
+        lifecycle::crash(ctx, &servers[2]).await;
         corpus_corrupt_snapshot(state, &servers[0], 0);
-        corpus_release_node(state, &servers[0]);
+        lifecycle::restart(ctx, &servers[0]).await;
         time.sleep(Duration::from_secs(4)).await.ok();
 
-        // Phase E — paths 2 and 3: release the survivors. The lone node's
+        // Phase E — paths 2 and 3: restart the survivors. The lone node's
         // next campaign prepares from slot 5, below both floors — refused by
         // the floor guard (path 3) — while its campaign catch-up probe draws
-        // the whole-blob InstallSnapshot that heals it (path 2).
-        let release_seq = ctx
-            .observability()
-            .snapshot(paros::EV_PREPARE_BELOW_FLOOR)
+        // the whole-blob InstallSnapshot that heals it (path 2). Both facts
+        // are read from the audit: a survivor's refusal count rises, and node
+        // 0 lands a snapshot at or past the point.
+        let audit = audit_world(state);
+        let refusals_before: u64 = audit
+            .below_floor_refusals()
             .into_iter()
-            .map(|event| event.seq)
-            .max()
-            .unwrap_or(0);
-        corpus_release_node(state, &servers[1]);
-        corpus_release_node(state, &servers[2]);
-        let refusal = wait_event(
-            ctx,
-            paros::EV_PREPARE_BELOW_FLOOR,
-            time.now() + OUTCOME_BUDGET,
-            |event| event.seq > release_seq && event.u64("node").is_some_and(|node| node >= 1),
-        )
+            .filter(|(node, _)| *node >= 1)
+            .map(|(_, count)| count)
+            .sum();
+        lifecycle::restart(ctx, &servers[1]).await;
+        lifecycle::restart(ctx, &servers[2]).await;
+        let refusal = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
+            audit
+                .below_floor_refusals()
+                .into_iter()
+                .filter(|(node, _)| *node >= 1)
+                .map(|(_, count)| count)
+                .sum::<u64>()
+                > refusals_before
+        })
         .await;
         assert_always!(
-            refusal.is_some(),
+            refusal,
             "corpus: a below-floor campaign is refused by a truncated acceptor"
         );
-        let installed = wait_event(
-            ctx,
-            "snapshot_installed",
-            time.now() + OUTCOME_BUDGET,
-            |event| {
-                event.u64("node") == Some(0)
-                    && event.u64("chosen_index").is_some_and(|index| index >= 8)
-            },
-        )
+        let installed = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
+            audit.snapshot_landed_at_least(0, 8)
+        })
         .await;
         assert_always!(
-            installed.is_some(),
+            installed,
             "corpus: a below-floor node recovers by whole-blob snapshot install"
         );
         let healed = clients
@@ -1059,7 +1031,7 @@ impl Workload for SnapshotLifecycleWorkload {
             { "world" => ground_truth.len() }
         );
         for ip in &servers {
-            corpus_restart_node(state, ip);
+            lifecycle::restart(ctx, ip).await;
         }
         let waiting = clients
             .wait_all_at(ctx, &ChainState::default(), time.now() + OUTCOME_BUDGET)
@@ -1260,16 +1232,7 @@ impl Workload for ChunkMaskWorkload {
                     probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
                 );
             }
-            for event in ctx.observability().snapshot("command_applied") {
-                if event.u64("node") == Some(1) {
-                    eprintln!(
-                        "CORPUS-DIAG applied idx={:?} kind={:?} cmd={:?}",
-                        event.u64("index"),
-                        event.str("kind"),
-                        event.str("cmd"),
-                    );
-                }
-            }
+            eprintln!("CORPUS-DIAG audit: {}", audit_world(state).diagnostics());
         }
         assert_always!(
             matched.is_some(),
@@ -1333,7 +1296,7 @@ impl Workload for ChunkMaskWorkload {
             { "world" => ground_truth.len() }
         );
         for ip in &servers {
-            corpus_restart_node(state, ip);
+            lifecycle::restart(ctx, ip).await;
         }
 
         // Phase 3: judge. Assemblable chunks must heal back to clean on every

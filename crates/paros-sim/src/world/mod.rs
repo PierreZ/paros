@@ -298,29 +298,12 @@ pub(crate) struct StorageWorld {
     /// and no post-truncation snapshot covering them (only ever populated in
     /// unbudgeted runs).
     unrecoverable: BTreeSet<u64>,
-    /// Scripted lifecycle (the #113 corpus): per-node restart epochs. Bumping
-    /// one makes the corpus node loop drop its current incarnation — a clean
-    /// crash, staged un-synced writes dying with it — and re-restore from the
-    /// world. A paros-side stand-in for the explicit scripted-lifecycle API
-    /// tracked upstream as moonpool#182.
-    restart_epochs: BTreeMap<String, u64>,
-    /// Scripted lifecycle: nodes held down between incarnations until the
-    /// corpus workload releases them.
-    held: BTreeSet<String>,
 }
 
 impl StorageWorld {
-    /// Scripted-lifecycle probes for the process loop (see `crate::process`).
+    /// Whether `ip` was terminally parked (see `crate::process`).
     pub(crate) fn is_parked(&self, ip: &str) -> bool {
         self.parked.contains(ip)
-    }
-
-    pub(crate) fn is_held(&self, ip: &str) -> bool {
-        self.held.contains(ip)
-    }
-
-    pub(crate) fn restart_epoch(&self, ip: &str) -> u64 {
-        self.restart_epochs.get(ip).copied().unwrap_or(0)
     }
 
     /// Declare the unbudgeted (corpus) mode: masks may exceed the per-record
@@ -841,31 +824,7 @@ pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     guard.parked.clone()
 }
 
-// --- #113 corpus support: scripted lifecycle + targeted mask injection --------
-
-/// Bump `ip`'s restart epoch: the corpus node loop drops its live incarnation
-/// (a clean crash) and re-restores from the world's durable records.
-pub(crate) fn corpus_restart_node(handle: &StateHandle, ip: &str) {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.restart_epochs.entry(ip.to_string()).or_insert(0) += 1;
-}
-
-/// Hold `ip` down: drop its live incarnation now and keep it down until
-/// [`corpus_release_node`].
-pub(crate) fn corpus_hold_node(handle: &StateHandle, ip: &str) {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.held.insert(ip.to_string());
-    *guard.restart_epochs.entry(ip.to_string()).or_insert(0) += 1;
-}
-
-/// Release a held node: its next loop pass re-restores from the world.
-pub(crate) fn corpus_release_node(handle: &StateHandle, ip: &str) {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.held.remove(ip);
-}
+// --- corpus support: world probes + targeted mask injection -------------------
 
 /// One node's durable evidence, for the corpus workloads' deterministic waits
 /// (world-truth probes: replication, floors, and the durable application
