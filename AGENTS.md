@@ -120,6 +120,40 @@ code runs in production (`TokioProviders` + a future `parosd` binary) and determ
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
+**Plain Multi-Paxos is first-class and permanent; everything beyond it is opt-in.** Multi-Paxos
+without matchmakers — a fixed membership read once from `Storage::initial_state()`, no matchmaker
+processes, no matchmaking phase, no registry — is a **permanent** configuration of `paros-core`
+and the `paros` driver, not a transitional state the Matchmaker milestone (#22) grows out of.
+Anyone must be able to take the core and the driver and run exactly today's protocol with exactly
+today's guarantees. The rules, which every later session reads before touching `on_check_leader`,
+`Election`, `HardState`, or the harness role map:
+
+- The static-membership case is the **`None` arm of the same state machine** — never a cargo
+  feature and never conditional compilation (`paros-core`'s only features, `serde` and `tracing`,
+  are observation-only and stay that way).
+- No matchmaker message, no `HardState` field, and no extra round trip may enter the
+  fixed-membership path. A cluster deployed without matchmakers exchanges the same messages and
+  persists the same scalars it does today. The matchmaker is its own state machine
+  (`paros_core::Matchmaker`), its own wire contract, and its own driver (`paros::run_matchmaker`);
+  `RawNode` never steps a matchmaker message.
+- A reconfiguration request on a cluster without matchmakers is **refused** (`accepted: false`),
+  never quietly honored.
+- Removing every matchmaker feature must leave the plain program's behaviour unchanged — the same
+  test the turbulence doctrine below applies to BUGGIFY.
+
+The general rule this instantiates: **flexible quorums, matchmaker reconfiguration, and
+compartmentalized Paxos are opt-in features** of paros. The default is plain Multi-Paxos; each
+feature is enabled explicitly, as configuration data (a deployment that names matchmakers, a
+`QuorumSystem` other than `Majority`), never implied by the presence of its code. In simulation
+that configuration is **workload-buggified per seed** (prong 2 below, `buggify_knob!` style): the
+harness's deployment/role map (`paros_sim::roles`) draws per seed whether the cluster runs with
+matchmakers or without, exactly as it draws cluster size and client count, so **one campaign
+exercises both modes**, the liveness and safety oracles hold in both, and the library is *proven*
+to support both rather than assumed to. The "matchmakers off" seeds are the plain Multi-Paxos runs
+of today and must keep behaving identically; the "matchmakers on" seeds add the registry, the
+matchmaking phase and the cross-configuration Phase 1 on top. Every later feature in the list gets
+the same treatment when it lands.
+
 **Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
 what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
 truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
