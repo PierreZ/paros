@@ -60,10 +60,10 @@ pub use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry,
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    Matchmaker, MatchmakerId, MatchmakerReady, MatchmakerState, MatchmakerWriteOp, Message,
+    Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Message,
     MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
-    ReadIndexResult, ReadState, Ready, SessionEntry, Slot, Storage, Value, WriteOp,
-    command_fingerprint,
+    ReadIndexResult, ReadState, Ready, RegistryStorage, SessionEntry, Slot, Storage, Value,
+    WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;

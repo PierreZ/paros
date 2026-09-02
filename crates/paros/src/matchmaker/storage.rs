@@ -1,27 +1,56 @@
-//! The matchmaker's durable seam: the [`MatchmakerStorage`] write port the
-//! driver persists the registry through, and the default in-memory
-//! [`MemMatchmakerStorage`].
+//! The matchmaker's durable seam: the [`MatchmakerStorage`] write extension the
+//! driver persists the registry through, over the core's read-only
+//! [`RegistryStorage`] recovery port, and the default in-memory
+//! [`MemMatchmakerStorage`] implementing both.
 //!
-//! The shape mirrors [`NodeStorage`](crate::NodeStorage): the core only ever
-//! *reads back* its durable state once, at construction
-//! ([`MatchmakerStorage::initial_state`]); the driver owns every write and
-//! applies each [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) through the
-//! matching method here, then [`sync`](MatchmakerStorage::sync)s the batch
-//! **before** its reply leaves (persist-before-reply). Every write returns
-//! [`Result`] so faults are injectable from the start; the records ride the
-//! existing durable-record contract (`docs/analysis/storage/clstore-record-contract.md`)
-//! — there is no matchmaker-specific disk-fault story.
+//! The split is the node's, mirrored on purpose: [`RegistryStorage`] is to the
+//! matchmaker what [`paros_core::Storage`] is to the node — the core reads its
+//! durable state back through it once, at construction, record by record — and
+//! [`MatchmakerStorage`] is the [`NodeStorage`](crate::NodeStorage) twin: the
+//! driver owns every write, applies each
+//! [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) through the matching
+//! method here, then [`sync`](MatchmakerStorage::sync)s the batch **before** its
+//! reply leaves (persist-before-reply).
+//!
+//! # Why the registry gets a real storage interface
+//!
+//! Because it is durable state that will rot, and the recovery story built for
+//! the accepted log (CTRL, Stages 7–8) is only available to state that crosses a
+//! seam like this one. Every registration is one checksummed record whose
+//! identity — the ballot — sits inside the checksummed region, so
+//! [`boot_scan`](MatchmakerStorage::boot_scan) can verify and classify each
+//! record before any byte reaches the core: a torn tail is discardable (never
+//! acknowledged: the reply only leaves after the fsync), a record whose bytes
+//! are lost but whose ballot survived is *recoverable* (the other matchmakers
+//! hold the same bytes), and only a record whose identity is also lost is a
+//! crash. That tri-state — report the ballot as faulty, never as "no
+//! configuration here" — is the registry's version of CTRL's central rule,
+//! and it lands as a defaulted `faulty_registrations()` on [`RegistryStorage`]
+//! beside the per-record read, exactly as [`Storage::faulty_entries`](paros_core::Storage::faulty_entries)
+//! landed for the log. A registry booted from one blob could offer none of
+//! this: one checksum, one verdict, and a matchmaker that either boots blind or
+//! not at all. Every write returns [`Result`] for the same reason: the faults
+//! are injectable from the start, through the existing durable-record contract
+//! (`docs/analysis/storage/clstore-record-contract.md`) — there is no
+//! matchmaker-specific disk-fault story, only the generic one applied to one
+//! more record family.
 
-use paros_core::{AcceptorConfig, Ballot, MatchmakerState};
+use paros_core::{AcceptorConfig, Ballot, MatchmakerHardState, RegistryStorage};
+use std::collections::BTreeMap;
 
 use crate::storage::StorageError;
 
-/// The write side of matchmaker storage: semantic per-record ops over the
-/// registry and the watermark scalar.
-pub trait MatchmakerStorage {
+/// The write side of matchmaker storage: **semantic per-record ops**, the
+/// [`NodeStorage`](crate::NodeStorage) twin over the [`RegistryStorage`] port.
+pub trait MatchmakerStorage: RegistryStorage {
     /// Boot-time integrity scan, run once per incarnation **before** the core
     /// reads the store (the [`NodeStorage::boot_scan`](crate::NodeStorage::boot_scan)
-    /// twin). The default reports a clean store, for storage that cannot rot.
+    /// twin): verify every registration record and the watermark scalar,
+    /// classify every mismatch, discard only a crash-truncatable tail (a
+    /// registration is acknowledged only after its fsync, so an un-synced
+    /// tail was never promised to anyone), and surface the first crash
+    /// verdict. **Never truncate on a corruption verdict.** The default
+    /// reports a clean store, for storage that cannot rot.
     ///
     /// # Errors
     /// Returns the first classified [`StorageError`] whose verdict requires a
@@ -30,20 +59,16 @@ pub trait MatchmakerStorage {
         Ok(())
     }
 
-    /// The durable registry and watermark to boot the matchmaker with. Called
-    /// once, at construction; a fresh store returns
-    /// [`MatchmakerState::default`].
-    fn initial_state(&self) -> MatchmakerState;
-
-    /// Persist the registration of `config` under `ballot`. Append-only: the
-    /// core only ever registers strictly above the highest ballot it holds.
+    /// Persist the registration of `config` under `ballot` as one record.
+    /// Append-only: the core only ever registers strictly above the highest
+    /// ballot it holds, so this is never an overwrite.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn register(&mut self, ballot: Ballot, config: &AcceptorConfig) -> Result<(), StorageError>;
 
-    /// Persist a raised GC watermark and drop every registration below it.
-    /// Monotone: a store never lowers its watermark.
+    /// Persist a raised GC watermark and drop every registration record below
+    /// it. Monotone: a store never lowers its watermark.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
@@ -58,10 +83,12 @@ pub trait MatchmakerStorage {
     fn sync(&mut self) -> Result<(), StorageError>;
 }
 
-/// The library's default in-memory matchmaker storage.
+/// The library's default in-memory matchmaker storage: the scalars and the
+/// per-ballot registration records stored separately (never a single blob).
 #[derive(Clone, Debug, Default)]
 pub struct MemMatchmakerStorage {
-    state: MatchmakerState,
+    hard_state: MatchmakerHardState,
+    registry: BTreeMap<Ballot, AcceptorConfig>,
 }
 
 impl MemMatchmakerStorage {
@@ -72,22 +99,32 @@ impl MemMatchmakerStorage {
     }
 }
 
-impl MatchmakerStorage for MemMatchmakerStorage {
-    fn initial_state(&self) -> MatchmakerState {
-        self.state.clone()
+impl RegistryStorage for MemMatchmakerStorage {
+    fn initial_state(&self) -> MatchmakerHardState {
+        self.hard_state.clone()
     }
 
+    fn registration(&self, ballot: Ballot) -> Option<AcceptorConfig> {
+        self.registry.get(&ballot).cloned()
+    }
+
+    fn registered_ballots(&self) -> Vec<Ballot> {
+        self.registry.keys().copied().collect()
+    }
+}
+
+impl MatchmakerStorage for MemMatchmakerStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     fn register(&mut self, ballot: Ballot, config: &AcceptorConfig) -> Result<(), StorageError> {
-        self.state.registry.insert(ballot, config.clone());
+        self.registry.insert(ballot, config.clone());
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
     fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        if watermark > self.state.gc_watermark {
-            self.state.gc_watermark = watermark;
-            self.state.registry = self.state.registry.split_off(&watermark);
+        if watermark > self.hard_state.gc_watermark {
+            self.hard_state.gc_watermark = watermark;
+            self.registry = self.registry.split_off(&watermark);
         }
         Ok(())
     }
@@ -103,8 +140,9 @@ impl MatchmakerStorage for MemMatchmakerStorage {
 /// must pass, run against [`MemMatchmakerStorage`] here and against the
 /// simulation's world-backed store in `paros-sim`, so a fake can never drift
 /// from the trait contract. `fresh` returns an empty store; `reopen` simulates
-/// a clean reboot of the same store (every read-back goes through it, because
-/// the core reads durable state once, at construction).
+/// a clean reboot of the same store — every read-back goes through it and
+/// through the [`RegistryStorage`] port, because that is how the core reads
+/// durable state: once, at construction, record by record.
 ///
 /// # Panics
 ///
@@ -127,39 +165,56 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         )
     };
 
-    // A fresh store is empty, and registrations round-trip through a sync.
+    // A fresh store is empty, and registrations round-trip through a sync as
+    // individually readable records.
     let s = fresh();
     assert_eq!(
         s.initial_state(),
-        MatchmakerState::default(),
-        "a fresh store holds an empty registry at the zero watermark"
+        MatchmakerHardState::default(),
+        "a fresh store holds the zero watermark"
+    );
+    assert!(
+        s.registered_ballots().is_empty(),
+        "a fresh store holds no registration"
     );
     let mut s = reopen(s);
     s.register(ballot(1), &config(3)).expect("register 1");
     s.register(ballot(2), &config(4)).expect("register 2");
     s.sync().expect("sync");
     let mut s = reopen(s);
-    let state = s.initial_state();
     assert_eq!(
-        state.registry.keys().copied().collect::<Vec<_>>(),
+        s.registered_ballots(),
         vec![ballot(1), ballot(2)],
-        "registrations read back in ballot order"
+        "registered ballots read back in ballot order"
     );
-    assert_eq!(state.registry[&ballot(1)], config(3));
-    assert_eq!(state.registry[&ballot(2)], config(4));
-    assert_eq!(state.gc_watermark, Ballot::zero());
+    assert_eq!(s.registration(ballot(1)), Some(config(3)));
+    assert_eq!(s.registration(ballot(2)), Some(config(4)));
+    assert_eq!(
+        s.registration(ballot(3)),
+        None,
+        "an unregistered ballot has no record"
+    );
+    assert_eq!(s.initial_state().gc_watermark, Ballot::zero());
 
-    // A raised watermark is durable and drops the collected prefix.
+    // A raised watermark is durable and drops the collected records.
     s.register(ballot(3), &config(5)).expect("register 3");
     s.set_gc_watermark(ballot(2)).expect("raise");
     s.sync().expect("sync raise");
     let mut s = reopen(s);
-    let state = s.initial_state();
-    assert_eq!(state.gc_watermark, ballot(2), "the watermark round-trips");
     assert_eq!(
-        state.registry.keys().copied().collect::<Vec<_>>(),
+        s.initial_state().gc_watermark,
+        ballot(2),
+        "the watermark round-trips"
+    );
+    assert_eq!(
+        s.registered_ballots(),
         vec![ballot(2), ballot(3)],
         "registrations below the watermark are dropped"
+    );
+    assert_eq!(
+        s.registration(ballot(1)),
+        None,
+        "a collected record is unreadable"
     );
 
     // The watermark never lowers.

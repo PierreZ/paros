@@ -6,9 +6,14 @@
 //! production and deterministic simulation; the harness adapts a moonpool
 //! `Process` to it exactly as it adapts the node. The loop serves the
 //! matchmaker gRPC contract, feeds each request into the core, and drains every
-//! [`MatchmakerReady`] in **persist → fsync → reply** order: a `Registered`
-//! reply leaves only once its registration is durable, the registry's version
-//! of the acceptor's persist-before-`Promise` rule.
+//! [`MatchmakerReady`](paros_core::MatchmakerReady) in **persist → fsync →
+//! reply** order: a `Registered` reply leaves only once its registration is
+//! durable, the registry's version of the acceptor's persist-before-`Promise`
+//! rule. The registry is read back through the core's
+//! [`RegistryStorage`](paros_core::RegistryStorage) port and written through
+//! [`MatchmakerStorage`] — the node's `Storage` / `NodeStorage` split,
+//! mirrored so the log's CTRL recovery applies to the registry (see
+//! [`storage`]).
 //!
 //! A cluster deployed without matchmakers never runs this loop; the node
 //! driver does not know it exists.
@@ -73,12 +78,14 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
 /// leaves).
 ///
 /// The order — writes, fsync, *then* replies — is the persist-before-reply
-/// rule (invariant 1 of #119), and it was proven load-bearing before this
-/// landed by inverting it: handing the replies out before the fsync, with a
-/// crash at the seam between them, let a `Registered` reply escape for a
-/// ballot the restarted matchmaker no longer held, which turned the audit's
-/// "matchmaker: a registration is durable before its reply leaves" oracle red
-/// on the ordinary swarm campaign.
+/// rule (invariant 1 of #119): a `Registered` reply that left before its
+/// registration reached the disk would, across a crash at the seam between
+/// the two, name a configuration the restarted matchmaker no longer holds —
+/// a later leader's history would then silently omit it. The audit judges the
+/// rule at the reply (`match_replied` must find the registration already
+/// folded durable) and again at every restart (`matchmaker_recovered` must
+/// read back every durable registration), and the two crash seams below are
+/// the BUGGIFY locations that make both crash windows likely.
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.id().0))]
 fn drain<S, H, A>(
     matchmaker: &mut Matchmaker,
@@ -260,20 +267,21 @@ where
         .await
         .map_err(|e| SimulationError::InvalidState(format!("matchmaker gRPC listener: {e}")))?;
 
-    // The sans-IO core, bootstrapped from durable storage; re-report the
+    // The sans-IO core, bootstrapped from durable storage through the
+    // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
-    let mut matchmaker = Matchmaker::new(id, storage.initial_state());
+    let mut matchmaker = Matchmaker::new(id, &storage);
     let recovered: Vec<(Ballot, u64)> = matchmaker
-        .state()
-        .registry
+        .registry()
         .iter()
         .map(|(ballot, config)| (*ballot, config_hash(config)))
         .collect();
-    audit.matchmaker_recovered(id, &recovered, matchmaker.state().gc_watermark);
+    let watermark = matchmaker.hard_state().gc_watermark;
+    audit.matchmaker_recovered(id, &recovered, watermark);
     tracing::info!(
         matchmaker = id.0,
         registrations = recovered.len() as u64,
-        watermark_round = matchmaker.state().gc_watermark.round,
+        watermark_round = watermark.round,
         "matchmaker_booted"
     );
 
@@ -342,7 +350,7 @@ where
                 );
                 let replies = drain(&mut matchmaker, &mut storage, hooks, audit)?;
                 assert!(replies.is_empty(), "a garbage-collect request yields no match reply");
-                let _ = reply.send((id, matchmaker.state().gc_watermark));
+                let _ = reply.send((id, matchmaker.hard_state().gc_watermark));
             }
             () = shutdown.cancelled() => return Ok(()),
         }
