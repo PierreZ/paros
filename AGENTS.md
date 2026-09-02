@@ -18,7 +18,7 @@ target). Clippy pedantic is on (`[workspace.lints]` in `Cargo.toml`).
 **Meta issue upkeep.** Issue #69 (`meta: up next`, label `up-next`) is the rolling backlog
 pointer — always exactly the next 3 issues, edited in place, never closed. Whenever a PR merges
 that closes or materially advances a tracked issue, update #69 in the same session: move closed
-work into "Recently landed" (one line: PR number, what it proved/fixed, seeds pinned), promote
+work into "Recently landed" (one line: PR number, what it proved/fixed), promote
 the next item from "On deck" into "Next 3" with a one-line why, and re-rank if the merge changed
 the picture (e.g. a feeder bug closed, an oracle went from armed to proven). Keep the issue's own
 maintenance contract: never more than 3 in "Next 3".
@@ -33,15 +33,40 @@ maintenance contract: never more than 3 in "Next 3".
 must *saturate* `AssertionCoverage`/`CodeCoverage`) always runs via `cargo xtask sim` so the
 sancov code-coverage instrumentation guides seed selection; that runner (`paros-sim-runner`) exits
 non-zero on any safety violation, so it is the real CI gate. The `cargo nextest` sim tests are only
-a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safety oracles) plus the
-pinned `REGRESSION_SEEDS`; they do **not** assert coverage saturation. So: to prove a new red→green
+a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safety oracles); they do
+**not** assert coverage saturation. So: to prove a new red→green
 oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
+
+**Pinned seeds are not a regression mechanism.** A seed does not name a scenario, it names a
+*draw schedule*, and every randomness draw the tree gains or loses — a new BUGGIFY location's
+per-seed activation, a probability that was tuned, a mailbox that evicts a different message —
+shifts every seed's interleaving. A seed therefore reproduces only the build it was found on, and
+a "stays red" or "stays green" replay silently stops testing what it was written for the moment
+anything moves (PR #126 re-hunted one witness four times inside a single branch). So: **do not add
+seed constants, seed lists, or seed-replay tests.** A witness may be cited in a comment or a commit
+message as the red→green evidence it was, never pinned as a live artifact. What replaces it is
+volume plus reach: the coverage-guided sweep, the raw hunt, and — where a rare-but-valid state
+needs to be *likely* rather than lucky — a new BUGGIFY location. A test may still hard-code a seed
+when the seed is not a witness: a determinism replay (the same seed twice), a scripted corpus case
+whose seed *is* its input (an E1 mask, a chunk mask), or an arbitrary display seed.
+
+**Red demos are retired.** An oracle's load-bearing-ness — "revert the rule and this assertion goes
+red" — is proven **once**, at step 4 of simulation-driven development below, and recorded in the
+commit message and in the rule's own doc comment. It is not kept afterwards as a permanently
+replayed mutation: a demo is a single-seed replay, so it inherits every problem above (its witness
+cannot stay stable) while carrying a deliberately broken code path in the shipped harness, its own
+process type, its own storage flags, and its own axis in every runner. The rules those demos
+defended are live in the oracles and the in-core asserts, which is where they belong: promise
+monotonicity across a restart (`paros_sim::audit`), never-truncate-on-a-corruption-verdict (the
+boot scan), and `faulty` never counting toward the Promise none-tally (`NodeStorage::faulty_entries`).
 
 **Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
 target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
 introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided
-saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume.
+saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume. A hunt's
+deliverable is a *failing* seed and the diagnosis it leads to — replay it while you fix, cite it in
+the commit, and let it go; it is evidence, not an artifact to keep.
 
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
 operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,
@@ -121,12 +146,39 @@ separation; #81 removed the message-class nemesis, which mixed them):
   when the choice can have an observable effect (for example, only ask to skip when accepts are
   pending), trace the action that actually happened, and disable disruptive hooks after the chaos
   window so recovery gets a quiet tail.
+
+  **Consult a hook only from the node loop, never from a spawned task.** A hook answer is a
+  randomness draw, and moonpool's BUGGIFY state is a thread-local whose draw order is stable only
+  for a stable *call sequence*; the node loop is where the simulation steps deterministically,
+  while a `spawn_task(..).detach()`ed task can outlive its simulation and shift the **next** run's
+  stream. That is not theoretical: consulting two hooks from inside the peer-delivery task broke
+  `same_seed_replays_identically` on CI (a seed's first in-process replay diverged from its second)
+  while replaying clean locally, because whether the leftover task got polled was environment-
+  dependent. A decision a spawned task needs is taken on the loop and *carried* to it — the peer
+  mailbox's `hold_next` / `reverse_next` flags are the pattern.
 - **BUGGIFY, prong 2 — tunables are workload-buggified config.** Anything that *shapes* a run — the
-  cluster size, request counts, timing windows, attrition knobs (the #61 swarm surface) — belongs in
-  plain config data that the **workload/harness layer** randomizes
+  cluster size, request counts, timing windows, fault firing rates, attrition knobs (the #61 swarm
+  surface) — belongs in plain config data that the **workload/harness layer** randomizes
   per seed, FDB knob style (`if buggify → an extreme value, else the default`). New tunables should
   be **born that way**, as data a workload can buggify, not as a constant buried in core or driver
-  code, so per-seed swarm variation composes without either layer knowing about it.
+  code, so per-seed swarm variation composes without either layer knowing about it. One knob is one
+  location: give each tunable its own `buggify_knob!` call site rather than one multiplier over a
+  family, so a seed can be extreme in one dimension and ordinary in the next.
+
+  **Every knob documents its floor**, and a knob only exists where the extreme is a *valid
+  configuration*: pushing it must not make a run unwinnable. The floor is usually structural rather
+  than numeric — the fault window closes long before the recovery tail does, a budget bounds how
+  many copies of a record may be lost — and where it is numeric it is a lesson: a peer queue that
+  cannot hold one tick's traffic starves whichever class is enqueued last *every* tick, and a
+  one-message delivery batch caps per-peer throughput below the protocol's own rate. Both are
+  permanent partitions wearing a knob's clothes, which is not a configuration but a defeat of
+  eventual synchrony. Two things are **never** buggified: **oracle thresholds**
+  (`CONVERGENCE_GRACE_MS`, `GAP_WEDGE_TICKS`, `DEPOSED_BEAT_STREAK`, `PLATEAU_SEEDS`, `SETTLE_MS`),
+  because they are the judgement the run is measured against — moving them does not explore a new
+  state, it changes the verdict on the old one — and **schedule ceilings** (`*_ITERATIONS`), which
+  feed the guided seed schedule rather than the run. Constants that a correctness argument depends
+  on (`MAX_TORN_TAIL` must equal the driver's real unwitnessed in-flight window) are not tunables at
+  all, and say so where they are defined.
 
 The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
 attrition cannot reach — five today: `BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync`,
@@ -294,14 +346,20 @@ test. Reproduce it as a **failing simulation**:
    it yet), a client-observable one in the workload's own history + `check()`. Only reach for a
    trace-scanning `Invariant` when the fact exists nowhere else (application state, simulator
    faults) — and then read it through a cursor, never a re-scan.
-4. Run the sweep, confirm it goes **red** on the unfixed code, and record the failing seed.
+4. Run the sweep, confirm it goes **red** on the unfixed code, and replay that seed while you work.
 5. Fix `paros-core`.
 6. Run the sweep, confirm it goes **green** and saturates.
+7. Write the red→green result down where it stays true: the commit message, and the doc comment on
+   the rule or oracle it proved load-bearing. Cite the witness seed there if it helps a reader —
+   and then let the seed go. It is evidence that the step happened, not a live reproduction (see
+   *Pinned seeds are not a regression mechanism*), and pinning it into the suite only buys a replay
+   that quietly stops reproducing.
 
-A regression unit test may *pin* the bug afterward, but it never replaces step 4. A critical claim
-the simulation cannot reproduce is treated as **unproven** (it is probably not a real bug: safety is
-often preserved by an invariant you missed). Do not add speculative defensive code for an
-unreproducible claim.
+A deterministic unit test may pin the *mechanism* afterward — a core state-machine trap, a storage
+contract — but it never replaces step 4, and it is written against the mechanism, not a seed. A
+critical claim the simulation cannot reproduce is treated as **unproven** (it is probably not a real
+bug: safety is often preserved by an invariant you missed). Do not add speculative defensive code
+for an unreproducible claim.
 
 The sim surface is never finished, and growing it is part of every change, not a follow-up.
 Every new feature or protocol path lands *with* its `sometimes`/`reachable` gates (so saturation

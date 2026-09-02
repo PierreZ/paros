@@ -43,6 +43,13 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// cluster may show before the hole counts as a wedge. Forty ticks is several
 /// election timeouts' worth of real healing opportunities on the protocol's
 /// own clock, immune to wall-time dilation from buggified sleep delays.
+///
+/// **Never buggified**, and neither are [`CONVERGENCE_GRACE_MS`] or
+/// [`DEPOSED_BEAT_STREAK`]: an oracle threshold is the judgement a run is
+/// measured against, so drawing it per seed does not explore a new state, it
+/// changes the verdict on the old one — a short draw indicts a cluster that was
+/// still healing, a long one lets a genuine wedge pass. Knobs shape the run;
+/// thresholds decide it (AGENTS.md, prong 2).
 const GAP_WEDGE_TICKS: u64 = 40;
 
 const CONVERGENCE_GRACE_MS: u64 = 3_000;
@@ -77,11 +84,6 @@ pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
 /// Which family of coverage gates a workload's `check()` should record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GateScope {
-    /// Safety only: the red demos and the scripted choreographies, which run a
-    /// deliberately broken cluster (a reneged promise, a silently truncated
-    /// log, a misreported record) that may correctly never converge, so they
-    /// make no liveness or coverage claim beyond safety.
-    SafetyOnly,
     /// Every protocol/driver gate the main campaign saturates on.
     Full,
     /// The budget-off campaign (issue #21, the WAITED leg): safety plus the
@@ -140,7 +142,6 @@ impl AuditWorld {
             "a committed write ack is checked against the acking node's applied prefix"
         );
         match scope {
-            GateScope::SafetyOnly => return,
             GateScope::BudgetOff => {
                 // The #71 pair: a budget-off sweep must exercise BOTH legs of
                 // the CTRL guarantee — repair where a clean copy survives, and
@@ -208,21 +209,6 @@ impl AuditWorld {
     /// of the #71 compound corruption x partition x lag gate).
     pub(crate) fn lag_observed(&self) -> bool {
         !self.lock().lagged.is_empty()
-    }
-
-    /// Red-demo side door (faulty-as-none only): record the classification the
-    /// demo deliberately withholds from the protocol, so the *storage*
-    /// divergence legs stay explained and the surviving red is the mutation's
-    /// genuine protocol consequence — a unanimous-looking `none` no-op filling
-    /// a chosen slot. Fires from the boot scan, i.e. *before* the boot's
-    /// `recovered` report, so it stages exactly like the driver's own
-    /// faulty report and becomes live for that incarnation at the swap.
-    pub(crate) fn note_reported_faulty(&self, node: u64, slot: u64) {
-        self.lock()
-            .faulty_staged
-            .entry(node)
-            .or_default()
-            .insert(slot);
     }
 
     /// Ground-truth feed from the storage world (issue #19 C). A record can
@@ -571,9 +557,9 @@ struct AuditState {
     /// re-reports what is still faulty, so a stale excuse from a previous
     /// boot must not keep explaining gaps forever.
     reported_faulty: BTreeMap<u64, BTreeSet<u64>>,
-    /// Faulty reports staged since the node's last boot report: the scan (and
-    /// the red-demo side door) speak *before* [`Audit::recovered`] fires, so
-    /// the swap-in happens there — the boot report is the incarnation edge.
+    /// Faulty reports staged since the node's last boot report: the scan
+    /// speaks *before* [`Audit::recovered`] fires, so the swap-in happens
+    /// there — the boot report is the incarnation edge.
     faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
     /// Stage 8 ground truth (budget-off only): slots with no readable copy
     /// anywhere. The wedge/convergence excuse — and the WAITED witness.
@@ -858,6 +844,18 @@ impl AuditState {
 
     /// A node's promised ballot is monotonic — it never decreases, including
     /// across a restart (the boot re-reports the recovered promise).
+    ///
+    /// The cross-restart half is the load-bearing one, and it is the only
+    /// oracle a lost *disk* cannot evade: `set_promise`'s in-core assert lives
+    /// behind the storage record an amnesiac node no longer has. It was proven
+    /// so by mutation — wiping one node's disk after it raised its promise and
+    /// letting it rejoin **naively**, as itself, turned this assertion red.
+    /// That is CTRL's takedown of Google's `MarkNonVoting`: a node that lost
+    /// its promise can accept from an old leader while the new leader still
+    /// counts that promise, and a chosen value is overwritten. It is why
+    /// `prob_wipe` stays 0 on every campaign — a snapshot restores the log, not
+    /// the promise, and restoring redundancy is node replacement (#22's
+    /// reconfiguration), never a rejoin.
     fn observe_promise(&mut self, node: u64, ballot: Ballot) {
         if let Some(prev) = self.promised.insert(node, ballot) {
             assert_always!(ballot >= prev, "a node's promised ballot never decreases");
@@ -1948,9 +1946,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         st.observe_promise(node.0, promised);
         // The boot report is the incarnation edge: swap in the faulty
-        // classifications staged by *this* boot's scan (driver report and
-        // red-demo side door alike) and drop the previous incarnation's — a
-        // stale excuse must not keep explaining divergence forever.
+        // classifications staged by *this* boot's scan and drop the previous
+        // incarnation's — a stale excuse must not keep explaining divergence
+        // forever.
         let fresh = st.faulty_staged.remove(&node.0).unwrap_or_default();
         st.reported_faulty.insert(node.0, fresh);
         // Fresh incarnation: the durable chosen index legally rewinds across

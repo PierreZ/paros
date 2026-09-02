@@ -52,6 +52,20 @@ pub trait Storage {
     /// place from peers. A record whose identity is *also* lost must not appear
     /// here: it is unidentifiable and stays a crash at the scan. Defaults to
     /// empty: a storage that cannot rot has nothing faulty.
+    ///
+    /// **`faulty` may never count toward the none-tally.** This is CTRL
+    /// §5.1.1's first known-fatal mutation, and it was proven load-bearing by
+    /// making it: a boot scan that classifies a rotted record normally but
+    /// *withholds* it from the tri-state makes the acceptor answer "nothing
+    /// accepted here" for a slot whose value it lost. A promise quorum that
+    /// excludes the record's surviving clean copy then sees a unanimous `none`
+    /// and no-op-fills (or re-allocates) an already-chosen slot — two values
+    /// chosen for one slot, which turned the agreement oracles ("a durable
+    /// accept quorum never decides two values for a slot", "at most one value
+    /// is ever chosen for a slot") red with their full apply-time cascade.
+    /// The mutation's other fate is the boot read-back's completeness assert:
+    /// when the withheld record's hole lands *below* the chosen prefix, the
+    /// node refuses to boot at all, before the misreport can reach a Promise.
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         Vec::new()
     }

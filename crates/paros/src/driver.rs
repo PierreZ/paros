@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -910,11 +911,31 @@ struct PeerQueues {
 /// catch-up page replaces the previous — which is the same separation etcd
 /// gets from carrying heartbeats and appends on distinct streams. The scan is
 /// linear in the mailbox and runs only on overflow.
+///
+/// The mailbox also carries the two **drain-side** hook decisions
+/// ([`DriverHooks::hold_peer_delivery`], [`DriverHooks::reverse_delivery_batch`]).
+/// They are taken here, at enqueue time on the node loop, and merely *read* by
+/// the delivery task, because a decision is a randomness draw and the delivery
+/// task is `spawn_task(..).detach()`ed: a detached task's poll schedule is not
+/// part of the simulation's deterministic step order the way the node loop is,
+/// so drawing inside one lets a task that outlives its simulation shift the
+/// *next* run's draw sequence. That is not a theoretical hazard — consulting
+/// these two hooks from inside the delivery task broke
+/// `same_seed_replays_identically` on CI (seed 42's first in-process replay
+/// diverged from its second, on a run that was clean locally). Deciding on the
+/// node loop restores the invariant every other hook already had: **simulation
+/// randomness is drawn only where the simulation is stepping deterministically.**
 #[derive(Clone)]
 struct PeerMailbox {
     inner: Arc<Mutex<VecDeque<internal::ConsensusMessage>>>,
     capacity: usize,
     wake: Arc<tokio::sync::Notify>,
+    /// Set by the enqueue side: the next drained batch waits one tick before
+    /// it goes on the wire. Read-and-cleared by the delivery task.
+    hold_next: Arc<AtomicBool>,
+    /// Set by the enqueue side: the next drained batch is handed to the peer
+    /// in reverse order. Read-and-cleared by the delivery task.
+    reverse_next: Arc<AtomicBool>,
 }
 
 impl PeerMailbox {
@@ -924,6 +945,8 @@ impl PeerMailbox {
             inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
             capacity,
             wake: Arc::new(tokio::sync::Notify::new()),
+            hold_next: Arc::new(AtomicBool::new(false)),
+            reverse_next: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -985,6 +1008,16 @@ impl PeerMailbox {
 
     fn try_pop(&self) -> Option<internal::ConsensusMessage> {
         self.lock().pop_front()
+    }
+
+    /// Take the enqueue side's "hold the next drain" decision, clearing it.
+    fn take_hold(&self) -> bool {
+        self.hold_next.swap(false, Ordering::Relaxed)
+    }
+
+    /// Take the enqueue side's "reverse the next batch" decision, clearing it.
+    fn take_reverse(&self) -> bool {
+        self.reverse_next.swap(false, Ordering::Relaxed)
     }
 
     fn len(&self) -> usize {
@@ -1094,11 +1127,26 @@ impl Outbound {
             } else {
                 &queues.regular
             };
-            // The mailbox's two enqueue-side decisions, each consulted only
-            // where it can have an observable effect (a non-empty queue to
-            // overtake; a full one to evict from).
+            // The mailbox's four decisions, all taken here on the node loop,
+            // each consulted only where it can have an observable effect.
+            //
+            // Two act on this enqueue: overtake needs something already queued
+            // to jump, evicting across kinds needs a full queue to evict from.
             let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
             let evict_across_kinds = queue.is_full() && hooks.evict_across_kinds(to, msg);
+            // Two arm the *drain*: this message's arrival is what makes the
+            // next batch worth holding or reversing. Holding needs a queue that
+            // is already non-empty (parking a drain of nothing changes
+            // nothing); reversing needs at least two messages, since this one
+            // plus a queued one is the smallest reorderable batch. Decided
+            // here, applied there — see [`PeerMailbox`] for why the delivery
+            // task must not draw.
+            if !queue.is_empty() && hooks.hold_peer_delivery(to) {
+                queue.hold_next.store(true, Ordering::Relaxed);
+            }
+            if !queue.is_empty() && hooks.reverse_delivery_batch(to) {
+                queue.reverse_next.store(true, Ordering::Relaxed);
+            }
             if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
                 // Deliberately lossy (etcd-style bounded mailbox, keep-newest),
                 // but never silent: the audit sees the drop the moment it
@@ -1171,6 +1219,19 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
                 message = messages.recv() => message,
             }
         };
+        // Park the drain for one tick before batching. The mailbox keeps
+        // filling while we wait, so the batcher below meets a real backlog
+        // rather than the one-or-two messages a promptly drained queue holds —
+        // the concurrency window an enqueue-time-only perturbation cannot
+        // reach. The *decision* was taken on the node loop (see [`PeerMailbox`]
+        // for why); this task only reads it.
+        if messages.take_hold() {
+            moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                _ = time.sleep(TICK_INTERVAL) => {}
+            }
+        }
         let mut attempt_client = client.clone();
         let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, self_id, to);
         carried = next;
@@ -1238,6 +1299,13 @@ fn delivery_batch<A: Audit>(
         batch_bytes += message.encoded_len();
         batch.push(wire_message(message));
     }
+    // The drain-side reorder: the peer transport never promised ordering, and
+    // reversing a whole batch is the shape a retried RPC or a re-established
+    // stream produces. Decided on the node loop (see [`PeerMailbox`]), applied
+    // only where it can have an effect.
+    if batch.len() > 1 && messages.take_reverse() {
+        batch.reverse();
+    }
     (internal::Deliver { messages: batch }, carried)
 }
 
@@ -1265,6 +1333,26 @@ fn send_snapshot_offers<S, H, A>(
     A: Audit,
 {
     for &(to, offered_index, ballot, config_id) in snapshot_offers {
+        // The mismatch skip below, taken spuriously: the requester re-asks
+        // every tick and any other custodian may answer, so an unserved beat
+        // is always safe — and this reaches the "nobody served me this round"
+        // state without needing an application repair to be open.
+        //
+        // Deliberately *not* reported through `Audit::snapshot_offer_skipped`:
+        // that channel's coverage gate claims a **mismatched** offer was
+        // withheld, and a hook that can fire on a perfectly matched offer would
+        // satisfy it trivially. The hook's own BUGGIFY pairing proves this
+        // location fires; the trace field says which of the two skips a reader
+        // is looking at.
+        if hooks.skip_snapshot_offer(to) {
+            tracing::info!(
+                node = out.self_id,
+                offered = offered_index.0,
+                reason = "hook",
+                "snapshot_offer_skipped"
+            );
+            continue;
+        }
         if storage.applied_slot() != Some(offered_index) {
             // An offered snapshot must describe exactly the application prefix
             // the protocol message names. Stage 8 makes a mismatch a
@@ -1279,6 +1367,7 @@ fn send_snapshot_offers<S, H, A>(
             tracing::info!(
                 node = out.self_id,
                 offered = offered_index.0,
+                reason = "mismatch",
                 "snapshot_offer_skipped"
             );
             continue;
@@ -2366,6 +2455,12 @@ pub async fn run_node<P, S, H, A>(
 where
     P: Providers,
     S: NodeStorage,
+    // Deliberately *not* `Send + 'static`, unlike the audit below. Every hook
+    // is consulted from the node loop, never from a spawned task, and keeping
+    // the bound this narrow is what *enforces* that: `hooks` arrives as a
+    // borrow, so it cannot be captured by a `spawn_task` future, and a future
+    // attempt to consult a hook from a detached task is a compile error rather
+    // than a determinism bug found on CI months later. See [`PeerMailbox`].
     H: DriverHooks,
     // `Clone + Send + Sync + 'static` because each peer-delivery task carries
     // its own handle to the audit: the bounded-mailbox drops happen inside
@@ -2808,7 +2903,14 @@ where
                 });
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
-                next_tick = time.now() + TICK_INTERVAL;
+                // Pacing, not a protocol bound: every timeout the core owns is
+                // counted in ticks, so a node that waits twice as long between
+                // ticks is exactly a slow node. Stretching desynchronizes the
+                // cluster's protocol clocks — a shape moonpool's clock skew
+                // reaches only for the wall clock, never for the tick counter
+                // the election and read-round timers actually run on.
+                next_tick = time.now()
+                    + if hooks.stretch_tick_interval() { TICK_INTERVAL * 2 } else { TICK_INTERVAL };
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision

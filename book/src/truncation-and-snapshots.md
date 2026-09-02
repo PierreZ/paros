@@ -131,10 +131,10 @@ That sweep found two bugs before a human did, both fixed here:
   it, so the no-gaps oracle had to track the *set* of snapshot landings, not just
   the latest, or it flagged the first install as a bad forward jump.
 
-Seed `11316277997507784505` is pinned in `REGRESSION_SEEDS`: it drives a node
-below a peer's floor and watches it recover through an `InstallSnapshot`. The
-coverage sweep saturates with the snapshot reachables firing, so the path is not
-just present but exercised. In the common random run a below-floor node is often
+The sweep drives nodes below a peer's floor and watches them recover through an
+`InstallSnapshot`, and it saturates with the snapshot reachables firing — so the
+path is not just present but exercised, on every run rather than on one pinned
+seed. In the common random run a below-floor node is often
 still healed by catch-up from a peer that truncated less aggressively — snapshot
 transfer is the accelerator that becomes *load-bearing* once every peer has
 truncated past it, which is exactly when nothing else can help.

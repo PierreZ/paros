@@ -11,6 +11,9 @@ use paros_sim::{
 };
 
 fn main() {
+    // The illustrative timeline's seed (step 3 below). A *display* default, not
+    // a pinned witness: every seed must satisfy what this run asserts, so the
+    // value only decides which run gets printed for eyeballing.
     let seed = std::env::args()
         .nth(1)
         .and_then(|s| s.parse::<u64>().ok())
