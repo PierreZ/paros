@@ -44,11 +44,10 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
 
-  # The sans-IO core, the library driver, and the sim's workloads/oracles must
-  # stay portable to wasm32 so the browser demo runs them unchanged. paros-core is
-  # zero-dep/std-only; paros (the provider-generic driver) must build for wasm32;
-  # paros-sim must build in its wasm-able `--no-default-features` configuration;
-  # paros-wasm-demo must compile the whole stack to wasm32.
+  # The sans-IO core and the library driver stay portable to wasm32: paros-core is
+  # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The
+  # gate guards those two contracts, not a browser build (the demo was removed
+  # and will return on top of them).
   portability:
     runs-on: ubuntu-latest
     steps:
@@ -59,10 +58,6 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
-      - name: Lint paros-sim in its wasm-able configuration
-        run: nix develop --command cargo clippy -p paros-sim --no-default-features --all-targets -- --deny warnings
-      - name: Build paros-wasm-demo for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-wasm-demo
 
   # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
   # the Paxos sim with sancov instrumentation on the shipped library (paros_core +

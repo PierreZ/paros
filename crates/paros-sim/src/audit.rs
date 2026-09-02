@@ -81,17 +81,6 @@ pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
     world
 }
 
-/// Which family of coverage gates a workload's `check()` should record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GateScope {
-    /// Every protocol/driver gate the main campaign saturates on.
-    Full,
-    /// The budget-off campaign (issue #21, the WAITED leg): safety plus the
-    /// recovered/waited pair — no full-liveness claim, since a run may
-    /// correctly end unavailable.
-    BudgetOff,
-}
-
 /// Fire a `reachable` gate the first time its sticky flag flips.
 macro_rules! reach_once {
     ($flag:expr, $message:expr) => {
@@ -127,7 +116,7 @@ impl AuditWorld {
     /// from the `check()` phase; repeating it (several client workloads run
     /// concurrently) is idempotent — a `sometimes` slot only accumulates
     /// samples, and an `always` re-check of the same true fact is free.
-    pub(crate) fn check_gates(&self, scope: GateScope) {
+    pub(crate) fn check_gates(&self) {
         let st = self.lock();
         // Liveness reachability: a value does get chosen.
         assert_sometimes!(st.any_chosen, "a value is eventually chosen");
@@ -141,24 +130,6 @@ impl AuditWorld {
             st.any_ack_checked,
             "a committed write ack is checked against the acking node's applied prefix"
         );
-        match scope {
-            GateScope::BudgetOff => {
-                // The #71 pair: a budget-off sweep must exercise BOTH legs of
-                // the CTRL guarantee — repair where a clean copy survives, and
-                // a *correct* wait where none does. Without the WAITED gate a
-                // sweep can go green having only ever recovered.
-                assert_sometimes!(
-                    st.repaired_seen,
-                    "recovery repaired a faulty record from a surviving clean copy"
-                );
-                assert_sometimes!(
-                    st.waited,
-                    "recovery correctly WAITED: no clean copy of a committed item remains"
-                );
-                return;
-            }
-            GateScope::Full => {}
-        }
         st.check_protocol_gates();
         st.check_driver_hook_gates();
     }
@@ -195,14 +166,6 @@ impl AuditWorld {
     /// still a failure).
     pub(crate) fn note_storage_dead(&self, node: u64) {
         self.lock().storage_dead.insert(node);
-    }
-
-    /// Ground truth from the storage world (budget-off runs only): `slot` has
-    /// no readable copy anywhere. The wedge and convergence oracles excuse
-    /// exactly this slot — a *correct* unavailability — and the WAITED gate
-    /// records that the leg was genuinely exercised.
-    pub(crate) fn note_unrecoverable(&self, slot: u64) {
-        self.lock().unrecoverable.insert(slot);
     }
 
     /// Whether any node has been observed lagging the cluster prefix (one leg
@@ -243,6 +206,36 @@ impl AuditWorld {
         }
     }
 
+    /// A fold of the run's end state for the determinism proof: the chosen
+    /// log, every node's applied prefix, and the leadership history. Two runs
+    /// of one seed must agree on it bit for bit.
+    pub(crate) fn digest(&self) -> u64 {
+        let st = self.lock();
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fold = |v: u64| {
+            for byte in v.to_le_bytes() {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for (&slot, &vhash) in &st.chosen {
+            fold(slot);
+            fold(vhash);
+        }
+        for (&node, &max) in &st.applied_max {
+            fold(node);
+            fold(max);
+        }
+        for &round in &st.leader_rounds {
+            fold(round);
+        }
+        for (&node, &round) in &st.leader_round {
+            fold(node);
+            fold(round);
+        }
+        h
+    }
+
     /// The convergence deliverable, judged when no future leader change can
     /// invalidate a provisional quiescence decision: every node this run brought
     /// up ends on the cluster's chosen prefix.
@@ -275,20 +268,6 @@ impl AuditWorld {
                 continue;
             }
             let prefix = st.applied_max.get(&node).copied();
-            // Stage 8's WAITED excuse: a node whose next needed slot (or any
-            // slot between it and the cluster maximum) has no readable copy
-            // anywhere is *correctly* held below the prefix — that is the
-            // guarantee, not a failure. Ground truth only (budget-off runs).
-            let next_needed = prefix.map_or(0, |p| p + 1);
-            let held_at_unrecoverable = st
-                .unrecoverable
-                .range(next_needed..=cluster_max)
-                .next()
-                .is_some();
-            if held_at_unrecoverable && prefix != Some(cluster_max) {
-                st.waited = true;
-                continue;
-            }
             assert_always!(
                 prefix == Some(cluster_max),
                 "every node converges to the cluster's chosen prefix at the end of the settle tail",
@@ -561,12 +540,6 @@ struct AuditState {
     /// speaks *before* [`Audit::recovered`] fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
-    /// Stage 8 ground truth (budget-off only): slots with no readable copy
-    /// anywhere. The wedge/convergence excuse — and the WAITED witness.
-    unrecoverable: BTreeSet<u64>,
-    /// The WAITED leg fired: the cluster correctly held position at an
-    /// unrecoverable committed item instead of fabricating or losing data.
-    waited: bool,
     /// Repair progress observed (from [`Audit::repair_progress`]): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.
@@ -678,17 +651,10 @@ impl AuditState {
             self.leader_promise_checked,
             "a fresh leader's promise is checked against the ballot it won"
         );
-        // #61's cluster-size regimes are actually visited: the quorum edge
-        // cases (a singleton that decides alone; a pair where any attrition
-        // freezes progress until recovery) and the n>=5 shape whose accept
-        // quorums can avoid a two-node pin. Every node boots at start, so the
-        // booted set is the drawn topology.
+        // The n>=5 shape, whose accept quorums can avoid a two-node pin, is
+        // actually visited. Every node boots at start, so the booted set is
+        // the drawn topology.
         let n = self.booted.len();
-        assert_sometimes!(n == 1, "a run drives a single-node cluster");
-        assert_sometimes!(
-            n == 2,
-            "a run drives a two-node cluster (any attrition freezes it)"
-        );
         assert_sometimes!(n >= 5, "a run drives a five-node cluster");
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
@@ -939,14 +905,8 @@ impl AuditState {
     /// counts beats (one per tick per leader; the seq dedups the per-peer
     /// fan-out) and must reset well inside [`DEPOSED_BEAT_STREAK`].
     ///
-    /// Below n=3 the condition is unreachable honestly: a singleton has no
-    /// peers to depose it, and an n=2 majority (both nodes) includes the leader
-    /// itself, whose own promise cannot sit above the ballot it is beating.
     fn observe_beat(&mut self, node: u64, ballot: Ballot, seq: u64) {
         let n = self.booted.len();
-        if n < 3 {
-            return;
-        }
         let majority = n / 2 + 1;
         let above = self.promised.values().filter(|p| **p > ballot).count();
         let entry = self.deposed_streaks.entry(node).or_default();
@@ -1191,9 +1151,10 @@ impl AuditState {
             assert_reachable!("a client proposal is acknowledged");
         }
         check_disclosed_order(h);
-        // The sequential fast path, per client: program order is real-time order
-        // within a non-pipelined client even where timestamps tie, so C1-C3 stay
-        // strictly stronger than L1-L4 for those clients.
+        // The sequential fast path, per client: every client runs one operation
+        // at a time (a primer batch completes before the next op starts), so
+        // program order is real-time order within a client even where
+        // timestamps tie, and C1-C3 are strictly stronger than L1-L4 there.
         let committed_clients: BTreeSet<u64> = h
             .write_slot
             .keys()
@@ -1201,11 +1162,8 @@ impl AuditState {
             .map(|&(c, _)| c)
             .collect();
         for &client in &committed_clients {
-            if !h.pipelined_clients.contains(&client) {
-                check_sequential_client(client, h);
-            }
+            check_sequential_client(client, h);
         }
-        h.check_mode_gates();
         h.check_coverage_gates(&committed_clients, self.leader_change_ms);
     }
 }
@@ -1802,16 +1760,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         //    buggified sleep delay stretches ticks during the chaos window.
         // `None` is the empty applied prefix (conceptually slot -1), so every
         // real hole sits above it and must remain observable.
-        // The WAITED excuse (Stage 8, budget-off ground truth): a hole at a
-        // slot with no readable copy anywhere is *correct* unavailability —
-        // the CTRL guarantee explicitly demands the cluster hold position
-        // there. Excused by the world's ground truth only, never by the
-        // node's own claim; the wedge stays armed everywhere else, so an
-        // unhealed hole WITH a surviving clean copy is still a red run.
-        if st.unrecoverable.contains(&hole.0) {
-            st.waited = true;
-            return;
-        }
         let wedged = st.quiesced(now)
             && st
                 .cluster_applied_max
@@ -2535,24 +2483,12 @@ impl OpSpan {
     }
 }
 
-/// This run's client workload mode, per client instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClientMode {
-    /// One outstanding op at a time: `W0 R0 W1 R1 …`.
-    Sequential,
-    /// Several fresh-seq proposals in flight at once.
-    Pipelined,
-    /// One decision, then silence.
-    Quiet,
-}
-
 /// One client's own record of what it asked for and what came back. Owned by
 /// the workload — the client is the only party that knows its own program order
 /// — and merged into the shared [`LinHistory`] at `check()` time.
 #[derive(Default)]
 pub(crate) struct ClientHistory {
     client: u64,
-    mode: Option<ClientMode>,
     issued: usize,
     acked: usize,
     failed: usize,
@@ -2572,10 +2508,6 @@ pub(crate) struct ClientHistory {
 impl ClientHistory {
     pub(crate) fn set_client(&mut self, client: u64) {
         self.client = client;
-    }
-
-    pub(crate) fn set_mode(&mut self, mode: ClientMode) {
-        self.mode = Some(mode);
     }
 
     pub(crate) fn record_write_issued(&mut self, seq: u64, now_ms: u64) {
@@ -2636,11 +2568,6 @@ struct LinHistory {
     writes: Vec<(OpSpan, Option<u64>)>,
     /// Committed reads as real-time spans with their watermark.
     reads: Vec<(OpSpan, Option<u64>)>,
-    /// Clients whose mode gives no per-client program order to linearize.
-    pipelined_clients: BTreeSet<u64>,
-    sequential_seen: bool,
-    pipelined_seen: bool,
-    quiet_seen: bool,
     issued: usize,
     acked: usize,
     failed: usize,
@@ -2655,15 +2582,6 @@ impl LinHistory {
     /// Fold one client's record in. Called once per client, from its `check()`.
     fn merge(&mut self, h: &ClientHistory) {
         let c = h.client;
-        match h.mode {
-            Some(ClientMode::Sequential) => self.sequential_seen = true,
-            Some(ClientMode::Pipelined) => {
-                self.pipelined_seen = true;
-                self.pipelined_clients.insert(c);
-            }
-            Some(ClientMode::Quiet) => self.quiet_seen = true,
-            None => {}
-        }
         self.issued += h.issued;
         self.acked += h.acked;
         self.failed += h.failed;
@@ -2685,35 +2603,6 @@ impl LinHistory {
             if let Some(&inv) = h.read_inv.get(&seq) {
                 self.reads.push((OpSpan { inv, resp }, wm));
             }
-        }
-    }
-
-    /// The per-run workload modes rotate across the seed sweep; gated so
-    /// saturation proves every mode is reached.
-    fn check_mode_gates(&self) {
-        assert_sometimes!(
-            self.sequential_seen,
-            "a run uses the sequential client workload mode"
-        );
-        if self.sequential_seen {
-            assert_reachable!("a run uses the sequential client workload mode");
-        }
-        assert_sometimes!(
-            self.pipelined_seen,
-            "a run uses the pipelined client workload mode"
-        );
-        if self.pipelined_seen {
-            assert_reachable!("a run uses the pipelined client workload mode");
-        }
-        // The one-decision-then-idle mode: the only run shape whose chosen
-        // prefix stops at slot 0, and therefore the only one in which an empty
-        // prefix can be told apart from a prefix of exactly slot 0.
-        assert_sometimes!(
-            self.quiet_seen,
-            "a run uses the quiet single-decision workload mode"
-        );
-        if self.quiet_seen {
-            assert_reachable!("a cluster decides one slot and then idles");
         }
     }
 

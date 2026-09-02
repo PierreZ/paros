@@ -1,6 +1,6 @@
 [package]
 name = "paros-sim"
-description = "Deterministic-simulation harness for paros: the moonpool Process adapter, workloads, and oracles"
+description = "Deterministic-simulation harness for paros: the moonpool Process adapter, the workload, the fault world, and the audit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,34 +9,21 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# `native` (default-on) re-enables moonpool's production providers + fork-based
-# exploration. Building with `--no-default-features` drops both for the wasm-able
-# configuration the demo reuses (CI enforces this; see .github/workflows/rust.yml).
-[features]
-default = ["native"]
-native = [
-    "moonpool-sim/tokio-providers",
-    "moonpool-sim/exploration",
-]
-
 [dependencies]
 # The node driver + RPC contract + MemStorage live in `paros` (the library); this
 # crate is just the DST harness on top: the `Process` adapter, workloads, oracles.
 paros = { path = "../paros", version = "0.2.0" }
 
 # moonpool is pinned to a commit on `main` (not the crates.io release): it evolves
-# fast and we track it deliberately, bumping `rev` by hand. Both crates come in
-# without their production (tokio net/fs) features so the sim stays wasm-able; the
-# `native` feature above layers those back on for the native runner.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27", default-features = false }
+# fast and we track it deliberately, bumping `rev` by hand. The sim needs only the
+# simulated providers plus the fork-free timeline explorer.
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27", default-features = false, features = ["exploration"] }
 
 async-trait = "0.1"
 # `join_all`, to drive the `Pipelined` workload mode's concurrent proposals.
 futures = "0.3"
 http = "1"
 moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "43304d8b5db58fbd171fcce44ced32d8cc8ceb27" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tonic = { version = "0.14", default-features = false, features = ["codegen"] }
 tracing = "0.1"
 

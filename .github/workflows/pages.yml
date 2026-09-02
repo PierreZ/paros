@@ -21,8 +21,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build and stage the wasm demo embedded in the book
-        run: nix develop --command scripts/build-wasm-demo.sh
       - name: Build book
         run: nix develop --command mdbook build
       - uses: actions/upload-pages-artifact@v5

@@ -20,7 +20,7 @@ use moonpool_sim::{
     assert_reachable, assert_sometimes, buggify_knob, buggify_with_prob, sim::sim_random,
 };
 
-use crate::audit::{AuditWorld, GateScope, NodeAudit, audit_world};
+use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
     Ballot, ClientId, ClientSeq, Command, Config, ConfigId, CorruptionVerdict, DriverHooks,
@@ -33,14 +33,6 @@ use paros::{
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
-const QUIET_HOOKS_KEY: &str = "paros-quiet-driver-hooks";
-
-/// Flag key for **budget-off** runs (issue #21/#71, the WAITED leg): the
-/// per-record clean-quorum budget on corruption injection is lifted, so every
-/// copy of a committed item can rot in one run. The CTRL guarantee then says
-/// the cluster must **wait** — correctly unavailable, never fabricating or
-/// losing data — and the WAITED gate proves the leg is genuinely exercised.
-const BUDGET_OFF_KEY: &str = "paros-budget-off";
 
 /// **Default** per-call firing probability of the write-`EIO` BUGGIFY site (one
 /// location, per-seed activation × per-call firing; the record identity travels
@@ -117,46 +109,26 @@ const P_SNAP_CHUNK_ROT: f64 = 0.05;
 /// scan invents. Narrow it and legitimate crash tails are classified as
 /// corruption and park otherwise healthy nodes. Neither extreme is a valid
 /// configuration, so this constant tracks [`paros::LEADER_RECOVERY_BATCH`]
-/// instead of being drawn.
-const MAX_TORN_TAIL: usize = 64;
+/// instead of being drawn — and is *defined* as that constant so the two
+/// cannot drift.
+const MAX_TORN_TAIL: usize = paros::LEADER_RECOVERY_BATCH;
 
 /// A paros node in the simulation.
 pub struct NodeProcess;
 
-/// A paros node with simulation-only driver decisions disabled. This keeps the
-/// dedicated lifecycle choreography's built-in graceful attrition as its sole
-/// perturbation without mutating Moonpool's iteration-owned BUGGIFY state.
-pub(crate) struct QuietNodeProcess;
+/// One inert topology member that keeps the simulator lifecycle open while a
+/// workload drives something else (the storage contract suite).
+pub(crate) struct IdleProcess;
 
 #[async_trait]
-impl Process for QuietNodeProcess {
+impl Process for IdleProcess {
     fn name(&self) -> &'static str {
-        "paros-node"
+        "paros-idle"
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.state().get::<bool>(QUIET_HOOKS_KEY).is_none() {
-            ctx.state().publish(QUIET_HOOKS_KEY, true);
-        }
-        NodeProcess.run(ctx).await
-    }
-}
-
-/// A paros node for **budget-off** runs ([`BUDGET_OFF_KEY`]): the WAITED-leg
-/// campaign, where corruption may take every copy of a committed item.
-pub(crate) struct BudgetOffNodeProcess;
-
-#[async_trait]
-impl Process for BudgetOffNodeProcess {
-    fn name(&self) -> &'static str {
-        "paros-node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.state().get::<bool>(BUDGET_OFF_KEY).is_none() {
-            ctx.state().publish(BUDGET_OFF_KEY, true);
-        }
-        NodeProcess.run(ctx).await
+        ctx.shutdown().cancelled().await;
+        Ok(())
     }
 }
 
@@ -222,7 +194,7 @@ async fn scripted_corpus_loop(ctx: &SimContext) -> SimulationResult<()> {
         guard.set_cluster_size(members.len());
         // The corpus's declared mode: masks may exceed the per-record budget,
         // and every injection records the unrecoverable ground truth.
-        guard.budget_off = true;
+        guard.unbudgeted = true;
     }
     // Every fault on this axis is a scripted injection: the swarm sites and
     // the driver's BUGGIFY hooks stay dark so a case replays as choreographed.
@@ -389,27 +361,20 @@ impl Process for NodeProcess {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .set_cluster_size(members.len());
-        let perturb = ctx.state().get::<bool>(QUIET_HOOKS_KEY) != Some(true);
         let hooks = BuggifyHooks::new(
             ctx.time().clone(),
             Duration::from_millis(crate::CHAOS_DURATION_MS),
-            perturb,
+            true,
         );
         // The budgeted storage-fault layer (issue #19 B/C) shares the driver
-        // hooks' chaos window and quiet-mode switch: after the cutoff the world
-        // stops injecting **new** faults but never heals the consequences of
-        // old ones — recovery through the tail must be genuine.
+        // hooks' chaos window: after the cutoff the world stops injecting
+        // **new** faults but never heals the consequences of old ones —
+        // recovery through the tail must be genuine.
         let faults = StorageFaults::new(
             ctx.time().clone(),
             Duration::from_millis(crate::CHAOS_DURATION_MS),
-            perturb,
+            true,
         );
-        if ctx.state().get::<bool>(BUDGET_OFF_KEY) == Some(true) {
-            world
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .budget_off = true;
-        }
         // The per-iteration shared audit: pure observation, published beside the
         // storage world so every node folds its transitions into one incremental
         // checker. It never influences the driver — that is `hooks`' job.
@@ -431,7 +396,7 @@ impl Process for NodeProcess {
         // gap). A one-message delivery batch maximizes framing pressure. Two
         // independent knob locations; drawn once per node per seed, stable
         // across this node's restarts.
-        let tunables = if perturb {
+        let tunables = {
             let defaults = DriverTunables::default();
             let peer_queue_capacity =
                 buggify_knob!(defaults.peer_queue_capacity, 4_usize..17_usize);
@@ -458,8 +423,6 @@ impl Process for NodeProcess {
                 peer_queue_capacity,
                 delivery_batch,
             }
-        } else {
-            DriverTunables::default()
         };
 
         // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
@@ -885,14 +848,14 @@ struct StorageWorld {
     parked_ids: BTreeSet<u64>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
-    /// Budget-off mode (issue #21, the WAITED leg): recoverable corruption may
-    /// take every copy of a record; each slot driven to zero readable copies
-    /// is recorded in `unrecoverable` and handed to the checker, which excuses
-    /// exactly that unavailability — and demands it be *correct* (safe).
-    budget_off: bool,
+    /// Unbudgeted mode (the scripted corpus): a targeted injection may take
+    /// every copy of a record; each slot driven to zero readable copies is
+    /// recorded in `unrecoverable`, the ground truth the corpus's analytic
+    /// derivation is cross-checked against.
+    unbudgeted: bool,
     /// Slots with no readable copy anywhere — no clean log record on any node
-    /// and no post-truncation snapshot covering them (ground truth for the
-    /// WAITED leg; only ever populated in budget-off runs).
+    /// and no post-truncation snapshot covering them (only ever populated in
+    /// unbudgeted runs).
     unrecoverable: BTreeSet<u64>,
     /// Scripted lifecycle (the #113 corpus): per-node restart epochs. Bumping
     /// one makes the corpus node loop drop its current incarnation — a clean
@@ -1008,14 +971,14 @@ impl StorageWorld {
     /// Whether a **recoverable** corruption of the accepted record at `slot`
     /// on `node_key` is inside the per-record budget: the record must keep a
     /// clean quorum of live copies (#70's rule, re-counted over live copies at
-    /// injection time). Budget-off lifts the bound — that is the WAITED leg's
-    /// whole point — and [`StorageWorld::note_if_unrecoverable`] records the
-    /// ground truth the oracles excuse against.
+    /// injection time). The unbudgeted corpus lifts the bound, and
+    /// [`StorageWorld::note_if_unrecoverable`] records the ground truth its
+    /// analytic derivation is checked against.
     fn may_corrupt_record(&self, node_key: &str, slot: u64) -> bool {
         if self.cluster_size == 0 {
             return false;
         }
-        if self.budget_off {
+        if self.unbudgeted {
             return true;
         }
         let already = self
@@ -1032,7 +995,7 @@ impl StorageWorld {
     /// disk truncated past it with a healthy snapshot (the snapshot covers the
     /// folded prefix), no disk retains a fully clean decided snapshot point
     /// covering it (#101), and no disk holds it clean. Ground truth for the
-    /// WAITED leg.
+    /// corpus.
     fn slot_unrecoverable(&self, slot: u64) -> bool {
         for (key, disk) in &self.disks {
             if self.parked.contains(key) {
@@ -1084,14 +1047,11 @@ impl StorageWorld {
         true
     }
 
-    /// After a budget-off injection touched `slot`, record it unrecoverable if
-    /// no readable copy survives, handing the fact to `checker` so the wedge /
-    /// convergence oracles excuse exactly this slot (and the WAITED gate can
-    /// fire).
-    fn note_if_unrecoverable(&mut self, slot: u64, checker: &AuditWorld) {
-        if self.budget_off && !self.unrecoverable.contains(&slot) && self.slot_unrecoverable(slot) {
+    /// After an unbudgeted injection touched `slot`, record it unrecoverable if
+    /// no readable copy survives.
+    fn note_if_unrecoverable(&mut self, slot: u64) {
+        if self.unbudgeted && !self.unrecoverable.contains(&slot) && self.slot_unrecoverable(slot) {
             self.unrecoverable.insert(slot);
-            checker.note_unrecoverable(slot);
             tracing::info!(slot, "slot_unrecoverable");
         }
     }
@@ -1385,7 +1345,7 @@ impl RotRates {
 /// terminally parks the node (detect ⇒ crash, and restarting cannot help), so
 /// each is gated on [`StorageWorld::may_park`]'s dead-node budget.
 #[allow(clippy::too_many_lines)] // one flat block per independent BUGGIFY location
-fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &AuditWorld) {
+fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
     // Rot density is workload-buggified config (prong 2), and **one knob per
     // family**: each multiplies its own family's *firing* probability toward
     // the extreme, capped so a probability stays a probability. Per family
@@ -1489,7 +1449,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                     CorruptionKind::BitFlip,
                     is_block,
                 );
-                world.note_if_unrecoverable(slot.0, checker);
+                world.note_if_unrecoverable(slot.0);
             }
             if id_faulty {
                 // Unidentifiable record: the scan can only crash, terminally.
@@ -1513,7 +1473,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                 CorruptionKind::LostWrite,
                 false,
             );
-            world.note_if_unrecoverable(slot.0, checker);
+            world.note_if_unrecoverable(slot.0);
         }
     }
     // A misdirected write: valid checksum, wrong identity — the identity
@@ -1531,7 +1491,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                 CorruptionKind::Misdirected,
                 false,
             );
-            world.note_if_unrecoverable(slot.0, checker);
+            world.note_if_unrecoverable(slot.0);
         }
     }
     // Snapshot corruption is its own kind and its own gate (#71) — a
@@ -1544,7 +1504,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
             .disks
             .get(key)
             .is_some_and(|d| d.chain.applied_count > 0)
-        && (world.budget_off
+        && (world.unbudgeted
             || world.cluster_size > 1
             || world.disks.get(key).is_some_and(|d| d.first_slot.0 == 0))
     {
@@ -1560,14 +1520,11 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
         });
         // Slots this node truncated past lose their local custody: re-derive
         // the unrecoverable ground truth over the folded prefix (mirrors
-        // `corpus_corrupt_snapshot`; budget-off only — a budget-on run never
-        // permits the shape). Witness seed 3347125089641664560 (budget-off): a
-        // singleton lost its live snapshot AND a chunk of its only decided
-        // point, correctly WAITED forever — and was judged unexplained because
-        // this bookkeeping was missing on the swarm sites.
+        // `corpus_corrupt_snapshot`; unbudgeted only — a budgeted run never
+        // permits the shape).
         let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
         for slot in 0..floor {
-            world.note_if_unrecoverable(slot, checker);
+            world.note_if_unrecoverable(slot);
         }
     }
     // HardState copy rot (CTRL metainfo doctrine): usually one copy — used and
@@ -1663,7 +1620,7 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                 })
                 .count();
             let quorum = world.quorum();
-            if (world.budget_off || clean_copies.saturating_sub(1) >= quorum)
+            if (world.unbudgeted || clean_copies.saturating_sub(1) >= quorum)
                 && let Some(disk) = world.disks.get_mut(key)
             {
                 let index = usize::try_from(chunk).unwrap_or(0);
@@ -1683,10 +1640,10 @@ fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64, checker: &Audit
                     // The point is custody for the folded prefix: losing its
                     // last clean copy of a chunk can strand every slot below
                     // the floor. Re-derive the unrecoverable ground truth
-                    // (mirrors `corpus_corrupt_snap_chunk`; budget-off only).
+                    // (mirrors `corpus_corrupt_snap_chunk`; unbudgeted only).
                     let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
                     for slot in 0..floor {
-                        world.note_if_unrecoverable(slot, checker);
+                        world.note_if_unrecoverable(slot);
                     }
                 }
             }
@@ -1976,7 +1933,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             // down, rolled at the boot that immediately scans them. Gated on
             // the chaos window like every other injection.
             if faults.active() {
-                roll_boot_rot(&mut guard, &key, node_id, &checker);
+                roll_boot_rot(&mut guard, &key, node_id);
             }
             let guard = &*guard;
             // Coverage: the recovery paths only matter if boots genuinely
@@ -3040,12 +2997,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             .application
             .applied_slot()
             .map_or(Slot(0), |applied| Slot(applied.0.saturating_add(1)));
-        if slot != expected {
-            eprintln!(
-                "CONTIGUITY: node={} slot={} expected={} chosen_index={} applied_count={}",
-                self.node_id, slot.0, expected.0, chosen_index.0, self.application.applied_count
-            );
-        }
         assert_always!(
             slot == expected,
             "chain: local application transition is contiguous"
@@ -3269,8 +3220,14 @@ struct BuggifyHooks<T> {
 
 impl<T: TimeProvider> BuggifyHooks<T> {
     fn new(time: T, cutoff: Duration, enabled: bool) -> Self {
+        // Only a perturbing node draws: the scripted corpus must not spend
+        // randomness it never uses (the same rule as `StorageFaults::new`).
         #[allow(clippy::cast_precision_loss)]
-        let seam_crash_bias = buggify_knob!(1_u64, 4_u64..11_u64) as f64;
+        let seam_crash_bias = if enabled {
+            buggify_knob!(1_u64, 4_u64..11_u64) as f64
+        } else {
+            1.0
+        };
         Self {
             time,
             cutoff,
@@ -3647,8 +3604,6 @@ pub(crate) struct StorageFaultStats {
     /// (`TigerBeetle`'s excuse-list doctrine — the bound is never trusted to be
     /// sufficient on its own).
     pub(crate) clean_quorum_everywhere: bool,
-    /// Whether this run lifted the corruption budget (the WAITED-leg axis).
-    pub(crate) budget_off: bool,
 }
 
 /// Fold the storage world's ground truth (empty world = no faults).
@@ -3662,7 +3617,6 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
         fsync_durable: false,
         fsync_lost: false,
         clean_quorum_everywhere: true,
-        budget_off: guard.budget_off,
     };
     for fault in &guard.injected {
         match (fault.kind, fault.persisted) {
@@ -3707,18 +3661,18 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
     stats
 }
 
-/// The IPs of nodes terminally parked by a detected persistent corruption
-/// (detect ⇒ crash, stays down). The workload's convergence probe skips
-/// exactly these — the availability cost Stage 7's baseline deliberately pays,
-/// bounded by the dead-node budget so the cluster keeps serving.
-/// Slots the budget-off run drove to zero readable copies (ground truth for
-/// the WAITED leg; empty on every budgeted campaign).
+/// Slots an unbudgeted (corpus) run drove to zero readable copies; empty on
+/// the budgeted main campaign.
 pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.unrecoverable.clone()
 }
 
+/// The IPs of nodes terminally parked by a detected persistent corruption
+/// (detect ⇒ crash, stays down). The workload's convergence probe skips
+/// exactly these — the availability cost Stage 7's baseline deliberately pays,
+/// bounded by the dead-node budget so the cluster keeps serving.
 pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3805,7 +3759,6 @@ pub(crate) fn corpus_corrupt_snap_chunk(
     chunk: u32,
 ) -> bool {
     let world = storage_world(handle);
-    let checker = audit_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let (at, floor) = {
         let Some(disk) = guard.disks.get_mut(ip) else {
@@ -3835,19 +3788,18 @@ pub(crate) fn corpus_corrupt_snap_chunk(
         outcome: CorruptionOutcome::Dormant,
     });
     for slot in 0..floor {
-        guard.note_if_unrecoverable(slot, &checker);
+        guard.note_if_unrecoverable(slot);
     }
     true
 }
 
 /// Targeted E1 mask corruption of one accepted record — value lost, identity
-/// preserved (the recoverable class). Deliberately unbudgeted: the corpus axis
-/// runs budget-off, and the world records the unrecoverable ground truth the
-/// analytic mask derivation cross-checks. Returns whether a clean record was
+/// preserved (the recoverable class). Deliberately unbudgeted: the world
+/// records the unrecoverable ground truth the analytic mask derivation
+/// cross-checks. Returns whether a clean record was
 /// there to corrupt.
 pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, slot: u64) -> bool {
     let world = storage_world(handle);
-    let checker = audit_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(disk) = guard.disks.get_mut(ip) else {
         return false;
@@ -3870,7 +3822,7 @@ pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, sl
         block: false,
         outcome: CorruptionOutcome::Dormant,
     });
-    guard.note_if_unrecoverable(slot, &checker);
+    guard.note_if_unrecoverable(slot);
     true
 }
 
@@ -3879,7 +3831,6 @@ pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, sl
 /// re-evaluated against the world's unrecoverable ground truth.
 pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64) -> bool {
     let world = storage_world(handle);
-    let checker = audit_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(disk) = guard.disks.get_mut(ip) else {
         return false;
@@ -3894,7 +3845,7 @@ pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64)
         outcome: CorruptionOutcome::Dormant,
     });
     for slot in 0..floor {
-        guard.note_if_unrecoverable(slot, &checker);
+        guard.note_if_unrecoverable(slot);
     }
     true
 }
@@ -3958,9 +3909,8 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
 
 /// The storage-fault coverage gates + the injected↔detected correlation,
 /// evaluated once per run from the workload's `check()` (the shared-gate
-/// doctrine in [`crate::audit`]). The correlation is safety and runs on every
-/// scope; the quadrant `sometimes` gates saturate on the main campaign only.
-pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
+/// doctrine in [`crate::audit`]).
+pub(crate) fn check_storage_gates(handle: &StateHandle) {
     let stats = storage_fault_stats(handle);
     let corruption = corruption_stats(handle);
     let detected = audit_world(handle).storage_faults_detected();
@@ -3976,13 +3926,10 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
         }
     );
     assert_always!(
-        stats.clean_quorum_everywhere || stats.budget_off,
+        stats.clean_quorum_everywhere,
         "storage: injected faults never cost a record its clean quorum of live copies"
     );
-    check_corruption_gates(handle, &corruption, scope);
-    if scope != GateScope::Full {
-        return;
-    }
+    check_corruption_gates(handle, &corruption);
     // The #71 compound gate: corruption x partition x a lagging follower
     // reached in one run (the network swarm IS the partition; lag is the
     // audit's observed fact). It used to ride the safety-only axis, which was
@@ -4014,7 +3961,7 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, scope: GateScope) {
 /// The Stage-7 half of the storage oracle (issue #20 F): the exercised ⇔
 /// detected correlation, the dead-node budget, and the per-family /
 /// per-verdict coverage gates.
-fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats, scope: GateScope) {
+fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats) {
     // Every exercised corruption is detected as exactly one typed crash
     // decision — a spontaneous corruption detection (nothing injected) or a
     // swallowed injection both break the count — and every injection is
@@ -4040,9 +3987,6 @@ fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats, sc
         "storage: corruption never parks a quorum of nodes",
         { "parked" => u64::try_from(corruption.parked).unwrap_or(u64::MAX) }
     );
-    if scope != GateScope::Full {
-        return;
-    }
     // Stage-7 family gates (issue #20 D): one per injected fault family,
     // proving the sweep genuinely visits each detection channel.
     let s7 = corruption.flags;

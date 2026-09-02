@@ -200,9 +200,9 @@ bit-identical. Hooks perturb; the audit only watches.
 storage world, factory-created per seed): every callback folds one transition into O(1) incremental
 state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
 the **workload**, which records its own operation history and checks it in `check()`; the client is
-the only party that knows its own program order. Tracing stays for humans and the wasm demo, and
-`oracle.rs` keeps only the demo-data recorders plus `ChainAgreement` (the *application* state
-machine, whose transitions the storage layer emits as trace facts). Do not add a new
+the only party that knows its own program order. Tracing stays for humans, and
+`oracle.rs` keeps only `ChainAgreement` (the *application* state machine, whose transitions the
+storage layer emits as trace facts). Do not add a new
 `Invariant` that re-scans an event stream to check the protocol: the scan is O(trace²) across a
 run's observability pumps, and the audit callback for that transition already exists or is one
 method away. Preserve assertion **message strings** when moving a check — the assertion slot is the
@@ -385,7 +385,7 @@ driver hooks and the sim/workload layers (per the turbulence doctrine above — 
 ## Layout
 
 Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
-Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-demo}.
+Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
 - `crates/paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
@@ -398,17 +398,22 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-dem
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
   `paros-core`, `moonpool-core` + `moonpool-hyper` and runtime-free tonic (wasm-safe). No
   dedicated storage crate — the Stage-4+ faulty fake lands here or in the harness.
-- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, workloads,
-  oracles (wasm-safe, `default-features = false`). Depends on `paros` + `moonpool-sim`.
-- `crates/paros-sim-runner/` — native sim runner binary (`publish = false`).
-- `crates/paros-wasm-demo/` — browser/wasm demo, `cdylib` + `rlib` (`publish = false`).
+- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
+  fault world, the one client workload, the audit, and the scripted corpus. Depends on `paros` +
+  `moonpool-sim`.
+- `crates/paros-sim-runner/` — native sim runner + hunt binaries (`publish = false`).
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
 - `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`
   cooperative leader-handoff restatement).
 
+**Organize as you grow.** A module holds one concern. When a file starts holding a second one,
+split it in the same change rather than in a follow-up, and never leave a file that needs a
+table-of-contents comment to navigate. Deleting is part of every change: a superseded axis,
+process type, flag, or gate goes out in the PR that supersedes it.
+
 Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
-`CHANGELOG.md` (release-plz); binaries/demos/xtask are `publish = false`. Note: `paros` and
+`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. Note: `paros` and
 `paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
 moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
 

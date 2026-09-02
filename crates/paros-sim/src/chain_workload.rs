@@ -17,9 +17,9 @@ use paros::{
     Slot, parse_addr, proposal_checksum,
 };
 
-use crate::CHAOS_DURATION_MS;
-use crate::audit::{GateScope, audit_world};
+use crate::audit::{ClientHistory, audit_world};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
+use crate::{CHAOS_DURATION_MS, DigestSink};
 
 const PROPOSE: u8 = 0;
 const PROPOSE_TO_NON_LEADER: u8 = 1;
@@ -183,7 +183,6 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
 /// identical bytes, and hash-keying would alias their outcomes ("never use
 /// hashes as identities"). The payload hash rides along as data, for the
 /// applied-trace joins.
-#[derive(Default)]
 pub(crate) struct ChainWorkload {
     /// Per `seq`: the payload's `cmd_hash` and the terminal client outcome.
     outcomes: BTreeMap<u64, (u64, Outcome)>,
@@ -193,17 +192,25 @@ pub(crate) struct ChainWorkload {
     issued_count: u64,
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
-    budget_off: bool,
+    /// This client's own record of what it asked for and what came back —
+    /// the linearizability history checked in `check()`. The client is the
+    /// only party that knows its own program order.
+    history: ClientHistory,
+    /// Where to publish the audit's end-of-run digest (the determinism proof).
+    digest: Option<DigestSink>,
 }
 
 impl ChainWorkload {
-    /// The budget-off (WAITED-leg) campaign's workload: the full main-campaign
-    /// drive, but an unavailable run is excused when — and only when — the
-    /// world's ground truth says a committed item has no readable copy left.
-    pub(crate) fn budget_off() -> Self {
+    pub(crate) fn new(digest: Option<DigestSink>) -> Self {
         Self {
-            budget_off: true,
-            ..Self::default()
+            outcomes: BTreeMap::new(),
+            submitted: BTreeMap::new(),
+            final_state: None,
+            issued_count: 0,
+            external_digests_compared: false,
+            adversarial: AdversarialCoverage::default(),
+            history: ClientHistory::default(),
+            digest,
         }
     }
 
@@ -326,6 +333,11 @@ impl Workload for ChainWorkload {
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+        self.history.set_client(client_id);
+        let now_ms = {
+            let time = time.clone();
+            move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
+        };
         let server_count = public_clients.len();
         let mut next_seq = 0_u64;
         let mut leader_hint: Option<usize> = None;
@@ -461,6 +473,7 @@ impl Workload for ChainWorkload {
                 );
                 let cmd_hash = user_command_hash(&payload);
                 self.submitted.insert(seq, cmd_hash);
+                self.history.record_write_issued(seq, now_ms());
                 tracing::info!(
                     cmd = %hash_text(cmd_hash),
                     seq,
@@ -494,6 +507,7 @@ impl Workload for ChainWorkload {
                         max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                         self.outcomes
                             .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                        self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -581,6 +595,7 @@ impl Workload for ChainWorkload {
                     );
                     let cmd_hash = user_command_hash(&payload);
                     self.submitted.insert(seq, cmd_hash);
+                    self.history.record_write_issued(seq, now_ms());
                     tracing::info!(
                         cmd = %hash_text(cmd_hash),
                         seq,
@@ -671,6 +686,7 @@ impl Workload for ChainWorkload {
                             max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                            self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -719,11 +735,13 @@ impl Workload for ChainWorkload {
                             );
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
+                            self.history.record_write_failed();
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
                         ProposalResult::Ambiguous => {
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
+                            self.history.record_write_failed();
                         }
                     }
                 }
@@ -766,6 +784,8 @@ impl Workload for ChainWorkload {
                         };
                         match result {
                             ProposalResult::Acked { leader, slot } => {
+                                self.history
+                                    .record_write_ack(command.seq, Some(slot), now_ms());
                                 assert_always!(
                                     slot == command.slot,
                                     "chain: duplicate committed ack preserves its slot",
@@ -813,6 +833,7 @@ impl Workload for ChainWorkload {
                         );
                         let cmd_hash = user_command_hash(&payload);
                         self.submitted.insert(seq, cmd_hash);
+                        self.history.record_write_issued(seq, now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -891,6 +912,7 @@ impl Workload for ChainWorkload {
                                 Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
                             self.outcomes
                                 .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                            self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -1068,14 +1090,17 @@ impl Workload for ChainWorkload {
                         assert_reachable!("chain: read-index operation executes");
                         self.adversarial.read_index_executed = true;
                     }
+                    self.history.record_read_issued(seq, now_ms());
                     let read_deadline =
                         time.now() + Duration::from_millis(config.request_timeout_ms);
                     let mut attempt_target = leader_hint.unwrap_or(target) % server_count;
+                    let mut attempts: u64 = 0;
                     let outcome = loop {
                         let remaining = read_deadline.saturating_sub(time.now());
                         if remaining.is_zero() || shutdown.is_cancelled() {
                             break None;
                         }
+                        attempts += 1;
                         let mut client = public_clients[attempt_target].clone();
                         let attempt = moonpool_sim::select! {
                             response = client.read(Read { client: client_id, seq }) =>
@@ -1108,6 +1133,8 @@ impl Workload for ChainWorkload {
                         }
                     };
                     if let Some(watermark) = outcome {
+                        self.history
+                            .record_read_ack(seq, watermark, attempts, now_ms());
                         tracing::info!(
                             client_id,
                             seq_id = seq,
@@ -1146,6 +1173,7 @@ impl Workload for ChainWorkload {
                     } else {
                         // Ambiguous per convention: a timed-out read carries
                         // no constraint and is never assumed to have missed.
+                        self.history.record_read_failed();
                         tracing::info!(client_id, seq_id = seq, "chain_read_index_ambiguous");
                     }
                 }
@@ -1279,6 +1307,7 @@ impl Workload for ChainWorkload {
             );
             let cmd_hash = user_command_hash(&payload);
             self.submitted.insert(seq, cmd_hash);
+            self.history.record_write_issued(seq, now_ms());
             tracing::info!(
                 cmd = %hash_text(cmd_hash),
                 seq,
@@ -1298,6 +1327,7 @@ impl Workload for ChainWorkload {
                         acknowledged = true;
                         self.outcomes
                             .insert(seq, (cmd_hash, Outcome::Acked { seq, slot }));
+                        self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
                             seq,
@@ -1407,17 +1437,10 @@ impl Workload for ChainWorkload {
         // *explainable* by the injected faults (a quorum of clean copies
         // genuinely missing). Under the per-record budget no run is excusable,
         // so an unavailable run with clean quorums everywhere is a real
-        // liveness bug, named as such beside the convergence failure. On the
-        // budget-off axis the WAITED ground truth is an equally honest
-        // explanation: a committed item with no readable copy anywhere holds
-        // the cluster correctly unavailable without ever marking an
-        // accepted-record quorum (snapshot + chunk rot strand the folded
-        // prefix — witness seed 3347125089641664560).
+        // liveness bug, named as such beside the convergence failure.
         let storage = crate::node::storage_fault_stats(ctx.state());
-        let waited_unrecoverable =
-            self.budget_off && !crate::node::unrecoverable_slots(ctx.state()).is_empty();
         assert_always!(
-            converged || !storage.clean_quorum_everywhere || waited_unrecoverable,
+            converged || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster
@@ -1595,9 +1618,8 @@ impl Workload for ChainWorkload {
                     lead.u64("node"),
                 );
             }
-            for ip_index in 1..=9_u64 {
-                let ip = format!("10.0.1.{ip_index}");
-                if let Some(probe) = crate::node::corpus_disk_probe(ctx.state(), &ip) {
+            for ip in &servers {
+                if let Some(probe) = crate::node::corpus_disk_probe(ctx.state(), ip) {
                     eprintln!(
                         "  DISK-DIAG {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
                         probe.floor,
@@ -1610,22 +1632,10 @@ impl Workload for ChainWorkload {
                 }
             }
         }
-        if self.budget_off {
-            // The WAITED leg: an unavailable budget-off run is legal iff the
-            // ground truth says a committed item genuinely lost every readable
-            // copy (or a record lost its clean quorum). Unexplained
-            // unavailability stays a failure, exactly like the main campaign.
-            let waited = !crate::node::unrecoverable_slots(ctx.state()).is_empty();
-            assert_always!(
-                (recovery_acked > 0 && converged) || waited || !storage.clean_quorum_everywhere,
-                "chain: an unavailable budget-off run is explained by an unrecoverable committed item"
-            );
-        } else {
-            assert_always!(
-                recovery_acked > 0 && converged,
-                "chain: cluster converged after chaos"
-            );
-        }
+        assert_always!(
+            recovery_acked > 0 && converged,
+            "chain: cluster converged after chaos"
+        );
         let applied_hashes: BTreeSet<String> = ctx
             .observability()
             .snapshot(EV_APPLIED)
@@ -1651,31 +1661,35 @@ impl Workload for ChainWorkload {
     }
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let scope = if self.budget_off {
-            GateScope::BudgetOff
-        } else {
-            GateScope::Full
-        };
-        audit_world(ctx.state()).check_gates(scope);
-        crate::node::check_storage_gates(ctx.state(), scope);
+        // The two perspectives, and nothing else: the client's own history
+        // (linearizability over what it was told), and the audit's fold of
+        // every driver transition (safety, restart, and the one liveness claim).
+        let audit = audit_world(ctx.state());
+        audit.check_client_history(&self.history);
+        audit.check_gates();
+        crate::node::check_storage_gates(ctx.state());
+        audit.check_final_convergence();
+        if let Some(sink) = &self.digest {
+            *sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(audit.digest());
+        }
         assert_always!(
             self.outcomes
                 .iter()
                 .all(|(seq, (_, outcome))| *seq == outcome.seq() && *seq < self.issued_count),
             "chain: retained outcome model is internally valid"
         );
-        if !self.budget_off {
-            assert_always!(
-                self.final_state
-                    .is_some_and(|state| self.outcomes.values().all(|(_, outcome)| {
-                        match outcome {
-                            Outcome::Acked { slot, .. } => *slot < state.applied_count,
-                            Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
-                        }
-                    })),
-                "chain: retained acknowledged slots are valid"
-            );
-        }
+        assert_always!(
+            self.final_state
+                .is_some_and(|state| self.outcomes.values().all(|(_, outcome)| {
+                    match outcome {
+                        Outcome::Acked { slot, .. } => *slot < state.applied_count,
+                        Outcome::Rejected { .. } | Outcome::Ambiguous { .. } => true,
+                    }
+                })),
+            "chain: retained acknowledged slots are valid"
+        );
         Ok(())
     }
 }

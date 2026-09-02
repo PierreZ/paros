@@ -160,8 +160,7 @@ The single-decree safety rules map directly onto the acceptor code:
 
 paros never has to *prove* this safety property by hand. The deterministic
 simulation asserts it directly: the `SafetyOracle` checks, on every step of every
-seed, that **"at most one value is ever chosen for a slot"** (`crates/paros-sim/src/oracle.rs`).
-That is the same property `P2` names, watched live. The
-[Watch it live](single-decree.md) page runs that oracle in your tab; the
+seed, that **"at most one value is ever chosen for a slot"** (`crates/paros-sim/src/audit`).
+That is the same property `P2` names, watched on every transition. The
 [crash and restart safety](restart-safety.md) chapter shows it catching a real
 bug.

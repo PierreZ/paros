@@ -21,14 +21,10 @@ clock, and no randomness. An async driver (built on
 side effects in the order the `Ready` documents, honoring the persist-before-send
 durability rule at the heart of Paxos safety.
 
-Because the core is portable to WebAssembly, the *same* simulation that runs in
-CI runs in your browser tab. The [Watch it live](single-decree.md) page runs it there.
-
 > **How to read this book.** It is a guided tour of the algorithm, grounded in the
 > papers and mapped onto the real `paros-core` code. Part one,
 > *Single-decree Paxos*, covers [how a value is chosen](choose-one-value.md) and
 > [why that choice is safe](safety.md). Part two, *Multi-Paxos*, builds the
 > [replicated log](replicated-log.md), elects a [stable leader](stable-leader.md),
 > and works through a [crash and restart safety](restart-safety.md) bug the
-> simulation caught. Every chapter explains with diagrams; to watch the
-> single-decree kernel actually run, open [Watch it live](single-decree.md).
+> simulation caught. Every chapter explains with diagrams.
