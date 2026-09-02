@@ -310,6 +310,16 @@ impl StorageWorld {
         self.parked.contains(ip)
     }
 
+    /// How many nodes *other than* `ip` are terminally parked — the persistent
+    /// half of the "parked peer + transient process loss" overlap a restarting
+    /// node reports to the audit.
+    pub(crate) fn parked_count_excluding(&self, ip: &str) -> usize {
+        self.parked
+            .iter()
+            .filter(|parked| parked.as_str() != ip)
+            .count()
+    }
+
     /// Fix this run's digest-lane count (first caller wins; the corpus pins
     /// the default, the main campaign draws a knob).
     pub(crate) fn set_lane_count(&mut self, lane_count: u8) {

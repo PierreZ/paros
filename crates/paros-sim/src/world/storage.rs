@@ -141,8 +141,8 @@ pub(crate) struct StorageFaults<T> {
     time: T,
     cutoff: Duration,
     enabled: bool,
-    /// Per-node write-path fault rates, drawn once per seed (see
-    /// [`WritePathRates`]).
+    /// This node's write-path fault rates, part of its per-seed shape (see
+    /// [`WritePathRates`] and [`crate::shape`]).
     rates: WritePathRates,
 }
 
@@ -160,8 +160,8 @@ pub(crate) struct StorageFaults<T> {
 /// unwinnable by turning a rate up: the extremes buy a *denser* fault window,
 /// never a longer one, and the recovery tail that follows (an order of
 /// magnitude longer than the window) is always fault-free.
-#[derive(Clone, Copy)]
-struct WritePathRates {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WritePathRates {
     write_eio: f64,
     fsync_fail: f64,
     force_torn_tail: f64,
@@ -193,10 +193,12 @@ impl Default for WritePathRates {
 }
 
 impl WritePathRates {
-    /// Draw this node's rates for one timeline. The knobs are integer
+    /// Draw one node's rates. Called exactly once per node per seed by the
+    /// shape registry ([`crate::shape`]), never per boot: a node's disk keeps
+    /// its failure profile across every incarnation. The knobs are integer
     /// percentages (`buggify_knob!` draws from an integer range) converted to
     /// probabilities here.
-    fn for_timeline() -> Self {
+    pub(crate) fn draw() -> Self {
         // A disk that returns `EIO` on one write in twelve rather than one in a
         // hundred. The ambiguity contract is unchanged (the world still decides
         // persisted-vs-lost per fault), so the extreme only makes the *recovery*
@@ -246,14 +248,10 @@ impl WritePathRates {
 }
 
 impl<T: TimeProvider> StorageFaults<T> {
-    pub(crate) fn new(time: T, cutoff: Duration, enabled: bool) -> Self {
-        // Only an enabled (perturbing) node draws: the scripted corpus and the
-        // contract suite must not spend randomness they never use.
-        let rates = if enabled {
-            WritePathRates::for_timeline()
-        } else {
-            WritePathRates::default()
-        };
+    /// `rates` come from the node's shape (drawn once per node per seed, so
+    /// a restarted node keeps its disk's failure profile); a quiet node passes
+    /// the defaults and `enabled: false`, which never consults them.
+    pub(crate) fn new(time: T, cutoff: Duration, enabled: bool, rates: WritePathRates) -> Self {
         Self {
             time,
             cutoff,

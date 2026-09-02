@@ -8,10 +8,46 @@
 //! randomness draw, and a draw taken inside a detached task can outlive its
 //! simulation and shift the *next* run's stream (see `PeerMailbox` in
 //! `paros::driver` for the CI failure that proved it).
+//!
+//! # Coverage: four questions per hook, answered in two places
+//!
+//! For every hook the sweep must be able to tell apart *enabled* (this module
+//! exists and the campaign is chaotic), *consulted* (the driver reached the
+//! decision point at all), *fired* (the draw said yes and the fault happened),
+//! and *recovered* (the protocol path the fault exists to exercise was then
+//! actually walked). The first is a property of the campaign. The other three
+//! are gates, and the rule for where a gate lives is: **the fired gate sits
+//! wherever the fact is reported**. A hook whose effect the driver reports
+//! through the `Audit` port gets its fired gate in `paros_sim::audit`, next
+//! to the recovery gate that consumes the same report; a hook the driver only
+//! traces gets an inline `assert_reachable!` here. "Consulted" is never a gate
+//! of its own — every hook is consulted only where its answer can have an
+//! effect, so the decision point is a protocol state the audit already gates
+//! (a pending accept, a parked read, a requested chunk, a transferable
+//! leadership).
+//!
+//! | hook | fired gate | recovery gate |
+//! |---|---|---|
+//! | `crash_at` (per seam) | audit `crashed`, one per seam | boot re-report checks in audit `recovered` |
+//! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
+//! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
+//! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
+//! | `shortest_election_timeout` / `longest_election_timeout` | audit `election_timeout_extreme` / inline | "a leader is elected" |
+//! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
+//! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
+//! | `drop_client_reply` (per kind) | audit `client_reply_dropped`, one per family | "…retry takes the dedup path", read retry |
+//! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
+//! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
+//! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
+//!
+//! Message kinds keep their own gates where they walk different Paxos paths:
+//! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the
+//! lost-ack re-propose, a lost `Promise`/`Prepare`/`Nack` stretches an
+//! election, and the repair, snap-repair and handoff planes each have theirs.
 
 use std::time::Duration;
 
-use moonpool_sim::{TimeProvider, assert_reachable, buggify_knob, buggify_with_prob};
+use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{DriverHooks, HandoffContext, Message, NodeId, Seam};
 
@@ -24,20 +60,13 @@ pub(crate) struct BuggifyHooks<T> {
     /// are in flight" pressure): a workload-buggified multiplier on the
     /// durability-seam crash probability. The seams are only ever consulted
     /// with a batch in flight, so biasing them *is* biasing crashes into the
-    /// write window. Drawn per seed, per node, FDB knob style.
+    /// write window. Part of the node's per-seed shape (`crate::shape`), so a
+    /// restarted node keeps the bias its first boot drew.
     seam_crash_bias: f64,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
-    pub(crate) fn new(time: T, cutoff: Duration, enabled: bool) -> Self {
-        // Only a perturbing node draws: the scripted corpus must not spend
-        // randomness it never uses (the same rule as `StorageFaults::new`).
-        #[allow(clippy::cast_precision_loss)]
-        let seam_crash_bias = if enabled {
-            buggify_knob!(1_u64, 4_u64..11_u64) as f64
-        } else {
-            1.0
-        };
+    pub(crate) fn new(time: T, cutoff: Duration, enabled: bool, seam_crash_bias: f64) -> Self {
         Self {
             time,
             cutoff,
@@ -79,6 +108,8 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn skip_accept_resend(&self) -> bool {
+        // Consulted only with accepts pending; gated in the audit
+        // (`resend_skipped`).
         self.active() && buggify_with_prob!(0.95)
     }
 
@@ -179,6 +210,8 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn resign_leadership(&self) -> bool {
+        // Consulted only by a sitting leader; gated in the audit
+        // (`stepped_down`).
         self.active() && buggify_with_prob!(0.004)
     }
 
@@ -252,6 +285,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn shortest_election_timeout(&self) -> bool {
+        // Gated in the audit (`election_timeout_extreme`).
         self.active() && buggify_with_prob!(0.5)
     }
 
@@ -406,7 +440,9 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn withhold_snap_chunk(&self, _to: NodeId) -> bool {
         // Per chunk that would otherwise be served. Generous: a requester
         // re-asks every tick and every custodian, so what this builds is the
-        // multi-beat, multi-custodian repair shape rather than a stall.
+        // multi-beat, multi-custodian repair shape rather than a stall. Gated
+        // in the audit (`snap_chunk_withheld`), where the requester's later
+        // repair can be tied back to the silence.
         self.active() && buggify_with_prob!(0.25)
     }
 
@@ -414,6 +450,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // Per tick while reads are parked. Kept shy: expiring most parked
         // reads early would stop confirmed reads from ever completing during
         // the chaos window, and the read-index path is what needs coverage.
+        // Gated in the audit (`read_expired`, the `early` leg).
         self.active() && buggify_with_prob!(0.05)
     }
 }

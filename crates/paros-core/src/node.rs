@@ -888,6 +888,23 @@ impl RawNode {
         if self.app_repair.is_none()
             && let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq))
         {
+            // What an immediate ack claims, restated at the reply: the slot is
+            // inside this node's applied prefix (the ledger is written only by
+            // the contiguous walk, the boot rebuild, and sealed records below
+            // the floor), and if its record is still retained, it is this very
+            // identity's command — never a `Noop` or another client's write.
+            assert!(
+                at < self.first_unchosen(),
+                "an immediate Chosen names a slot inside the applied prefix"
+            );
+            assert!(
+                match self.chosen.get(&at) {
+                    None => true,
+                    Some(Command::User(applied)) => applied.client == client && applied.seq == seq,
+                    Some(Command::Control(_)) => false,
+                },
+                "the applied ledger points at the identity's own chosen command"
+            );
             return ProposeResult::Chosen(at);
         }
         if let Some(&slot) = self.inflight.get(&(client, seq)) {
@@ -1098,6 +1115,14 @@ impl RawNode {
         assert!(
             self.first_slot <= self.first_unchosen(),
             "compaction never drops an undecided slot"
+        );
+        // The cap above, restated as what it protects: an open application
+        // repair still needs every decided record from its cursor up, so the
+        // floor stops below the cursor (the truncate-before-heal bug class).
+        assert!(
+            self.app_repair
+                .is_none_or(|cursor| self.first_slot <= cursor),
+            "compaction never drops a slot an open application repair still needs"
         );
         self.assert_invariants();
         self.first_slot

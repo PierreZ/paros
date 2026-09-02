@@ -291,6 +291,18 @@ pub trait Audit {
     /// failed proposal all report `false`).
     fn compact_acked(&self, node: NodeId, accepted: bool) {}
 
+    /// This node held a snapshot chunk `to` asked for, clean, and stayed
+    /// silent about it (the `withhold_snap_chunk` hook fired). Reported so a
+    /// checker can tie a later chunk repair at the requester to the silence it
+    /// had to work around.
+    fn snap_chunk_withheld(&self, node: NodeId, to: NodeId) {}
+
+    /// This node answered a parked read with a retry redirect instead of a
+    /// confirmation: `early` when the `expire_parked_read_early` hook fired
+    /// before the read's confirmation deadline, otherwise the deadline itself
+    /// ran out.
+    fn read_expired(&self, node: NodeId, early: bool) {}
+
     /// This node dropped one outbound message at a bounded in-process mailbox
     /// (the lossy per-peer transport handoff): either the enqueue found the
     /// peer queue full, or the delivery task discarded a stale backlog entry

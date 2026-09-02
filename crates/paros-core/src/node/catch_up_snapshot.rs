@@ -160,6 +160,7 @@ impl RawNode {
             "a merged session record stays inside the snapshot boundary"
         );
         let old_floor = self.first_slot;
+        let old_chosen_index = self.hard_state.chosen_index;
         // The MAX guard at entry makes this addition exact; `saturating_add`
         // stays as defense in depth.
         let first = Slot(chosen_index.0.saturating_add(1));
@@ -242,6 +243,30 @@ impl RawNode {
         assert!(
             self.first_slot >= old_floor,
             "a snapshot install never lowers the floor"
+        );
+        // The durable frontiers only move forward: the entry guards refuse a
+        // boundary behind the prefix, so the chosen index lands at or past
+        // where it was, and the allocator is carried past the folded prefix.
+        assert!(
+            Some(chosen_index) >= old_chosen_index,
+            "a snapshot install never rewinds the chosen index"
+        );
+        assert!(
+            self.next_slot >= self.first_slot,
+            "a snapshot install carries the allocator past the folded prefix"
+        );
+        // Every open recovery structure now refers only to retained slots:
+        // an application repair the fold did not close sits above the
+        // boundary, and a probe keeps only blocked slots at or past the floor.
+        assert!(
+            self.app_repair.is_none_or(|cursor| cursor > chosen_index),
+            "an application repair surviving a snapshot install sits above its boundary"
+        );
+        assert!(
+            self.repair_probe
+                .as_ref()
+                .is_none_or(|probe| probe.blocked.first().is_none_or(|s| *s >= first)),
+            "a repair probe surviving a snapshot install keeps only retained slots"
         );
         // Re-drive the contiguous walk: a `Commit` learned out of order may
         // already sit in `chosen` just above the boundary, and without the walk

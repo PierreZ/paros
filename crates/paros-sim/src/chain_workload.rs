@@ -235,6 +235,38 @@ const TAIL_KEY: &str = "paros-chain-tail";
 /// of the tail's end, not a shape the run takes.
 const SETTLE: Duration = Duration::from_secs(1);
 
+/// The replicas of one full probe (every live node answered, all at the same
+/// applied count) whose digest disagrees with the lowest-id replica's. Each
+/// entry keeps its **real node id**: the probe skips parked nodes, so the
+/// position in the answer list is not the node, and a diagnostic that used it
+/// would blame the wrong replica whenever a lower-id node was parked.
+fn divergent_replicas(observed: &[(usize, ChainState)]) -> Vec<(usize, ChainState)> {
+    let Some(&(_, reference)) = observed.first() else {
+        return Vec::new();
+    };
+    observed
+        .iter()
+        .skip(1)
+        .filter(|(_, state)| state.chain_hash != reference.chain_hash)
+        .copied()
+        .collect()
+}
+
+/// `node=<id> count=<n> state=<digest>` per replica, for a detail map.
+fn describe_replicas(replicas: &[(usize, ChainState)]) -> String {
+    replicas
+        .iter()
+        .map(|(node, state)| {
+            format!(
+                "node={node} count={} state={}",
+                state.applied_count,
+                hash_text(state.chain_hash)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The run's shared tail bookkeeping, one per iteration: how many clients the
 /// run has and how many have finished proposing. Convergence is only called
 /// once *every* client is quiet — the first client to see it ends the run, and
@@ -1509,7 +1541,11 @@ impl Workload for ChainWorkload {
             .done_proposing += 1;
 
         let mut converged = false;
-        let mut last_probe: Vec<Option<ChainState>> = Vec::new();
+        // The last probe, `(node, answer)` per live node in node order — the
+        // node id travels with its state from the read through the settle
+        // decision to the red-path print, so a parked node dropping out of the
+        // live set can never shift the blame onto its neighbour.
+        let mut last_probe: Vec<(usize, Option<ChainState>)> = Vec::new();
         // `(since, state)`: when the cluster was first seen converged at
         // `state`, reset whenever a probe disagrees.
         let mut stable: Option<(Duration, ChainState)> = None;
@@ -1523,9 +1559,10 @@ impl Workload for ChainWorkload {
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !parked.contains(&servers[*i]))
                 .collect();
-            let mut observed = Vec::with_capacity(live.len());
-            for &i in &live {
-                let mut client = internal_clients[i].clone();
+            let mut observed: Vec<(usize, ChainState)> = Vec::with_capacity(live.len());
+            let mut unanswered = false;
+            for &node in &live {
+                let mut client = internal_clients[node].clone();
                 let state = moonpool_sim::select! {
                     response = client.inspect(InspectRequest {}) => response
                         .ok()
@@ -1533,23 +1570,33 @@ impl Workload for ChainWorkload {
                     _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                     () = shutdown.cancelled() => None,
                 };
-                if let Some(state) = state {
-                    observed.push(state);
-                } else {
+                let Some(state) = state else {
+                    unanswered = true;
                     break;
-                }
+                };
+                observed.push((node, state));
             }
-            last_probe = (0..live.len()).map(|i| observed.get(i).copied()).collect();
+            last_probe = live
+                .iter()
+                .map(|&node| {
+                    let answer = observed
+                        .iter()
+                        .find(|(observed_node, _)| *observed_node == node)
+                        .map(|(_, state)| *state);
+                    (node, answer)
+                })
+                .collect();
             // This is deliberately independent of `command_applied`: these are
             // live RPC reads of each application's opaque snapshot. A driver or
             // trace bug cannot manufacture agreement here. Different counts may
             // be ordinary catch-up; equal counts with different digests are an
             // immediate state-machine-safety violation.
-            if !observed.is_empty() && observed.len() == live.len() {
-                let reference = observed[0];
+            if let Some((reference_node, reference)) =
+                (!unanswered).then(|| observed.first().copied()).flatten()
+            {
                 let equal_count = observed
                     .iter()
-                    .all(|state| state.applied_count == reference.applied_count);
+                    .all(|(_, state)| state.applied_count == reference.applied_count);
                 if equal_count {
                     if !self.external_digests_compared {
                         assert_reachable!(
@@ -1557,25 +1604,24 @@ impl Workload for ChainWorkload {
                         );
                         self.external_digests_compared = true;
                     }
-                    for (node, state) in observed.iter().enumerate().skip(1) {
-                        assert_always!(
-                            state.chain_hash == reference.chain_hash,
-                            "chain: live reads agree at equal count",
-                            {
-                                "node" => node,
-                                "applied_count" => state.applied_count,
-                                "expected_state" => hash_text(reference.chain_hash),
-                                "observed_state" => hash_text(state.chain_hash),
-                            }
-                        );
-                    }
+                    let divergent = divergent_replicas(&observed);
+                    assert_always!(
+                        divergent.is_empty(),
+                        "chain: live reads agree at equal count",
+                        {
+                            "reference_node" => reference_node,
+                            "applied_count" => reference.applied_count,
+                            "expected_state" => hash_text(reference.chain_hash),
+                            "divergent" => describe_replicas(&divergent),
+                        }
+                    );
                     let all_quiet = {
                         let guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
                         guard.done_proposing == guard.registered
                     };
                     if all_quiet
                         && reference.applied_count > pre_tail_count
-                        && observed.iter().all(|state| *state == reference)
+                        && observed.iter().all(|(_, state)| *state == reference)
                     {
                         match stable {
                             Some((since, state)) if state == reference => {
@@ -1632,7 +1678,8 @@ impl Workload for ChainWorkload {
         );
         if !converged && !ended_by_sibling {
             // Failure diagnostic (fires only on the red path): which node is
-            // stuck, and where. `None` = the node did not answer the inspect
+            // stuck, and where, by real node id (the parked nodes are absent,
+            // not renumbered). `None` = the node did not answer the inspect
             // probe inside its timeout. The seed's buggified shape is printed
             // too — a knob at its extreme is one of the things that can
             // produce a red.
@@ -1692,5 +1739,42 @@ impl Workload for ChainWorkload {
             "chain: retained outcome model is internally valid"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(applied_count: u64, chain_hash: u64) -> ChainState {
+        ChainState {
+            applied_count,
+            chain_hash,
+            ..ChainState::default()
+        }
+    }
+
+    /// The identity regression: node 1 is parked and absent from the probe,
+    /// node 3 diverges. The report must name node 3 — the positional answer
+    /// (index 2 of the live list) would have blamed node 2, which agrees.
+    #[test]
+    fn a_divergent_replica_is_named_by_its_node_id_not_its_position() {
+        let observed = vec![
+            (0, state(7, 0xaa)),
+            (2, state(7, 0xaa)),
+            (3, state(7, 0xbb)),
+        ];
+        let divergent = divergent_replicas(&observed);
+        assert_eq!(divergent.len(), 1);
+        assert_eq!(divergent[0].0, 3);
+        assert_eq!(divergent[0].1.chain_hash, 0xbb);
+        assert!(describe_replicas(&divergent).starts_with("node=3 count=7 "));
+    }
+
+    #[test]
+    fn agreeing_replicas_report_no_divergence() {
+        let observed = vec![(0, state(3, 0x11)), (2, state(3, 0x11))];
+        assert!(divergent_replicas(&observed).is_empty());
+        assert!(divergent_replicas(&[]).is_empty());
     }
 }

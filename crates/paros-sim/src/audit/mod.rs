@@ -298,6 +298,40 @@ impl AuditWorld {
         self.lock().storage_dead.insert(node);
     }
 
+    /// A node booted again after a process-level kill (moonpool attrition on
+    /// the main campaign, the script on the corpus) while `parked_peers` other
+    /// nodes sat terminally parked. Until this very boot the node was down, so
+    /// the two loss kinds — persistent (a parked disk that never comes back)
+    /// and transient (a process that does) — overlapped for the whole hold-down.
+    /// On a small cluster that overlap is the interesting one: `n = 3` with one
+    /// parked node and one killed node has **no quorum** until the killed node
+    /// returns, and the run is still required to converge afterwards.
+    ///
+    /// Recorded here as coverage, never as a verdict: whether a seed draws both
+    /// an attrition kill and a parking corruption is the swarm's business.
+    pub(crate) fn note_process_restart(&self, node: u64, parked_peers: usize, cluster_size: usize) {
+        let mut st = self.lock();
+        if parked_peers == 0 {
+            return;
+        }
+        reach_once!(
+            st.parked_overlap,
+            "storage: a transient process loss overlaps a corruption-parked node"
+        );
+        let quorum = cluster_size / 2 + 1;
+        // The node reporting is the one that was down; anything else down at
+        // the same time only makes the loss deeper, so this is the *at least*
+        // side of the count.
+        let live_during_hold_down = cluster_size.saturating_sub(parked_peers + 1);
+        if live_during_hold_down < quorum {
+            reach_once!(
+                st.parked_overlap_quorum_returned,
+                "storage: quorum returns after a parked node and a transient process loss overlapped"
+            );
+        }
+        tracing::info!(node, parked_peers, cluster_size, "restart_over_parked_peer");
+    }
+
     /// Whether any node has been observed lagging the cluster prefix (one leg
     /// of the #71 compound corruption x partition x lag gate).
     pub(crate) fn lag_observed(&self) -> bool {
@@ -366,15 +400,64 @@ impl AuditWorld {
         h
     }
 
-    /// The convergence deliverable, judged when no future leader change can
-    /// invalidate a provisional quiescence decision: every node this run brought
-    /// up ends on the cluster's chosen prefix.
+    /// The convergence deliverable, judged at the end of the recovery tail
+    /// when no future leader change can invalidate a provisional quiescence
+    /// decision. It ties the run's four frontiers together:
+    ///
+    /// ```text
+    /// decided frontier == applied frontier == every live node's applied prefix >= every acked slot
+    /// ```
+    ///
+    /// - the **decided frontier** (`decided_max`) is the highest slot a
+    ///   majority of the configured cluster durably accepted at one ballot
+    ///   for one value — the quorum-decided oracle
+    ///   ([`AuditState::decided`]: keyed by `(slot, ballot)`, value-checked
+    ///   per key, so it is Paxos "chosen" and never a cross-ballot count),
+    ///   fed by durable accepts alone, so it sees a slot that is chosen even
+    ///   if no node ever applied it (the blind spot of the apply-fed `chosen`
+    ///   map);
+    /// - the **applied frontier** (`cluster_max`) is the highest slot any node
+    ///   applied; a node's applied prefix is contiguous (`check_no_gaps`), so
+    ///   the frontier names a prefix, not a sparse set;
+    /// - every node this run brought up that is not terminally parked ends
+    ///   exactly on that frontier;
+    /// - every slot a client was told was committed is inside it (the
+    ///   per-identity presence check lives in the client history fold).
+    ///
+    /// `decided == applied` is two liveness claims in one. `decided <= applied`
+    /// says every quorum-decided slot was eventually applied: a slot durably
+    /// accepted by a majority whose proposer never learnt it (lost `Accepted`
+    /// acks, a crashed proposer) must still be chosen — by the `Accept`
+    /// re-send, by a successor's P2c re-proposal, or as a gap-filled `Noop`
+    /// (the applied value's agreement with the decided value is asserted per
+    /// apply, so a `Noop` here means the decided command was itself a
+    /// control command or a #94-suppressed identity). `decided >= applied`
+    /// says nothing was applied without a durable majority behind it — the
+    /// persist-before-send ordering seen from the outside. That ordering is
+    /// not assumed here; it is asserted at each transition it rests on, and
+    /// this end-of-run leg is their corollary: an outgoing `Accepted` names
+    /// a durably recorded accept, an outgoing `Commit` names a slot the
+    /// tally already decided with that value, and every `applied` report
+    /// finds its slot decided (all three in the `sent`/`applied` callbacks
+    /// below). The driver folds each accept at its fsync
+    /// (`surface_persisted`), before the ack that could count toward a
+    /// quorum leaves the node.
+    ///
+    /// Sparse states are excused where they are legal: a run in which nothing
+    /// was ever applied has no frontier (then nothing may have been decided or
+    /// acked either), and a parked node is excused from the per-node leg only
+    /// when its parking was observed as a corruption crash.
     pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),
                 "every acked slot is inside the cluster's applied prefix at the end of the tail"
+            );
+            assert_always!(
+                st.decided_max.is_none(),
+                "every quorum-decided slot is applied by the end of the tail",
+                { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => -1_i64 }
             );
             return;
         };
@@ -384,6 +467,20 @@ impl AuditWorld {
             acked_max.is_none_or(|acked| acked <= cluster_max),
             "every acked slot is inside the cluster's applied prefix at the end of the tail",
             { "acked_max" => acked_max.unwrap_or(0), "cluster_max" => cluster_max }
+        );
+        // The decided frontier and the applied frontier coincide (see above).
+        assert_always!(
+            st.decided_max.is_none_or(|decided| decided <= cluster_max),
+            "every quorum-decided slot is applied by the end of the tail",
+            { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => cluster_max }
+        );
+        assert_always!(
+            st.decided_max.is_some_and(|decided| decided >= cluster_max),
+            "the applied frontier never runs ahead of the quorum-decided frontier",
+            {
+                "decided_max" => st.decided_max.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+                "cluster_max" => cluster_max
+            }
         );
         let cluster: BTreeSet<u64> = st
             .booted
@@ -415,7 +512,8 @@ impl AuditWorld {
                 {
                     "node" => node,
                     "prefix" => prefix.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
-                    "cluster_max" => cluster_max
+                    "cluster_max" => cluster_max,
+                    "decided_max" => st.decided_max.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
                 }
             );
         }
@@ -451,6 +549,7 @@ pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
     audit.check_client_history(history);
     audit.check_gates();
     crate::world::check_storage_gates(state);
+    crate::shape::check_shape_gates(state);
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()
@@ -487,6 +586,50 @@ impl<T: TimeProvider> NodeAudit<T> {
 
     fn state(&self) -> MutexGuard<'_, AuditState> {
         self.world.lock()
+    }
+
+    /// Persist-before-send, observed at the send seam: the two replies whose
+    /// meaning is a durable fact must find that fact already folded — an
+    /// `Accepted` its sender's durable accept, a `Commit` a quorum decision
+    /// on the tally (see [`AuditWorld::check_final_convergence`]).
+    fn observe_durable_send(&self, node: NodeId, msg: &Message) {
+        if let Message::Accepted { ballot, slot, .. } = msg {
+            let st = self.state();
+            let holds = st
+                .accept_sets
+                .get(&(slot.0, ballot.round, ballot.node.0))
+                .is_some_and(|holders| holders.contains(&node.0));
+            assert_always!(
+                holds,
+                "an outgoing Accepted names a durably accepted record",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+        }
+        if let Message::Commit {
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        {
+            // The leader-side half of persist-before-send: a `Commit` is the
+            // core's decision on a quorum of `Accepted`s, each preceded (above)
+            // by its durable accept, so the tally has already decided the slot
+            // — and with this value, at this or a lower ballot (P2: a later
+            // ballot re-decides only the same value).
+            let st = self.state();
+            let decided = st.decided.get(&slot.0).copied();
+            assert_always!(
+                decided.is_some(),
+                "an outgoing Commit names a slot a durable accept quorum already decided",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+            assert_always!(
+                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == command_hash(command)),
+                "an outgoing Commit carries the quorum-decided value",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+        }
     }
 }
 
@@ -699,6 +842,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 { "node" => node.0, "slot" => slot.0 }
             );
         }
+        // Persist-before-send, observed at the apply seam: a slot is applied
+        // only once chosen, chosen only on a quorum of `Accepted`s, and each
+        // of those left its node after the audit folded the durable accept —
+        // so by the time any node applies a slot, the tally has decided it.
+        // The end-of-run `decided >= applied` leg is this, per slot.
+        assert_always!(
+            st.decided.contains_key(&slot.0),
+            "an applied slot was decided by a durable accept quorum before any node applied it",
+            { "node" => node.0, "slot" => slot.0 }
+        );
         reach_once!(st.any_chosen, "a value is chosen");
         st.observe_applied_index(node.0, slot.0);
     }
@@ -761,18 +914,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // node's folded durable-accept tally (the same-batch write is flushed
         // and reported before the send; a re-answer names an older record
         // that was folded when it was first written or re-read at boot).
-        if let Message::Accepted { ballot, slot, .. } = msg {
-            let st = self.state();
-            let holds = st
-                .accept_sets
-                .get(&(slot.0, ballot.round, ballot.node.0))
-                .is_some_and(|holders| holders.contains(&node.0));
-            assert_always!(
-                holds,
-                "an outgoing Accepted names a durably accepted record",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
-            );
-        }
+        self.observe_durable_send(node, msg);
         // A `Commit` names a decided slot; where the durable-accept tally
         // already knows the decision, the commit must carry that value.
         // Checked against `decided`, never the apply-fed `chosen` map: a #94
@@ -1476,6 +1618,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
         let mut st = self.state();
+        if matches!(reply, paros::Reply::Compact) {
+            // The compaction client's re-ask loop is its own recovery path
+            // (a lost ack must not double-seed a snapshot point), so the
+            // kind keeps a gate beside the redirect family's.
+            reach_once!(
+                st.compact_reply_dropped,
+                "a compaction reply is dropped at the reply seam"
+            );
+        }
         if matches!(
             reply,
             paros::Reply::ProposeRedirect | paros::Reply::ReadRedirect | paros::Reply::Compact
@@ -1528,6 +1679,36 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn dropped_at_mailbox(&self, _node: NodeId, _to: NodeId, _kind: &'static str) {
         let mut st = self.state();
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
+    }
+
+    fn snap_chunk_withheld(&self, _node: NodeId, to: NodeId) {
+        let mut st = self.state();
+        // BUGGIFY pairing for `withhold_snap_chunk`: the fired half. The
+        // recovery half fires in `snap_chunk_repaired` for a requester that
+        // was withheld from.
+        reach_once!(
+            st.chunk_withheld,
+            "a custodian withholds a requested snapshot chunk"
+        );
+        st.withheld_from.insert(to.0);
+    }
+
+    fn read_expired(&self, _node: NodeId, early: bool) {
+        let mut st = self.state();
+        if early {
+            // BUGGIFY pairing for `expire_parked_read_early`. The recovery
+            // half is the client's own: "a read is retried across nodes
+            // before committing" in the client history fold.
+            reach_once!(
+                st.read_expired_early,
+                "the driver redirects a parked read before its confirmation deadline"
+            );
+        } else {
+            reach_once!(
+                st.read_expired_overdue,
+                "a parked read outlives its confirmation deadline and is redirected"
+            );
+        }
     }
 
     fn snapshot_offer_skipped(&self, _node: NodeId, _offered: Slot) {
@@ -1705,13 +1886,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn snap_chunk_repaired(
         &self,
-        _node: NodeId,
+        node: NodeId,
         _at: Slot,
         chunks: u64,
         bytes: u64,
         blob_bytes: u64,
     ) {
         let mut st = self.state();
+        if st.withheld_from.contains(&node.0) {
+            // The `withhold_snap_chunk` recovery half: the silence cost this
+            // requester beats or a second custodian, and it still repaired.
+            reach_once!(
+                st.repaired_after_withhold,
+                "a requester repairs its snapshot chunks after a custodian withheld one"
+            );
+        }
         // The CTRL §5.2 chunk-repair cost metric: an install ships at most the
         // chunks it names — never the whole blob riding along.
         assert_always!(
