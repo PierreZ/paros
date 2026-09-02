@@ -23,10 +23,12 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod corpus;
-mod node;
+mod hooks;
+mod process;
+mod world;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
-pub use node::NodeProcess;
+pub use process::NodeProcess;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -266,8 +268,8 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
 #[must_use]
 pub fn run_storage_contract_suite() -> SimulationReport {
     SimulationBuilder::new()
-        .processes(1, || Box::new(crate::node::IdleProcess))
-        .workload_factory(|| Box::new(crate::node::ContractSuiteWorkload))
+        .processes(1, || Box::new(crate::process::IdleProcess))
+        .workload_factory(|| Box::new(crate::process::ContractSuiteWorkload))
         .set_iterations(1)
         .run()
 }
@@ -280,7 +282,7 @@ fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::node::CorpusNodeProcess)
+            Box::new(crate::process::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
 }
@@ -354,7 +356,7 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::node::CorpusNodeProcess)
+            Box::new(crate::process::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
         .set_iterations(1)
@@ -370,7 +372,7 @@ pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::node::CorpusNodeProcess)
+            Box::new(crate::process::CorpusNodeProcess)
         })
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
         .set_iterations(1)
@@ -386,7 +388,7 @@ fn chunk_corpus_builder(
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(corpus::CORPUS_NODES, || {
-            Box::new(crate::node::CorpusNodeProcess)
+            Box::new(crate::process::CorpusNodeProcess)
         })
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
 }

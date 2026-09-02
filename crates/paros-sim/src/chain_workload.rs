@@ -1350,7 +1350,7 @@ impl Workload for ChainWorkload {
             // cost the dead-node budget bounds. Convergence is demanded of
             // every *live* node; the parked set's unavailability is separately
             // asserted as explained (audit + storage gates).
-            let parked = crate::node::parked_nodes(ctx.state());
+            let parked = crate::world::parked_nodes(ctx.state());
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !parked.contains(&servers[*i]))
                 .collect();
@@ -1419,7 +1419,7 @@ impl Workload for ChainWorkload {
         // genuinely missing). Under the per-record budget no run is excusable,
         // so an unavailable run with clean quorums everywhere is a real
         // liveness bug, named as such beside the convergence failure.
-        let storage = crate::node::storage_fault_stats(ctx.state());
+        let storage = crate::world::storage_fault_stats(ctx.state());
         assert_always!(
             converged || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
@@ -1433,7 +1433,7 @@ impl Workload for ChainWorkload {
         );
         // The CTRL availability trade, measured: a corruption-parked node
         // stays down (detect ⇒ crash) while the live quorum still converges.
-        let corruption = crate::node::corruption_stats(ctx.state());
+        let corruption = crate::world::corruption_stats(ctx.state());
         assert_sometimes!(
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
@@ -1444,7 +1444,7 @@ impl Workload for ChainWorkload {
             // probe inside its timeout. The seed's buggified shape is printed
             // too — a knob at its extreme is one of the things that can
             // produce a red.
-            let parked_now = crate::node::parked_nodes(ctx.state());
+            let parked_now = crate::world::parked_nodes(ctx.state());
             eprintln!(
                 "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node states = {:?}",
                 time.now().as_millis(),
@@ -1456,7 +1456,7 @@ impl Workload for ChainWorkload {
             eprintln!("  PROBE parked={parked_now:?} servers={server_count}");
             eprintln!("  AUDIT {}", audit.diagnostics());
             for ip in &servers {
-                if let Some(probe) = crate::node::corpus_disk_probe(ctx.state(), ip) {
+                if let Some(probe) = crate::world::corpus_disk_probe(ctx.state(), ip) {
                     eprintln!(
                         "  DISK {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
                         probe.floor,

@@ -47,7 +47,7 @@ use paros::{
 
 use crate::audit::audit_world;
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
-use crate::node::{
+use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
     corpus_hold_node, corpus_release_node, corpus_restart_node, unrecoverable_slots,
 };
