@@ -310,6 +310,13 @@ impl RawNode {
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
         );
+        // Write-side pair of the boot scan's "the durable promise dominates
+        // every accepted record": every caller raises the promise first, so
+        // the batch never carries a record above the promise it flushes.
+        assert!(
+            ballot <= self.hard_state.max_promised_ballot,
+            "a record is never accepted above the promise"
+        );
         // A fresh record over a faulty entry is the in-place repair (Stage 8):
         // fill or replace-with-proven-identical, never delete. An `Accept`
         // lands at `>=` this node's promise (`>=` the lost record's ballot; at

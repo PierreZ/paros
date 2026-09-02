@@ -215,6 +215,17 @@ impl RawNode {
                 "a decision at the open round's ballot carries the round's command"
             );
         }
+        // Adopt the choosing ballot *before* the record lands, so the batch
+        // carries the promise ahead of the accept exactly as `on_accept` does:
+        // the write-side ordering the boot scan re-asserts ("the durable
+        // promise dominates every accepted record"). Recording first left a
+        // crash between the two durable ops with a record above the promise;
+        // a spare that only ever learns (never prepared, promise still zero)
+        // hit it on 1 seed in 2,000 (17196295897912962235) and refused to
+        // boot again.
+        if ballot > self.hard_state.max_promised_ballot {
+            self.set_promise(ballot);
+        }
         // Record the *chosen* value as the authoritative accepted command. Using
         // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
         // lower-ballot accept it picked up from a failed earlier ballot, and
@@ -222,9 +233,6 @@ impl RawNode {
         // would resurrect a value the cluster never chose for this slot. A chosen
         // value is durable and safe to record at its choosing ballot.
         self.record_accepted(slot, ballot, command.clone());
-        if ballot > self.hard_state.max_promised_ballot {
-            self.set_promise(ballot);
-        }
         self.chosen.insert(slot, command.clone());
         // Re-point `inflight` at what this slot actually decided. Two halves,
         // and both matter:
