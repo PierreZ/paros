@@ -35,6 +35,28 @@ macro_rules! reach_once {
 mod client;
 mod state;
 
+/// A stable label per message kind, for the failure print's send tally.
+fn message_kind(msg: &Message) -> &'static str {
+    match msg {
+        Message::Prepare { .. } => "prepare",
+        Message::Promise { .. } => "promise",
+        Message::Accept { .. } => "accept",
+        Message::Accepted { .. } => "accepted",
+        Message::Commit { .. } => "commit",
+        Message::Nack { .. } => "nack",
+        Message::Heartbeat { .. } => "heartbeat",
+        Message::HeartbeatAck { .. } => "heartbeat_ack",
+        Message::CatchUpRequest { .. } => "catch_up_request",
+        Message::CatchUpResponse { .. } => "catch_up_response",
+        Message::InstallSnapshot { .. } => "install_snapshot",
+        Message::Relinquish { .. } => "relinquish",
+        Message::SnapAck { .. } => "snap_ack",
+        Message::SnapChunkRequest { .. } => "snap_chunk_request",
+        Message::SnapChunkResponse { .. } => "snap_chunk_response",
+        _ => "other",
+    }
+}
+
 pub(crate) use client::ClientHistory;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,8 +64,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    Audit, Ballot, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, Message, NodeId, PROMISE_BATCH,
-    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    Audit, Ballot, EdgeRejection, HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, Message, NodeId,
+    PROMISE_BATCH, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord,
+    command_hash,
 };
 
 use self::state::AuditState;
@@ -205,13 +228,17 @@ impl AuditWorld {
     pub(crate) fn diagnostics(&self) -> String {
         let st = self.lock();
         format!(
-            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?}",
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={}",
             st.applied_max,
             st.cluster_applied_max,
             st.booted,
             st.storage_dead,
             st.leader_rounds,
-            st.last_gap
+            st.last_gap,
+            st.promised,
+            st.sent_kinds,
+            st.delivery_failures,
+            st.edge_rejections
         )
     }
 
@@ -677,6 +704,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn sent(&self, node: NodeId, _to: NodeId, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
         if msg.config_id().is_some() {
             let mut st = self.state();
             reach_once!(
@@ -1277,6 +1309,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after a snap-point restore and before its sync"
                 );
             }
+            Seam::AfterBootReplayBeforeSync => {
+                reach_once!(
+                    st.crashed_after_boot_replay,
+                    "the driver crashes after the boot replay and before its sync"
+                );
+            }
         }
     }
 
@@ -1438,6 +1476,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
         let mut st = self.state();
+        if matches!(
+            reply,
+            paros::Reply::ProposeRedirect | paros::Reply::ReadRedirect | paros::Reply::Compact
+        ) {
+            // Nothing committed behind these: the client sees a deadline and
+            // retries blind. No dedup edge to track, only the reach.
+            reach_once!(
+                st.redirect_dropped,
+                "a redirect or compaction reply is dropped at the reply seam"
+            );
+            return;
+        }
         reach_once!(
             st.reply_dropped,
             "a committed client reply is dropped at the reply seam"
@@ -1485,6 +1535,29 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.offer_skipped,
             "the driver skips a mismatched snapshot offer"
+        );
+    }
+
+    fn delivery_failed(&self, _node: NodeId, _to: NodeId) {
+        let mut st = self.state();
+        st.delivery_failures += 1;
+        reach_once!(st.delivery_failed, "a peer delivery RPC fails or times out");
+    }
+
+    fn waiters_cleared(&self, _node: NodeId, _writes: u64, _reads: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.waiters_cleared,
+            "a deposed leader clears client replies it still held"
+        );
+    }
+
+    fn edge_rejected(&self, _node: NodeId, _kind: EdgeRejection) {
+        let mut st = self.state();
+        st.edge_rejections += 1;
+        reach_once!(
+            st.edge_rejected,
+            "the gRPC edge rejects a corrupted request"
         );
     }
 

@@ -53,16 +53,32 @@ use crate::process::NodeProcess;
 /// used again, so the only chance to ping is while a stream is open; but the
 /// probe timeout is always shorter than the ping interval, so the stream is
 /// always gone before a ping is due and the keep-alive can never fire.
-pub(crate) fn client_channel_config() -> moonpool_hyper::ChannelConfig {
+///
+/// The three durations are the chain workload's knobs (the corpus passes the
+/// production defaults through [`default_client_channel_config`]).
+pub(crate) fn client_channel_config(
+    connection_timeout: Duration,
+    keep_alive_interval: Duration,
+    keep_alive_timeout: Duration,
+) -> moonpool_hyper::ChannelConfig {
     moonpool_hyper::ChannelConfig {
-        connection_timeout: Duration::from_secs(1),
+        connection_timeout,
         keep_alive: Some(moonpool_hyper::KeepAlive {
-            interval: Duration::from_secs(2),
-            timeout: Duration::from_secs(1),
+            interval: keep_alive_interval,
+            timeout: keep_alive_timeout,
             while_idle: true,
         }),
         ..moonpool_hyper::ChannelConfig::default()
     }
+}
+
+/// [`client_channel_config`] at the production defaults.
+pub(crate) fn default_client_channel_config() -> moonpool_hyper::ChannelConfig {
+    client_channel_config(
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+    )
 }
 
 fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {

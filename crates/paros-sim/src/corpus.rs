@@ -231,8 +231,11 @@ impl CorpusClients {
             let addr = parse_addr(ip)?;
             let origin = http::Uri::try_from(format!("http://{addr}"))
                 .map_err(|e| invalid(format!("bad gRPC origin: {e}")))?;
-            let channel =
-                ReconnectingChannel::new(ctx.providers(), addr, crate::client_channel_config());
+            let channel = ReconnectingChannel::new(
+                ctx.providers(),
+                addr,
+                crate::default_client_channel_config(),
+            );
             public.push(ParosClient::with_origin(channel.clone(), origin.clone()));
             internal.push(ParosInternalClient::with_origin(channel.clone(), origin));
             channels.push(channel);

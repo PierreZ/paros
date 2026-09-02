@@ -1,6 +1,7 @@
 //! Generated gRPC contract and the bridge into the single-owner node driver.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use paros_core::{
     Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Message, NodeId, SessionEntry,
@@ -578,6 +579,21 @@ pub(crate) struct RpcInbox {
     pub(crate) inspect: mpsc::Receiver<Call<InspectRequest, InspectReply>>,
 }
 
+/// Why the gRPC edge refused an inbound request before the node loop saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeRejection {
+    /// A client proposal whose `(client, seq, command)` checksum did not match.
+    ProposalChecksum,
+    /// A peer batch envelope whose per-message checksum did not match.
+    MessageChecksum,
+    /// A peer message that decoded from the wire but not into a `Message`.
+    MessageDecode,
+}
+
+/// The edge's observation callback: the driver installs one that forwards to
+/// its [`Audit`](crate::Audit), stamped with the node's identity.
+pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
+
 /// Cloneable tonic handler. Each method forwards to [`RpcInbox`] and holds the
 /// HTTP/2 response open until the driver completes that request.
 #[derive(Clone)]
@@ -587,17 +603,24 @@ pub(crate) struct RpcService {
     deliver: mpsc::Sender<Call<Message, ()>>,
     compact: mpsc::Sender<Call<Compact, CompactAck>>,
     inspect: mpsc::Sender<Call<InspectRequest, InspectReply>>,
+    on_reject: OnReject,
 }
 
-/// Construct a handler/inbox pair for one node incarnation.
-pub(crate) fn rpc_channel() -> (RpcService, RpcInbox) {
+/// Construct a handler/inbox pair for one node incarnation. `client_inbox`
+/// bounds each client-facing queue (propose, read, compact, inspect) and
+/// `peer_inbox` the peer-message queue; both must be at least 1.
+pub(crate) fn rpc_channel(
+    client_inbox: usize,
+    peer_inbox: usize,
+    on_reject: OnReject,
+) -> (RpcService, RpcInbox) {
     // Bounded queues make overload visible as backpressure while leaving ample
     // room for one simulation tick's peer-message fanout.
-    let (propose_tx, propose_rx) = mpsc::channel(256);
-    let (read_tx, read_rx) = mpsc::channel(256);
-    let (deliver_tx, deliver_rx) = mpsc::channel(1024);
-    let (compact_tx, compact_rx) = mpsc::channel(256);
-    let (inspect_tx, inspect_rx) = mpsc::channel(256);
+    let (propose_tx, propose_rx) = mpsc::channel(client_inbox);
+    let (read_tx, read_rx) = mpsc::channel(client_inbox);
+    let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
+    let (compact_tx, compact_rx) = mpsc::channel(client_inbox);
+    let (inspect_tx, inspect_rx) = mpsc::channel(client_inbox);
     (
         RpcService {
             propose: propose_tx,
@@ -605,6 +628,7 @@ pub(crate) fn rpc_channel() -> (RpcService, RpcInbox) {
             deliver: deliver_tx,
             compact: compact_tx,
             inspect: inspect_tx,
+            on_reject,
         },
         RpcInbox {
             propose: propose_rx,
@@ -637,6 +661,7 @@ impl public::paros_server::Paros for RpcService {
                 seq = request.seq,
                 "proposal_checksum_rejected"
             );
+            (self.on_reject)(EdgeRejection::ProposalChecksum);
             return Err(Status::data_loss("invalid proposal checksum"));
         }
         dispatch(&self.propose, request).await.map(Response::new)
@@ -667,9 +692,11 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
                 .ok_or_else(|| Status::invalid_argument("missing Paxos message"))?;
             if wire_checksum(&message.encode_to_vec()) != envelope.checksum {
                 tracing::warn!("message_corruption_rejected");
+                (self.on_reject)(EdgeRejection::MessageChecksum);
                 return Err(Status::data_loss("invalid Paxos message checksum"));
             }
             let message = message_from_proto(message).map_err(|error| {
+                (self.on_reject)(EdgeRejection::MessageDecode);
                 Status::invalid_argument(format!("invalid Paxos message: {error}"))
             })?;
             dispatch(&self.deliver, message).await?;

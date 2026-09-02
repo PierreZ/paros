@@ -29,6 +29,12 @@ use crate::world::storage::{DurableStorage, StorageFaults};
 use crate::world::storage_world;
 use paros::{Config, DriverTunables, NodeId, RunError, parse_addr, run_node};
 
+/// The wall-clock floor of every driver timeout that races the network: one
+/// Phase-1 round trip over moonpool's default cross-datacenter link plus one
+/// delivery batch, i.e. production's `5 ticks × 50 ms`. See the knob block in
+/// [`NodeProcess::run`] for why it is a floor and not a tunable.
+const ROUND_TRIP_FLOOR_MS: u64 = 250;
+
 /// A paros node in the simulation.
 pub(crate) struct NodeProcess {
     mode: NodeMode,
@@ -199,7 +205,38 @@ impl Process for NodeProcess {
                 // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
                 assert_reachable!("a node runs with an extreme delivery batch");
             }
+            // The remaining knobs, one location each (AGENTS.md: a seed may
+            // be extreme in one dimension and ordinary in the next). Every
+            // duration that races the network has the same structural floor,
+            // `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter link
+            // is 20-80 ms one way, so a Phase-1 round trip plus one delivery
+            // batch is ~250 ms — production's own `5 ticks × 50 ms`. An
+            // election timeout below it makes a candidate abandon its own
+            // round before its promises return (witness: base 3 × 50 ms on a
+            // 4-node cluster campaigned 1,185 times in 80 s and never once
+            // collected a quorum); a keep-alive, connect or delivery timeout
+            // below it kills every stream on every round trip. Both are a
+            // permanent partition wearing a knob's clothes, not a
+            // configuration. The tick itself may go fast (a 10 ms tick is 25
+            // heartbeats per round trip); the tick-counted timeouts are then
+            // raised to keep their wall-clock floor. The ranges still cross
+            // the client's knobbed deadline (350 ms..3 s) in both directions:
+            // a node slower than the client's patience is a valid, ambiguous
+            // outcome, never a wrong one.
+            let ms = Duration::from_millis;
+            let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
+            let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
             DriverTunables {
+                tick_interval: ms(tick_ms),
+                election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
+                keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
+                keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
+                connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
+                delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
+                read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(floor_ticks),
+                snapshot_queue_capacity: buggify_knob!(4_usize, 1_usize..9_usize),
+                client_inbox_capacity: buggify_knob!(256_usize, 1_usize..17_usize),
+                peer_inbox_capacity: buggify_knob!(1024_usize, 1_usize..65_usize),
                 peer_queue_capacity,
                 delivery_batch,
             }

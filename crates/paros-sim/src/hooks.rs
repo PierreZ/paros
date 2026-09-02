@@ -64,6 +64,11 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 // own independently selectable location.
                 Seam::BeforeChunkSync => buggify_with_prob!(prob),
                 Seam::AfterChunkRestoreBeforeSync => buggify_with_prob!(prob),
+                // The boot replay's own durability point: consulted once per
+                // incarnation that had something to replay, so a generous
+                // rate still crashes only a handful of boots per run — and
+                // each one is a second boot from the same durable state.
+                Seam::AfterBootReplayBeforeSync => buggify_with_prob!(0.25),
             };
         if fired && self.seam_crash_bias > 1.0 {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
@@ -387,6 +392,28 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             paros::Reply::Propose => buggify_with_prob!(0.10),
             paros::Reply::ProposeDedup => buggify_with_prob!(0.10),
             paros::Reply::Read => buggify_with_prob!(0.10),
+            // A lost redirect costs the client its whole request deadline
+            // before it retries blind, so the retarget policies meet a stale
+            // hint under time pressure instead of a fresh one.
+            paros::Reply::ProposeRedirect => buggify_with_prob!(0.10),
+            paros::Reply::ReadRedirect => buggify_with_prob!(0.10),
+            // A lost compaction ack is the one ambiguity the compaction
+            // client's re-ask loop must absorb without double-seeding.
+            paros::Reply::Compact => buggify_with_prob!(0.10),
         }
+    }
+
+    fn withhold_snap_chunk(&self, _to: NodeId) -> bool {
+        // Per chunk that would otherwise be served. Generous: a requester
+        // re-asks every tick and every custodian, so what this builds is the
+        // multi-beat, multi-custodian repair shape rather than a stall.
+        self.active() && buggify_with_prob!(0.25)
+    }
+
+    fn expire_parked_read_early(&self) -> bool {
+        // Per tick while reads are parked. Kept shy: expiring most parked
+        // reads early would stop confirmed reads from ever completing during
+        // the chaos window, and the read-index path is what needs coverage.
+        self.active() && buggify_with_prob!(0.05)
     }
 }

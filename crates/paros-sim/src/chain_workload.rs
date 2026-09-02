@@ -93,6 +93,16 @@ struct ChainConfig {
     compact_beat_ms: u64,
     /// Compaction re-asks per operation. Floor 1.
     compact_attempts: u8,
+    /// The client channel's connect timeout. Floor 250 ms: one round trip
+    /// over the default cross-datacenter link; a shorter one never connects.
+    connect_timeout_ms: u64,
+    /// The client channel's h2 PING interval. Floor 250 ms (same bound), and
+    /// below the shortest request deadline so a half-open connection is
+    /// caught within one request.
+    keep_alive_interval_ms: u64,
+    /// How long a PING may go unanswered. Floor 250 ms: a timeout under the
+    /// round trip replaces a healthy stream on every ping.
+    keep_alive_timeout_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -120,6 +130,9 @@ impl ChainConfig {
             probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
             compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
+            connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
+            keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
@@ -405,12 +418,17 @@ impl Workload for ChainWorkload {
                 Ok((addr, origin))
             })
             .collect::<SimulationResult<Vec<_>>>()?;
+        let config = ChainConfig::for_timeline();
+        let channel_config = crate::client_channel_config(
+            Duration::from_millis(config.connect_timeout_ms),
+            Duration::from_millis(config.keep_alive_interval_ms),
+            Duration::from_millis(config.keep_alive_timeout_ms),
+        );
         let mut public_clients = Vec::with_capacity(endpoints.len());
         let mut internal_clients = Vec::with_capacity(endpoints.len());
         let mut channels = Vec::with_capacity(endpoints.len());
         for (addr, origin) in endpoints {
-            let channel =
-                ReconnectingChannel::new(ctx.providers(), addr, crate::client_channel_config());
+            let channel = ReconnectingChannel::new(ctx.providers(), addr, channel_config.clone());
             public_clients.push(ParosClient::with_origin(channel.clone(), origin.clone()));
             internal_clients.push(ParosInternalClient::with_origin(channel.clone(), origin));
             channels.push(channel);
@@ -421,7 +439,6 @@ impl Workload for ChainWorkload {
             }
         });
 
-        let config = ChainConfig::for_timeline();
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
