@@ -3,48 +3,34 @@
 //! saturation gate), a hunt never stops at a coverage plateau and treats
 //! coverage gates as irrelevant — its only deliverable is failing seeds.
 //!
-//! Usage: `sim-paros-hunt [main|snapshot|bounds|budget-off] [iterations]`
+//! Usage: `sim-paros-hunt [main|corpus|corpus-chunks] [iterations]`
 //!        `sim-paros-hunt replay-main <seed>` — deterministic single-seed
-//!        replay on the main campaign (the red→green witness command). The
-//!        former `network` axis folded into `main` once Moonpool `43304d8`
-//!        made the post-chaos tail genuinely fault-free.
-//!        `sim-paros-hunt replay-snapshot <seed>` — lifecycle choreography
-//!        `sim-paros-hunt replay-bounds <seed>` — protocol-bounds choreography
-//!        `sim-paros-hunt budget-off-coverage [iterations]` — the same axis as
-//!        the CI campaign runs it: coverage-guided selection with the
-//!        saturation gate armed (the raw `budget-off` hunt below is random
-//!        volume, and a gate it reaches easily can still starve under
-//!        guidance).
-//!        `sim-paros-hunt budget-off [iterations]` — the WAITED-leg axis
-//!        (issue #21): corruption may take every copy of a committed item, and
-//!        safety must still hold while the cluster correctly waits.
-//!        `sim-paros-hunt replay-budget-off <seed>` — deterministic replay.
-//!        `sim-paros-hunt corpus [iterations]` — the #113 E1 mask corpus:
-//!        each seed draws a per-slot × per-node corruption mask and asserts
-//!        its analytically derived outcome (Correct vs `CorrectlyUnavailable`).
+//!        replay on the main campaign (the red→green witness command).
+//!        `sim-paros-hunt explore-main <seed>` — root + explored continuation
+//!        timelines, for failures that live only on explorer branches.
+//!        `sim-paros-hunt corpus [iterations]` — the E1 mask corpus: each seed
+//!        draws a per-slot × per-node corruption mask and asserts its
+//!        analytically derived outcome (Correct vs `CorrectlyUnavailable`).
 //!        `sim-paros-hunt replay-corpus <seed>` — deterministic replay.
 //!        `sim-paros-hunt replay-corpus-mask <mask>` — one explicit mask.
-//!        `sim-paros-hunt corpus-chunks [iterations]` — the #101 per-chunk
-//!        mask corpus over the decided snapshot point; `replay-chunk-mask
-//!        <mask>` / `replay-chunk-seed <seed>` replay one case.
+//!        `sim-paros-hunt corpus-chunks [iterations]` — the per-chunk mask
+//!        corpus over the decided snapshot point; `replay-chunk-mask <mask>` /
+//!        `replay-chunk-seed <seed>` replay one case.
 //!        `sim-paros-hunt replay-bare-quorum <seed>` / `replay-lifecycle
 //!        <seed>` — the bare-quorum lost-slot case and the §5.1.2
 //!        snapshot-lifecycle compound.
 
 use paros_sim::{
-    budget_off_hunt, chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_budget_off,
-    explore_chain_seed, explore_snapshot_recovery, explore_snapshot_recovery_seed,
-    protocol_bounds_hunt, run_bare_quorum_case, run_budget_off_seed, run_chain_seed,
-    run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_protocol_bounds_seed, run_snapshot_lifecycle_case, run_snapshot_recovery_seed,
+    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
+    run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
+    run_snapshot_lifecycle_case,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
-    if let "replay-main" | "replay-snapshot" | "replay-bounds" | "replay-budget-off"
-    | "replay-corpus" | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle"
-    | "replay-chunk-mask" | "replay-chunk-seed" | "explore-snapshot" | "explore-main" =
+    if let "replay-main" | "explore-main" | "replay-corpus" | "replay-corpus-mask"
+    | "replay-bare-quorum" | "replay-lifecycle" | "replay-chunk-mask" | "replay-chunk-seed" =
         axis.as_str()
     {
         let seed = std::env::args()
@@ -53,15 +39,7 @@ fn main() {
             .expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
         let report = match axis.as_str() {
-            "replay-snapshot" => run_snapshot_recovery_seed(seed),
-            // Root + explored continuation timelines: the replay command for
-            // choreography failures that live only on explorer branches.
-            "explore-snapshot" => explore_snapshot_recovery_seed(seed, 8),
-            // Root + explored continuation timelines on the main campaign —
-            // the replay command for failures found on explorer branches.
             "explore-main" => explore_chain_seed(seed, 8),
-            "replay-bounds" => run_protocol_bounds_seed(seed),
-            "replay-budget-off" => run_budget_off_seed(seed),
             "replay-corpus" => run_corpus_seed(seed),
             "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
             "replay-bare-quorum" => run_bare_quorum_case(seed),
@@ -89,22 +67,10 @@ fn main() {
     println!("--- hunt: {axis} axis, {iterations} seeds ---");
     let report = match axis.as_str() {
         "main" => chain_smoke(iterations),
-        "snapshot" => explore_snapshot_recovery(iterations),
-        "bounds" => protocol_bounds_hunt(iterations),
-        "budget-off" => budget_off_hunt(iterations),
-        // The CI campaign's budget-off axis, standalone: coverage-*guided*
-        // seed selection with the saturation gate armed, rather than the raw
-        // hunt's random volume. The two answer different questions — a gate
-        // the raw hunt reaches easily can still be starved under guidance,
-        // which is exactly the failure shape that is otherwise only visible by
-        // re-running the whole sweep.
-        "budget-off-coverage" => explore_budget_off(iterations),
         "corpus" => corpus_hunt(iterations),
         "corpus-chunks" => chunk_corpus_hunt(iterations),
         other => {
-            eprintln!(
-                "unknown axis: {other} (expected 'main', 'snapshot', 'bounds', 'budget-off', 'budget-off-coverage', 'corpus', or 'corpus-chunks')"
-            );
+            eprintln!("unknown axis: {other} (expected 'main', 'corpus', or 'corpus-chunks')");
             std::process::exit(2);
         }
     };

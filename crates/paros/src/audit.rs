@@ -19,6 +19,7 @@
 
 use paros_core::{Ballot, Handoff, Message, NodeId, Slot};
 
+use crate::grpc::EdgeRejection;
 use crate::hooks::Seam;
 use crate::storage::StorageError;
 
@@ -302,6 +303,24 @@ pub trait Audit {
     /// application state did not cover the offered boundary (a legitimate
     /// transient under an open application repair); the requester re-asks.
     fn snapshot_offer_skipped(&self, node: NodeId, offered: Slot) {}
+
+    /// One peer-delivery RPC toward `to` failed or timed out; every message
+    /// of that batch is lost at the transport. Reported from the delivery
+    /// task (the audit handle is cloned into it), so implementations must
+    /// stay observation-only here as everywhere.
+    fn delivery_failed(&self, node: NodeId, to: NodeId) {}
+
+    /// This node lost its leadership with client replies still parked:
+    /// `writes` proposals whose slot may yet commit under the successor (their
+    /// clients time out, on purpose) and `reads` that were answered with a
+    /// redirect on the spot.
+    fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
+
+    /// The gRPC edge refused an inbound request before it reached the node
+    /// loop — a checksum or decode failure on a client proposal or a peer
+    /// batch. The refusal is the transport's own integrity gate; nothing
+    /// inside the node changed.
+    fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
 }
 
 /// Inert production audit: every observation is dropped.

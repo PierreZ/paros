@@ -63,14 +63,61 @@ const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
 /// Maximum Paxos messages packed into one protobuf/gRPC request. This keeps
 /// a chatty heartbeat/catch-up round from creating one h2 frame per message.
 const GRPC_DELIVERY_BATCH: usize = 64;
+/// Bounded inboxes between the tonic handlers and the node loop: overload is
+/// visible as backpressure, with ample room for one tick's peer fanout.
+const GRPC_CLIENT_INBOX_CAPACITY: usize = 256;
+const GRPC_PEER_INBOX_CAPACITY: usize = 1024;
 
-/// Per-node driver transport tunables — **born workload-buggified config**
-/// (AGENTS.md prong 2): plain data the harness layer randomizes per seed, FDB
-/// knob style, while production takes [`DriverTunables::default()`] and is
-/// bit-identical to the old constants. Both values must be at least 1 (a
-/// zero-capacity mpsc channel panics at construction).
+/// Per-node driver tunables — **born workload-buggified config** (AGENTS.md
+/// prong 2): plain data the harness layer randomizes per seed, FDB knob style,
+/// while production takes [`DriverTunables::default()`] and is bit-identical
+/// to the constants above. Every field documents its floor: a capacity must be
+/// at least 1 (a zero-capacity mpsc channel panics at construction), a
+/// duration at least non-zero, and the election base at least
+/// `2 * HEARTBEAT_TICKS` so a live leader always beats before a follower's
+/// election clock fires.
 #[derive(Clone, Copy, Debug)]
 pub struct DriverTunables {
+    /// How often the node advances its logical clock. Pacing, not a protocol
+    /// bound: every timeout the core owns is counted in ticks, so a slower
+    /// tick is a slower node, which the cluster already tolerates. Floor: any
+    /// non-zero duration.
+    pub tick_interval: Duration,
+    /// Base election timeout `T`, in ticks; the actual timeout is drawn from
+    /// `[T, 2T)` to break dueling proposers. Two floors: `2 * HEARTBEAT_TICKS`
+    /// (see `paros_core`), below which a live leader's beat can lose the race
+    /// against its followers' election clocks every round; and, in wall-clock
+    /// terms, `T × tick_interval` must exceed a Phase-1 round trip, or a
+    /// candidate abandons its own round before its promises return and no
+    /// leader is ever elected.
+    pub election_timeout_base: u64,
+    /// h2 PING interval on peer streams (provider time, so a half-open
+    /// connection is replaced deterministically). Floor: non-zero.
+    pub keep_alive_interval: Duration,
+    /// How long a PING may go unanswered before the stream is replaced.
+    /// Floor: non-zero.
+    pub keep_alive_timeout: Duration,
+    /// How long a peer connect attempt may take before it is retried. Floor:
+    /// non-zero (a reconnecting channel retries forever).
+    pub connection_timeout: Duration,
+    /// How long one peer-delivery RPC may take before its batch is written
+    /// off as lost (the mailbox is lossy by contract; resends repair it).
+    /// Floor: non-zero.
+    pub delivery_timeout: Duration,
+    /// Ticks a parked read may wait for its read-index confirmation before
+    /// the driver answers a retry redirect. Floor: the confirmation is one
+    /// heartbeat-ack round trip, so `read_retry_ticks × tick_interval` must
+    /// exceed it or no read ever confirms. A client whose deadline is shorter
+    /// than the wait simply times out (ambiguous, never wrong).
+    pub read_retry_ticks: u64,
+    /// Capacity of the snapshot offers' independent h2 request lane. Floor 1.
+    pub snapshot_queue_capacity: usize,
+    /// Capacity of each client-facing inbox (propose, read, compact, inspect)
+    /// between the tonic handlers and the node loop. Floor 1: overload is
+    /// visible as backpressure, never as a lost request.
+    pub client_inbox_capacity: usize,
+    /// Capacity of the peer-message inbox. Floor 1, same contract.
+    pub peer_inbox_capacity: usize,
     /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this
     /// is deliberately bounded and lossy: the consensus driver never waits for
     /// network I/O, and current heartbeats/resends repair anything dropped
@@ -87,6 +134,16 @@ pub struct DriverTunables {
 impl Default for DriverTunables {
     fn default() -> Self {
         Self {
+            tick_interval: TICK_INTERVAL,
+            election_timeout_base: ELECTION_TIMEOUT_BASE,
+            keep_alive_interval: GRPC_KEEP_ALIVE_INTERVAL,
+            keep_alive_timeout: GRPC_KEEP_ALIVE_TIMEOUT,
+            connection_timeout: GRPC_DELIVERY_TIMEOUT,
+            delivery_timeout: GRPC_DELIVERY_TIMEOUT,
+            read_retry_ticks: READ_RETRY_TICKS,
+            snapshot_queue_capacity: GRPC_SNAPSHOT_QUEUE_CAPACITY,
+            client_inbox_capacity: GRPC_CLIENT_INBOX_CAPACITY,
+            peer_inbox_capacity: GRPC_PEER_INBOX_CAPACITY,
             peer_queue_capacity: GRPC_PEER_QUEUE_CAPACITY,
             delivery_batch: GRPC_DELIVERY_BATCH,
         }
@@ -114,18 +171,18 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
     }
 }
 
-fn grpc_keep_alive() -> KeepAlive {
+fn grpc_keep_alive(tunables: &DriverTunables) -> KeepAlive {
     KeepAlive {
-        interval: GRPC_KEEP_ALIVE_INTERVAL,
-        timeout: GRPC_KEEP_ALIVE_TIMEOUT,
+        interval: tunables.keep_alive_interval,
+        timeout: tunables.keep_alive_timeout,
         while_idle: false,
     }
 }
 
-fn grpc_channel_config() -> ChannelConfig {
+fn grpc_channel_config(tunables: &DriverTunables) -> ChannelConfig {
     ChannelConfig {
-        connection_timeout: GRPC_DELIVERY_TIMEOUT,
-        keep_alive: Some(grpc_keep_alive()),
+        connection_timeout: tunables.connection_timeout,
+        keep_alive: Some(grpc_keep_alive(tunables)),
         ..ChannelConfig::default()
     }
 }
@@ -606,9 +663,16 @@ fn handle_snap_chunk_request<S, H, A>(
             let served: Vec<(u32, Value)> = chunks
                 .iter()
                 .filter_map(|chunk| {
-                    storage
-                        .read_snap_chunk(at, *chunk)
-                        .map(|bytes| (*chunk, Value(bytes)))
+                    let bytes = storage.read_snap_chunk(at, *chunk)?;
+                    // Silence about a chunk this node holds is the same
+                    // answer as silence about one it lacks; the requester
+                    // re-asks every tick. Consulted only for a chunk that
+                    // would otherwise be served.
+                    if hooks.withhold_snap_chunk(to) {
+                        tracing::info!(node = me.0, at = at.0, chunk, "snap_chunk_withheld");
+                        return None;
+                    }
+                    Some((*chunk, Value(bytes)))
                 })
                 .collect();
             if !served.is_empty() {
@@ -1203,11 +1267,12 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     time: P::Time,
     shutdown: CancellationToken,
     messages: PeerMailbox,
-    batch_limit: usize,
+    tunables: DriverTunables,
     audit: A,
     self_id: u64,
     to: NodeId,
 ) {
+    let batch_limit = tunables.delivery_batch;
     let mut carried = None;
     loop {
         let first = if let Some(message) = carried.take() {
@@ -1229,7 +1294,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => return,
-                _ = time.sleep(TICK_INTERVAL) => {}
+                _ = time.sleep(tunables.tick_interval) => {}
             }
         }
         let mut attempt_client = client.clone();
@@ -1238,12 +1303,18 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
         let outcome = moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => return,
-            result = time.timeout(GRPC_DELIVERY_TIMEOUT, attempt_client.deliver(batch)) => result,
+            result = time.timeout(tunables.delivery_timeout, attempt_client.deliver(batch)) => result,
         };
         match outcome {
             Ok(Ok(_)) => {}
-            Ok(Err(status)) => tracing::debug!(%status, "peer gRPC delivery failed"),
-            Err(_) => tracing::debug!("peer gRPC delivery timed out"),
+            Ok(Err(status)) => {
+                audit.delivery_failed(NodeId(self_id), to);
+                tracing::debug!(%status, "peer gRPC delivery failed");
+            }
+            Err(_) => {
+                audit.delivery_failed(NodeId(self_id), to);
+                tracing::debug!("peer gRPC delivery timed out");
+            }
         }
     }
 }
@@ -2028,28 +2099,23 @@ fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
     self_id: u64,
+    base: u64,
 ) -> u64 {
     if hooks.shortest_election_timeout() {
-        audit.election_timeout_extreme(NodeId(self_id), ELECTION_TIMEOUT_BASE);
-        tracing::info!(
-            node = self_id,
-            ticks = ELECTION_TIMEOUT_BASE,
-            "election_timeout_extreme"
-        );
-        ELECTION_TIMEOUT_BASE
+        audit.election_timeout_extreme(NodeId(self_id), base);
+        tracing::info!(node = self_id, ticks = base, "election_timeout_extreme");
+        base
     } else if hooks.longest_election_timeout() {
         // The other jitter extreme: the highest value the honest draw below
         // could produce. Consulted only when the shortest hook stayed quiet,
         // so the two extremes remain independent locations. Its BUGGIFY
         // pairing gate fires in the sim hook implementation (the audit's
         // `election_timeout_extreme` reach gate is the shortest extreme's).
-        let ticks = ELECTION_TIMEOUT_BASE * 2 - 1;
+        let ticks = base * 2 - 1;
         tracing::info!(node = self_id, ticks, "election_timeout_extreme");
         ticks
     } else {
-        providers
-            .random()
-            .random_range(ELECTION_TIMEOUT_BASE..ELECTION_TIMEOUT_BASE * 2)
+        providers.random().random_range(base..base * 2)
     }
 }
 
@@ -2139,11 +2205,18 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     last_handoff: &mut HandoffCounters,
     waiters: &mut ClientWaiters,
     self_id: u64,
+    election_base: u64,
     hooks: &H,
     audit: &A,
 ) {
     if node.needs_election_timeout() {
-        node.set_election_timeout(draw_election_timeout(providers, hooks, audit, self_id));
+        node.set_election_timeout(draw_election_timeout(
+            providers,
+            hooks,
+            audit,
+            self_id,
+            election_base,
+        ));
     }
     // Surface any #94 duplicate suppressions the batch's contiguous walk
     // performed (the counter is monotone per incarnation).
@@ -2202,6 +2275,16 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             "leader_elected"
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
+        let writes = waiters.pending.values().map(Vec::len).sum::<usize>();
+        let reads = waiters.pending_reads.len();
+        if writes + reads > 0 {
+            audit.waiters_cleared(
+                NodeId(self_id),
+                u64::try_from(writes).unwrap_or(u64::MAX),
+                u64::try_from(reads).unwrap_or(u64::MAX),
+            );
+            tracing::info!(node = self_id, writes, reads, "waiters_cleared");
+        }
         waiters.pending.clear();
         // Parked reads have no slot whose commit could ever answer them:
         // redirect explicitly so the client retries the new leader now rather
@@ -2234,10 +2317,11 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 // One linear boot replay: report → walk → repair; splitting it would scatter
 // the ordering contract between the three.
 #[allow(clippy::too_many_lines)]
-fn replay_boot_state<S: NodeStorage, A: Audit>(
+fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     storage: &mut S,
     self_id: u64,
+    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError> {
     // Mark this incarnation coming up. The recovery recorder turns every `booted`
@@ -2378,6 +2462,20 @@ fn replay_boot_state<S: NodeStorage, A: Audit>(
         }
     }
     if replayed_application {
+        // Crash seam: the replayed prefix is staged but not yet flushed. The
+        // next incarnation replays the same prefix from the same durable
+        // state, so this is the idempotence of the boot replay itself under
+        // test — the one seam a crash *between* batches can never reach,
+        // because it sits before the first batch.
+        if hooks.crash_at(Seam::AfterBootReplayBeforeSync) {
+            audit.crashed(NodeId(self_id), Seam::AfterBootReplayBeforeSync);
+            tracing::info!(
+                node = self_id,
+                seam = "after_boot_replay_before_sync",
+                "crashed"
+            );
+            return Err(RunError::SeamCrash(Seam::AfterBootReplayBeforeSync));
+        }
         storage
             .sync(paros_core::MustSync::Sync)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
@@ -2494,22 +2592,33 @@ where
         .await
         .map_err(|e| SimulationError::InvalidState(format!("node gRPC listener: {e}")))?;
 
-    // Tonic handlers run as h2 request tasks and forward into these typed
-    // queues. The loop remains the sole owner of RawNode.
-    let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel();
-    let grpc_service = tonic::service::Routes::new(ParosServer::new(rpc_service.clone()))
-        .add_service(ParosInternalServer::new(rpc_service))
-        .prepare();
-    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(grpc_keep_alive()),
-        vectored_writes: true,
-    });
-
     // The sans-IO core, bootstrapped from durable storage.
     let mut node = RawNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&mut node, &mut storage, self_id, audit)?;
+    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit)?;
+
+    // Tonic handlers run as h2 request tasks and forward into these typed
+    // queues. The loop remains the sole owner of RawNode. The edge's
+    // integrity rejections are reported through the audit like every other
+    // externally meaningful transition (observation only: the closure
+    // returns nothing and the edge's answer does not depend on it).
+    let on_reject: crate::grpc::OnReject = {
+        let audit = audit.clone();
+        Arc::new(move |kind| audit.edge_rejected(NodeId(self_id), kind))
+    };
+    let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
+        tunables.client_inbox_capacity,
+        tunables.peer_inbox_capacity,
+        on_reject,
+    );
+    let grpc_service = tonic::service::Routes::new(ParosServer::new(rpc_service.clone()))
+        .add_service(ParosInternalServer::new(rpc_service))
+        .prepare();
+    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
+        keep_alive: Some(grpc_keep_alive(&tunables)),
+        vectored_writes: true,
+    });
 
     // Validate every origin before starting reconnecting-channel tasks. Once
     // channels exist, there are no fallible setup steps before their drop guard
@@ -2527,11 +2636,12 @@ where
     let peer_queues = peers
         .into_iter()
         .map(|(id, addr, origin)| {
-            let channel = ReconnectingChannel::new(&providers, addr, grpc_channel_config());
+            let channel =
+                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
             peer_channels.push(channel.clone());
             let client = ParosInternalClient::with_origin(channel, origin);
             let regular = PeerMailbox::new(tunables.peer_queue_capacity);
-            let snapshot = PeerMailbox::new(GRPC_SNAPSHOT_QUEUE_CAPACITY);
+            let snapshot = PeerMailbox::new(tunables.snapshot_queue_capacity);
             providers
                 .task()
                 .spawn_task(
@@ -2541,7 +2651,7 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         regular.clone(),
-                        tunables.delivery_batch,
+                        tunables,
                         audit.clone(),
                         self_id,
                         id,
@@ -2557,7 +2667,7 @@ where
                         providers.time().clone(),
                         incarnation_shutdown.clone(),
                         snapshot.clone(),
-                        tunables.delivery_batch,
+                        tunables,
                         audit.clone(),
                         self_id,
                         id,
@@ -2600,7 +2710,13 @@ where
         tracing::info!(node = self_id, at, chunks = count, "snap_chunks_reported");
     }
     // Seed the first randomized election timeout (jitter from the driver's RNG).
-    node.set_election_timeout(draw_election_timeout(&providers, hooks, audit, self_id));
+    node.set_election_timeout(draw_election_timeout(
+        &providers,
+        hooks,
+        audit,
+        self_id,
+        tunables.election_timeout_base,
+    ));
     let mut last_role = node.role();
     let mut last_duplicates = node.duplicates_suppressed();
     let mut last_quorum_lost = node.quorum_lost_step_downs();
@@ -2618,7 +2734,7 @@ where
     // loop (seed 3847608256092482294 ticked twice in 81 simulated seconds).
     // With an absolute deadline the sleep is zero-length once the deadline
     // passes and fires regardless of load.
-    let mut next_tick = time.now() + TICK_INTERVAL;
+    let mut next_tick = time.now() + tunables.tick_interval;
 
     loop {
         moonpool_core::select! {
@@ -2644,7 +2760,14 @@ where
                 let client = req.client;
                 match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
                     ProposeResult::NotLeader(hint) => {
-                        let _ = reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
+                        // A lost redirect is a legal outcome: the client's
+                        // deadline turns it into a retry elsewhere.
+                        if hooks.drop_client_reply(Reply::ProposeRedirect) {
+                            audit.client_reply_dropped(NodeId(self_id), Reply::ProposeRedirect);
+                            tracing::info!(node = self_id, reply = "propose_redirect", "client_reply_dropped");
+                        } else {
+                            let _ = reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
+                        }
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
                         waiters.pending.entry(slot).or_default().push((client, seq, reply));
@@ -2667,7 +2790,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -2679,7 +2802,12 @@ where
                 let seq = req.seq;
                 match node.read_index(next_read_ctx) {
                     ReadIndexResult::NotLeader(hint) => {
-                        let _ = reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
+                        if hooks.drop_client_reply(Reply::ReadRedirect) {
+                            audit.client_reply_dropped(NodeId(self_id), Reply::ReadRedirect);
+                            tracing::info!(node = self_id, reply = "read_redirect", "client_reply_dropped");
+                        } else {
+                            let _ = reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
+                        }
                     }
                     ReadIndexResult::Pending => {
                         waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
@@ -2687,7 +2815,7 @@ where
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -2809,7 +2937,7 @@ where
                     node.step(msg);
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 let _ = reply.send(());
             }
             Some((req, reply)) = rpc.compact.recv() => {
@@ -2892,8 +3020,15 @@ where
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
-                let _ = reply.send(ack);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                // A lost compaction ack is ambiguous to the client, which
+                // re-asks; the marker/Truncate it may have seeded stands.
+                if hooks.drop_client_reply(Reply::Compact) {
+                    audit.client_reply_dropped(NodeId(self_id), Reply::Compact);
+                    tracing::info!(node = self_id, reply = "compact", "client_reply_dropped");
+                } else {
+                    let _ = reply.send(ack);
+                }
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
                 let _ = reply.send(InspectReply {
@@ -2910,7 +3045,7 @@ where
                 // reaches only for the wall clock, never for the tick counter
                 // the election and read-round timers actually run on.
                 next_tick = time.now()
-                    + if hooks.stretch_tick_interval() { TICK_INTERVAL * 2 } else { TICK_INTERVAL };
+                    + if hooks.stretch_tick_interval() { tunables.tick_interval * 2 } else { tunables.tick_interval };
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision
@@ -2972,19 +3107,27 @@ where
                 // Expire parked reads whose confirmation is overdue (lost acks, a
                 // minority-partitioned leader that never steps down): answer a
                 // retry redirect while the client still has deadline left. A late
-                // core confirmation finds the ctx gone and is ignored.
+                // core confirmation finds the ctx gone and is ignored. The
+                // early-expiry hook (consulted only while reads are parked)
+                // takes the same exit before the deadline.
+                let expire_all = !waiters.pending_reads.is_empty() && hooks.expire_parked_read_early();
                 let overdue: Vec<u64> = waiters.pending_reads
                     .iter()
-                    .filter(|(_, (_, parked_at, _))| ticks.saturating_sub(*parked_at) > READ_RETRY_TICKS)
+                    .filter(|(_, (_, parked_at, _))| expire_all || ticks.saturating_sub(*parked_at) > tunables.read_retry_ticks)
                     .map(|(ctx, _)| *ctx)
                     .collect();
                 for ctx in overdue {
                     if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
-                        let _ = waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
+                        if hooks.drop_client_reply(Reply::ReadRedirect) {
+                            audit.client_reply_dropped(NodeId(self_id), Reply::ReadRedirect);
+                            tracing::info!(node = self_id, reply = "read_redirect", "client_reply_dropped");
+                        } else {
+                            let _ = waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
+                        }
                     }
                 }
                 drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, hooks, audit);
+                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

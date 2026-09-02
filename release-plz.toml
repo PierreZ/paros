@@ -42,14 +42,9 @@ name = "paros"
 changelog_path = "crates/paros/CHANGELOG.md"
 version_group = "paros"
 
-# Binaries and demos are not published or released.
+# Binaries are not published or released.
 [[package]]
 name = "paros-sim-runner"
-release = false
-publish = false
-
-[[package]]
-name = "paros-wasm-demo"
 release = false
 publish = false
 

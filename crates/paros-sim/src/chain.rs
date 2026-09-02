@@ -4,37 +4,66 @@ use paros::{Command, Control, Slot};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Version 2 (#101): the state carries per-lane block digests beside the
-/// running chain hash, so a snapshot blob genuinely spans several
-/// [`paros::SNAP_CHUNK_BYTES`] chunks and chunk-level repair is observable.
-const SNAPSHOT_VERSION: u8 = 2;
-/// Fixed digest-lane count. Command `i` folds into lane `i % CHAIN_LANES`, so
-/// the whole array is a deterministic function of the applied prefix.
-pub(crate) const CHAIN_LANES: usize = 32;
-const SNAPSHOT_LEN: usize = 1 + 8 + 8 + 8 * CHAIN_LANES;
+/// Version 3: the state carries per-lane block digests beside the running
+/// chain hash, so a snapshot blob genuinely spans several
+/// [`paros::SNAP_CHUNK_BYTES`] chunks and chunk-level repair is observable —
+/// and the lane count travels in the blob, so a seed can draw it.
+const SNAPSHOT_VERSION: u8 = 3;
+/// Upper bound on the digest-lane count (the array is fixed; only
+/// `lane_count` lanes are live and encoded).
+pub(crate) const MAX_LANES: usize = 128;
+/// The lane count the corpus and the default state use: five chunks of
+/// [`paros::SNAP_CHUNK_BYTES`], the grid the chunk corpus enumerates.
+pub(crate) const DEFAULT_LANES: u8 = 32;
+const HEADER_LEN: usize = 1 + 1 + 8 + 8;
 
-/// The complete application value checked across replicas.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The complete application value checked across replicas. Command `i` folds
+/// into lane `i % lane_count`, so the whole array is a deterministic function
+/// of the applied prefix (and of the lane count, which every node of a run
+/// shares).
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainState {
     pub(crate) applied_count: u64,
     pub(crate) chain_hash: u64,
-    /// Per-lane digests (see [`CHAIN_LANES`]): the snapshot body that makes
-    /// the blob multi-chunk. Deterministic in the applied prefix, like
-    /// everything else here.
-    pub(crate) lanes: [u64; CHAIN_LANES],
+    /// Live digest lanes: the snapshot body that makes the blob multi-chunk.
+    /// A per-seed draw on the main campaign (1..=128 lanes, so the blob spans
+    /// 1 to 17 chunks), fixed at [`DEFAULT_LANES`] on the corpus.
+    pub(crate) lane_count: u8,
+    /// Per-lane digests; lanes past `lane_count` stay at the offset.
+    pub(crate) lanes: [u64; MAX_LANES],
+}
+
+/// Compact: the count, the digest, and the live lane count — never the lane
+/// array, which would drown every red-path dump in a kilobyte per node.
+impl std::fmt::Debug for ChainState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ChainState({}, {}, {} lanes)",
+            self.applied_count,
+            hash_text(self.chain_hash),
+            self.lane_count
+        )
+    }
 }
 
 impl Default for ChainState {
     fn default() -> Self {
-        Self {
-            applied_count: 0,
-            chain_hash: FNV_OFFSET,
-            lanes: [FNV_OFFSET; CHAIN_LANES],
-        }
+        Self::empty(DEFAULT_LANES)
     }
 }
 
 impl ChainState {
+    /// The empty state with `lane_count` live lanes (at least one).
+    pub(crate) fn empty(lane_count: u8) -> Self {
+        Self {
+            applied_count: 0,
+            chain_hash: FNV_OFFSET,
+            lane_count: lane_count.clamp(1, u8::try_from(MAX_LANES).unwrap_or(u8::MAX)),
+            lanes: [FNV_OFFSET; MAX_LANES],
+        }
+    }
+
     pub(crate) fn applied_slot(self) -> Option<Slot> {
         self.applied_count.checked_sub(1).map(Slot)
     }
@@ -44,7 +73,7 @@ impl ChainState {
         let cmd_hash = fnv1a(&encoded);
         let mut chained = self.chain_hash.to_le_bytes().to_vec();
         chained.extend_from_slice(&encoded);
-        let lane = usize::try_from(self.applied_count).unwrap_or(0) % CHAIN_LANES;
+        let lane = usize::try_from(self.applied_count).unwrap_or(0) % usize::from(self.lane_count);
         let mut lanes = self.lanes;
         let mut lane_bytes = lanes[lane].to_le_bytes().to_vec();
         lane_bytes.extend_from_slice(&encoded);
@@ -52,6 +81,7 @@ impl ChainState {
         let next = Self {
             applied_count: self.applied_count.saturating_add(1),
             chain_hash: fnv1a(&chained),
+            lane_count: self.lane_count,
             lanes,
         };
         AppliedTransition {
@@ -61,40 +91,56 @@ impl ChainState {
         }
     }
 
+    fn encoded_len(lane_count: u8) -> usize {
+        HEADER_LEN + 8 * usize::from(lane_count)
+    }
+
     pub(crate) fn encode(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(SNAPSHOT_LEN);
+        let mut bytes = Vec::with_capacity(Self::encoded_len(self.lane_count));
         bytes.push(SNAPSHOT_VERSION);
+        bytes.push(self.lane_count);
         bytes.extend_from_slice(&self.applied_count.to_le_bytes());
         bytes.extend_from_slice(&self.chain_hash.to_le_bytes());
-        for lane in self.lanes {
+        for lane in &self.lanes[..usize::from(self.lane_count)] {
             bytes.extend_from_slice(&lane.to_le_bytes());
         }
         bytes
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != SNAPSHOT_LEN {
+        if bytes.len() < HEADER_LEN {
             return Err(format!(
-                "chain snapshot has {} bytes, expected {SNAPSHOT_LEN}",
+                "chain snapshot has {} bytes, too short",
                 bytes.len()
             ));
         }
         if bytes[0] != SNAPSHOT_VERSION {
             return Err(format!("unsupported chain snapshot version {}", bytes[0]));
         }
+        let lane_count = bytes[1];
+        if lane_count == 0 || usize::from(lane_count) > MAX_LANES {
+            return Err(format!("invalid lane count {lane_count}"));
+        }
+        if bytes.len() != Self::encoded_len(lane_count) {
+            return Err(format!(
+                "chain snapshot has {} bytes, expected {}",
+                bytes.len(),
+                Self::encoded_len(lane_count)
+            ));
+        }
         let applied_count = u64::from_le_bytes(
-            bytes[1..9]
+            bytes[2..10]
                 .try_into()
                 .map_err(|_| "invalid applied-count encoding")?,
         );
         let chain_hash = u64::from_le_bytes(
-            bytes[9..17]
+            bytes[10..18]
                 .try_into()
                 .map_err(|_| "invalid chain-hash encoding")?,
         );
-        let mut lanes = [0_u64; CHAIN_LANES];
-        for (i, lane) in lanes.iter_mut().enumerate() {
-            let start = 17 + 8 * i;
+        let mut lanes = [FNV_OFFSET; MAX_LANES];
+        for (i, lane) in lanes.iter_mut().enumerate().take(usize::from(lane_count)) {
+            let start = HEADER_LEN + 8 * i;
             *lane = u64::from_le_bytes(
                 bytes[start..start + 8]
                     .try_into()
@@ -104,6 +150,7 @@ impl ChainState {
         Ok(Self {
             applied_count,
             chain_hash,
+            lane_count,
             lanes,
         })
     }

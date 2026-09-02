@@ -38,6 +38,17 @@ a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safet
 oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
+**The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
+three-to-five node cluster of `NodeProcess::chaotic()` under every moonpool fault plus the driver
+hooks and the disk's fault coins, driven by one to three `ChainWorkload` clients whose every
+tunable is a `buggify_knob!`; the *corpus* is a scripted three-node cluster with every fault a
+targeted injection (`NodeProcess::scripted()`, kills and restarts through moonpool's
+`fault_factory`) and an analytically known outcome per mask. Every run is judged by the same two
+things: the client's own history (`ClientHistory`, linearizability and sequential-client
+consistency) and the shared `AuditWorld` (protocol safety, the application state machine, the
+storage gates, and one convergence claim at the end of the recovery tail). There is no third
+workload, no per-scenario process type, and no check that reads a trace.
+
 **Pinned seeds are not a regression mechanism.** A seed does not name a scenario, it names a
 *draw schedule*, and every randomness draw the tree gains or loses — a new BUGGIFY location's
 per-seed activation, a probability that was tuned, a mailbox that evicts a different message —
@@ -200,13 +211,15 @@ bit-identical. Hooks perturb; the audit only watches.
 storage world, factory-created per seed): every callback folds one transition into O(1) incremental
 state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
 the **workload**, which records its own operation history and checks it in `check()`; the client is
-the only party that knows its own program order. Tracing stays for humans and the wasm demo, and
-`oracle.rs` keeps only the demo-data recorders plus `ChainAgreement` (the *application* state
-machine, whose transitions the storage layer emits as trace facts). Do not add a new
-`Invariant` that re-scans an event stream to check the protocol: the scan is O(trace²) across a
-run's observability pumps, and the audit callback for that transition already exists or is one
-method away. Preserve assertion **message strings** when moving a check — the assertion slot is the
-hash of its message, so a reworded message silently resets the sweep's saturation history.
+the only party that knows its own program order. The application state machine
+(`ChainAgreement`: one command and one state per applied index, contiguous local application)
+lives in the audit too, fed by the storage layer's `app_applied`/`app_snapshot`/`app_reset`
+callbacks. Tracing is for humans only: nothing reads the trace back, and there is no `Invariant`
+type to add one to. If a fact a check needs exists nowhere the audit can see, add the `Audit`
+callback that reports it — never a scan over the event stream (it is O(trace²) across a run's
+observability pumps). Preserve assertion **message strings** when moving a check — the assertion
+slot is the hash of its message, so a reworded message silently resets the sweep's saturation
+history.
 
 **Assertion doctrine (TigerBeetle-style).** Two assertion families, split by layer, and neither
 substitutes for the other:
@@ -231,7 +244,14 @@ substitutes for the other:
   sweep is certain to reach it — an evaluated-but-never-true sometimes fails the runner) or a
   branch-guarded `assert_reachable!` (the `reach_once!` idiom; creates no slot when unreached, so
   it can never fail coverage); guidance is the numeric/`sometimes_all`/`sometimes_each` family.
-  Pair every BUGGIFY site with a sometimes/reachable proving it fired. **Budget:** one slot per
+  **Which one:** a `sometimes` names an *outcome* the run must be proven to reach — a leader is
+  elected, a below-floor node recovers through a snapshot, a read commits across a leader change,
+  a corruption class is detected — and its failing is a finding about the harness's reach. A
+  `reachable` names a *cause* that fired — a hook, a knob extreme, a fault coin, an operation the
+  client happened to draw — and only records that it did. A perturbation never gets a
+  `sometimes`: whether a seed draws it is the swarm's business, and a gate on it turns a tuned
+  probability into a CI failure. Pair every BUGGIFY site with a reachable proving it fired.
+  **Budget:** one slot per
   unique message string (identity = the message hash — never reword an existing message), 512
   slots per campaign process shared with moonpool's own internals; overflow is reported as an
   always violation. Count before adding, keep messages short/stable/free of interpolated ids, and
@@ -343,9 +363,8 @@ test. Reproduce it as a **failing simulation**:
 3. Add or strengthen a check so the violation surfaces as a
    `SimulationReport.assertion_violation`. Put it where the fact arrives: a driver-observable
    transition goes in `paros_sim::audit` (adding an `Audit` callback if the driver does not report
-   it yet), a client-observable one in the workload's own history + `check()`. Only reach for a
-   trace-scanning `Invariant` when the fact exists nowhere else (application state, simulator
-   faults) — and then read it through a cursor, never a re-scan.
+   it yet), a client-observable one in the workload's own history + `check()`, an application
+   or storage fact in the storage layer's audit callbacks. The trace is never read back.
 4. Run the sweep, confirm it goes **red** on the unfixed code, and replay that seed while you work.
 5. Fix `paros-core`.
 6. Run the sweep, confirm it goes **green** and saturates.
@@ -385,7 +404,7 @@ driver hooks and the sim/workload layers (per the turbulence doctrine above — 
 ## Layout
 
 Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
-Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-demo}.
+Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
 - `crates/paros-core/` — sans-IO Multi-Paxos state machine: zero *default* deps, std-only, wasm-safe (the
@@ -398,17 +417,22 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← {runner, wasm-dem
   node RPC contract (`Propose`/`ProposeAck`). The client API + a `parosd` binary land here. Deps:
   `paros-core`, `moonpool-core` + `moonpool-hyper` and runtime-free tonic (wasm-safe). No
   dedicated storage crate — the Stage-4+ faulty fake lands here or in the harness.
-- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, workloads,
-  oracles (wasm-safe, `default-features = false`). Depends on `paros` + `moonpool-sim`.
-- `crates/paros-sim-runner/` — native sim runner binary (`publish = false`).
-- `crates/paros-wasm-demo/` — browser/wasm demo, `cdylib` + `rlib` (`publish = false`).
+- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
+  fault world, the one client workload, the audit, and the scripted corpus. Depends on `paros` +
+  `moonpool-sim`.
+- `crates/paros-sim-runner/` — native sim runner + hunt binaries (`publish = false`).
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
 - `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`
   cooperative leader-handoff restatement).
 
+**Organize as you grow.** A module holds one concern. When a file starts holding a second one,
+split it in the same change rather than in a follow-up, and never leave a file that needs a
+table-of-contents comment to navigate. Deleting is part of every change: a superseded axis,
+process type, flag, or gate goes out in the PR that supersedes it.
+
 Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
-`CHANGELOG.md` (release-plz); binaries/demos/xtask are `publish = false`. Note: `paros` and
+`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. Note: `paros` and
 `paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
 moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
 

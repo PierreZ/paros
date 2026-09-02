@@ -33,8 +33,8 @@ pub use driver::{
     command_hash, parse_addr, run_node,
 };
 pub use grpc::{
-    Compact, CompactAck, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose,
-    ProposeAck, Read, ReadAck, proposal_checksum,
+    Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
+    ParosInternalClient, Propose, ProposeAck, Read, ReadAck, proposal_checksum,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use storage::{

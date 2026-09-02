@@ -223,6 +223,7 @@ fn step_at(nodes: &mut [RawNode], to: NodeId, msg: Message) {
 // the learned promise), and the healthy re-propose the stale win used to break.
 
 mod acceptor;
+mod bounds;
 mod catch_up_snapshot;
 mod decide_apply;
 mod election;

@@ -23,11 +23,10 @@ and performs all side effects, honoring the persist-before-send rule at the hear
 safety.
 
 The same code runs in production and in **deterministic simulation**: every seed replays
-bit-for-bit, network chaos is injected, and a safety oracle asserts on every step that no two
-acceptors ever choose different values. Because the core compiles to WebAssembly, the
-simulation that runs in CI also runs in your browser.
+bit-for-bit, network chaos is injected, and an audit asserts on every transition that no two
+acceptors ever choose different values.
 
-👉 **[Read the book and play with the live demo](https://pierrez.github.io/paros/)**
+👉 **[Read the book](https://pierrez.github.io/paros/)**
 
 ## At a glance
 
@@ -35,8 +34,7 @@ simulation that runs in CI also runs in your browser.
 |-------|------|
 | [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: zero deps, std-only, wasm-safe |
 | [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
-| [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: workloads and oracles |
-| [`paros-wasm-demo`](crates/paros-wasm-demo) | the browser visualization (GitHub Pages) |
+| [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.

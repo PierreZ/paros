@@ -50,6 +50,13 @@ pub enum Seam {
     /// fully clean chunks; the reboot lands below the floor again and recovers
     /// through the ordinary peer `InstallSnapshot` path instead.
     AfterChunkRestoreBeforeSync,
+    /// At boot, after the replay re-applied the committed prefix the previous
+    /// incarnation had persisted but not yet applied, and **before** that
+    /// application fsync. A crash here repeats the boot replay from the same
+    /// durable state: the idempotent re-apply must converge on the second
+    /// attempt exactly as on the first, and nothing the first attempt staged
+    /// may leak into what the second one reads.
+    AfterBootReplayBeforeSync,
 }
 
 /// What a cooperative leader handoff would transfer right now, handed to
@@ -85,6 +92,12 @@ pub enum Reply {
     ProposeDedup,
     /// A confirmed `ReadAck`.
     Read,
+    /// A `ProposeAck` redirect from a non-leader (`committed: false`).
+    ProposeRedirect,
+    /// A `ReadAck` redirect from a non-leader (`committed: false`).
+    ReadRedirect,
+    /// A `CompactAck` (accepted or refused).
+    Compact,
 }
 
 /// Optional driver-level fault and policy hooks.
@@ -276,6 +289,28 @@ pub trait DriverHooks {
     /// dedup path. Deterministically produces "committed, applied, and the
     /// client does not know", the precondition of the dedup-window edges.
     fn drop_client_reply(&self, _reply: Reply) -> bool {
+        false
+    }
+
+    /// Whether to stay silent about one chunk a peer asked for, even though
+    /// this node holds it clean. Always safe: the chunk-repair protocol is
+    /// built on silence — a peer answers what it holds and says nothing about
+    /// what it lacks — and the requester re-asks every tick for whatever is
+    /// still missing, from every peer. This reaches the partial-answer
+    /// shapes (a point repaired from two custodians, a pull that takes several
+    /// beats) without needing the custodians' own rot to line up.
+    fn withhold_snap_chunk(&self, _to: NodeId) -> bool {
+        false
+    }
+
+    /// Whether to answer a parked read with a retry redirect **now**, before
+    /// its confirmation deadline. Always safe: the redirect is the same reply
+    /// the deadline produces, and a client is built to retry it; a late core
+    /// confirmation finds the ctx gone and is ignored, exactly as after the
+    /// deadline. Consulted once per tick while reads are parked, so it
+    /// reaches the "redirected while the confirmation was in flight" edge the
+    /// deadline only reaches under a lost ack.
+    fn expire_parked_read_early(&self) -> bool {
         false
     }
 }
