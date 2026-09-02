@@ -132,8 +132,13 @@ pub(super) struct AuditState {
     pub(super) accept_sets: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
     /// Per slot: the first quorum-decided `(ballot round, ballot node,
     /// vhash)`. Records a decision the moment a majority of the *configured*
-    /// cluster holds the durable accept — even if no node ever applies the
-    /// slot, which is exactly the blind spot the apply-fed `chosen` map has.
+    /// cluster holds a durable accept **at one ballot for one value** — the
+    /// tally is keyed by `(slot, ballot)`, and two commands under one key are
+    /// themselves a violation — so this is Paxos "chosen", not a count of
+    /// accepts across ballots (a majority split between `(b5, X)` and
+    /// `(b6, Y)` decides nothing until one key alone reaches a quorum). It
+    /// is recorded even if no node ever applies the slot, which is exactly
+    /// the blind spot the apply-fed `chosen` map has.
     pub(super) decided: BTreeMap<u64, (u64, u64, u64)>,
     /// The highest slot ever quorum-decided — a monotone scalar the
     /// below-floor pruning of `decided` never lowers, so the cross-restart

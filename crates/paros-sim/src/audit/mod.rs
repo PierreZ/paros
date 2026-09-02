@@ -409,10 +409,13 @@ impl AuditWorld {
     /// ```
     ///
     /// - the **decided frontier** (`decided_max`) is the highest slot a
-    ///   majority of the configured cluster durably accepted at one ballot —
-    ///   the quorum-decided oracle, fed by durable accepts alone, so it sees
-    ///   a slot that is chosen in the Paxos sense even if no node ever applied
-    ///   it (the blind spot of the apply-fed `chosen` map);
+    ///   majority of the configured cluster durably accepted at one ballot
+    ///   for one value — the quorum-decided oracle
+    ///   ([`AuditState::decided`]: keyed by `(slot, ballot)`, value-checked
+    ///   per key, so it is Paxos "chosen" and never a cross-ballot count),
+    ///   fed by durable accepts alone, so it sees a slot that is chosen even
+    ///   if no node ever applied it (the blind spot of the apply-fed `chosen`
+    ///   map);
     /// - the **applied frontier** (`cluster_max`) is the highest slot any node
     ///   applied; a node's applied prefix is contiguous (`check_no_gaps`), so
     ///   the frontier names a prefix, not a sparse set;
@@ -430,8 +433,14 @@ impl AuditWorld {
     /// apply, so a `Noop` here means the decided command was itself a
     /// control command or a #94-suppressed identity). `decided >= applied`
     /// says nothing was applied without a durable majority behind it — the
-    /// persist-before-send ordering seen from the outside: the audit folds
-    /// each accept at its fsync, before the ack that could count toward a
+    /// persist-before-send ordering seen from the outside. That ordering is
+    /// not assumed here; it is asserted at each transition it rests on, and
+    /// this end-of-run leg is their corollary: an outgoing `Accepted` names
+    /// a durably recorded accept, an outgoing `Commit` names a slot the
+    /// tally already decided with that value, and every `applied` report
+    /// finds its slot decided (all three in the `sent`/`applied` callbacks
+    /// below). The driver folds each accept at its fsync
+    /// (`surface_persisted`), before the ack that could count toward a
     /// quorum leaves the node.
     ///
     /// Sparse states are excused where they are legal: a run in which nothing
@@ -577,6 +586,50 @@ impl<T: TimeProvider> NodeAudit<T> {
 
     fn state(&self) -> MutexGuard<'_, AuditState> {
         self.world.lock()
+    }
+
+    /// Persist-before-send, observed at the send seam: the two replies whose
+    /// meaning is a durable fact must find that fact already folded — an
+    /// `Accepted` its sender's durable accept, a `Commit` a quorum decision
+    /// on the tally (see [`AuditWorld::check_final_convergence`]).
+    fn observe_durable_send(&self, node: NodeId, msg: &Message) {
+        if let Message::Accepted { ballot, slot, .. } = msg {
+            let st = self.state();
+            let holds = st
+                .accept_sets
+                .get(&(slot.0, ballot.round, ballot.node.0))
+                .is_some_and(|holders| holders.contains(&node.0));
+            assert_always!(
+                holds,
+                "an outgoing Accepted names a durably accepted record",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+        }
+        if let Message::Commit {
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        {
+            // The leader-side half of persist-before-send: a `Commit` is the
+            // core's decision on a quorum of `Accepted`s, each preceded (above)
+            // by its durable accept, so the tally has already decided the slot
+            // — and with this value, at this or a lower ballot (P2: a later
+            // ballot re-decides only the same value).
+            let st = self.state();
+            let decided = st.decided.get(&slot.0).copied();
+            assert_always!(
+                decided.is_some(),
+                "an outgoing Commit names a slot a durable accept quorum already decided",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+            assert_always!(
+                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == command_hash(command)),
+                "an outgoing Commit carries the quorum-decided value",
+                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+            );
+        }
     }
 }
 
@@ -789,6 +842,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 { "node" => node.0, "slot" => slot.0 }
             );
         }
+        // Persist-before-send, observed at the apply seam: a slot is applied
+        // only once chosen, chosen only on a quorum of `Accepted`s, and each
+        // of those left its node after the audit folded the durable accept —
+        // so by the time any node applies a slot, the tally has decided it.
+        // The end-of-run `decided >= applied` leg is this, per slot.
+        assert_always!(
+            st.decided.contains_key(&slot.0),
+            "an applied slot was decided by a durable accept quorum before any node applied it",
+            { "node" => node.0, "slot" => slot.0 }
+        );
         reach_once!(st.any_chosen, "a value is chosen");
         st.observe_applied_index(node.0, slot.0);
     }
@@ -851,18 +914,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // node's folded durable-accept tally (the same-batch write is flushed
         // and reported before the send; a re-answer names an older record
         // that was folded when it was first written or re-read at boot).
-        if let Message::Accepted { ballot, slot, .. } = msg {
-            let st = self.state();
-            let holds = st
-                .accept_sets
-                .get(&(slot.0, ballot.round, ballot.node.0))
-                .is_some_and(|holders| holders.contains(&node.0));
-            assert_always!(
-                holds,
-                "an outgoing Accepted names a durably accepted record",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
-            );
-        }
+        self.observe_durable_send(node, msg);
         // A `Commit` names a decided slot; where the durable-accept tally
         // already knows the decision, the commit must carry that value.
         // Checked against `decided`, never the apply-fed `chosen` map: a #94
