@@ -76,7 +76,7 @@ pub use single_decree::{AcceptFold, DecreeAcceptor, DecreePhase, DecreeProposer,
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, SessionEntry, Slot,
-    Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Fingerprint, NodeId,
+    SessionEntry, Slot, Value, command_fingerprint,
 };
 pub use write::{MustSync, WriteOp};

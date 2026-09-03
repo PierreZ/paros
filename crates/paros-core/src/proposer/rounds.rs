@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Proposer, RESEND_BATCH};
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, NodeId, Slot, command_fingerprint};
+use crate::types::{Ballot, Command, Fingerprint, NodeId, Slot};
 
 /// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
 #[derive(Clone, Debug)]
@@ -85,7 +85,7 @@ impl Proposer {
         let Some(round) = self.rounds.get_mut(&slot) else {
             return false;
         };
-        if round.ballot != ballot || command_fingerprint(&round.command) != vhash {
+        if round.ballot != ballot || round.command.fingerprint() != vhash {
             return false;
         }
         round.accepted_by.insert(from);

@@ -137,6 +137,27 @@ pub enum Command {
     Control(Control),
 }
 
+/// A consensus value that can name itself in one word.
+///
+/// Phase 2 carries the fingerprint, not the value: an `Accepted` reports
+/// *which* value the acceptor took, so a leader never credits an ack for a
+/// different value at the same `(slot, ballot)`. That is the only thing the
+/// [`crate::proposer::Proposer`] role ever needs to know about a value, which
+/// is why it is a trait rather than a `Command`-shaped function call: a
+/// deployment over some other value type implements this and reuses the role
+/// unchanged.
+pub trait Fingerprint {
+    /// A stable identity for this value. Two values that compare equal must
+    /// fingerprint equal; distinct values should collide only by accident.
+    fn fingerprint(&self) -> u64;
+}
+
+impl Fingerprint for Command {
+    fn fingerprint(&self) -> u64 {
+        command_fingerprint(self)
+    }
+}
+
 /// A stable fingerprint of the complete consensus value identity.
 ///
 /// Unlike application-level value hashes, this includes the command variant,
