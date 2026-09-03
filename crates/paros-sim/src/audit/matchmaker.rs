@@ -1331,9 +1331,18 @@ impl MatchmakerAudit {
 
     // ---- garbage collection (#123) ------------------------------------------
 
+    /// Whether a GC request at `(node, watermark)` still needs its licence
+    /// judged. The licence is judged **once** per pair, and re-deriving it is
+    /// an O(fence x members) walk the leader repeats on every re-send, so the
+    /// caller asks first and only then pays for the derivation.
+    pub(super) fn gc_needs_licence(&self, node: NodeId, watermark: Ballot) -> bool {
+        !self.gc_judged.contains(&(node.0, watermark))
+    }
+
     /// A leader sent a GC request; `covered` is the audit's own re-derivation
     /// of the forgettability condition (computed by the caller, which holds
-    /// the durable-record fold), judged once per `(node, watermark)`.
+    /// the durable-record fold, and only when [`Self::gc_needs_licence`] says
+    /// it is still wanted), judged once per `(node, watermark)`.
     pub(super) fn gc_requested(
         &mut self,
         node: NodeId,

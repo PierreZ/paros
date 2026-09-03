@@ -2236,6 +2236,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         fence: Option<Slot>,
     ) {
         let mut st = self.state();
+        // The leader re-sends its request every beat and the licence is judged
+        // once per `(node, watermark)`, so ask before deriving: everything
+        // below is an O(fence x members) walk whose answer would be dropped.
+        if !st.matchmaker.gc_needs_licence(node, watermark) {
+            st.matchmaker.gc_requested(node, watermark, fence, None, "");
+            return;
+        }
         // GC invariant 1, re-derived from the audit's own durable fold: a
         // Phase-2 quorum of the configuration bound to the leader's ballot
         // holds every slot up to the fence — a durable record carrying the
