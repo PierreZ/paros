@@ -151,6 +151,7 @@ pub use self::state::{
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration,
     RegistrationKind,
 };
+pub(crate) use self::state::{resolved_phase, resolved_set};
 pub use self::storage::RegistryStorage;
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -284,16 +285,7 @@ impl Matchmaker {
     /// bootstrap set.
     #[must_use]
     pub fn phase(&self) -> MatchmakerPhase {
-        match self.hard_state.phase {
-            MatchmakerPhase::Fresh => {
-                if self.config.bootstrap.binary_search(&self.config.id).is_ok() {
-                    MatchmakerPhase::Active
-                } else {
-                    MatchmakerPhase::Inactive
-                }
-            }
-            phase => phase,
-        }
+        resolved_phase(&self.hard_state, self.config.id, &self.config.bootstrap)
     }
 
     /// The set this matchmaker is active or frozen for: generation 0's
@@ -306,16 +298,7 @@ impl Matchmaker {
     /// The set `hard_state` describes: generation 0's bootstrap set until a
     /// generation is durably activated or frozen.
     fn derive_set(&self) -> MatchmakerSet {
-        if self.hard_state.generation == MatchmakerGeneration(0)
-            && self.hard_state.members.is_empty()
-        {
-            MatchmakerSet::new(MatchmakerGeneration(0), self.config.bootstrap.clone())
-        } else {
-            MatchmakerSet {
-                generation: self.hard_state.generation,
-                members: self.hard_state.members.clone(),
-            }
-        }
+        resolved_set(&self.hard_state, &self.config.bootstrap)
     }
 
     /// Re-materialize [`Self::set`] after a durable generation change (the

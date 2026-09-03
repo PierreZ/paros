@@ -240,6 +240,18 @@ struct Reach {
     /// it replaces — the ratchet review finding P5 is about, now bounded by
     /// the driver's cadence instead of by the quorum-completing ack.
     finish_shrank_the_set: u64,
+    /// A batch reached the disk **torn**: a prefix of its writes landed and
+    /// the matchmaker died before the rest. A real fsync does not tear a
+    /// batch in the middle, but a driver that persists op by op and dies
+    /// between two of them does, and that is the shape the crash seams
+    /// could not produce (they lose or keep the batch whole).
+    crash_torn_prefix: u64,
+    /// An activation whose *own* watermark was above the reconstruction's,
+    /// so the max rule in `Matchmaker::activate` fired on the local side.
+    activated_with_local_floor: u64,
+    /// Two matchmakers were active for two different generations at once —
+    /// a half-completed handover, the state every discovery rule exists for.
+    concurrent_generations: u64,
 }
 
 impl Reach {
@@ -259,6 +271,12 @@ impl Reach {
             ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
             ("inherited_effective", self.inherited_effective),
             ("finish_shrank_the_set", self.finish_shrank_the_set),
+            ("crash_torn_prefix", self.crash_torn_prefix),
+            (
+                "activated_with_local_floor",
+                self.activated_with_local_floor,
+            ),
+            ("concurrent_generations", self.concurrent_generations),
         ];
         for (name, count) in counters {
             assert!(
@@ -516,6 +534,20 @@ impl World {
     fn persist(&mut self, id: MatchmakerId, writes: &[MatchmakerWriteOp]) {
         let generation_before = self.site(id).disk_set().generation;
         for op in writes {
+            // Whether an activation's *own* floor is the one that survives:
+            // `Matchmaker::activate` installs the maximum of the local
+            // watermark and the reconstruction's, and only the pre-install
+            // disk knows which was which.
+            let local_floor_won = match op {
+                MatchmakerWriteOp::InstallRegistry { scalars, .. } => {
+                    let disk = &self.site(id).disk.hard_state;
+                    disk.pending
+                        .iter()
+                        .find(|p| p.set.generation == scalars.generation)
+                        .is_some_and(|p| p.gc_watermark < scalars.gc_watermark)
+                }
+                _ => false,
+            };
             self.site(id).disk.apply(op);
             match op {
                 MatchmakerWriteOp::Register {
@@ -545,6 +577,9 @@ impl World {
                     scalars,
                     registrations,
                 } => {
+                    if local_floor_won {
+                        self.reach.activated_with_local_floor += 1;
+                    }
                     let set = MatchmakerSet {
                         generation: scalars.generation,
                         members: scalars.members.clone(),
@@ -691,6 +726,14 @@ impl World {
         let crash_before = chaos && self.rng.chance(1, 120);
         let crash_between = chaos && self.rng.chance(1, 120);
         let crash_after = chaos && self.rng.chance(1, 200);
+        // A batch that reaches the disk torn: a prefix of its writes lands
+        // and the matchmaker dies before the rest. The three crash seams
+        // above keep a batch whole (lost, or durable); a driver that
+        // persists op by op and dies between two of them does not, and the
+        // core's own ordering — a scalar write staged before the record it
+        // covers, an `InstallRegistry` that must be one write — is exactly
+        // what that shape tests.
+        let crash_torn = chaos && self.rng.chance(1, 90);
         let site = self.site(to);
         let Some(mm) = site.live.as_mut() else {
             // Down: the message is lost.
@@ -705,6 +748,14 @@ impl World {
             // The batch dies whole before it is durable, no reply leaves.
             site.live = None;
             self.reach.crash_before_persist += 1;
+            return;
+        }
+        if crash_torn && writes.len() > 1 {
+            let landed = 1 + usize::try_from(self.rng.below(writes.len() as u64 - 1))
+                .expect("a page index fits");
+            self.persist(to, &writes[..landed]);
+            self.site(to).live = None;
+            self.reach.crash_torn_prefix += 1;
             return;
         }
         self.persist(to, &writes);
@@ -1244,33 +1295,35 @@ impl World {
         for i in 0..POOL {
             self.check_disk(MatchmakerId(i));
         }
+        // A half-completed handover: two matchmakers serving two different
+        // generations at once. Everything the discovery rules exist for
+        // (the `Generation` refusal, the republication, the successor a
+        // frozen member points at) is reachable only from here.
+        let generations: BTreeSet<MatchmakerGeneration> = self
+            .sites
+            .iter()
+            .filter(|site| site.disk_phase() == MatchmakerPhase::Active)
+            .map(|site| site.disk_set().generation)
+            .collect();
+        if generations.len() > 1 {
+            self.reach.concurrent_generations += 1;
+        }
     }
 }
 
 impl Site {
+    /// What a boot from this disk would resolve to — the core's own rule
+    /// ([`super::resolved_set`]), not a second copy of it.
     fn disk_set(&self) -> MatchmakerSet {
-        let hs = &self.disk.hard_state;
-        if hs.generation == MatchmakerGeneration(0) && hs.members.is_empty() {
-            MatchmakerSet::new(MatchmakerGeneration(0), self.config.bootstrap.clone())
-        } else {
-            MatchmakerSet {
-                generation: hs.generation,
-                members: hs.members.clone(),
-            }
-        }
+        super::resolved_set(&self.disk.hard_state, &self.config.bootstrap)
     }
 
     fn disk_phase(&self) -> MatchmakerPhase {
-        match self.disk.hard_state.phase {
-            MatchmakerPhase::Fresh => {
-                if self.config.bootstrap.contains(&self.config.id) {
-                    MatchmakerPhase::Active
-                } else {
-                    MatchmakerPhase::Inactive
-                }
-            }
-            phase => phase,
-        }
+        super::resolved_phase(
+            &self.disk.hard_state,
+            self.config.id,
+            &self.config.bootstrap,
+        )
     }
 }
 
@@ -1303,9 +1356,95 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
         total.inherited_effective += reach.inherited_effective;
         total.finish_shrank_the_set += reach.finish_shrank_the_set;
+        total.crash_torn_prefix += reach.crash_torn_prefix;
+        total.activated_with_local_floor += reach.activated_with_local_floor;
+        total.concurrent_generations += reach.concurrent_generations;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
+}
+
+/// The reviewer's directed two-finisher case: `M_0 = {A, B, C}` is frozen
+/// and its reconfigurer gone. Two nodes meet it and finish it — one hears
+/// `{A, B}`, the other `{B, C}` — so they propose **different** well-formed
+/// successors over the same generation. The decree serializes them: exactly
+/// one set is authoritative for generation 1, the loser's Phase 1 finds the
+/// winner's vote and proposes it (P2c), and both nodes end up believing the
+/// same set.
+///
+/// The seeded campaign reaches this shape by luck; naming it pins the one
+/// interleaving where the two proposals are incompatible and both quorums
+/// exist.
+#[test]
+fn two_finishers_with_different_stop_quorums_choose_one_successor() {
+    let mut world = World::new(2_000);
+    world.chaos = false;
+    let (a, b, c) = (MatchmakerId(0), MatchmakerId(1), MatchmakerId(2));
+    let (f1, f2) = (NodeId(0), NodeId(1));
+    let believed = world.node(f1).believed.clone();
+    assert_eq!(believed.members, vec![a, b, c]);
+    world.node(f1).reconfigurer.finish(&believed).expect("f1");
+    world.node(f2).reconfigurer.finish(&believed).expect("f2");
+    world.queue_requests(f1);
+    world.queue_requests(f2);
+    // F1 reaches only A and B, F2 only B and C: two different stop quorums
+    // of the same generation.
+    let reachable = |from: NodeId, to: MatchmakerId| {
+        if from == f1 {
+            to == a || to == b
+        } else {
+            to == b || to == c
+        }
+    };
+    let mut pending: Vec<Envelope> = std::mem::take(&mut world.network);
+    while let Some(envelope) = pending.first().cloned() {
+        pending.remove(0);
+        match &envelope {
+            Envelope::Reconfigure { to, request } if !reachable(request.from(), *to) => {}
+            _ => world.deliver(envelope),
+        }
+        pending.append(&mut std::mem::take(&mut world.network));
+    }
+    // Each closes its own freeze on its own beat, with what answered it.
+    let first = world
+        .node(f1)
+        .reconfigurer
+        .close_stop()
+        .expect("f1 froze a quorum");
+    let second = world
+        .node(f2)
+        .reconfigurer
+        .close_stop()
+        .expect("f2 froze a quorum");
+    assert_eq!(first.bootstrap.set.members, vec![a, b]);
+    assert_eq!(second.bootstrap.set.members, vec![b, c]);
+    assert_ne!(first.bootstrap.set, second.bootstrap.set);
+    // From here the partition heals and the recovery tail runs both
+    // finishers to completion — including the discovery a losing node needs
+    // (its own probe meets a frozen member that names the successor).
+    for step in 0..400 {
+        world.quiet_step(step);
+    }
+    world.check_all();
+    let chosen = world
+        .ledger
+        .authoritative
+        .get(&MatchmakerGeneration(1))
+        .expect("one successor is chosen")
+        .clone();
+    assert!(
+        chosen == first.bootstrap.set || chosen == second.bootstrap.set,
+        "the chosen set is one of the two proposals: {chosen:?}"
+    );
+    // `observe_authoritative` already asserted there is only one; both
+    // finishers must have converged on it.
+    for node in [f1, f2] {
+        assert_eq!(
+            world.node(node).believed,
+            chosen,
+            "the loser adopts the winner"
+        );
+    }
 }
 
 /// Review finding P5, the other half: closing the freeze on the

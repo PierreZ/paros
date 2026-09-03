@@ -115,6 +115,49 @@ pub struct MatchmakerHardState {
     pub effective: Option<(Ballot, AcceptorConfig)>,
 }
 
+/// The set `scalars` describes, resolved against the deployment's
+/// `bootstrap` membership: generation 0's bootstrap set until a generation
+/// is durably activated or frozen.
+///
+/// Shared, rather than re-derived: [`Matchmaker`] reads it from its own
+/// scalars and the handover model checker reads it from a *disk* the
+/// matchmaker is not booted from, and two copies of this rule would let a
+/// checker agree with a resolution the core does not make.
+pub(crate) fn resolved_set(
+    scalars: &MatchmakerHardState,
+    bootstrap: &[MatchmakerId],
+) -> MatchmakerSet {
+    if scalars.generation == MatchmakerGeneration(0) && scalars.members.is_empty() {
+        MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.to_vec())
+    } else {
+        MatchmakerSet {
+            generation: scalars.generation,
+            members: scalars.members.clone(),
+        }
+    }
+}
+
+/// Where `scalars` stand, resolved the same way: a fresh store makes a
+/// bootstrap member active for generation 0 and anyone else a spare.
+///
+/// `bootstrap` must be sorted (both callers keep it so).
+pub(crate) fn resolved_phase(
+    scalars: &MatchmakerHardState,
+    id: MatchmakerId,
+    bootstrap: &[MatchmakerId],
+) -> MatchmakerPhase {
+    match scalars.phase {
+        MatchmakerPhase::Fresh => {
+            if bootstrap.binary_search(&id).is_ok() {
+                MatchmakerPhase::Active
+            } else {
+                MatchmakerPhase::Inactive
+            }
+        }
+        phase => phase,
+    }
+}
+
 /// A matchmaker's static configuration: its identity and the deployment's
 /// bootstrap matchmaker set (generation 0).
 #[derive(Clone, Debug, PartialEq, Eq)]
