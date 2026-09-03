@@ -93,6 +93,55 @@ use snap_repair::{
 };
 use transport::{Outbound, PeerMailbox, PeerQueues, run_peer_delivery};
 
+/// The node loop's fixed context: the handles every arm's **settle tail** needs
+/// and none of them change across an incarnation. Bundled so the tail is one
+/// call instead of four repeated at every arm.
+struct NodeLoop<'a, P: Providers, H: DriverHooks, A: Audit> {
+    providers: &'a P,
+    links: &'a MatchmakerLinks<P>,
+    out: &'a Outbound,
+    hooks: &'a H,
+    audit: &'a A,
+    self_id: u64,
+    election_base: u64,
+}
+
+impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
+    /// The **settle tail**: every arm that feeds the core ends here, in this
+    /// order — drain the `Ready` batch (persist → send → apply), surface a
+    /// matchmaking phase it opened *before* the requests leave, put the
+    /// batch's matchmaker-wire requests on the wire, then run the post-batch
+    /// upkeep. The order is the contract; the arms differ only in what they
+    /// fed the core beforehand.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the drain's typed exit ([`RunError`]): a durability-seam
+    /// crash or a storage fault the driver decided to crash on.
+    fn settle<S: NodeStorage>(
+        &self,
+        node: &mut RawNode,
+        storage: &mut S,
+        waiters: &mut ClientWaiters,
+        last: &mut Deltas,
+    ) -> Result<(), RunError> {
+        let outbox = drain_ready(node, storage, self.out, waiters, self.hooks, self.audit)?;
+        surface_matchmaking(node, &mut last.matchmaking, self.audit, self.self_id);
+        send_outbox(self.providers, self.links, self.audit, self.self_id, outbox);
+        maintain(
+            node,
+            self.providers,
+            last,
+            waiters,
+            self.self_id,
+            self.election_base,
+            self.hooks,
+            self.audit,
+        );
+        Ok(())
+    }
+}
+
 /// Drive a paros node to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
@@ -329,6 +378,15 @@ where
         peer_queues,
         self_id,
     };
+    let loop_ctx = NodeLoop {
+        providers: &providers,
+        links: &links,
+        out: &out,
+        hooks,
+        audit,
+        self_id,
+        election_base: tunables.election_timeout_base,
+    };
 
     // The held client replies: proposals keyed by slot (ack-on-commit), reads
     // keyed by their read-index ctx.
@@ -443,10 +501,7 @@ where
                         }
                     }
                 }
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -470,10 +525,7 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -597,10 +649,7 @@ where
                 if !snap_handled {
                     node.step(msg);
                 }
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
                 let _ = reply.send(());
             }
             Some(reply) = match_replies.recv() => {
@@ -657,10 +706,7 @@ where
                     }
                     _ => {}
                 }
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some(ack) = gc_acks.recv() => {
                 // A matchmaker's answer to this leader's GC request (#123):
@@ -677,10 +723,7 @@ where
                     step = ?step,
                     "gc_ack_received"
                 );
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some(reply) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step (#125).
@@ -709,12 +752,11 @@ where
                     tracing::info!(node = self_id, ticks = reconfigure_backoff, "reconfigurer_backoff");
                 }
                 send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
+                // No settle tail: this arm drives the reconfigurer, never the
+                // core, so there is no `Ready` batch to drain.
                 // A matchmaker-set reconfiguration (#125): any node may drive
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
@@ -759,6 +801,8 @@ where
                 }
             }
             Some((_req, reply)) = rpc.retire.recv() => {
+                // No settle tail: this arm only reads the core and arms a flag
+                // the tick arm acts on, so it produces no `Ready` batch.
                 // Operator decommissioning (#123): a node a leader's GC named
                 // retirable is shut down for good. Refused while this node is
                 // a member of the configuration it believes in force, or
@@ -814,10 +858,7 @@ where
                     round = round.unwrap_or(0),
                     "reconfigure_acked"
                 );
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
@@ -904,10 +945,7 @@ where
                     }
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
                 if hooks.drop_client_reply(Reply::Compact) {
@@ -918,6 +956,8 @@ where
                 }
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
+                // No settle tail: an inspect is a pure read of the core and the
+                // store, so it produces no `Ready` batch.
                 let since = node.acceptors_since();
                 let set = node.matchmaker_set();
                 let (gc_watermark, retirable) = node.gc_effective().map_or((None, Vec::new()), |(w, retired)| {
@@ -1109,10 +1149,7 @@ where
                         }
                     }
                 }
-                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_outbox(&providers, &links, audit, self_id, outbox);
-                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the
