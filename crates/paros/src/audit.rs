@@ -317,6 +317,13 @@ pub trait Audit {
     ) {
     }
 
+    /// This node's store **refused** a repaired chunk of the decided snapshot
+    /// at `at`: every chunk the point still lacked arrived and every write
+    /// returned `Ok`, yet the store does not call the point whole. The pull
+    /// keeps asking — the point stays incomplete until a custodian serves
+    /// bytes the store accepts.
+    fn snap_chunk_rejected(&self, node: NodeId, at: Slot) {}
+
     /// This node answered a chunk request for a point it no longer retains
     /// with its full, more advanced snapshot (`Message::InstallSnapshot`) —
     /// the unchanged whole-blob fallback.

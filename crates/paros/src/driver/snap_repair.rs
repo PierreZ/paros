@@ -164,29 +164,30 @@ where
     H: DriverHooks,
     A: Audit,
 {
-    let Some(pending) = snap.pending.get_mut(&at.0) else {
+    let Some(pending) = snap.pending.get(&at.0).cloned() else {
         return Ok(());
     };
     let mut installed = 0_u64;
     let mut bytes = 0_u64;
+    // The store's own verdict on the *point*: whether it is whole now. The
+    // driver's optimism is not a substitute — a write the store refuses (a
+    // point it no longer retains, a payload whose length or bytes do not
+    // match the decided state) installs nothing, and crossing the chunk off
+    // `pending` anyway dropped the point's entry and left it permanently
+    // incomplete for the rest of the incarnation.
+    let mut clean = false;
     for (chunk, payload) in chunks {
         if !pending.contains(chunk) {
             continue;
         }
-        let clean = storage
+        clean = storage
             .write_snap_chunk(at, *chunk, &payload.0)
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-        pending.remove(chunk);
         installed += 1;
         bytes += u64::try_from(payload.0.len()).unwrap_or(u64::MAX);
-        let _ = clean;
     }
     if installed == 0 {
         return Ok(());
-    }
-    let complete = pending.is_empty();
-    if complete {
-        snap.pending.remove(&at.0);
     }
     // Crash seam: the repaired chunks are staged but not yet flushed — the
     // only durable-write pipeline outside `drain_ready`'s seam machinery. A
@@ -214,6 +215,37 @@ where
         blob_bytes,
         "snap_chunk_repaired"
     );
+    let complete = clean;
+    if complete {
+        snap.pending.remove(&at.0);
+    } else {
+        // Not whole: re-derive what the store still classifies faulty for
+        // this point rather than crossing off what this response happened to
+        // carry. Re-asking for a chunk already installed is free — the write
+        // is idempotent and the pull runs once a tick — while forgetting one
+        // the store never took costs the point for the incarnation.
+        let still_faulty: BTreeSet<u32> = storage
+            .faulty_snap_chunks()
+            .into_iter()
+            .filter(|(point, _)| *point == at)
+            .map(|(_, chunk)| chunk)
+            .collect();
+        if still_faulty.is_empty() {
+            snap.pending.remove(&at.0);
+        } else {
+            snap.pending.insert(at.0, still_faulty);
+        }
+        // Every chunk the point still lacked arrived in this response and
+        // every write returned `Ok`, yet the store does not call the point
+        // whole: it refused at least one of them.
+        if pending
+            .iter()
+            .all(|chunk| chunks.iter().any(|(offered, _)| offered == chunk))
+        {
+            audit.snap_chunk_rejected(NodeId(self_id), at);
+            tracing::info!(node = self_id, at = at.0, "snap_chunk_rejected");
+        }
+    }
     if complete
         && let Some(point) = storage
             .restore_from_snap_point()
