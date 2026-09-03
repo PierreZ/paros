@@ -90,8 +90,8 @@ use std::ops::Bound;
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
     AcceptorConfig, Ballot, GcAck, GcStep, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, NodeId, ReconfigureReply, ReconfigurerStep, Registration, Seam,
-    Slot,
+    MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, ReconfigureReply, ReconfigurerStep,
+    Registration, Seam, Slot,
 };
 
 /// One matchmaker's folded registry.
@@ -1853,10 +1853,7 @@ impl MatchmakerAudit {
             history,
             ..
         } = reply
-            && matches!(
-                step,
-                ReconfigurerStep::Stopped { .. } | ReconfigurerStep::Bootstrapping { .. }
-            )
+            && matches!(step, ReconfigurerStep::Stopped { .. })
         {
             let snapshot: Vec<(Ballot, Registration)> =
                 history.iter().map(|(b, r)| (*b, r.clone())).collect();
@@ -1875,99 +1872,6 @@ impl MatchmakerAudit {
             | ReconfigurerStep::Promised { .. }
             | ReconfigurerStep::Accepted { .. }
             | ReconfigurerStep::Published { .. } => {}
-            ReconfigurerStep::Bootstrapping { bootstrap } => {
-                // Invariant 3: the reconstruction is the union of the frozen
-                // quorum's durable registries above their maximum watermark
-                // — and every completed registration of the replaced
-                // generation above that watermark is in it.
-                // The generation being replaced is the one the frozen
-                // matchmaker named in the very reply this step folded — not
-                // the successor's number minus one, which only happens to
-                // agree while generations are contiguous.
-                let old = match reply {
-                    ReconfigureReply::Stopped { generation, .. } => generation.0,
-                    _ => bootstrap.set.generation.0.saturating_sub(1),
-                };
-                let folded = self
-                    .stop_acks
-                    .get(&(node.0, old))
-                    .cloned()
-                    .unwrap_or_default();
-                let quorum = self.quorum(old);
-                assert_always!(
-                    folded.len() >= quorum,
-                    "generation: a reconstruction rests on a frozen matchmaker quorum",
-                    { "node" => node.0, "generation" => old, "folded" => folded.len(), "quorum" => quorum }
-                );
-                let max_watermark = folded.values().map(|(w, _)| *w).max().unwrap_or_default();
-                let mut expected: BTreeMap<Ballot, Registration> = BTreeMap::new();
-                for (_, registry) in folded.values() {
-                    for (b, r) in registry {
-                        if *b >= max_watermark {
-                            expected.entry(*b).or_insert_with(|| r.clone());
-                        }
-                    }
-                }
-                let folded_ids: Vec<String> = folded.keys().map(ToString::to_string).collect();
-                assert_always!(
-                    bootstrap.gc_watermark == max_watermark && bootstrap.history == expected,
-                    "generation: a reconstruction is the union of the frozen quorum above its maximum watermark",
-                    {
-                        "node" => node.0,
-                        "generation" => old,
-                        "reported" => bootstrap.history.len(),
-                        "expected" => expected.len(),
-                        "reported_round" => bootstrap.gc_watermark.round,
-                        "max_round" => max_watermark.round,
-                        "folded" => folded_ids.join(",")
-                    }
-                );
-                let missing = self
-                    .completed_by_generation
-                    .get(&old)
-                    .and_then(|completed| {
-                        completed
-                            .range(bootstrap.gc_watermark..)
-                            .find(|(b, config)| {
-                                bootstrap.history.get(b).map(|r| &r.config) != config.as_ref()
-                            })
-                            .map(|(b, _)| b.round)
-                    });
-                assert_always!(
-                    missing.is_none(),
-                    "generation: a reconstruction carries every completed registration above its watermark",
-                    { "node" => node.0, "generation" => old, "missing_round" => missing.unwrap_or(0) }
-                );
-                // The reconstruction this generation is being chosen with,
-                // kept for the activation to be judged against: `activated()`
-                // overwrites the audit's folded registry with whatever the
-                // matchmaker reported, so a truncated activated copy would
-                // otherwise be invisible and every later check would compare
-                // against the corrupted state.
-                let proposed: Vec<u64> = bootstrap.set.members.iter().map(|m| m.0).collect();
-                let candidates = self
-                    .bootstrap_histories
-                    .entry((bootstrap.set.generation.0, proposed))
-                    .or_default();
-                let candidate = (bootstrap.gc_watermark, bootstrap.history.clone());
-                if !candidates.contains(&candidate) {
-                    candidates.push(candidate);
-                }
-                if !bootstrap.history.is_empty() {
-                    reach_once!(
-                        self.handover_with_prior_registrations,
-                        "generation: a handover carries prior registrations forward"
-                    );
-                }
-                reach_once!(
-                    self.reconstruction_checked,
-                    "generation: a reconstruction is checked against the frozen registries"
-                );
-                reach_once!(
-                    self.reconfigurer_bootstrapping,
-                    "generation: a frozen quorum is reconstructed and bootstrapped"
-                );
-            }
             ReconfigurerStep::Deciding { .. } => {
                 // Invariant 7: every proposed member holds the bootstrap.
                 if let ReconfigureReply::Bootstrapped { set, .. } = reply {
@@ -2093,6 +1997,100 @@ impl MatchmakerAudit {
                 );
             }
         }
+    }
+
+    /// A node's handover closed its freeze: `bootstrap` is the
+    /// reconstruction it is about to hand every proposed member of `old`'s
+    /// successor.
+    ///
+    /// Reported on the driver beat that closes the freeze rather than on
+    /// the ack that completed its quorum (review finding P5), so the acks
+    /// folded here are every one that arrived, not only the quorum's first.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn reconstructed(&mut self, node: NodeId, old: u64, bootstrap: &PendingBootstrap) {
+        // Invariant 3: the reconstruction is the union of the frozen
+        // quorum's durable registries above their maximum watermark
+        // — and every completed registration of the replaced
+        // generation above that watermark is in it.
+        let folded = self
+            .stop_acks
+            .get(&(node.0, old))
+            .cloned()
+            .unwrap_or_default();
+        let quorum = self.quorum(old);
+        assert_always!(
+            folded.len() >= quorum,
+            "generation: a reconstruction rests on a frozen matchmaker quorum",
+            { "node" => node.0, "generation" => old, "folded" => folded.len(), "quorum" => quorum }
+        );
+        let max_watermark = folded.values().map(|(w, _)| *w).max().unwrap_or_default();
+        let mut expected: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        for (_, registry) in folded.values() {
+            for (b, r) in registry {
+                if *b >= max_watermark {
+                    expected.entry(*b).or_insert_with(|| r.clone());
+                }
+            }
+        }
+        let folded_ids: Vec<String> = folded.keys().map(ToString::to_string).collect();
+        assert_always!(
+            bootstrap.gc_watermark == max_watermark && bootstrap.history == expected,
+            "generation: a reconstruction is the union of the frozen quorum above its maximum watermark",
+            {
+                "node" => node.0,
+                "generation" => old,
+                "reported" => bootstrap.history.len(),
+                "expected" => expected.len(),
+                "reported_round" => bootstrap.gc_watermark.round,
+                "max_round" => max_watermark.round,
+                "folded" => folded_ids.join(",")
+            }
+        );
+        let missing = self
+            .completed_by_generation
+            .get(&old)
+            .and_then(|completed| {
+                completed
+                    .range(bootstrap.gc_watermark..)
+                    .find(|(b, config)| {
+                        bootstrap.history.get(b).map(|r| &r.config) != config.as_ref()
+                    })
+                    .map(|(b, _)| b.round)
+            });
+        assert_always!(
+            missing.is_none(),
+            "generation: a reconstruction carries every completed registration above its watermark",
+            { "node" => node.0, "generation" => old, "missing_round" => missing.unwrap_or(0) }
+        );
+        // The reconstruction this generation is being chosen with,
+        // kept for the activation to be judged against: `activated()`
+        // overwrites the audit's folded registry with whatever the
+        // matchmaker reported, so a truncated activated copy would
+        // otherwise be invisible and every later check would compare
+        // against the corrupted state.
+        let proposed: Vec<u64> = bootstrap.set.members.iter().map(|m| m.0).collect();
+        let candidates = self
+            .bootstrap_histories
+            .entry((bootstrap.set.generation.0, proposed))
+            .or_default();
+        let candidate = (bootstrap.gc_watermark, bootstrap.history.clone());
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+        if !bootstrap.history.is_empty() {
+            reach_once!(
+                self.handover_with_prior_registrations,
+                "generation: a handover carries prior registrations forward"
+            );
+        }
+        reach_once!(
+            self.reconstruction_checked,
+            "generation: a reconstruction is checked against the frozen registries"
+        );
+        reach_once!(
+            self.reconfigurer_bootstrapping,
+            "generation: a frozen quorum is reconstructed and bootstrapped"
+        );
     }
 
     /// A matchmaker durably persisted its generation scalars.

@@ -3,8 +3,8 @@
 //! and no durable state of its own.
 
 use paros_core::{
-    MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerStep, StartRefusal,
+    MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
+    PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerStep, StartRefusal,
 };
 
 /// The node driver's handover state: the sans-IO
@@ -74,6 +74,25 @@ impl HandoverDriver {
     /// The requests the running phase wants on the wire right now.
     pub(crate) fn take_requests(&mut self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
         self.reconfigurer.take_requests()
+    }
+
+    /// Close a freeze whose quorum has answered, on this driver's cadence
+    /// rather than on the ack that completed the quorum: every straggler
+    /// that arrives in between widens the reconstruction, and — for a
+    /// `finish`, whose proposal *is* the members that answered — the
+    /// successor set itself. Returns the generation replaced and the
+    /// reconstruction, for the report; `None` when there is nothing to
+    /// close.
+    pub(crate) fn close_stop(&mut self) -> Option<(MatchmakerGeneration, PendingBootstrap)> {
+        if !self.reconfigurer.stop_quorum_reached() {
+            return None;
+        }
+        let bootstrap = self.reconfigurer.close_stop()?;
+        let old = self
+            .reconfigurer
+            .old()
+            .map_or(MatchmakerGeneration(0), |set| set.generation);
+        Some((old, bootstrap))
     }
 
     /// Fold one matchmaker's answer into the running phase.

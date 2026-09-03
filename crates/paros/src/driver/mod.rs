@@ -1102,6 +1102,23 @@ where
                     tracing::info!(node = self_id, "reconfigurer_aborted");
                 }
                 if handover.resend_due(tunables.reconfigurer_resend_ticks) {
+                    // The freeze closes here, not on the ack that completed
+                    // its quorum: a quorum is the floor the reconstruction
+                    // rests on, and every straggler that answered since
+                    // widens it — and, for a `finish`, the successor set it
+                    // proposes (review finding P5).
+                    if let Some((generation, bootstrap)) = handover.close_stop() {
+                        audit.reconfigurer_reconstructed(NodeId(self_id), generation.0, &bootstrap);
+                        tracing::info!(
+                            node = self_id,
+                            generation = generation.0,
+                            members = bootstrap.set.members.len() as u64,
+                            registrations = bootstrap.history.len() as u64,
+                            watermark_round = bootstrap.gc_watermark.round,
+                            "reconfigurer_reconstructed"
+                        );
+                        send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
+                    }
                     if hooks.skip_reconfigurer_resend() {
                         audit.reconfigurer_resend_skipped(NodeId(self_id));
                         tracing::info!(node = self_id, "reconfigurer_resend_skipped");

@@ -67,9 +67,9 @@ use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, a
 use paros::{
     AcceptorConfig, Audit, Ballot, Command, Control, Deployment, EdgeRejection, GcAck, GcStep,
     HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, SNAP_CHUNK_BYTES, Seam,
-    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
+    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -2183,6 +2183,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state()
             .matchmaker
             .scalars_persisted(matchmaker, scalars);
+    }
+
+    fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
+    ) {
+        self.state()
+            .matchmaker
+            .reconstructed(node, generation, bootstrap);
     }
 
     fn matchmaker_activated(

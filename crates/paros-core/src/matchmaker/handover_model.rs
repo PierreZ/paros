@@ -236,6 +236,10 @@ struct Reach {
     /// A generation was activated carrying an effective configuration
     /// inherited from the one it replaced (review finding P1).
     inherited_effective: u64,
+    /// A `finish` closed its freeze with fewer members than the generation
+    /// it replaces — the ratchet review finding P5 is about, now bounded by
+    /// the driver's cadence instead of by the quorum-completing ack.
+    finish_shrank_the_set: u64,
 }
 
 impl Reach {
@@ -254,6 +258,7 @@ impl Reach {
             ("killed_deciding", self.killed_deciding),
             ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
             ("inherited_effective", self.inherited_effective),
+            ("finish_shrank_the_set", self.finish_shrank_the_set),
         ];
         for (name, count) in counters {
             assert!(
@@ -411,6 +416,10 @@ struct World {
     reach: Reach,
     /// Whether faults are still being injected.
     chaos: bool,
+    /// The smallest target an explicit `start` ever proposed. A `finish`
+    /// proposes the members that answered a freeze — a quorum of the old
+    /// set at least — so only an operator can take the set below that.
+    smallest_started: Option<usize>,
 }
 
 impl World {
@@ -451,6 +460,7 @@ impl World {
             ledger,
             reach: Reach::default(),
             chaos: true,
+            smallest_started: None,
         }
     }
 
@@ -809,12 +819,19 @@ impl World {
 
     fn start_handover(&mut self, node: NodeId) {
         let target = self.random_target();
+        let size = target.len();
         let believed = self.node(node).believed.clone();
         let started = self
             .node(node)
             .reconfigurer
             .start(&believed, target)
             .is_ok();
+        if started {
+            // An operator may deliberately shrink the set; a `finish` may
+            // not (see `assert_converged`).
+            self.smallest_started =
+                Some(self.smallest_started.map_or(size, |s: usize| s.min(size)));
+        }
         if std::env::var("HANDOVER_MODEL_TRACE").is_ok() {
             eprintln!(
                 "start node={} believed_gen={} started={started} busy_phase={:?}",
@@ -916,6 +933,21 @@ impl World {
                 n.backoff -= 1;
                 continue;
             }
+            // The driver's beat closes a completed freeze (review finding
+            // P5): the quorum-completing ack only counts, and every
+            // straggler that arrives before this beat widens the
+            // reconstruction — and a finish's proposal.
+            let n = self.node(node);
+            let was = n.reconfigurer.old().map(|s| s.members.len());
+            let shrank = n
+                .reconfigurer
+                .close_stop()
+                .zip(was)
+                .is_some_and(|(bootstrap, len)| bootstrap.set.members.len() < len);
+            if shrank {
+                self.reach.finish_shrank_the_set += 1;
+            }
+            let n = self.node(node);
             n.reconfigurer.resend();
             self.queue_requests(node);
         }
@@ -1093,6 +1125,23 @@ impl World {
                 );
             }
         }
+        // Review finding P5: a `finish` proposes the members that answered
+        // its freeze — a quorum of the generation it replaces, never fewer —
+        // so nothing but an operator's explicit target can take the set
+        // below the bootstrap's own quorum. Closing the freeze on the
+        // quorum-completing ack made every finish propose exactly that
+        // quorum, and a run of them ratcheted five members to three to two.
+        let bootstrap_quorum = usize::try_from(BOOTSTRAP).expect("pool fits") / 2 + 1;
+        let floor = self
+            .smallest_started
+            .map_or(bootstrap_quorum, |started| started.min(bootstrap_quorum));
+        assert!(
+            top_set.members.len() >= floor,
+            "seed {seed}: the top generation {} keeps at least {floor} members; it has {:?}{}",
+            top.0,
+            top_set.members,
+            self.dump()
+        );
         for (i, site) in self.sites.iter().enumerate() {
             let live = site.live.as_ref().expect("quiescence boots everything");
             // Review finding P6: every proposal at or below the top
@@ -1247,9 +1296,52 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.killed_deciding += reach.killed_deciding;
         total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
         total.inherited_effective += reach.inherited_effective;
+        total.finish_shrank_the_set += reach.finish_shrank_the_set;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
+}
+
+/// Review finding P5, the other half: closing the freeze on the
+/// quorum-completing ack made every `finish` propose exactly `quorum(M_g)`
+/// members — a five-member set became three, then two, then one, each
+/// handover halving the fault tolerance with nobody asking. The freeze now
+/// closes on the driver's beat, so a third member answering before that
+/// beat is part of the proposal.
+#[test]
+fn a_straggler_that_answers_before_the_close_widens_the_finish() {
+    let mut world = World::new(0);
+    world.chaos = false;
+    let node = NodeId(0);
+    let believed = world.node(node).believed.clone();
+    assert_eq!(believed.members.len(), 3);
+    assert_eq!(believed.quorum_size(), 2);
+    world
+        .node(node)
+        .reconfigurer
+        .finish(&believed)
+        .expect("finish");
+    world.queue_requests(node);
+    // Every freeze answer arrives, and none of them closes the phase: the
+    // quorum is a floor, not a deadline.
+    while !world.network.is_empty() {
+        let envelope = world.network.remove(0);
+        world.deliver(envelope);
+    }
+    assert!(matches!(
+        world.node(node).reconfigurer.phase(),
+        ReconfigurerPhase::Stopping { .. }
+    ));
+    assert!(world.node(node).reconfigurer.stop_quorum_reached());
+    let bootstrap = world
+        .node(node)
+        .reconfigurer
+        .close_stop()
+        .expect("the quorum closes on the beat");
+    assert_eq!(
+        bootstrap.set.members, believed.members,
+        "every member that answered the freeze is in the finish's proposal"
+    );
 }
 
 /// The reviewer's directed case: `M_0 = {A, B, C}`; the stop quorum `{A, B}`
@@ -1257,6 +1349,12 @@ fn handover_holds_under_seeded_chaos_and_converges() {
 /// finishes with `{A, B}`; `A` then disappears; `C`'s late stop reply
 /// arrives. The successor is `{A, B}` with the union of both histories, and
 /// the late reply changes nothing.
+///
+/// This is the *narrow* half of review finding P5, and it is narrow only
+/// because `C` never answers at all: the freeze closes on a driver beat
+/// (`tick_nodes`), so an ack that arrives before that beat widens both the
+/// reconstruction and the proposal — see
+/// [`a_straggler_that_answers_before_the_close_widens_the_finish`].
 #[test]
 fn finish_with_a_partial_quorum_and_a_late_straggler() {
     let mut world = World::new(0);
@@ -1572,6 +1670,9 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                                 .network
                                 .retain(|e| !matches!(e, Envelope::Reconfigure { .. }));
                         }
+                        // The driver's beat closes the freeze once its
+                        // quorum answered (review finding P5).
+                        world.node(reconfigurer_node).reconfigurer.close_stop();
                         let phase = world.node(reconfigurer_node).reconfigurer.phase().clone();
                         let ReconfigurerPhase::Bootstrapping { bootstrap, .. } = phase else {
                             panic!(

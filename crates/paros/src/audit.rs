@@ -19,8 +19,8 @@
 
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, Slot,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, Slot,
 };
 
 use crate::grpc::EdgeRejection;
@@ -596,6 +596,19 @@ pub trait Audit {
         phase: MatchmakerPhase,
         registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
+    ) {
+    }
+
+    /// This node's handover closed its freeze: a quorum of `generation`
+    /// answered, and `bootstrap` is the reconstruction now on its way to
+    /// every proposed member of the successor. Reported on the driver beat
+    /// that closes the freeze, never on the ack that completed the quorum
+    /// (#125, review finding P5).
+    fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
     ) {
     }
 

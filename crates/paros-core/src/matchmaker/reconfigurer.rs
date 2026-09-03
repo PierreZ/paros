@@ -143,11 +143,6 @@ pub enum ReconfigurerStep {
         /// Stop acks still needed.
         remaining: usize,
     },
-    /// The quorum froze: reconstructed and bootstrapping.
-    Bootstrapping {
-        /// The reconstruction sent to the proposed members.
-        bootstrap: PendingBootstrap,
-    },
     /// One more member holds the bootstrap; `remaining` more before all do.
     Bootstrapped {
         /// Members still missing.
@@ -396,6 +391,100 @@ impl MatchmakerReconfigurer {
         true
     }
 
+    /// Whether the running freeze has the quorum it needs to be closed
+    /// ([`Self::close_stop`]). `false` in every other phase.
+    #[must_use]
+    pub fn stop_quorum_reached(&self) -> bool {
+        match &self.phase {
+            ReconfigurerPhase::Stopping { old, acks, .. } => acks.len() >= old.quorum_size(),
+            _ => false,
+        }
+    }
+
+    /// Close the freeze: reconstruct the successor's initial state from the
+    /// members that answered so far and move to `Bootstrapping`, returning
+    /// the reconstruction the driver must report. `None` when no freeze is
+    /// running or the quorum is still short.
+    ///
+    /// **Closing is the driver's decision, not the quorum-completing ack's.**
+    /// A quorum is the *floor* the reconstruction rests on; every further ack
+    /// widens it, and — for a `finish`, whose proposal is "the members that
+    /// answered" — widens the successor set itself. Closing on the ack that
+    /// first reached the quorum made every finish propose exactly
+    /// `quorum(M_g)`: a five-member set became three, then two, then one
+    /// (review finding P5). Calling this from the same cadence that re-sends
+    /// the `Stop` gives the stragglers one full round to arrive, and calling
+    /// it late is always safe — the freeze is durable and idempotent.
+    ///
+    /// # Panics
+    ///
+    /// If the reconstruction breaks its own contract (a registration below
+    /// the watermark it computed, a proposed successor that does not admit
+    /// the matchmaker quorum system).
+    pub fn close_stop(&mut self) -> Option<PendingBootstrap> {
+        let ReconfigurerPhase::Stopping {
+            old,
+            target,
+            acks,
+            decree_floor,
+            effective,
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        if acks.len() < old.quorum_size() {
+            return None;
+        }
+        // The reconstruction (§5): the maximum watermark, and the union of
+        // every frozen registry at or above it. A ballot reported twice
+        // carries one registration (the write-once ledger); the first seen
+        // is kept.
+        let gc_watermark = acks.values().map(|(w, _)| *w).max().unwrap_or_default();
+        let mut history: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        for (_, registry) in acks.values() {
+            for (ballot, registration) in registry {
+                if *ballot >= gc_watermark {
+                    history
+                        .entry(*ballot)
+                        .or_insert_with(|| registration.clone());
+                }
+            }
+        }
+        // A finish proposes every member that answered the freeze.
+        let target = target
+            .clone()
+            .unwrap_or_else(|| acks.keys().copied().collect());
+        let bootstrap = PendingBootstrap {
+            set: MatchmakerSet::new(old.generation.next(), target),
+            gc_watermark,
+            history,
+            effective: effective.clone(),
+        };
+        assert!(
+            bootstrap
+                .history
+                .keys()
+                .all(|b| *b >= bootstrap.gc_watermark),
+            "a reconstruction holds nothing below its watermark"
+        );
+        // A proposed successor admits its quorum system: a `start` refused a
+        // malformed target, and a `finish` proposes the members that
+        // answered the freeze — a quorum of the old set, never fewer.
+        assert!(
+            bootstrap.set.is_well_formed(),
+            "a proposed successor admits the matchmaker quorum system"
+        );
+        self.phase = ReconfigurerPhase::Bootstrapping {
+            old: old.clone(),
+            bootstrap: bootstrap.clone(),
+            acks: BTreeSet::new(),
+            decree_floor: *decree_floor,
+        };
+        self.elapsed = 0;
+        self.resend();
+        Some(bootstrap)
+    }
+
     /// Re-queue the running phase's requests to every matchmaker that has not
     /// answered it. **Skipping a call is always safe** (a lost request or
     /// reply only stalls the handover until the next call), and a preempted
@@ -542,10 +631,10 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Idle => ReconfigurerStep::Ignored,
             ReconfigurerPhase::Stopping {
                 old,
-                target,
                 acks,
                 decree_floor,
                 effective,
+                ..
             } => {
                 let ReconfigureReply::Stopped {
                     generation,
@@ -585,60 +674,20 @@ impl MatchmakerReconfigurer {
                 {
                     *effective = Some((ballot, config));
                 }
-                let frozen: BTreeSet<MatchmakerId> = acks.keys().copied().collect();
-                if !old.has_quorum(&frozen) {
-                    return ReconfigurerStep::Stopped {
-                        remaining: old.quorum_size().saturating_sub(acks.len()),
-                    };
+                // The freeze does **not** close here. A quorum is what the
+                // reconstruction *needs*, never what it should settle for:
+                // closing on the ack that completed it made every `finish`
+                // propose exactly `quorum(M_g)` members, ratcheting a set of
+                // five to three to two to zero fault tolerance over a run
+                // (review finding P5). The driver closes it on its own
+                // cadence ([`Self::close_stop`]) once
+                // [`Self::stop_quorum_reached`], so every ack that arrives
+                // in between widens the reconstruction and a finish's
+                // proposal.
+                let quorum = old.quorum_size();
+                ReconfigurerStep::Stopped {
+                    remaining: quorum.saturating_sub(acks.len()),
                 }
-                // The reconstruction (§5): the maximum watermark, and the
-                // union of every frozen registry at or above it. A ballot
-                // reported twice carries one registration (the write-once
-                // ledger); the first seen is kept.
-                let gc_watermark = acks.values().map(|(w, _)| *w).max().unwrap_or_default();
-                let mut history: BTreeMap<Ballot, Registration> = BTreeMap::new();
-                for (_, registry) in acks.values() {
-                    for (ballot, registration) in registry {
-                        if *ballot >= gc_watermark {
-                            history
-                                .entry(*ballot)
-                                .or_insert_with(|| registration.clone());
-                        }
-                    }
-                }
-                // A finish proposes the members that answered the freeze.
-                let target = target
-                    .clone()
-                    .unwrap_or_else(|| acks.keys().copied().collect());
-                let bootstrap = PendingBootstrap {
-                    set: MatchmakerSet::new(old.generation.next(), target),
-                    gc_watermark,
-                    history,
-                    effective: effective.clone(),
-                };
-                assert!(
-                    bootstrap
-                        .history
-                        .keys()
-                        .all(|b| *b >= bootstrap.gc_watermark),
-                    "a reconstruction holds nothing below its watermark"
-                );
-                // A proposed successor admits its quorum system: a `start`
-                // refused a malformed target, and a `finish` proposes the
-                // members that answered the freeze — a quorum of the old
-                // set, never fewer.
-                assert!(
-                    bootstrap.set.is_well_formed(),
-                    "a proposed successor admits the matchmaker quorum system"
-                );
-                self.phase = ReconfigurerPhase::Bootstrapping {
-                    old: old.clone(),
-                    bootstrap: bootstrap.clone(),
-                    acks: BTreeSet::new(),
-                    decree_floor: *decree_floor,
-                };
-                self.resend();
-                ReconfigurerStep::Bootstrapping { bootstrap }
             }
             ReconfigurerPhase::Bootstrapping {
                 old,
@@ -894,6 +943,10 @@ mod tests {
                 steps.push(r.on_reply(reply));
             }
         }
+        // The driver's own cadence closes a completed freeze
+        // ([`MatchmakerReconfigurer::close_stop`]); doing it here keeps
+        // these tests the shape the driver has, one beat per call.
+        r.close_stop();
         steps
     }
 
@@ -911,13 +964,18 @@ mod tests {
             .expect("start");
         assert!(r.is_busy());
         let steps = exchange(&mut r, &mut pool, &[]);
-        assert!(matches!(
-            steps[0],
-            ReconfigurerStep::Stopped { remaining: 1 }
-        ));
-        assert!(matches!(steps[1], ReconfigurerStep::Bootstrapping { .. }));
-        // The third stop answer lands on a bootstrapping reconfigurer: ignored.
-        assert!(matches!(steps[2], ReconfigurerStep::Ignored));
+        // Every member answers the freeze; the quorum-completing ack does
+        // not close it, the beat that follows does — so the third answer is
+        // still counted, not dropped on a phase that already moved on.
+        assert_eq!(
+            steps,
+            vec![
+                ReconfigurerStep::Stopped { remaining: 1 },
+                ReconfigurerStep::Stopped { remaining: 0 },
+                ReconfigurerStep::Stopped { remaining: 0 },
+            ]
+        );
+        assert!(matches!(r.phase(), ReconfigurerPhase::Bootstrapping { .. }));
         let steps = exchange(&mut r, &mut pool, &[]);
         assert!(matches!(
             steps.last(),
