@@ -2642,13 +2642,9 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         matchmaker_generation: last_generation,
     } = last;
     if node.needs_election_timeout() {
-        node.set_election_timeout(draw_election_timeout(
-            providers,
-            hooks,
-            audit,
-            self_id,
-            election_base,
-        ));
+        let ticks = draw_election_timeout(providers, hooks, audit, self_id, election_base);
+        node.set_election_timeout(ticks);
+        audit.election_timeout_set(NodeId(self_id), ticks);
     }
     // Surface any #94 duplicate suppressions the batch's contiguous walk
     // performed (the counter is monotone per incarnation).
@@ -3222,13 +3218,15 @@ where
         tracing::info!(node = self_id, at, chunks = count, "snap_chunks_reported");
     }
     // Seed the first randomized election timeout (jitter from the driver's RNG).
-    node.set_election_timeout(draw_election_timeout(
+    let first_timeout = draw_election_timeout(
         &providers,
         hooks,
         audit,
         self_id,
         tunables.election_timeout_base,
-    ));
+    );
+    node.set_election_timeout(first_timeout);
+    audit.election_timeout_set(NodeId(self_id), first_timeout);
     let mut last = Deltas {
         role: node.role(),
         duplicates: node.duplicates_suppressed(),
@@ -3991,6 +3989,7 @@ where
                     audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
                 }
+                audit.ticked(NodeId(self_id));
                 tracing::info!(tick = ticks, "node_tick");
             }
             () = shutdown.cancelled() => return Ok(()),

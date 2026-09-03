@@ -232,6 +232,17 @@ pub trait Audit {
     /// This node selected the shortest valid election timeout.
     fn election_timeout_extreme(&self, node: NodeId, ticks: u64) {}
 
+    /// This node now runs with an election timeout of `ticks` (the driver's
+    /// randomized draw, re-drawn at every demotion). The `CheckQuorum`
+    /// window a leader re-proves its ack quorum in is exactly this long, so
+    /// a liveness oracle that bounds a deposed leader's remaining beats must
+    /// measure against it, never against a fixed count.
+    fn election_timeout_set(&self, node: NodeId, ticks: u64) {}
+
+    /// This node's logical clock ticked (`RawNode::tick`), once per driver
+    /// tick. The unit every core timeout is counted in.
+    fn ticked(&self, node: NodeId) {}
+
     /// This node received a `Prepare` below its own compaction floor — the
     /// "campaign against a truncated acceptor" interleaving.
     fn prepare_below_floor(&self, node: NodeId, from_slot: Slot, floor: Slot) {}

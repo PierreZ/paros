@@ -1915,6 +1915,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
+    fn election_timeout_set(&self, node: NodeId, ticks: u64) {
+        self.state().election_timeouts.insert(node.0, ticks);
+    }
+
+    fn ticked(&self, node: NodeId) {
+        self.state().observe_tick(node.0);
+    }
+
     fn election_timeout_extreme(&self, _node: NodeId, _ticks: u64) {
         let mut st = self.state();
         reach_once!(
