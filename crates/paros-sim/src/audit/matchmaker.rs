@@ -114,8 +114,8 @@ struct Registry {
 /// One `Registered` reply as sent: the history it names and the watermark it
 /// reports.
 type ReplyCopy = (Vec<(Ballot, Registration)>, Ballot);
-/// A stopped matchmaker's frozen registry: `(generation, watermark, history)`.
-type FrozenRegistry = (u64, Ballot, Vec<(Ballot, Registration)>);
+/// A frozen registry as a `Stopped` reply carried it: `(watermark, history)`.
+type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
 
 #[derive(Default)]
 struct Campaign {
@@ -160,12 +160,14 @@ pub(super) struct MatchmakerAudit {
     /// invariant 1): generation 0 is the bootstrap set, each later one the
     /// value the successor decree chose.
     sets: BTreeMap<u64, Vec<u64>>,
-    /// Per matchmaker: the frozen registry it answered a `Stop` with,
-    /// `(generation, watermark, registry)`.
-    frozen: BTreeMap<u64, FrozenRegistry>,
-    /// Per `(node, generation)`: the matchmakers whose `Stopped` replies the
-    /// reconfigurer folded.
-    stop_acks: BTreeMap<(u64, u64), BTreeSet<u64>>,
+    /// Per `(node, generation)`: the `Stopped` replies the reconfigurer
+    /// folded, by matchmaker — the exact frozen registries its
+    /// reconstruction is the union of. Snapshotted at the fold: a matchmaker
+    /// may freeze again for a later generation while a slow reconfigurer is
+    /// still collecting its quorum for this one (the hunt found exactly that
+    /// on seed 17432266949812866995 — a stale reconfigurer, judged against a
+    /// snapshot overwritten since, reported more than the audit expected).
+    stop_acks: BTreeMap<(u64, u64), BTreeMap<u64, FrozenRegistry>>,
     /// Refusals folded, by kind (diagnostics only).
     refusal_counts: BTreeMap<&'static str, u64>,
     /// Per node: handovers started, abandoned, and the last step folded
@@ -1575,16 +1577,23 @@ impl MatchmakerAudit {
             self.reconfigurer_trace.entry(node.0).or_default().2 =
                 format!("{step:?}").chars().take(48).collect();
         }
-        if let ReconfigureReply::Stopped { generation, .. } = reply
+        if let ReconfigureReply::Stopped {
+            generation,
+            gc_watermark,
+            history,
+            ..
+        } = reply
             && matches!(
                 step,
                 ReconfigurerStep::Stopped { .. } | ReconfigurerStep::Bootstrapping { .. }
             )
         {
+            let snapshot: Vec<(Ballot, Registration)> =
+                history.iter().map(|(b, r)| (*b, r.clone())).collect();
             self.stop_acks
                 .entry((node.0, generation.0))
                 .or_default()
-                .insert(matchmaker.0);
+                .insert(matchmaker.0, (*gc_watermark, snapshot));
         }
         match step {
             ReconfigurerStep::Ignored
@@ -1607,26 +1616,16 @@ impl MatchmakerAudit {
                     "generation: a reconstruction rests on a frozen matchmaker quorum",
                     { "node" => node.0, "generation" => old, "folded" => folded.len(), "quorum" => quorum }
                 );
-                let max_watermark = folded
-                    .iter()
-                    .filter_map(|m| self.frozen.get(m))
-                    .filter(|(g, _, _)| *g == old)
-                    .map(|(_, w, _)| *w)
-                    .max()
-                    .unwrap_or_default();
+                let max_watermark = folded.values().map(|(w, _)| *w).max().unwrap_or_default();
                 let mut expected: BTreeMap<Ballot, Registration> = BTreeMap::new();
-                for m in &folded {
-                    if let Some((g, _, registry)) = self.frozen.get(m)
-                        && *g == old
-                    {
-                        for (b, r) in registry {
-                            if *b >= max_watermark {
-                                expected.entry(*b).or_insert_with(|| r.clone());
-                            }
+                for (_, registry) in folded.values() {
+                    for (b, r) in registry {
+                        if *b >= max_watermark {
+                            expected.entry(*b).or_insert_with(|| r.clone());
                         }
                     }
                 }
-                let folded_ids: Vec<String> = folded.iter().map(ToString::to_string).collect();
+                let folded_ids: Vec<String> = folded.keys().map(ToString::to_string).collect();
                 assert_always!(
                     bootstrap.gc_watermark == max_watermark && bootstrap.history == expected,
                     "generation: a reconstruction is the union of the frozen quorum above its maximum watermark",
@@ -1885,8 +1884,6 @@ impl MatchmakerAudit {
                     "generation: a frozen registry is answered as the durable one",
                     { "matchmaker" => matchmaker.0, "reported" => reported.len(), "expected" => expected.len() }
                 );
-                self.frozen
-                    .insert(matchmaker.0, (generation.0, *gc_watermark, reported));
             }
             ReconfigureReply::Bootstrapped { set, .. } => {
                 let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
