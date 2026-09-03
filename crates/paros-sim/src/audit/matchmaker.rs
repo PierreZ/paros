@@ -186,6 +186,11 @@ pub(super) struct MatchmakerAudit {
     retired_by_gc: BTreeSet<u64>,
     /// `(node, watermark)` GC requests whose licence was judged (once each).
     gc_judged: BTreeSet<(u64, Ballot)>,
+    /// Per `(leader, acked watermark)`: the matchmakers that answered a GC
+    /// request holding that floor. The **reported** acks, not a re-derivation
+    /// from the registries' current watermarks: those are monotone, so
+    /// re-deriving them can only ever hide a floor called effective too early.
+    gc_acks: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
     deployed: bool,
     registered_any: bool,
     history_nonempty: bool,
@@ -1420,6 +1425,10 @@ impl MatchmakerAudit {
         step: &GcStep,
         config: Option<&AcceptorConfig>,
     ) {
+        self.gc_acks
+            .entry((node.0, ack.watermark))
+            .or_default()
+            .insert(ack.matchmaker.0);
         let GcStep::Effective { watermark, retired } = step else {
             return;
         };
@@ -1441,6 +1450,30 @@ impl MatchmakerAudit {
                 "node" => node.0,
                 "round" => watermark.round,
                 "holders" => holders,
+                "quorum" => quorum
+            }
+        );
+        // The same claim from the acks the leader actually folded, and only
+        // from matchmakers the generation names: the core adds `ack.matchmaker`
+        // to its tally after checking its *own belief* about the set, so an
+        // ack from a matchmaker outside the authoritative generation is
+        // exactly what this catches.
+        let acked = self
+            .gc_acks
+            .iter()
+            .filter(|((leader, floor), _)| *leader == node.0 && *floor >= *watermark)
+            .flat_map(|(_, matchmakers)| matchmakers.iter().copied())
+            .filter(|matchmaker| self.member_of(generation, *matchmaker))
+            .collect::<BTreeSet<u64>>()
+            .len();
+        assert_always!(
+            acked >= quorum,
+            "gc: a floor is effective only once a quorum of the generation's matchmakers acked",
+            {
+                "node" => node.0,
+                "round" => watermark.round,
+                "generation" => generation,
+                "acked" => acked,
                 "quorum" => quorum
             }
         );
