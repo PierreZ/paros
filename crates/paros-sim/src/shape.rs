@@ -410,6 +410,11 @@ pub(crate) fn matchmaker_bootstrap_ranks(
                 "a run bootstraps on a subset of the matchmaker pool, leaving spares"
             );
             let rotation = buggify_knob!(0_usize, 1_usize..pool);
+            if rotation != 0 {
+                // BUGGIFY pairing: the matchmaker spares are not simply the
+                // highest ranks.
+                assert_reachable!("a run's matchmaker spares are drawn from the low ranks");
+            }
             let mut ranks: Vec<u64> = (0..size)
                 .map(|i| u64::try_from((rotation + i) % pool).unwrap_or(u64::MAX))
                 .collect();
@@ -419,13 +424,20 @@ pub(crate) fn matchmaker_bootstrap_ranks(
         .clone()
 }
 
-/// The smallest matchmaker set a run may put in force (#125): three where
-/// the bootstrap set has three or more members (one loss keeps a quorum, and
-/// the world may then lose one matchmaker for good), else the bootstrap size
-/// itself. Not a tunable: it is what the matchmaker-loss budget is computed
-/// over.
+/// The smallest bootstrap matchmaker set that can lose one member and keep a
+/// quorum — and therefore the smallest set the world will ever take a
+/// matchmaker from ([`StorageWorld::park_matchmaker`]) and the ceiling of
+/// [`matchmaker_floor`]. Not a tunable: it is what the matchmaker-loss budget
+/// is computed over.
+///
+/// [`StorageWorld::park_matchmaker`]: crate::world::StorageWorld::park_matchmaker
+pub(crate) const MATCHMAKER_LOSS_FLOOR: usize = 3;
+
+/// The smallest matchmaker set a run may put in force (#125):
+/// [`MATCHMAKER_LOSS_FLOOR`] where the bootstrap set has that many members or
+/// more, else the bootstrap size itself.
 pub(crate) fn matchmaker_floor(bootstrap: usize) -> usize {
-    bootstrap.min(3)
+    bootstrap.min(MATCHMAKER_LOSS_FLOOR)
 }
 
 /// The shape gate, evaluated once per run from the workload's `check()`: every

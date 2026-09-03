@@ -132,6 +132,14 @@ struct ChainConfig {
     compact_beat_ms: u64,
     /// Compaction re-asks per operation. Floor 1.
     compact_attempts: u8,
+    /// Beat between reconfiguration re-asks at the same node — an `unsettled`
+    /// leader, or a `busy` matchmaker reconfigurer. Floor 10 ms, like the
+    /// compaction beat it used to borrow: the answer it waits for is a
+    /// driver-paced phase, so a beat below one tick only re-asks inside the
+    /// same tick. Its own knob because the two cadences bound different
+    /// things — compaction waits on a decided marker, a handover on a phase
+    /// the reconfigurer abandons after a stall budget.
+    reconfigure_beat_ms: u64,
     /// Reconfiguration re-asks per operation (following `not_leader`
     /// redirects, or an `unsettled` leader a beat later). Floor 1.
     reconfigure_attempts: u8,
@@ -185,6 +193,7 @@ impl ChainConfig {
             probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
             compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
+            reconfigure_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             reconfigure_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             reconfigure_matchmakers_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
@@ -919,7 +928,7 @@ impl Workload for ChainWorkload {
                         }
                         ReconfigureResult::Refused { refusal, .. } if refusal == "unsettled" => {
                             if time
-                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
                                 .await
                                 .is_err()
                             {
@@ -961,7 +970,7 @@ impl Workload for ChainWorkload {
                         // terminal for this operation.
                         ReconfigureMatchmakersResult::Refused { refusal } if refusal == "busy" => {
                             if time
-                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
                                 .await
                                 .is_err()
                             {

@@ -417,12 +417,13 @@ impl StorageWorld {
 
     /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
     /// run, and only where the deployment's bootstrap matchmaker set holds
-    /// three or more members — the smallest set that keeps a quorum without
-    /// the lost one (the workload never shrinks the set below that floor on
-    /// such a seed). Returns whether it fired.
+    /// [`crate::shape::MATCHMAKER_LOSS_FLOOR`] members or more — the smallest
+    /// set that keeps a quorum without the lost one, and the same constant
+    /// [`crate::shape::matchmaker_floor`] refuses to shrink below on such a
+    /// seed. Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
     pub(crate) fn park_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
-        if bootstrap < 3 || !self.parked_matchmakers.is_empty() {
+        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
             return false;
         }
         self.matchmakers.remove(key);
