@@ -1804,27 +1804,67 @@ impl Workload for ChainWorkload {
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
-                    let candidates =
-                        live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
+                    let live = live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
+                    // The adversarial draw (R5): compose from *every* rank
+                    // instead, so the request may name an identity the run
+                    // lost for good. A well-behaved operator would not, and
+                    // the protocol must survive one who does. What it must
+                    // never be asked for is an *unwinnable* configuration —
+                    // one whose live members cannot form a quorum — so every
+                    // composition, adversarial or not, is filtered on that
+                    // and the shape ring falls through to one that holds.
+                    // This binds the ordinary path too: `grow` keeps the set
+                    // in force whole, so growing onto a spare from a
+                    // configuration that already carried a dead member left
+                    // one live of two (hunt seed 11169765483580423663); the
+                    // ring now reaches `replace`/`shrink` instead, which move
+                    // the dead identity out — the composer's documented job.
+                    let all_ranks: Vec<u64> =
+                        (0..u64::try_from(server_count).unwrap_or(0)).collect();
+                    let adversarial_members = buggify_with_prob!(0.10);
+                    let keeps_live_quorum = |next: &[u64]| {
+                        next.iter().filter(|m| live.contains(m)).count() * 2 > next.len()
+                    };
                     // Most shapes need a spare, which most seeds do not have:
                     // walk the shape ring from the draw so an impossible
                     // shape falls through to the next one instead of making
                     // the whole step a silent no-op.
-                    let composed = members.as_deref().and_then(|members| {
-                        (0..RECONFIGURE_SHAPES.len()).find_map(|k| {
-                            let shape = (drawn + k) % RECONFIGURE_SHAPES.len();
-                            compose_reconfiguration(
-                                shape,
-                                members,
-                                &candidates,
-                                config_floor,
-                                leader_id,
-                                raw_payload,
-                            )
-                            .map(|(observed, name, next)| (shape, observed, name, next))
+                    let compose_from = |candidates: &[u64]| {
+                        members.as_deref().and_then(|members| {
+                            (0..RECONFIGURE_SHAPES.len()).find_map(|k| {
+                                let shape = (drawn + k) % RECONFIGURE_SHAPES.len();
+                                compose_reconfiguration(
+                                    shape,
+                                    members,
+                                    candidates,
+                                    config_floor,
+                                    leader_id,
+                                    raw_payload,
+                                )
+                                .filter(|(_, _, next)| keeps_live_quorum(next))
+                                .map(|(observed, name, next)| (shape, observed, name, next))
+                            })
                         })
-                    });
+                    };
+                    let composed = if adversarial_members {
+                        compose_from(&all_ranks).or_else(|| compose_from(&live))
+                    } else {
+                        compose_from(&live)
+                    };
                     if let Some((shape, observed, name, next)) = composed {
+                        assert_always!(
+                            keeps_live_quorum(&next),
+                            "reconfiguration: a requested configuration keeps a live quorum",
+                            {
+                                "members" => next.len() as u64,
+                                "live" => next.iter().filter(|m| live.contains(m)).count() as u64
+                            }
+                        );
+                        if next.iter().any(|m| !live.contains(m)) {
+                            assert_reachable!(
+                                "reconfiguration: a requested configuration names an identity lost for good"
+                            );
+                        }
                         if shape != drawn {
                             assert_reachable!(
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
@@ -2010,11 +2050,23 @@ impl Workload for ChainWorkload {
                         "gc: a deployment without matchmakers never names a retirable node"
                     );
                     let parked = crate::world::parked_nodes(ctx.state());
-                    let victims: Vec<usize> = retirable
+                    // The adversarial aim (R5): send the retirement to a node
+                    // the *same* reply names as a current member instead of a
+                    // retirable one. A well-behaved operator would not; the
+                    // node must refuse it (`member`, or `leader` when it is
+                    // the sitting one), so the world reservation is skipped
+                    // for this draw — nothing is parked, and a refusal has
+                    // nothing to release.
+                    let aim_at_member = buggify_with_prob!(0.10);
+                    let pool: &[u64] = if aim_at_member { &in_force } else { &retirable };
+                    let victims: Vec<usize> = pool
                         .iter()
                         .filter_map(|id| usize::try_from(*id).ok())
                         .filter(|i| *i < server_count && !parked.contains(&servers[*i]))
                         .collect();
+                    if aim_at_member && !victims.is_empty() {
+                        assert_reachable!("gc: a retirement is aimed at a current member");
+                    }
                     if !victims.is_empty() {
                         let victim = victims[usize::try_from(
                             raw_payload % u64::try_from(victims.len()).unwrap_or(1),
@@ -2025,7 +2077,12 @@ impl Workload for ChainWorkload {
                         // node holds); a restart of a parked identity exits
                         // at boot, so an ambiguous ack can never bring it
                         // back. Refused by the budget: the step is a no-op.
-                        let reserved = {
+                        let reserved = if aim_at_member {
+                            // No reservation: the target is a member, the
+                            // node refuses, and parking it would remove a
+                            // live acceptor the protocol still names.
+                            true
+                        } else {
                             let world = crate::world::storage_world(ctx.state());
                             let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
                             guard.retire(
