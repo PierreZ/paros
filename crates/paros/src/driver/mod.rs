@@ -650,6 +650,18 @@ where
                 // fold it into the open matchmaking phase; a quorum closes the
                 // phase and opens Phase 1 in the same step.
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
+                // The duplicate seam (`duplicate_client_reply`, the mirror of
+                // the matchmaker driver's `drop_client_reply`): re-queue the
+                // answer so the node loop folds it a second time, through the
+                // identical arm, interleaved with whatever else arrives. What
+                // it tests is the idempotency the registration path claims —
+                // a matchmaker already counted never re-opens the quorum.
+                // Decided on the loop, per the hooks rule; the bounded
+                // channel caps the copies whatever the coin says.
+                if hooks.duplicate_client_reply(Reply::Match) && links.replies.try_send(reply.clone()).is_ok() {
+                    audit.client_reply_duplicated(NodeId(self_id), Reply::Match);
+                    tracing::info!(node = self_id, reply = "match", "client_reply_duplicated");
+                }
                 tracing::info!(
                     node = self_id,
                     matchmaker = matchmaker.0,
@@ -712,6 +724,10 @@ where
                 // A matchmaker's answer to this leader's GC request (#123):
                 // fold it; a quorum makes the floor effective and names the
                 // retirable acceptors (reported in the step).
+                if hooks.duplicate_client_reply(Reply::GcAck) && links.gc_acks.try_send(ack.clone()).is_ok() {
+                    audit.client_reply_duplicated(NodeId(self_id), Reply::GcAck);
+                    tracing::info!(node = self_id, reply = "gc_ack", "client_reply_duplicated");
+                }
                 let step = node.on_gc_ack(&ack);
                 audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
                 tracing::info!(
@@ -728,6 +744,12 @@ where
             Some(reply) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step (#125).
                 let matchmaker = reply.matchmaker();
+                if hooks.duplicate_client_reply(Reply::MatchmakerReconfigure)
+                    && links.reconfigure_replies.try_send(reply.clone()).is_ok()
+                {
+                    audit.client_reply_duplicated(NodeId(self_id), Reply::MatchmakerReconfigure);
+                    tracing::info!(node = self_id, reply = "matchmaker_reconfigure", "client_reply_duplicated");
+                }
                 let step = handover.on_reply(reply.clone());
                 audit.reconfigurer_step(NodeId(self_id), matchmaker, &reply, &step);
                 tracing::info!(

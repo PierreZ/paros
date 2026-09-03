@@ -37,6 +37,7 @@
 //! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
 //! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
 //! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
+//! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
@@ -493,6 +494,34 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // A lost retirement ack: the operator re-asks a node already
             // gone; the world already knows it is retired.
             paros::Reply::Retire => buggify_with_prob!(0.10),
+        }
+    }
+
+    fn duplicate_client_reply(&self, reply: paros::Reply) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // The mirror of `drop_client_reply`, at the matchmaker-plane replies
+        // the node loop folds: the answer is delivered a second time, which
+        // is exactly what a sender's own re-send produces once its first
+        // answer was merely slow. One location per reply kind, at the drop
+        // twins' rates. Every claim these paths make is an idempotency claim,
+        // and until now none of them met a duplicate on purpose.
+        match reply {
+            // Folded twice into the open matchmaking phase: a matchmaker
+            // already counted must not re-open the registration quorum, and a
+            // refusal must not be applied twice to the round floor.
+            paros::Reply::Match => buggify_with_prob!(0.20),
+            // Folded twice into the collector: an ack already counted must
+            // not re-close the floor, nor re-name the retirable acceptors.
+            paros::Reply::GcAck => buggify_with_prob!(0.20),
+            // Folded twice into the reconfigurer: a repeated `StopAck`,
+            // bootstrap ack, decree promise or vote must move no tally, and a
+            // repeated `Learned` must not re-publish.
+            paros::Reply::MatchmakerReconfigure => buggify_with_prob!(0.20),
+            // The client-facing seams cannot duplicate a unary response; see
+            // the trait doc.
+            _ => false,
         }
     }
 

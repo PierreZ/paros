@@ -357,6 +357,23 @@ pub trait DriverHooks {
         false
     }
 
+    /// Whether to deliver this one reply **twice**, the mirror of
+    /// [`DriverHooks::drop_client_reply`]. Always safe: a duplicate is what
+    /// the sender's own re-send produces once its first answer was merely
+    /// slow, so every reply the driver folds must already be idempotent —
+    /// this makes the second copy arrive on purpose instead of by luck.
+    ///
+    /// Consulted only where a duplicate is *expressible*: the matchmaker
+    /// plane's replies, which reach the node loop through a channel and are
+    /// folded into `RawNode` / the reconfigurer ([`Reply::Match`],
+    /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
+    /// seams take no duplicate by construction — a unary gRPC response is
+    /// delivered exactly once, and the *client's* retry is the duplicate that
+    /// path has to survive, which `drop_client_reply` already produces.
+    fn duplicate_client_reply(&self, _reply: Reply) -> bool {
+        false
+    }
+
     /// Whether to stay silent about one chunk a peer asked for, even though
     /// this node holds it clean. Always safe: the chunk-repair protocol is
     /// built on silence — a peer answers what it holds and says nothing about

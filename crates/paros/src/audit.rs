@@ -213,6 +213,13 @@ pub trait Audit {
     /// server state advanced ([`DriverHooks::drop_client_reply`](crate::DriverHooks)).
     fn client_reply_dropped(&self, node: NodeId, reply: crate::hooks::Reply) {}
 
+    /// The driver deliberately re-queued this one reply so the node loop
+    /// folds it twice
+    /// ([`DriverHooks::duplicate_client_reply`](crate::DriverHooks)) — the
+    /// mirror of [`Audit::client_reply_dropped`], and the test of every
+    /// idempotency claim the matchmaker plane's answers rest on.
+    fn client_reply_duplicated(&self, node: NodeId, reply: crate::hooks::Reply) {}
+
     /// A snapshot install persisted while this node was a live Candidate — the
     /// #88 window (`on_install_snapshot` deliberately does not touch the
     /// election, so the campaign stays open across the install).

@@ -1906,6 +1906,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
+    fn client_reply_duplicated(&self, _node: NodeId, reply: paros::Reply) {
+        let mut st = self.state();
+        match reply {
+            paros::Reply::Match => reach_once!(
+                st.reply_duplicated[0],
+                "a matchmaker's registration reply is folded twice"
+            ),
+            paros::Reply::GcAck => reach_once!(
+                st.reply_duplicated[1],
+                "a matchmaker's GC ack is folded twice"
+            ),
+            paros::Reply::MatchmakerReconfigure => reach_once!(
+                st.reply_duplicated[2],
+                "a matchmaker's handover reply is folded twice"
+            ),
+            _ => {}
+        }
+    }
+
     fn edge_rejected(&self, _node: NodeId, _kind: EdgeRejection) {
         let mut st = self.state();
         st.edge_rejections += 1;

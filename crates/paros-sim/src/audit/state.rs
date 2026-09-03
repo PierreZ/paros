@@ -430,6 +430,9 @@ pub(super) struct AuditState {
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
     pub(super) edge_rejected: bool,
+    /// A matchmaker-plane reply the node loop folded twice, per kind
+    /// (`Match`, `GcAck`, `MatchmakerReconfigure`).
+    pub(super) reply_duplicated: [bool; 3],
     /// A `Retire` refused because no effective GC floor sat above the target's
     /// membership fence (#123's `not_collected` leg).
     pub(super) retire_not_collected: bool,
