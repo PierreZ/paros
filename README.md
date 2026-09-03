@@ -39,6 +39,27 @@ acceptors ever choose different values.
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.
 
+## Learning Paxos with paros-core
+
+Three small, deterministic, runnable examples drive the composable roles of
+[`paros-core`](crates/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
+direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
+property each one teaches. Read them in order:
+
+1. [`single_decree.rs`](crates/paros-core/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
+   one value, and why a higher ballot must adopt a value it finds accepted.
+2. [`multi_paxos.rs`](crates/paros-core/examples/multi_paxos.rs) — slots versus ballots, one
+   Phase 1 amortized over many slots, and leader recovery as P2c applied slot by slot.
+3. [`matchmaker.rs`](crates/paros-core/examples/matchmaker.rs) — configuration discovery
+   through the matchmakers, a reconfiguration as a round change, and the matchmaker set
+   itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
+
+```sh
+cargo run -p paros-core --example single_decree
+cargo run -p paros-core --example multi_paxos
+cargo run -p paros-core --example matchmaker
+```
+
 ## Build and test
 
 Enter the Nix dev shell (`nix develop`, or rely on direnv), then:

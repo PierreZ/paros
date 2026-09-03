@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+### 📚 Documentation
+
+- **core**: three runnable, deterministic examples that drive the composable
+  roles by hand — `single_decree` (Phase 1, P2c, Phase 2), `multi_paxos`
+  (slots versus ballots, amortized Phase 1, per-slot recovery) and
+  `matchmaker` (configuration discovery, reconfiguration, and the matchmaker
+  set chosen by the same single-decree Paxos over `Vec<MatchmakerId>`). Run
+  with `cargo run -p paros-core --example <name>`.
+
 ### 🚜 Refactor
 
 - **core**: `RawNode` is renamed `ColocatedNode`. The type is not a "raw"
