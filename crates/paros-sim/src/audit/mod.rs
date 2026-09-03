@@ -66,8 +66,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     AcceptorConfig, Audit, Ballot, Command, Control, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
+    HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
     RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
     StorageRecord, command_hash,
@@ -2251,12 +2251,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         to: NodeId,
         ballot: Ballot,
         generation: u64,
-        history: &[(Ballot, Registration)],
-        gc_watermark: Ballot,
+        page: &HistoryPage<'_>,
     ) {
         self.state()
             .matchmaker
-            .replied(matchmaker, to, ballot, generation, history, gc_watermark);
+            .replied(matchmaker, to, ballot, generation, page);
     }
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
@@ -2493,6 +2492,20 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             watermark,
             history_hash,
         );
+    }
+
+    fn match_paged(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        _next: Ballot,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+        self.state()
+            .matchmaker
+            .paged(node, matchmaker, ballot, watermark, history_hash);
     }
 
     fn matchmaking_completed(

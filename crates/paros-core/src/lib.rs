@@ -57,7 +57,7 @@ mod write;
 pub use matchmaker::{
     GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
-    MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, ReconfigureReply,
+    MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
     ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Registration,
     RegistrationKind, RegistryStorage, StartRefusal,
 };

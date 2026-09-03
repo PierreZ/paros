@@ -30,7 +30,7 @@ use paros_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{Audit, StorageFaultDecision};
+use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::driver::{DriverTunables, RunError, accept_and_serve, grpc_keep_alive};
 use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
 use crate::hooks::{DriverHooks, Reply, Seam};
@@ -242,21 +242,23 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
     let id = reply.matchmaker;
     match &reply.outcome {
         MatchOutcome::Registered {
+            from_ballot,
             history,
+            next_from_ballot,
             gc_watermark,
             ..
         } => {
-            let history: Vec<(Ballot, Registration)> = history
-                .iter()
-                .map(|(ballot, registration)| (*ballot, registration.clone()))
-                .collect();
             audit.match_replied(
                 id,
                 reply.to,
                 reply.ballot,
                 reply.generation.0,
-                &history,
-                *gc_watermark,
+                &HistoryPage {
+                    from_ballot: *from_ballot,
+                    history,
+                    next_from_ballot: *next_from_ballot,
+                    gc_watermark: *gc_watermark,
+                },
             );
             tracing::info!(
                 matchmaker = id.0,
@@ -264,7 +266,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                 round = reply.ballot.round,
                 bnode = reply.ballot.node.0,
                 generation = reply.generation.0,
+                from_round = from_ballot.round,
                 history = history.len() as u64,
+                next_round = next_from_ballot.map_or(0, |b| b.round),
                 watermark_round = gc_watermark.round,
                 "match_replied"
             );

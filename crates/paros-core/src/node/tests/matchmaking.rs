@@ -70,9 +70,35 @@ fn registered_effective(
         ballot,
         generation: MatchmakerGeneration(0),
         outcome: MatchOutcome::Registered {
+            from_ballot: wm,
             history,
+            next_from_ballot: None,
             gc_watermark: wm,
             effective,
+        },
+    }
+}
+
+/// One page of a paged answer: it starts at `from`, and `next` is the cursor
+/// the following page begins at (`None` for the last page).
+fn registered_page(
+    mm: u64,
+    ballot: Ballot,
+    from: Ballot,
+    history: BTreeMap<Ballot, Registration>,
+    next: Option<Ballot>,
+) -> MatchReply {
+    MatchReply {
+        matchmaker: MatchmakerId(mm),
+        to: ballot.node,
+        ballot,
+        generation: MatchmakerGeneration(0),
+        outcome: MatchOutcome::Registered {
+            from_ballot: from,
+            history,
+            next_from_ballot: next,
+            gc_watermark: Ballot::zero(),
+            effective: None,
         },
     }
 }
@@ -803,4 +829,130 @@ fn an_ordinary_registration_never_raises_the_effective_configuration() {
         }
     }
     assert_eq!(mms[0].hard_state().effective, None);
+}
+
+/// A full page of beliefs at rounds `1..=REGISTRY_PAGE`, all naming
+/// `members` — what a matchmaker's first page looks like when its registry
+/// does not fit in one answer.
+fn full_page(members: &[u64]) -> BTreeMap<Ballot, Registration> {
+    (1..=crate::matchmaker::REGISTRY_PAGE)
+        .map(|round| belief(ballot(round as u64, 1), members))
+        .collect()
+}
+
+/// Review finding P9: a registry that retains more than `REGISTRY_PAGE`
+/// registrations answers in pages, and a page that is not the last counts
+/// for nothing — the candidate re-asks with the cursor, and the quorum
+/// closes only on a complete answer.
+#[test]
+fn a_paged_answer_counts_only_once_its_last_page_lands() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert_eq!(drain_match_requests(&mut n).len(), 1);
+    let cursor = ballot(200, 1);
+    let step = n.on_match_reply(registered_page(
+        0,
+        b,
+        Ballot::zero(),
+        full_page(&[0, 1, 3]),
+        Some(cursor),
+    ));
+    assert_eq!(step, MatchStep::Paged { next: cursor });
+    // The candidate asked that matchmaker for the rest, from the cursor,
+    // and opened no Phase 1.
+    let requests = drain_match_requests(&mut n);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, MatchmakerId(0));
+    assert_eq!(requests[0].1.from_ballot, Some(cursor));
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "an incomplete answer opens no Phase 1"
+    );
+    // A page at the wrong cursor is not the one owed: ignored whole.
+    assert_eq!(
+        n.on_match_reply(registered_page(0, b, Ballot::zero(), BTreeMap::new(), None)),
+        MatchStep::Ignored
+    );
+    // A page carrying a continuation without filling the page is malformed.
+    assert_eq!(
+        n.on_match_reply(registered_page(
+            0,
+            b,
+            cursor,
+            BTreeMap::from([belief(ballot(200, 1), &[1, 2, 3])]),
+            Some(ballot(300, 1))
+        )),
+        MatchStep::Ignored
+    );
+    // The last page closes the answer, and the union spans both pages.
+    let second = BTreeMap::from([belief(ballot(200, 1), &[1, 2, 3])]);
+    let step = n.on_match_reply(registered_page(0, b, cursor, second, None));
+    let MatchStep::Completed { prior, .. } = step else {
+        panic!("the last page closes the quorum: {step:?}");
+    };
+    assert_eq!(prior, vec![cfg(&[0, 1, 3]), cfg(&[1, 2, 3])]);
+}
+
+/// The matchmaker side: a registry larger than one page answers a prefix
+/// and names the cursor the rest starts at, and the cursor request answers
+/// the remainder without registering anything twice.
+#[test]
+fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
+    let mut mm = registries(1);
+    let mm = &mut mm[0];
+    let page = crate::matchmaker::REGISTRY_PAGE;
+    for round in 1..=page + 1 {
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(round as u64, 1),
+            cfg(&[0, 1, 2]),
+            MatchmakerGeneration(0),
+        ));
+        mm.ready().advance();
+    }
+    let top = ballot(page as u64 + 5, 1);
+    mm.step(MatchRequest::new(
+        NodeId(1),
+        top,
+        cfg(&[0, 1, 2]),
+        MatchmakerGeneration(0),
+    ));
+    let ready = mm.ready();
+    let first = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let MatchOutcome::Registered {
+        from_ballot,
+        history,
+        next_from_ballot,
+        ..
+    } = first
+    else {
+        panic!("expected a registration");
+    };
+    assert_eq!(from_ballot, Ballot::zero());
+    assert_eq!(history.len(), page);
+    assert_eq!(next_from_ballot, Some(ballot(page as u64 + 1, 1)));
+    // The cursor request re-answers idempotently, from where the first page
+    // stopped, and registers nothing.
+    mm.step(
+        MatchRequest::new(NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
+            .from_page(next_from_ballot.expect("a cursor")),
+    );
+    let ready = mm.ready();
+    assert!(ready.writes().is_empty(), "a cursor request writes nothing");
+    let second = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let MatchOutcome::Registered {
+        from_ballot,
+        history,
+        next_from_ballot,
+        ..
+    } = second
+    else {
+        panic!("expected a registration");
+    };
+    assert_eq!(from_ballot, ballot(page as u64 + 1, 1));
+    assert_eq!(history.len(), 1);
+    assert_eq!(next_from_ballot, None);
 }

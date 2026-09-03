@@ -17,6 +17,8 @@
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
+use std::collections::BTreeMap;
+
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap,
@@ -53,6 +55,25 @@ pub struct Deployment {
     /// Every matchmaker a matchmaker-set reconfiguration may draw from
     /// (`Config::matchmaker_pool()`).
     pub matchmaker_pool: Vec<MatchmakerId>,
+}
+
+/// One `MatchB` page as it leaves a matchmaker: where it starts, the
+/// registrations it carries, where the next one starts (`None` when the
+/// answer is complete) and the durable watermark it was computed under.
+///
+/// A borrowed view, never an owned copy: the registry is the driver's own
+/// `BTreeMap` and an audit that made it allocate would be a port that
+/// changes the shipped program (AGENTS.md, *Audit doctrine*).
+pub struct HistoryPage<'a> {
+    /// Where this page starts — the request's cursor, floored at the
+    /// watermark.
+    pub from_ballot: Ballot,
+    /// The registrations it carries, in ballot order.
+    pub history: &'a BTreeMap<Ballot, Registration>,
+    /// Where the next page starts; `None` when the answer is complete.
+    pub next_from_ballot: Option<Ballot>,
+    /// The durable watermark in force when the page was computed.
+    pub gc_watermark: Ballot,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
@@ -450,6 +471,22 @@ pub trait Audit {
     ) {
     }
 
+    /// This candidate folded a `Registered` page from `matchmaker` for
+    /// `ballot` that was **not** the last one: the registration does not
+    /// count toward the quorum yet, and the next page is asked for from
+    /// `next`. `watermark` and `history_hash` name the page, exactly as
+    /// [`Audit::match_registered_by`] names the terminal one.
+    fn match_paged(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        next: Ballot,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+    }
+
     /// This candidate's matchmaking quorum closed for `ballot`: `prior` is
     /// `H_b` (the distinct prior configurations Phase 1 must each cover, in
     /// ballot order), `watermark` the maximum GC watermark it was filtered by,
@@ -691,8 +728,7 @@ pub trait Audit {
         to: NodeId,
         ballot: Ballot,
         generation: u64,
-        history: &[(Ballot, Registration)],
-        gc_watermark: Ballot,
+        page: &HistoryPage<'_>,
     ) {
     }
 

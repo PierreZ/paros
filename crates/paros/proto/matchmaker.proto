@@ -39,6 +39,9 @@ message MatchRequest {
   // The matchmaker generation addressed (a matchmaker not active for
   // exactly this generation refuses with what it knows).
   uint64 generation = 5;
+  // The history cursor: absent asks for the first page (which starts at the
+  // matchmaker's watermark), present continues a paged answer.
+  optional .paros.common.v1.Ballot from_ballot = 6;
 }
 
 message Registration {
@@ -61,6 +64,11 @@ message Registered {
   repeated Registration history = 1;
   .paros.common.v1.Ballot gc_watermark = 2;
   optional EffectiveConfiguration effective = 3;
+  // Where this page starts (the request's cursor, floored at the
+  // watermark), echoed.
+  .paros.common.v1.Ballot from_ballot = 4;
+  // Where the next page starts; absent means the history is complete.
+  optional .paros.common.v1.Ballot next_from_ballot = 5;
 }
 
 // A refusal, carrying what the requester needs to make progress. Diagnostics

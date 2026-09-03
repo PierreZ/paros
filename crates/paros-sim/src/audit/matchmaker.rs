@@ -89,9 +89,9 @@ use std::ops::Bound;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Ballot, GcAck, GcStep, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, ReconfigureReply, ReconfigurerStep,
-    Registration, RegistrationKind, Seam, Slot,
+    AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, MatchRefusal, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE,
+    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Seam, Slot,
 };
 
 /// One matchmaker's folded registry.
@@ -101,9 +101,10 @@ struct Registry {
     registered: BTreeMap<Ballot, Registration>,
     /// The durable watermark.
     watermark: Ballot,
-    /// Ballots a `Registered` reply escaped for, with the history each first
-    /// answer carried (a re-answer may only shrink it).
-    replied: BTreeMap<Ballot, Vec<(Ballot, Registration)>>,
+    /// Pages a `Registered` reply escaped for, keyed by
+    /// `(request ballot, page start)`, with the history each first answer
+    /// carried (a re-answer of the same page may only shrink it).
+    replied: BTreeMap<(Ballot, Ballot), Vec<(Ballot, Registration)>>,
     /// Boots observed (1 after the first).
     boots: u64,
     /// The durable generation state last persisted (or recovered):
@@ -144,11 +145,12 @@ struct Campaign {
     floor_at_start: Ballot,
     /// The matchmakers whose replies the candidate reported folding.
     registered_by: BTreeSet<u64>,
-    /// Per matchmaker, the copy the candidate *actually* folded — the one it
-    /// named by watermark and history digest. The union and the maximum
-    /// watermark a completion claims are re-derived from exactly these,
-    /// never from a search over the copies the matchmakers sent.
-    folded: BTreeMap<u64, ReplyCopy>,
+    /// Per matchmaker, the copies the candidate *actually* folded — each
+    /// named by watermark and history digest, one entry per page of a paged
+    /// answer. The union and the maximum watermark a completion claims are
+    /// re-derived from exactly these, never from a search over the copies
+    /// the matchmakers sent.
+    folded: BTreeMap<u64, Vec<ReplyCopy>>,
     /// A refusal was folded: the campaign is dead.
     refused: bool,
     /// The matchmaking closed with a quorum; Phase 1 is licensed.
@@ -279,6 +281,7 @@ pub(super) struct MatchmakerAudit {
     /// next campaign must open strictly above.
     refused_floor: BTreeMap<u64, u64>,
     campaign_empty_history: bool,
+    answer_paged: bool,
     campaign_union_several: bool,
     campaign_disagreeing_histories: bool,
     resend_skipped: bool,
@@ -347,7 +350,7 @@ fn check_folded_union(
     prior: &[AcceptorConfig],
     watermark: Ballot,
 ) -> BTreeSet<Vec<Ballot>> {
-    let replies: Vec<&ReplyCopy> = campaign.folded.values().collect();
+    let replies: Vec<&ReplyCopy> = campaign.folded.values().flatten().collect();
     let max_watermark = replies.iter().map(|(_, w)| *w).max().unwrap_or_default();
     assert_always!(
         watermark == max_watermark,
@@ -376,6 +379,45 @@ fn check_folded_union(
     histories
 }
 
+/// Invariant 4, per page (#P9): the page is the folded window
+/// `[from_ballot, ballot)` truncated to one [`REGISTRY_PAGE`] — nothing
+/// missing (under-reporting), nothing foreign — it starts at or above the
+/// durable watermark, and the continuation cursor is set exactly when the
+/// window did not fit.
+fn check_page_window(
+    matchmaker: MatchmakerId,
+    ballot: Ballot,
+    entry: &Registry,
+    page: &HistoryPage<'_>,
+) {
+    assert_always!(
+        page.from_ballot >= entry.watermark,
+        "matchmaker: a page starts at or above the durable watermark",
+        {
+            "matchmaker" => matchmaker.0,
+            "from_round" => page.from_ballot.round,
+            "folded_round" => entry.watermark.round
+        }
+    );
+    let mut window = entry.registered.range(page.from_ballot..ballot);
+    let expected: BTreeMap<Ballot, Registration> = window
+        .by_ref()
+        .take(REGISTRY_PAGE)
+        .map(|(b, c)| (*b, c.clone()))
+        .collect();
+    let expected_next = window.next().map(|(b, _)| *b);
+    assert_always!(
+        *page.history == expected && page.next_from_ballot == expected_next,
+        "matchmaker: a reply reports every registration below its ballot",
+        {
+            "matchmaker" => matchmaker.0,
+            "round" => ballot.round,
+            "reported" => page.history.len(),
+            "expected" => expected.len()
+        }
+    );
+}
+
 /// The digest of one history copy, computed exactly as the driver computes
 /// the one it reports ([`paros::registration_history_hash`]) — the two must
 /// agree or the point check below could never match.
@@ -402,15 +444,15 @@ fn serves_generation(
 
 /// The round of the first history entry that disagrees with what *any*
 /// matchmaker ever durably registered for that ballot, if one does.
-fn ledger_disagreement(
+fn ledger_disagreement<'a>(
     ever: &BTreeMap<(u64, Ballot), Registration>,
-    history: &[(Ballot, Registration)],
+    history: impl Iterator<Item = (&'a Ballot, &'a Registration)>,
 ) -> Option<u64> {
     history
-        .iter()
+        .into_iter()
         .find(|(b, r)| {
-            ever.range((0, *b)..=(u64::MAX, *b))
-                .any(|((_, eb), er)| *eb == *b && er != r)
+            ever.range((0, **b)..=(u64::MAX, **b))
+                .any(|((_, eb), er)| *eb == **b && er != *r)
         })
         .map(|(b, _)| b.round)
 }
@@ -877,9 +919,14 @@ impl MatchmakerAudit {
         to: NodeId,
         ballot: Ballot,
         generation: u64,
-        history: &[(Ballot, Registration)],
-        gc_watermark: Ballot,
+        page: &HistoryPage<'_>,
     ) {
+        let &HistoryPage {
+            from_ballot,
+            history,
+            gc_watermark,
+            ..
+        } = page;
         let bootstrap_member = self
             .bootstrap_set
             .as_ref()
@@ -926,30 +973,14 @@ impl MatchmakerAudit {
                 "folded_round" => entry.watermark.round
             }
         );
-        // Invariant 4: the history is the folded window `[watermark, ballot)`
-        // — nothing missing (under-reporting), nothing foreign.
-        let expected: Vec<(Ballot, Registration)> = entry
-            .registered
-            .range(entry.watermark..ballot)
-            .map(|(b, c)| (*b, c.clone()))
-            .collect();
-        assert_always!(
-            history == expected.as_slice(),
-            "matchmaker: a reply reports every registration below its ballot",
-            {
-                "matchmaker" => matchmaker.0,
-                "round" => ballot.round,
-                "reported" => history.len(),
-                "expected" => expected.len()
-            }
-        );
+        check_page_window(matchmaker, ballot, entry, page);
         // The registry protocol itself, judged on every reply: each entry
         // the history names agrees with what *any* matchmaker durably
         // registered for that ballot. Together with the completion-time
         // `disagreements == 0`, this is the claim that two honest
         // matchmakers never disagree — not merely that a disagreeing pair
         // would still be safe (review of #132).
-        let disagreeing = ledger_disagreement(&self.ever, history);
+        let disagreeing = ledger_disagreement(&self.ever, history.iter());
         assert_always!(
             disagreeing.is_none(),
             "matchmaker: a reply's history agrees with every matchmaker's ledger",
@@ -969,12 +1000,12 @@ impl MatchmakerAudit {
                 "matchmaker: a reply carries a prior configuration"
             );
         }
-        match entry.replied.get(&ballot) {
-            // A re-answer of an already-answered ballot: the idempotent
+        match entry.replied.get(&(ballot, from_ballot)) {
+            // A re-answer of an already-answered page: the idempotent
             // duplicate path. It may only shrink the first answer (GC).
             Some(first) => {
                 assert_always!(
-                    history.iter().all(|h| first.contains(h)),
+                    history.iter().all(|(b, r)| first.contains(&(*b, r.clone()))),
                     "matchmaker: a re-answer never adds to the first answer's history",
                     { "matchmaker" => matchmaker.0, "round" => ballot.round }
                 );
@@ -984,7 +1015,10 @@ impl MatchmakerAudit {
                 );
             }
             None => {
-                entry.replied.insert(ballot, history.to_vec());
+                entry.replied.insert(
+                    (ballot, from_ballot),
+                    history.iter().map(|(b, r)| (*b, r.clone())).collect(),
+                );
             }
         }
         // The leader side: what this candidate may receive for this ballot.
@@ -994,7 +1028,10 @@ impl MatchmakerAudit {
             .replies
             .entry(matchmaker.0)
             .or_default()
-            .push((history.to_vec(), gc_watermark));
+            .push((
+                history.iter().map(|(b, r)| (*b, r.clone())).collect(),
+                gc_watermark,
+            ));
     }
 
     /// A refusal is leaving: it must name the registry's own state.
@@ -1270,20 +1307,17 @@ impl MatchmakerAudit {
     }
 
     /// The candidate folded `matchmaker`'s registration.
-    pub(super) fn registered_by(
+    /// Record the page a candidate reported folding: it must be one this
+    /// matchmaker actually sent for this ballot, named by its watermark and
+    /// history digest.
+    fn fold_page(
         &mut self,
         node: NodeId,
         matchmaker: MatchmakerId,
         ballot: Ballot,
-        remaining: usize,
         watermark: Ballot,
         history_hash: u64,
     ) {
-        let generation = self
-            .campaigns
-            .get(&(node.0, ballot))
-            .map_or(0, |c| c.generation);
-        let quorum = self.quorum(generation);
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         // The reply it folded is one the matchmaker actually sent it — and,
         // now that the candidate names *which* copy it folded, exactly one
@@ -1303,8 +1337,52 @@ impl MatchmakerAudit {
             { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
         );
         if let Some(copy) = sent {
-            campaign.folded.insert(matchmaker.0, copy);
+            campaign.folded.entry(matchmaker.0).or_default().push(copy);
         }
+    }
+
+    /// The candidate folded a page that was not the last one (#P9): nothing
+    /// counts toward the quorum until the answer is complete.
+    pub(super) fn paged(
+        &mut self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+        self.fold_page(node, matchmaker, ballot, watermark, history_hash);
+        let counted = self
+            .campaigns
+            .get(&(node.0, ballot))
+            .is_some_and(|c| c.registered_by.contains(&matchmaker.0));
+        assert_always!(
+            !counted,
+            "matchmaking: an incomplete answer never counts toward the quorum",
+            { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
+        );
+        reach_once!(
+            self.answer_paged,
+            "matchmaking: a matchmaker answers a registration in pages"
+        );
+    }
+
+    pub(super) fn registered_by(
+        &mut self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+        let generation = self
+            .campaigns
+            .get(&(node.0, ballot))
+            .map_or(0, |c| c.generation);
+        let quorum = self.quorum(generation);
+        self.fold_page(node, matchmaker, ballot, watermark, history_hash);
+        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         campaign.registered_by.insert(matchmaker.0);
         assert_always!(
             remaining == quorum.saturating_sub(campaign.registered_by.len()),
@@ -1388,6 +1466,7 @@ impl MatchmakerAudit {
         let effective = campaign
             .folded
             .values()
+            .flatten()
             .flat_map(|(history, _)| history.iter())
             .filter(|(_, r)| r.kind.is_reconfiguration())
             .max_by_key(|(b, _)| *b)

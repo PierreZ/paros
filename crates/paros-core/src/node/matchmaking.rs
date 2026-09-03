@@ -114,7 +114,8 @@
 
 use super::{BTreeMap, BTreeSet, Ballot, NodeId, NodeRole, RawNode};
 use crate::matchmaker::{
-    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Registration, RegistrationKind,
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, REGISTRY_PAGE, Registration,
+    RegistrationKind,
 };
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 
@@ -131,8 +132,12 @@ pub(super) struct Matchmaking {
     /// [`RegistrationKind::Belief`] campaign is subject to the
     /// stale-configuration abort.
     pub(super) kind: RegistrationKind,
-    /// Matchmakers whose `Registered` reply has been folded.
+    /// Matchmakers whose **complete** answer has been folded — a paged one
+    /// counts only once its last page arrived.
     pub(super) registered_by: BTreeSet<MatchmakerId>,
+    /// Next history-page cursor expected from each matchmaker still
+    /// mid-answer, exactly as the log's Phase 1 tracks its promise pages.
+    pub(super) page_next: BTreeMap<MatchmakerId, Ballot>,
     /// The union of every reported history so far, ballot by ballot. A ballot
     /// normally maps to one configuration (one proposer per ballot, write-once
     /// per matchmaker); two matchmakers disagreeing would be a registry bug,
@@ -165,6 +170,13 @@ pub enum MatchStep {
     Registered {
         /// Registrations still missing before the quorum holds.
         remaining: usize,
+    },
+    /// A matchmaker's answer is paged and this was not its last page: the
+    /// registration does not count yet, and the candidate has queued the
+    /// request for the page starting at `next`.
+    Paged {
+        /// The cursor the next page starts at.
+        next: Ballot,
     },
     /// The matchmaker quorum holds and Phase 1 has started: `prior` is `H_b`
     /// (the distinct prior configurations, in ballot order) and `watermark`
@@ -205,6 +217,7 @@ impl Matchmaking {
             config,
             kind,
             registered_by: BTreeSet::new(),
+            page_next: BTreeMap::new(),
             history: BTreeMap::new(),
             effective: None,
             watermark: Ballot::zero(),
@@ -212,18 +225,60 @@ impl Matchmaking {
         }
     }
 
-    /// Fold one `Registered` reply's history, watermark and reported
-    /// effective configuration. Returns `false` when `matchmaker` had
-    /// already been folded (a duplicate answer).
+    /// Whether this page counts at all: a matchmaker not already done, and
+    /// a page whose shape and cursor are what that matchmaker owes next.
+    /// Wire input, so a refusal is a `false`, never an assert — the twin of
+    /// the log's own `PromiseTally::accepts`.
+    fn accepts(
+        &self,
+        matchmaker: MatchmakerId,
+        from_ballot: Ballot,
+        history: &BTreeMap<Ballot, Registration>,
+        next_from_ballot: Option<Ballot>,
+    ) -> bool {
+        if self.registered_by.contains(&matchmaker) {
+            return false;
+        }
+        // The first page starts wherever the matchmaker's own watermark is,
+        // which the candidate cannot know; every later one must start at the
+        // cursor that page named.
+        if self
+            .page_next
+            .get(&matchmaker)
+            .is_some_and(|expected| *expected != from_ballot)
+        {
+            return false;
+        }
+        // Only the lower bound, exactly as `promise_page_shape_valid` checks
+        // its page: an entry above the request's ballot would merely add a
+        // configuration to `H_b`, which Phase 1 covering more than it must
+        // is always safe.
+        history.len() <= REGISTRY_PAGE
+            && history.keys().all(|b| *b >= from_ballot)
+            && next_from_ballot.is_none_or(|next| {
+                history.len() == REGISTRY_PAGE
+                    && next > from_ballot
+                    && history.keys().next_back().is_none_or(|last| next > *last)
+            })
+    }
+
+    /// Fold one `Registered` page's history, watermark and reported
+    /// effective configuration. Returns the cursor the next page starts at
+    /// when the answer is still incomplete, `Ok(None)` when this page
+    /// completed it, and `Err(())` when the page does not count (a
+    /// duplicate, or one whose cursor or shape is not what this matchmaker
+    /// owed).
     pub(super) fn fold(
         &mut self,
         matchmaker: MatchmakerId,
+        from_ballot: Ballot,
         history: BTreeMap<Ballot, Registration>,
+        next_from_ballot: Option<Ballot>,
         watermark: Ballot,
         reported: Option<(Ballot, AcceptorConfig)>,
-    ) -> bool {
-        if !self.registered_by.insert(matchmaker) {
-            return false;
+    ) -> Result<Option<Ballot>, ()> {
+        if !self.accepts(matchmaker, from_ballot, &history, next_from_ballot) {
+            return Err(());
         }
         for (ballot, registration) in history {
             let Registration { config, kind } = registration;
@@ -249,7 +304,13 @@ impl Matchmaking {
         // The watermark is the maximum reported, never the minimum and never
         // a per-reply filter (§3.2): the union is filtered once, at closure.
         self.watermark = self.watermark.max(watermark);
-        true
+        if let Some(next) = next_from_ballot {
+            self.page_next.insert(matchmaker, next);
+        } else {
+            self.page_next.remove(&matchmaker);
+            self.registered_by.insert(matchmaker);
+        }
+        Ok(next_from_ballot)
     }
 
     /// Raise the effective configuration to `(ballot, config)` when it is
@@ -297,14 +358,16 @@ impl Matchmaking {
 
 /// What one matchmaker answered: the history, watermark and effective
 /// configuration of a registration, or the refusal.
-pub(super) type MatchAnswer = Result<
-    (
-        BTreeMap<Ballot, Registration>,
-        Ballot,
-        Option<(Ballot, AcceptorConfig)>,
-    ),
-    MatchRefusal,
->;
+pub(super) type MatchAnswer = Result<RegisteredPage, MatchRefusal>;
+
+/// One `MatchB` page as the campaign folds it.
+pub(super) struct RegisteredPage {
+    pub(super) from_ballot: Ballot,
+    pub(super) history: BTreeMap<Ballot, Registration>,
+    pub(super) next_from_ballot: Option<Ballot>,
+    pub(super) gc_watermark: Ballot,
+    pub(super) effective: Option<(Ballot, AcceptorConfig)>,
+}
 
 /// Decode one reply into the answer the campaign folds.
 pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, MatchAnswer) {
@@ -317,10 +380,18 @@ pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, M
     } = reply;
     let answer = match outcome {
         MatchOutcome::Registered {
+            from_ballot,
             history,
+            next_from_ballot,
             gc_watermark,
             effective,
-        } => Ok((history, gc_watermark, effective)),
+        } => Ok(RegisteredPage {
+            from_ballot,
+            history,
+            next_from_ballot,
+            gc_watermark,
+            effective,
+        }),
         MatchOutcome::Refused(refusal) => Err(refusal),
     };
     (matchmaker, to, ballot, answer)
@@ -361,16 +432,24 @@ impl RawNode {
                 MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
             }
         };
-        let unanswered: Vec<MatchmakerId> = self
+        let unanswered: Vec<(MatchmakerId, Option<Ballot>)> = self
             .matchmakers
             .members
             .iter()
             .copied()
             .filter(|mm| !m.registered_by.contains(mm))
+            .map(|mm| (mm, m.page_next.get(&mm).copied()))
             .collect();
-        for matchmaker in unanswered {
-            self.pending_match_requests
-                .push((matchmaker, request.clone()));
+        for (matchmaker, cursor) in unanswered {
+            // A matchmaker mid-answer is re-asked from where its last page
+            // stopped, never from the start: the pages already folded stay
+            // folded, and an answer restarted at the watermark would be
+            // refused by `Matchmaking::accepts` anyway.
+            let request = match cursor {
+                Some(from) => request.clone().from_page(from),
+                None => request.clone(),
+            };
+            self.pending_match_requests.push((matchmaker, request));
         }
         self.assert_invariants();
     }
@@ -437,9 +516,7 @@ impl RawNode {
             return MatchStep::Ignored;
         }
         let step = match answer {
-            Ok((history, watermark, effective)) => {
-                self.fold_registration(matchmaker, history, watermark, effective)
-            }
+            Ok(page) => self.fold_registration(matchmaker, page),
             Err(refusal) => self.fold_refusal(refusal),
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
@@ -464,7 +541,7 @@ impl RawNode {
                     "a completed matchmaking phase is closed"
                 );
             }
-            MatchStep::Registered { .. } | MatchStep::Ignored => {}
+            MatchStep::Registered { .. } | MatchStep::Paged { .. } | MatchStep::Ignored => {}
         }
         self.assert_invariants();
         step
@@ -479,20 +556,48 @@ impl RawNode {
     ///
     /// If Phase 1 would open without the quorum, or on a prior configuration
     /// naming a node outside the pool.
-    fn fold_registration(
-        &mut self,
-        matchmaker: MatchmakerId,
-        history: BTreeMap<Ballot, Registration>,
-        watermark: Ballot,
-        effective: Option<(Ballot, AcceptorConfig)>,
-    ) -> MatchStep {
+    fn fold_registration(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchStep {
         let matchmakers = &self.matchmakers;
         let Some(m) = self.matchmaking.as_mut() else {
             return MatchStep::Ignored;
         };
-        if !m.fold(matchmaker, history, watermark, effective) {
+        let RegisteredPage {
+            from_ballot,
+            history,
+            next_from_ballot,
+            gc_watermark,
+            effective,
+        } = page;
+        let Ok(next) = m.fold(
+            matchmaker,
+            from_ballot,
+            history,
+            next_from_ballot,
+            gc_watermark,
+            effective,
+        ) else {
             return MatchStep::Ignored;
+        };
+        if let Some(next) = next {
+            // The answer is still paged: ask this matchmaker for the rest.
+            // Nothing counts toward the quorum until its last page lands.
+            let ballot = m.ballot;
+            let config = m.config.clone();
+            let kind = m.kind;
+            let generation = self.matchmakers.generation;
+            let request = match kind {
+                RegistrationKind::Reconfiguration => {
+                    MatchRequest::reconfigure(self.config.id, ballot, config, generation)
+                }
+                RegistrationKind::Belief => {
+                    MatchRequest::new(self.config.id, ballot, config, generation)
+                }
+            };
+            self.pending_match_requests
+                .push((matchmaker, request.from_page(next)));
+            return MatchStep::Paged { next };
         }
+        let m = self.matchmaking.as_mut().expect("the phase is still open");
         let registered = m.registered_by.len();
         let quorum_held = matchmakers.has_quorum(&m.registered_by);
         if !quorum_held {

@@ -336,6 +336,24 @@ pub(crate) fn report_match_step<A: Audit>(
                 "match_registered_by"
             );
         }
+        MatchStep::Paged { next } => {
+            audit.match_paged(
+                NodeId(self_id),
+                matchmaker,
+                ballot,
+                *next,
+                folded_watermark,
+                folded_hash,
+            );
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = ballot.round,
+                next_round = next.round,
+                watermark_round = folded_watermark.round,
+                "match_paged"
+            );
+        }
         MatchStep::Completed {
             prior,
             watermark,

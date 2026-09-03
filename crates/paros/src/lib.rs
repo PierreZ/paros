@@ -23,7 +23,7 @@ mod hooks;
 mod matchmaker;
 mod storage;
 
-pub use audit::{Audit, Deployment, NoAudit, StorageFaultDecision};
+pub use audit::{Audit, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
 pub use corruption::{
     CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
     classify_log, decide,
@@ -67,10 +67,10 @@ pub use paros_core::{
     MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
     MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
-    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, ReconfigureRefusal,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase, ReconfigurerStep,
-    Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot, StartRefusal, Storage,
-    Value, WriteOp, command_fingerprint,
+    ProposeResult, QuorumSystem, REGISTRY_PAGE, RawNode, ReadIndexResult, ReadState, Ready,
+    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
+    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
@@ -361,6 +361,8 @@ mod tests {
                     ]),
                     gc_watermark: ballot(2, 1),
                     effective: Some((ballot(5, 3), config(&[1, 2, 3, 4]))),
+                    from_ballot: ballot(2, 1),
+                    next_from_ballot: Some(ballot(6, 1)),
                 },
             ),
             reply(
@@ -370,6 +372,8 @@ mod tests {
                     history: BTreeMap::new(),
                     gc_watermark: Ballot::zero(),
                     effective: None,
+                    from_ballot: Ballot::zero(),
+                    next_from_ballot: None,
                 },
             ),
             reply(

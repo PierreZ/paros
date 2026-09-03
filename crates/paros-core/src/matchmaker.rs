@@ -155,6 +155,16 @@ pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::Ballot;
 
+/// The most registrations one `MatchB` page carries
+/// ([`MatchOutcome::Registered`]). A registry retains one record per ballot
+/// above its watermark, and a cluster that elects often between two GC
+/// rounds accumulates them; answering the whole ledger in one message is
+/// the same unbounded reply the log's `Promise` is paged to avoid
+/// ([`crate::PROMISE_BATCH`]). A candidate re-asks with a cursor until the
+/// answer is complete, and only a complete answer counts toward its
+/// matchmaker quorum.
+pub const REGISTRY_PAGE: usize = 64;
+
 /// What a GC request did at this matchmaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcOutcome {
@@ -335,6 +345,7 @@ impl Matchmaker {
             config,
             kind,
             generation,
+            from_ballot,
         } = request;
         let registration = Registration { config, kind };
         let outcome = if !registration.config.is_well_formed() {
@@ -356,17 +367,13 @@ impl Matchmaker {
                 // The same request again: answered from the retained history
                 // (which GC may have shrunk since the first answer),
                 // registered once.
-                Some(registered) if *registered == registration => MatchOutcome::Registered {
-                    history: self.history_below(ballot),
-                    gc_watermark: self.hard_state.gc_watermark,
-                    effective: self.hard_state.effective.clone(),
-                },
+                Some(registered) if *registered == registration => self.page(from_ballot, ballot),
                 _ => MatchOutcome::Refused(MatchRefusal::Stale { highest }),
             }
         } else {
-            // Compute the history *before* registering, so the request's own
+            // Compute the page *before* registering, so the request's own
             // configuration never appears in its own answer.
-            let history = self.history_below(ballot);
+            let page = self.page(from_ballot, ballot);
             let previous = self.registry.insert(ballot, registration.clone());
             assert!(
                 previous.is_none(),
@@ -395,13 +402,15 @@ impl Matchmaker {
                 ballot,
                 registration,
             });
-            MatchOutcome::Registered {
-                history,
-                gc_watermark: self.hard_state.gc_watermark,
-                effective: self.hard_state.effective.clone(),
-            }
+            page
         };
-        if let MatchOutcome::Registered { history, .. } = &outcome {
+        if let MatchOutcome::Registered {
+            from_ballot,
+            history,
+            next_from_ballot,
+            ..
+        } = &outcome
+        {
             // Postconditions of a successful answer: the ballot is registered,
             // the history is exactly the window below it, and only an active
             // matchmaker of the addressed generation ever registers.
@@ -416,6 +425,19 @@ impl Matchmaker {
             assert!(
                 history.keys().all(|b| *b >= self.hard_state.gc_watermark),
                 "a history never reaches below the watermark"
+            );
+            assert!(
+                history.keys().all(|b| *b >= *from_ballot),
+                "a page starts at the cursor it names"
+            );
+            assert!(
+                history.len() <= REGISTRY_PAGE,
+                "a page carries at most REGISTRY_PAGE registrations"
+            );
+            assert!(
+                next_from_ballot.is_none_or(|next| history.len() == REGISTRY_PAGE
+                    && history.keys().next_back().is_none_or(|last| next > *last)),
+                "a continuation cursor follows a full page"
             );
             assert!(
                 self.phase() == MatchmakerPhase::Active && self.set().generation == generation,
@@ -528,13 +550,30 @@ impl Matchmaker {
         MatchmakerReady { matchmaker: self }
     }
 
-    /// Every registration in `[gc_watermark, ballot)`, in ballot order — the
-    /// history a `MatchB` answers with.
-    fn history_below(&self, ballot: Ballot) -> BTreeMap<Ballot, Registration> {
-        self.registry
-            .range(self.hard_state.gc_watermark..ballot)
+    /// One `MatchB` page: at most [`REGISTRY_PAGE`] registrations from
+    /// `max(cursor, watermark)` up to (but not including) `ballot`, in
+    /// ballot order, with the cursor the next page starts at when the
+    /// window did not fit.
+    fn page(&self, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
+        let from_ballot = cursor
+            .unwrap_or(self.hard_state.gc_watermark)
+            .max(self.hard_state.gc_watermark);
+        let mut window = self.registry.range(from_ballot..ballot);
+        let history: BTreeMap<Ballot, Registration> = window
+            .by_ref()
+            .take(REGISTRY_PAGE)
             .map(|(b, c)| (*b, c.clone()))
-            .collect()
+            .collect();
+        // The next key the window would have yielded: the cursor the
+        // candidate re-asks with. `None` means the answer is complete.
+        let next_from_ballot = window.next().map(|(b, _)| *b);
+        MatchOutcome::Registered {
+            from_ballot,
+            history,
+            next_from_ballot,
+            gc_watermark: self.hard_state.gc_watermark,
+            effective: self.hard_state.effective.clone(),
+        }
     }
 
     /// Every registration this matchmaker retains — everything at or above the

@@ -33,6 +33,15 @@ pub struct MatchRequest {
     /// The matchmaker generation the proposer addresses. A matchmaker not
     /// active for exactly this generation refuses with what it knows.
     pub generation: MatchmakerGeneration,
+    /// The **history cursor**: where the answer's page should start.
+    /// `None` asks for the first page, which begins at the matchmaker's own
+    /// watermark; `Some(b)` continues a paged answer at `b`
+    /// ([`MatchOutcome::Registered::next_from_ballot`]). A registry with
+    /// more than [`REGISTRY_PAGE`](super::REGISTRY_PAGE) retained
+    /// registrations would otherwise put its whole ledger in one message,
+    /// exactly the unbounded reply the log's own `Promise` is paged to
+    /// avoid.
+    pub from_ballot: Option<Ballot>,
 }
 
 impl MatchRequest {
@@ -51,6 +60,7 @@ impl MatchRequest {
             config,
             kind: RegistrationKind::Belief,
             generation,
+            from_ballot: None,
         }
     }
 
@@ -69,7 +79,16 @@ impl MatchRequest {
             config,
             kind: RegistrationKind::Reconfiguration,
             generation,
+            from_ballot: None,
         }
+    }
+
+    /// The same request, asking for the page that starts at `from`: what a
+    /// candidate re-asks with while a matchmaker's answer is still paged.
+    #[must_use]
+    pub fn from_page(mut self, from: Ballot) -> Self {
+        self.from_ballot = Some(from);
+        self
     }
 
     /// The ledger record this request registers.
@@ -142,9 +161,19 @@ pub enum MatchOutcome {
     /// the paper's `MatchB`: every configuration registered at a ballot
     /// **strictly below** the request's and at or above the watermark.
     Registered {
+        /// Where this page starts: the maximum of the request's cursor and
+        /// the watermark. Echoed so the candidate can check the page is the
+        /// one it asked for, exactly as [`crate::Message::Promise`] echoes
+        /// `from_slot`.
+        from_ballot: Ballot,
         /// `ballot -> registration` for every registration in
-        /// `[gc_watermark, request.ballot)`, in ballot order.
+        /// `[from_ballot, request.ballot)`, in ballot order, at most
+        /// [`REGISTRY_PAGE`](super::REGISTRY_PAGE) of them.
         history: BTreeMap<Ballot, Registration>,
+        /// Where the next page starts, when this one was cut short.
+        /// `None` means the history is complete: only then does the
+        /// registration count toward the candidate's matchmaker quorum.
+        next_from_ballot: Option<Ballot>,
         /// The watermark in force when the history was computed.
         gc_watermark: Ballot,
         /// The **effective configuration** this matchmaker durably holds

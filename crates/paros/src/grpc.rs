@@ -864,6 +864,7 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
         config: Some(config_to_proto(&request.config)),
         reconfiguration: request.kind.is_reconfiguration(),
         generation: request.generation.0,
+        from_ballot: request.from_ballot.map(ballot_to_proto),
     }
 }
 
@@ -876,10 +877,14 @@ pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest
     let ballot = ballot_from_proto(request.ballot)?;
     let config = acceptor_config_from_proto(request.config)?;
     let generation = MatchmakerGeneration(request.generation);
-    Ok(if request.reconfiguration {
+    let base = if request.reconfiguration {
         MatchRequest::reconfigure(from, ballot, config, generation)
     } else {
         MatchRequest::new(from, ballot, config, generation)
+    };
+    Ok(match request.from_ballot {
+        Some(cursor) => base.from_page(ballot_from_proto(Some(cursor))?),
+        None => base,
     })
 }
 
@@ -888,13 +893,17 @@ pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest
 pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
     let outcome = match &reply.outcome {
         MatchOutcome::Registered {
+            from_ballot,
             history,
+            next_from_ballot,
             gc_watermark,
             effective,
         } => matchmaker::match_reply::Outcome::Registered(matchmaker::Registered {
             history: registrations_to_proto(history),
             gc_watermark: Some(ballot_to_proto(*gc_watermark)),
             effective: effective_to_proto(effective.as_ref()),
+            from_ballot: Some(ballot_to_proto(*from_ballot)),
+            next_from_ballot: next_from_ballot.map(ballot_to_proto),
         }),
         MatchOutcome::Refused(refusal) => {
             let reason = match refusal {
@@ -940,7 +949,12 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
 pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'static str> {
     let outcome = match reply.outcome.ok_or("missing match outcome")? {
         matchmaker::match_reply::Outcome::Registered(registered) => MatchOutcome::Registered {
+            from_ballot: ballot_from_proto(registered.from_ballot)?,
             history: registrations_from_proto(registered.history)?,
+            next_from_ballot: registered
+                .next_from_ballot
+                .map(|b| ballot_from_proto(Some(b)))
+                .transpose()?,
             gc_watermark: ballot_from_proto(registered.gc_watermark)?,
             effective: effective_from_proto(registered.effective)?,
         },
