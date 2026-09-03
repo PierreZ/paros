@@ -4,7 +4,8 @@
 
 use paros_core::{
     MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Reconstruction, StartRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Reconstruction,
+    StartRefusal,
 };
 
 /// The node driver's handover state: the sans-IO
@@ -44,6 +45,12 @@ impl HandoverDriver {
     /// Whether a handover phase is running here.
     pub(crate) fn is_busy(&self) -> bool {
         self.reconfigurer.is_busy()
+    }
+
+    /// Where the running phase stands — what the abandonment hook selects
+    /// on.
+    pub(crate) fn phase(&self) -> &ReconfigurerPhase {
+        self.reconfigurer.phase()
     }
 
     /// Open a handover onto `target` (an operator request).

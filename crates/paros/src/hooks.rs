@@ -17,7 +17,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, Slot};
+use paros_core::{Message, NodeId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +179,24 @@ pub trait DriverHooks {
     /// Consulted only while a handover runs; skipping stretches it (and a
     /// preempted decree waits one more beat to reopen), never breaks it.
     fn skip_reconfigurer_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to give up the running matchmaker-set handover this beat
+    /// ([`paros_core::MatchmakerReconfigurer::abandon`]), consulted from the
+    /// handover beat while one runs — `phase` is where it stands, so a
+    /// simulation can select each phase's abandonment independently.
+    ///
+    /// **Abandoning is always safe**, which is why this is a hook and not a
+    /// fault: the reconfigurer holds no durable state, the freeze and the
+    /// bootstrap are idempotent, the decree's votes stay durable at the
+    /// matchmakers, and the next node to meet the frozen generation
+    /// finishes it. It is the driver's own timeout
+    /// ([`RECONFIGURE_TIMEOUT_ELECTIONS`](crate::RECONFIGURE_TIMEOUT_ELECTIONS))
+    /// taken early — the rare-but-valid decision that puts a *second*
+    /// reconfigurer on a generation someone else half-replaced.
+    fn abandon_reconfigurer(&self, phase: &ReconfigurerPhase) -> bool {
+        let _ = phase;
         false
     }
 

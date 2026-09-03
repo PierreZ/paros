@@ -1103,6 +1103,19 @@ where
                     audit.reconfigurer_aborted(NodeId(self_id));
                     tracing::info!(node = self_id, "reconfigurer_aborted");
                 }
+                // The same decision taken early, on the node loop: giving up
+                // a handover is always safe (the reconfigurer holds no
+                // durable state and the freeze, the bootstrap and the votes
+                // are all idempotent or durable elsewhere), and it is what
+                // puts a *second* reconfigurer on a half-replaced
+                // generation.
+                if handover.is_busy()
+                    && hooks.abandon_reconfigurer(handover.phase())
+                    && handover.abandon()
+                {
+                    audit.reconfigurer_aborted(NodeId(self_id));
+                    tracing::info!(node = self_id, hooked = true, "reconfigurer_aborted");
+                }
                 if handover.resend_due(tunables.reconfigurer_resend_ticks) {
                     // The freeze closes here, not on the ack that completed
                     // its quorum: a quorum is the floor the reconstruction

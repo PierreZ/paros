@@ -40,6 +40,7 @@
 //! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
+//! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
 //!
 //! Message kinds keep their own gates where they walk different Paxos paths:
@@ -51,7 +52,7 @@ use std::time::Duration;
 
 use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
-use paros::{DriverHooks, HandoffContext, Message, NodeId, Seam};
+use paros::{DriverHooks, HandoffContext, Message, NodeId, ReconfigurerPhase, Seam};
 
 /// The driver's `DriverHooks` under simulation (see the module doc).
 pub(crate) struct BuggifyHooks<T> {
@@ -146,6 +147,41 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // (`reconfigurer_resend_skipped`). A skipped beat stretches the
         // stop-the-world window and delays a preempted decree's reopening.
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn abandon_reconfigurer(&self, phase: &ReconfigurerPhase) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // One location per phase, not one multiplied by a phase weight: a
+        // seed that abandons freezes readily must be able to leave decrees
+        // alone, and a shared location cannot express that. `Publishing` is
+        // deliberately absent — the successor is already chosen there, so
+        // giving up loses nothing a straggler's republication does not
+        // already cover.
+        let fired = match phase {
+            ReconfigurerPhase::Stopping { .. } => buggify_with_prob!(0.02),
+            ReconfigurerPhase::Bootstrapping { .. } => buggify_with_prob!(0.02),
+            ReconfigurerPhase::Deciding { .. } => buggify_with_prob!(0.02),
+            ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => false,
+        };
+        if fired {
+            // BUGGIFY pairing, one gate per location: a phase whose
+            // abandonment the sweep never reaches proves nothing.
+            match phase {
+                ReconfigurerPhase::Stopping { .. } => {
+                    assert_reachable!("generation: a handover is abandoned while freezing");
+                }
+                ReconfigurerPhase::Bootstrapping { .. } => {
+                    assert_reachable!("generation: a handover is abandoned while bootstrapping");
+                }
+                ReconfigurerPhase::Deciding { .. } => {
+                    assert_reachable!("generation: a handover is abandoned mid-decree");
+                }
+                ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => {}
+            }
+        }
+        fired
     }
 
     fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
