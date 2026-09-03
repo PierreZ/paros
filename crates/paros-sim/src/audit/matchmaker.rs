@@ -1282,45 +1282,26 @@ impl MatchmakerAudit {
         );
     }
 
-    /// The `sometimes` gates, evaluated once per run: both deployment modes are
-    /// visited, and a deployed registry genuinely registers, reports a past,
-    /// and licenses a leadership. Everything rarer (each refusal leg, the
-    /// duplicate re-answer, a GC raise, a restart) is a
-    /// `reachable` recorded at its transition — each is conditioned on the
-    /// deployment draw *and* a rarer event, and a per-sweep gate on such a
-    /// conjunction would starve saturation.
+    /// The `sometimes` gates, evaluated once per run: **only** the deployment
+    /// draw itself, which every seed decides one way or the other.
+    ///
+    /// Everything else this fold observes is a `reachable` recorded at its own
+    /// transition — each is conditioned on the deployment draw *and* a rarer
+    /// event, and a per-sweep gate on such a conjunction would starve
+    /// saturation. That rule is also mechanical, not only stylistic: moonpool
+    /// keys an assertion slot by the **hash of its message**, so a `sometimes`
+    /// here sharing a string with the `reach_once!` at the transition is one
+    /// slot, not two, and whichever fires first decides the kind. Five gates
+    /// did exactly that (a configuration is registered, a reply carries a
+    /// prior configuration, a campaign closes with a matchmaker quorum, a
+    /// floor becomes effective, a handover completes) and are now recorded
+    /// only where they happen.
     pub(super) fn check_gates(&self) {
         assert_sometimes!(self.deployed, "matchmaker: a run deploys matchmakers");
         assert_sometimes!(!self.deployed, "matchmaker: a run deploys no matchmakers");
-        assert_sometimes!(
-            self.registered_any,
-            "matchmaker: a configuration is registered"
-        );
-        assert_sometimes!(
-            self.history_nonempty,
-            "matchmaker: a reply carries a prior configuration"
-        );
-        assert_sometimes!(
-            self.campaign_completed,
-            "matchmaking: a campaign closes with a matchmaker quorum"
-        );
         if self.recovered_after_restart {
             assert_reachable!("matchmaker: a matchmaker recovers its registry across a restart");
         }
-        // #123: a leader's floor becomes effective on some seed — the outcome
-        // GC exists for, and the sweep is certain to reach it (any settled
-        // leadership on a matchmaker seed with a live matchmaker quorum).
-        assert_sometimes!(
-            self.gc_effective,
-            "gc: a leader's floor becomes effective at a matchmaker quorum"
-        );
-        // #125: a handover completes on some seed (the workload asks for one
-        // on every matchmaker seed, and a one-member pool can hand over to
-        // itself).
-        assert_sometimes!(
-            self.reconfigurer_done,
-            "generation: a matchmaker-set handover completes"
-        );
     }
 
     // ---- garbage collection (#123) ------------------------------------------
