@@ -74,6 +74,11 @@ pub enum ReconfigureRefusal {
     /// The requested configuration names a node outside the addressable
     /// pool, which this deployment can neither reach nor prepare.
     UnknownMember,
+    /// The requested configuration is malformed: empty, or under a quorum
+    /// system whose quorums do not all intersect
+    /// ([`AcceptorConfig::is_well_formed`]). Refused at the boundary, so the
+    /// core never reaches a quorum size it would have to panic on.
+    Malformed,
     /// The leadership is not settled: a Phase-1-shaped recovery, a repair
     /// probe, or an application repair is still open. A reconfiguration moves
     /// a *settled* leadership to a new ballot; the caller retries once the
@@ -116,6 +121,9 @@ impl RawNode {
         }
         if !self.config.has_matchmakers() {
             return ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers);
+        }
+        if !config.is_well_formed() {
+            return ReconfigureResult::Refused(ReconfigureRefusal::Malformed);
         }
         if !config.members.iter().all(|m| self.in_pool(*m)) {
             return ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember);

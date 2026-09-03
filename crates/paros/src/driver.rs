@@ -2375,6 +2375,15 @@ fn report_match_step<A: Audit>(
                 "matchmaking_completed"
             );
         }
+        MatchStep::StaleConfiguration { newest } => {
+            audit.matchmaking_stale_configuration(NodeId(self_id), ballot, *newest);
+            tracing::info!(
+                node = self_id,
+                round = ballot.round,
+                newest_round = newest.round,
+                "matchmaking_stale_configuration"
+            );
+        }
         MatchStep::Refused(refusal) => {
             audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, *refusal);
             tracing::info!(
@@ -3285,6 +3294,7 @@ where
                     ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => (false, "no_matchmakers", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => (false, "unknown_member", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => (false, "round_exhausted", None),
                 };

@@ -62,8 +62,8 @@ pub use paros_core::{
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
     MatchStep, Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp,
     Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
-    ReadIndexResult, ReadState, Ready, ReconfigureRefusal, ReconfigureResult, RegistryStorage,
-    SessionEntry, Slot, Storage, Value, WriteOp, command_fingerprint,
+    ReadIndexResult, ReadState, Ready, ReconfigureRefusal, ReconfigureResult, Registration,
+    RegistryStorage, SessionEntry, Slot, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
@@ -298,7 +298,7 @@ mod tests {
     fn matchmaker_contract_round_trips() {
         use paros_core::{
             AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerId,
-            QuorumSystem,
+            QuorumSystem, Registration,
         };
         let ballot = |round: u64, node: u64| Ballot {
             round,
@@ -310,14 +310,18 @@ mod tests {
                 QuorumSystem::Majority,
             )
         };
-        let request = MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]));
-        let wire = crate::grpc::wire_match_request(&request);
-        let bytes = wire.encode_to_vec();
-        let decoded = crate::grpc::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
-        assert_eq!(
-            crate::grpc::match_request_from_wire(decoded).expect("request"),
-            request
-        );
+        for request in [
+            MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2])),
+            MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3])),
+        ] {
+            let wire = crate::grpc::wire_match_request(&request);
+            let bytes = wire.encode_to_vec();
+            let decoded = crate::grpc::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
+            assert_eq!(
+                crate::grpc::match_request_from_wire(decoded).expect("request"),
+                request
+            );
+        }
 
         let replies = vec![
             MatchReply {
@@ -326,8 +330,11 @@ mod tests {
                 ballot: ballot(7, 4),
                 outcome: MatchOutcome::Registered {
                     history: BTreeMap::from([
-                        (ballot(2, 1), config(&[0, 1, 2])),
-                        (ballot(5, 3), config(&[1, 2, 3, 4])),
+                        (ballot(2, 1), Registration::belief(config(&[0, 1, 2]))),
+                        (
+                            ballot(5, 3),
+                            Registration::reconfiguration(config(&[1, 2, 3, 4])),
+                        ),
                     ]),
                     gc_watermark: ballot(2, 1),
                 },

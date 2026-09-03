@@ -50,7 +50,8 @@ mod write;
 
 pub use matchmaker::{
     AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, RegistryStorage,
+    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Registration,
+    RegistryStorage,
 };
 pub use message::Message;
 pub use node::{

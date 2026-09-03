@@ -67,8 +67,8 @@ use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, a
 use paros::{
     AcceptorConfig, Audit, Ballot, Deployment, EdgeRejection, HANDOFF_BATCH, Handoff,
     LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerId, Message, NodeId, PROMISE_BATCH,
-    ReconfigureResult, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
-    StorageRecord, command_hash,
+    ReconfigureResult, Registration, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
+    StorageFaultDecision, StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -2072,7 +2072,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
-        registry: &[(Ballot, AcceptorConfig)],
+        registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         self.state()
@@ -2080,9 +2080,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .recovered(matchmaker, registry, gc_watermark);
     }
 
-    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: &AcceptorConfig) {
+    fn match_registered(
+        &self,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
         let mut st = self.state();
-        st.matchmaker.registered(matchmaker, ballot, config);
+        st.matchmaker.registered(matchmaker, ballot, registration);
+        let config = &registration.config;
         // The per-ballot configuration the quorum oracles count over: bound
         // at its durable registration, before any leader could exercise it.
         st.bind_config(ballot, config);
@@ -2099,7 +2105,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
-        history: &[(Ballot, AcceptorConfig)],
+        history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         self.state()
@@ -2125,6 +2131,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state()
             .matchmaker
             .request_sent(node, matchmaker, ballot);
+    }
+
+    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {
+        self.state().matchmaker.campaign_stale(node, ballot, newest);
     }
 
     fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, _count: u64) {

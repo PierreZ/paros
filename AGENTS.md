@@ -167,11 +167,22 @@ with the matchmakers (`Ready::match_requests`, `RawNode::on_match_reply`) and se
 until a matchmaker quorum answered; the replies' histories are unioned above the **maximum**
 watermark into `H_b`; a refusal abandons the campaign (the next one opens above the refuser's
 highest round); a campaign whose matchmakers are slow is re-asked on every election timeout,
-never abandoned by the clock. A candidate registers the configuration it *believes* in force —
-learned only from a leader's `Prepare`, `Heartbeat` or `Relinquish` — and the ledger never
-changes that belief: it records every registration, aborted ones included, so "adopt the newest
-registered configuration" flip-flopped a candidate between two beliefs forever (a stale belief
-is safe — Phase 1 still covers `H_b`). Phase 1
+never abandoned by the clock. **The ledger distinguishes a belief from a fact.** Every
+registration carries a `reconfiguration` flag (`paros_core::Registration`): an ordinary campaign
+registers the configuration the candidate *believes* in force (learned from a leader's
+`Prepare`, `Heartbeat` or `Relinquish`), a `RawNode::reconfigure` campaign registers an
+operator's explicit change. The **effective configuration** is the highest-ballot
+reconfiguration registration a matchmaker quorum holds: an ordinary campaign whose histories
+name one other than what it registered abandons, adopts it, and re-campaigns
+(`MatchStep::StaleConfiguration`), so a node that missed a completed reconfiguration can never be
+elected under the superseded configuration; a reconfiguration campaign is exempt (it *is* the
+next one). Beliefs never trigger the abort — "adopt the newest *registration*" flip-flopped two
+candidates between their abandoned beliefs forever — and reconfiguration requests are monotone
+by ballot and never manufactured by a campaign, so adopting the highest cannot. A
+reconfiguration is guaranteed to be honored once its matchmaking completed at a quorum
+(intersection hands the record to every later campaign); before that it may be lost like any
+proposal that never reached a quorum. GC (#123) must never retire the highest reconfiguration
+registration. Phase 1
 then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
 in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
 `C_b` alone. A **reconfiguration is a round change** (`RawNode::reconfigure`, the `Reconfigure`

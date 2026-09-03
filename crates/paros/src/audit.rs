@@ -19,7 +19,7 @@
 
 use paros_core::{
     AcceptorConfig, Ballot, Handoff, MatchRefusal, MatchmakerId, Message, NodeId,
-    ReconfigureResult, Slot,
+    ReconfigureResult, Registration, Slot,
 };
 
 use crate::grpc::EdgeRejection;
@@ -385,6 +385,13 @@ pub trait Audit {
     /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
     fn matchmaking_resend_skipped(&self, node: NodeId) {}
 
+    /// This candidate's matchmaking quorum named a reconfiguration to a
+    /// configuration other than the one its ordinary campaign registered for
+    /// `ballot`: the campaign was abandoned and the configuration registered
+    /// at `newest` — the effective configuration — adopted as the node's
+    /// belief (`RawNode::on_match_reply`, `StaleConfiguration`).
+    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
+
     /// This candidate's election clock fired while its matchmaking was still
     /// open and re-asked the unanswered matchmakers instead of abandoning the
     /// campaign (`RawNode::tick`). `count` is the monotone total for this
@@ -454,21 +461,27 @@ pub trait Audit {
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
-        registry: &[(Ballot, AcceptorConfig)],
+        registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
     }
 
     /// This matchmaker durably registered `config` under `ballot` (after the
     /// fsync).
-    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: &AcceptorConfig) {}
+    fn match_registered(
+        &self,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
+    }
 
     /// This matchmaker durably raised its GC watermark (after the fsync),
     /// dropping every registration below it.
     fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {}
 
     /// This matchmaker is answering `to`'s request for `ballot` with a
-    /// registration: `history` is every `(ballot, configuration)` the reply
+    /// registration: `history` is every `(ballot, registration)` the reply
     /// names and `gc_watermark` the floor it reports. Reported at the instant
     /// the reply leaves — after the registration's fsync and its
     /// [`Audit::match_registered`] report, which is what lets a checker judge
@@ -478,7 +491,7 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
-        history: &[(Ballot, AcceptorConfig)],
+        history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
     }

@@ -265,7 +265,11 @@ impl RawNode {
                 config.clone(),
                 reconfiguration,
             ));
-            let request = MatchRequest::new(me, self.ballot, config);
+            let request = if reconfiguration {
+                MatchRequest::reconfigure(me, self.ballot, config)
+            } else {
+                MatchRequest::new(me, self.ballot, config)
+            };
             for matchmaker in self.config.matchmakers.clone() {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));

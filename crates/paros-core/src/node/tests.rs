@@ -10,6 +10,7 @@ use super::{
 };
 use crate::matchmaker::{
     AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerId,
+    Registration,
 };
 use crate::message::Message;
 use crate::state::{Config, HardState};
@@ -142,7 +143,7 @@ impl crate::matchmaker::RegistryStorage for MemRegistry {
     fn initial_state(&self) -> crate::matchmaker::MatchmakerHardState {
         crate::matchmaker::MatchmakerHardState::default()
     }
-    fn registration(&self, _ballot: Ballot) -> Option<AcceptorConfig> {
+    fn registration(&self, _ballot: Ballot) -> Option<crate::matchmaker::Registration> {
         None
     }
     fn registered_ballots(&self) -> Vec<Ballot> {

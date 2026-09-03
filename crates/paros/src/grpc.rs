@@ -6,7 +6,7 @@ use std::sync::Arc;
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, MatchOutcome,
     MatchRefusal, MatchReply, MatchRequest, MatchmakerId, Message, NodeId, QuorumSystem,
-    SessionEntry, Slot, Value,
+    Registration, SessionEntry, Slot, Value,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
@@ -840,6 +840,7 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
         from: request.from.0,
         ballot: Some(mm_ballot_to_proto(request.ballot)),
         config: Some(acceptor_config_to_proto(&request.config)),
+        reconfiguration: request.reconfiguration,
     }
 }
 
@@ -848,11 +849,14 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
 /// # Errors
 /// Returns a static description of the first malformed field.
 pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest, &'static str> {
-    Ok(MatchRequest::new(
-        NodeId(request.from),
-        mm_ballot_from_proto(request.ballot)?,
-        acceptor_config_from_proto(request.config)?,
-    ))
+    let from = NodeId(request.from);
+    let ballot = mm_ballot_from_proto(request.ballot)?;
+    let config = acceptor_config_from_proto(request.config)?;
+    Ok(if request.reconfiguration {
+        MatchRequest::reconfigure(from, ballot, config)
+    } else {
+        MatchRequest::new(from, ballot, config)
+    })
 }
 
 /// Encode a matchmaker's reply for the wire.
@@ -865,9 +869,10 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
         } => matchmaker::match_reply::Outcome::Registered(matchmaker::Registered {
             history: history
                 .iter()
-                .map(|(ballot, config)| matchmaker::Registration {
+                .map(|(ballot, registration)| matchmaker::Registration {
                     ballot: Some(mm_ballot_to_proto(*ballot)),
-                    config: Some(acceptor_config_to_proto(config)),
+                    config: Some(acceptor_config_to_proto(&registration.config)),
+                    reconfiguration: registration.reconfiguration,
                 })
                 .collect(),
             gc_watermark: Some(mm_ballot_to_proto(*gc_watermark)),
@@ -904,10 +909,11 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
             let mut history = BTreeMap::new();
             for entry in registered.history {
                 let ballot = mm_ballot_from_proto(entry.ballot)?;
-                if history
-                    .insert(ballot, acceptor_config_from_proto(entry.config)?)
-                    .is_some()
-                {
+                let registration = Registration {
+                    config: acceptor_config_from_proto(entry.config)?,
+                    reconfiguration: entry.reconfiguration,
+                };
+                if history.insert(ballot, registration).is_some() {
                     return Err("duplicate ballot in history");
                 }
             }

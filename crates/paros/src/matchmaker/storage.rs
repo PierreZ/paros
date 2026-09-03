@@ -35,7 +35,10 @@
 //! matchmaker-specific disk-fault story, only the generic one applied to one
 //! more record family.
 
-use paros_core::{AcceptorConfig, Ballot, MatchmakerHardState, RegistryStorage};
+use paros_core::{
+    AcceptorConfig, Ballot, MatchmakerHardState, NodeId, QuorumSystem, Registration,
+    RegistryStorage,
+};
 use std::collections::BTreeMap;
 
 use crate::storage::StorageError;
@@ -59,13 +62,14 @@ pub trait MatchmakerStorage: RegistryStorage {
         Ok(())
     }
 
-    /// Persist the registration of `config` under `ballot` as one record.
-    /// Append-only: the core only ever registers strictly above the highest
-    /// ballot it holds, so this is never an overwrite.
+    /// Persist `registration` under `ballot` as one record. Append-only: the
+    /// core only ever registers strictly above the highest ballot it holds,
+    /// so this is never an overwrite.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn register(&mut self, ballot: Ballot, config: &AcceptorConfig) -> Result<(), StorageError>;
+    fn register(&mut self, ballot: Ballot, registration: &Registration)
+    -> Result<(), StorageError>;
 
     /// Persist a raised GC watermark and drop every registration record below
     /// it. Monotone: a store never lowers its watermark.
@@ -88,7 +92,7 @@ pub trait MatchmakerStorage: RegistryStorage {
 #[derive(Clone, Debug, Default)]
 pub struct MemMatchmakerStorage {
     hard_state: MatchmakerHardState,
-    registry: BTreeMap<Ballot, AcceptorConfig>,
+    registry: BTreeMap<Ballot, Registration>,
 }
 
 impl MemMatchmakerStorage {
@@ -104,7 +108,7 @@ impl RegistryStorage for MemMatchmakerStorage {
         self.hard_state.clone()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<AcceptorConfig> {
+    fn registration(&self, ballot: Ballot) -> Option<Registration> {
         self.registry.get(&ballot).cloned()
     }
 
@@ -115,8 +119,12 @@ impl RegistryStorage for MemMatchmakerStorage {
 
 impl MatchmakerStorage for MemMatchmakerStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
-    fn register(&mut self, ballot: Ballot, config: &AcceptorConfig) -> Result<(), StorageError> {
-        self.registry.insert(ballot, config.clone());
+    fn register(
+        &mut self,
+        ballot: Ballot,
+        registration: &Registration,
+    ) -> Result<(), StorageError> {
+        self.registry.insert(ballot, registration.clone());
         Ok(())
     }
 
@@ -136,6 +144,27 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     }
 }
 
+/// The suite's ballot at `round` (one proposer, node 1).
+fn suite_ballot(round: u64) -> Ballot {
+    Ballot {
+        round,
+        node: NodeId(1),
+    }
+}
+
+/// The suite's configuration of `n` acceptors.
+fn suite_config(n: u64) -> AcceptorConfig {
+    AcceptorConfig::new(
+        (0..n).map(NodeId).collect::<Vec<_>>(),
+        QuorumSystem::Majority,
+    )
+}
+
+/// The suite's belief registration of `n` acceptors.
+fn suite_belief(n: u64) -> Registration {
+    Registration::belief(suite_config(n))
+}
+
 /// The behavioral **contract suite** every [`MatchmakerStorage`] implementation
 /// must pass, run against [`MemMatchmakerStorage`] here and against the
 /// simulation's world-backed store in `paros-sim`, so a fake can never drift
@@ -153,11 +182,7 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,
 ) {
-    use paros_core::{Matchmaker, MatchmakerId, NodeId, QuorumSystem};
-    let ballot = |round: u64| Ballot {
-        round,
-        node: NodeId(1),
-    };
+    use paros_core::{Matchmaker, MatchmakerId};
     // What every reopen must satisfy: the durable records and the durable
     // scalars are mutually consistent (no record below the watermark, every
     // walked ballot readable), and — the recovery contract itself — a
@@ -192,12 +217,6 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
             );
         }
     };
-    let config = |n: u64| {
-        AcceptorConfig::new(
-            (0..n).map(NodeId).collect::<Vec<_>>(),
-            QuorumSystem::Majority,
-        )
-    };
 
     // A fresh store is empty, and registrations round-trip through a sync as
     // individually readable records.
@@ -213,55 +232,58 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     );
     consistent(&s);
     let mut s = reopen(s);
-    s.register(ballot(1), &config(3)).expect("register 1");
-    s.register(ballot(2), &config(4)).expect("register 2");
+    s.register(suite_ballot(1), &suite_belief(3))
+        .expect("register 1");
+    s.register(suite_ballot(2), &suite_belief(4))
+        .expect("register 2");
     s.sync().expect("sync");
     let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
         s.registered_ballots(),
-        vec![ballot(1), ballot(2)],
+        vec![suite_ballot(1), suite_ballot(2)],
         "registered ballots read back in ballot order"
     );
-    assert_eq!(s.registration(ballot(1)), Some(config(3)));
-    assert_eq!(s.registration(ballot(2)), Some(config(4)));
+    assert_eq!(s.registration(suite_ballot(1)), Some(suite_belief(3)));
+    assert_eq!(s.registration(suite_ballot(2)), Some(suite_belief(4)));
     assert_eq!(
-        s.registration(ballot(3)),
+        s.registration(suite_ballot(3)),
         None,
         "an unregistered ballot has no record"
     );
     assert_eq!(s.initial_state().gc_watermark, Ballot::zero());
 
     // A raised watermark is durable and drops the collected records.
-    s.register(ballot(3), &config(5)).expect("register 3");
-    s.set_gc_watermark(ballot(2)).expect("raise");
+    s.register(suite_ballot(3), &suite_belief(5))
+        .expect("register 3");
+    s.set_gc_watermark(suite_ballot(2)).expect("raise");
     s.sync().expect("sync raise");
     let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
-        ballot(2),
+        suite_ballot(2),
         "the watermark round-trips"
     );
     assert_eq!(
         s.registered_ballots(),
-        vec![ballot(2), ballot(3)],
+        vec![suite_ballot(2), suite_ballot(3)],
         "registrations below the watermark are dropped"
     );
     assert_eq!(
-        s.registration(ballot(1)),
+        s.registration(suite_ballot(1)),
         None,
         "a collected record is unreadable"
     );
 
     // The watermark never lowers.
-    s.set_gc_watermark(ballot(1)).expect("re-raise lower");
+    s.set_gc_watermark(suite_ballot(1)).expect("re-raise lower");
     s.sync().expect("sync no-op");
     let s = reopen(s);
     consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
-        ballot(2),
+        suite_ballot(2),
         "the watermark is monotone"
     );
 }

@@ -140,6 +140,22 @@ impl AcceptorConfig {
         q
     }
 
+    /// Whether this configuration can be run at all: at least one acceptor,
+    /// and a quorum system whose quorums all intersect (`2q > n`). The
+    /// operating-condition twin of [`AcceptorConfig::quorum_size`]'s hard
+    /// asserts: a boundary that takes a configuration from outside
+    /// (`RawNode::reconfigure`) refuses a malformed one here instead of
+    /// letting a later quorum tally panic on it.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        let n = self.members.len();
+        if n == 0 {
+            return false;
+        }
+        let q = self.quorum_system.quorum_size(n);
+        q >= 1 && 2 * q > n
+    }
+
     /// Whether `node` is a member of this configuration.
     #[must_use]
     pub fn contains(&self, node: NodeId) -> bool {
@@ -220,14 +236,61 @@ pub trait RegistryStorage {
     /// construction.
     fn initial_state(&self) -> MatchmakerHardState;
 
-    /// The configuration registered under `ballot`, if any — the per-record
-    /// read, the twin of [`crate::Storage::accepted`].
-    fn registration(&self, ballot: Ballot) -> Option<AcceptorConfig>;
+    /// The record registered under `ballot`, if any — the per-record read,
+    /// the twin of [`crate::Storage::accepted`].
+    fn registration(&self, ballot: Ballot) -> Option<Registration>;
 
     /// Every registered ballot in ascending order — the registry's
     /// identities, the twin of the `first_slot..=last_slot` walk. Each names a
     /// record [`Self::registration`] serves.
     fn registered_ballots(&self) -> Vec<Ballot>;
+}
+
+/// One ledger record: the configuration registered under a ballot, and
+/// whether registering it was an **operator's reconfiguration** (a leader
+/// moving the cluster to a new acceptor set, `RawNode::reconfigure`) rather
+/// than a candidate restating the configuration it believed in force.
+///
+/// The flag is what makes the ledger answer "which configuration is in
+/// force?" without treating every registration as a fact: an ordinary
+/// campaign registers a *belief* (possibly stale, possibly abandoned), and a
+/// ledger full of beliefs made "adopt the newest registration" flip-flop
+/// between two candidates' beliefs forever. A reconfiguration registration is
+/// an explicit request, and requests are monotone by ballot: the
+/// highest-ballot one a matchmaker quorum holds is the **effective
+/// configuration** — the one every ordinary campaign must register (see
+/// `RawNode::on_match_reply`). Once a reconfiguration's matchmaking has
+/// completed at a matchmaker quorum, quorum intersection hands that record
+/// to every later campaign's matchmaking, so no later ordinary election can
+/// reinstate a superseded configuration; before that it may be lost like any
+/// proposal that never reached a quorum.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Registration {
+    /// The acceptor configuration registered.
+    pub config: AcceptorConfig,
+    /// Whether this registration is a reconfiguration request.
+    pub reconfiguration: bool,
+}
+
+impl Registration {
+    /// A candidate's belief: the configuration it intends to run with.
+    #[must_use]
+    pub fn belief(config: AcceptorConfig) -> Self {
+        Self {
+            config,
+            reconfiguration: false,
+        }
+    }
+
+    /// A reconfiguration request: the configuration a leader moves to.
+    #[must_use]
+    pub fn reconfiguration(config: AcceptorConfig) -> Self {
+        Self {
+            config,
+            reconfiguration: true,
+        }
+    }
 }
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
@@ -246,16 +309,40 @@ pub struct MatchRequest {
     pub ballot: Ballot,
     /// The acceptor configuration the proposer intends to run `ballot` with.
     pub config: AcceptorConfig,
+    /// Whether this is a reconfiguration request (see [`Registration`]).
+    pub reconfiguration: bool,
 }
 
 impl MatchRequest {
-    /// A request from `from` to register `config` under `ballot`.
+    /// A candidate's request to register its belief `config` under `ballot`.
     #[must_use]
     pub fn new(from: NodeId, ballot: Ballot, config: AcceptorConfig) -> Self {
         Self {
             from,
             ballot,
             config,
+            reconfiguration: false,
+        }
+    }
+
+    /// A leader's request to register the reconfiguration to `config` under
+    /// `ballot` (see [`Registration`]).
+    #[must_use]
+    pub fn reconfigure(from: NodeId, ballot: Ballot, config: AcceptorConfig) -> Self {
+        Self {
+            from,
+            ballot,
+            config,
+            reconfiguration: true,
+        }
+    }
+
+    /// The ledger record this request registers.
+    #[must_use]
+    pub fn registration(&self) -> Registration {
+        Registration {
+            config: self.config.clone(),
+            reconfiguration: self.reconfiguration,
         }
     }
 }
@@ -292,9 +379,9 @@ pub enum MatchOutcome {
     /// the paper's `MatchB`: every configuration registered at a ballot
     /// **strictly below** the request's and at or above the watermark.
     Registered {
-        /// `ballot -> configuration` for every registration in
+        /// `ballot -> registration` for every registration in
         /// `[gc_watermark, request.ballot)`, in ballot order.
-        history: BTreeMap<Ballot, AcceptorConfig>,
+        history: BTreeMap<Ballot, Registration>,
         /// The watermark in force when the history was computed.
         gc_watermark: Ballot,
     },
@@ -327,8 +414,8 @@ pub enum MatchmakerWriteOp {
     Register {
         /// The ballot registered.
         ballot: Ballot,
-        /// The configuration registered under it.
-        config: AcceptorConfig,
+        /// The record registered under it.
+        registration: Registration,
     },
     /// Raise the durable GC watermark to `watermark` and drop every
     /// registration below it. Monotone: never below the current watermark.
@@ -383,10 +470,10 @@ impl MatchmakerReady<'_> {
 pub struct Matchmaker {
     id: MatchmakerId,
     hard_state: MatchmakerHardState,
-    /// Every registered `ballot -> configuration`, strictly increasing in
+    /// Every registered `ballot -> registration`, strictly increasing in
     /// ballot order (a [`BTreeMap`] keeps the order; the state machine keeps
     /// the "only ever appended above the highest" discipline).
-    registry: BTreeMap<Ballot, AcceptorConfig>,
+    registry: BTreeMap<Ballot, Registration>,
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
 }
@@ -410,10 +497,10 @@ impl Matchmaker {
         let hard_state = storage.initial_state();
         let mut registry = BTreeMap::new();
         for ballot in storage.registered_ballots() {
-            let config = storage
+            let registration = storage
                 .registration(ballot)
                 .expect("every registered ballot the walk names has a readable record");
-            let previous = registry.insert(ballot, config);
+            let previous = registry.insert(ballot, registration);
             assert!(
                 previous.is_none(),
                 "the registry walk names each ballot once"
@@ -447,7 +534,7 @@ impl Matchmaker {
     /// The registry as it stands, in ballot order (same caveat as
     /// [`Self::hard_state`]).
     #[must_use]
-    pub fn registry(&self) -> &BTreeMap<Ballot, AcceptorConfig> {
+    pub fn registry(&self) -> &BTreeMap<Ballot, Registration> {
         &self.registry
     }
 
@@ -490,7 +577,12 @@ impl Matchmaker {
             from,
             ballot,
             config,
+            reconfiguration,
         } = request;
+        let registration = Registration {
+            config,
+            reconfiguration,
+        };
         let outcome = if ballot < self.hard_state.gc_watermark {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                 watermark: self.hard_state.gc_watermark,
@@ -500,7 +592,7 @@ impl Matchmaker {
                 // The same request again: answered from the retained history
                 // (which GC may have shrunk since the first answer),
                 // registered once.
-                Some(registered) if *registered == config => MatchOutcome::Registered {
+                Some(registered) if *registered == registration => MatchOutcome::Registered {
                     history: self.history_below(ballot),
                     gc_watermark: self.hard_state.gc_watermark,
                 },
@@ -510,7 +602,7 @@ impl Matchmaker {
             // Compute the history *before* registering, so the request's own
             // configuration never appears in its own answer.
             let history = self.history_below(ballot);
-            let previous = self.registry.insert(ballot, config.clone());
+            let previous = self.registry.insert(ballot, registration.clone());
             assert!(
                 previous.is_none(),
                 "a fresh registration lands on an unregistered ballot"
@@ -519,8 +611,10 @@ impl Matchmaker {
                 self.highest() == Some(ballot),
                 "a fresh registration becomes the registry's highest ballot"
             );
-            self.pending_writes
-                .push(MatchmakerWriteOp::Register { ballot, config });
+            self.pending_writes.push(MatchmakerWriteOp::Register {
+                ballot,
+                registration,
+            });
             MatchOutcome::Registered {
                 history,
                 gc_watermark: self.hard_state.gc_watermark,
@@ -599,7 +693,7 @@ impl Matchmaker {
     }
 
     /// Every registration in `[gc_watermark, ballot)`, in ballot order.
-    fn history_below(&self, ballot: Ballot) -> BTreeMap<Ballot, AcceptorConfig> {
+    fn history_below(&self, ballot: Ballot) -> BTreeMap<Ballot, Registration> {
         self.registry
             .range(self.hard_state.gc_watermark..ballot)
             .map(|(b, c)| (*b, c.clone()))
@@ -617,13 +711,13 @@ impl Matchmaker {
                 .is_none_or(|lowest| *lowest >= self.hard_state.gc_watermark),
             "no registration survives below the gc watermark"
         );
-        for config in self.registry.values() {
+        for registration in self.registry.values() {
             assert!(
-                !config.members.is_empty(),
+                !registration.config.members.is_empty(),
                 "a registered configuration names at least one acceptor"
             );
             assert!(
-                config.members.windows(2).all(|w| w[0] < w[1]),
+                registration.config.members.windows(2).all(|w| w[0] < w[1]),
                 "a registered membership is sorted and deduplicated"
             );
         }
@@ -638,7 +732,7 @@ mod tests {
     #[derive(Default)]
     struct TestRegistry {
         hard_state: MatchmakerHardState,
-        registry: BTreeMap<Ballot, AcceptorConfig>,
+        registry: BTreeMap<Ballot, Registration>,
     }
 
     impl TestRegistry {
@@ -656,7 +750,7 @@ mod tests {
             self.hard_state.clone()
         }
 
-        fn registration(&self, ballot: Ballot) -> Option<AcceptorConfig> {
+        fn registration(&self, ballot: Ballot) -> Option<Registration> {
             self.registry.get(&ballot).cloned()
         }
 
@@ -691,7 +785,7 @@ mod tests {
         (writes, replies)
     }
 
-    fn registered(reply: &MatchReply) -> (&BTreeMap<Ballot, AcceptorConfig>, Ballot) {
+    fn registered(reply: &MatchReply) -> (&BTreeMap<Ballot, Registration>, Ballot) {
         match &reply.outcome {
             MatchOutcome::Registered {
                 history,
@@ -714,7 +808,7 @@ mod tests {
             writes,
             vec![MatchmakerWriteOp::Register {
                 ballot: ballot(1, 1),
-                config: config(&[0, 1, 2]),
+                registration: Registration::belief(config(&[0, 1, 2])),
             }]
         );
         assert_eq!(replies.len(), 1);
@@ -735,7 +829,7 @@ mod tests {
             history.keys().copied().collect::<Vec<_>>(),
             vec![ballot(1, 1)]
         );
-        assert_eq!(history[&ballot(1, 1)], config(&[0, 1, 2]));
+        assert_eq!(history[&ballot(1, 1)].config, config(&[0, 1, 2]));
         assert_eq!(mm.highest(), Some(ballot(3, 2)));
     }
 
@@ -821,7 +915,7 @@ mod tests {
                 highest: ballot(1, 1)
             })
         );
-        assert_eq!(mm.registry()[&ballot(1, 1)], config(&[0, 1, 2]));
+        assert_eq!(mm.registry()[&ballot(1, 1)].config, config(&[0, 1, 2]));
     }
 
     #[test]
@@ -945,13 +1039,13 @@ mod tests {
         assert_eq!(writes.len(), 2, "two keys, two registrations");
         let (history, _) = registered(&replies[1]);
         assert_eq!(
-            history.get(&ballot(5, 1)),
+            history.get(&ballot(5, 1)).map(|r| &r.config),
             Some(&config(&[0, 1, 2])),
             "the same-round lower ballot is in the higher one's history"
         );
         assert_eq!(mm.registry().len(), 2);
-        assert_eq!(mm.registry()[&ballot(5, 1)], config(&[0, 1, 2]));
-        assert_eq!(mm.registry()[&ballot(5, 2)], config(&[3, 4, 5]));
+        assert_eq!(mm.registry()[&ballot(5, 1)].config, config(&[0, 1, 2]));
+        assert_eq!(mm.registry()[&ballot(5, 2)].config, config(&[3, 4, 5]));
 
         // The reverse arrival order: the lower node's ballot is stale once
         // the higher node's is registered, and refused — never merged into it.
@@ -1011,7 +1105,9 @@ mod tests {
     #[should_panic(expected = "no registration survives below the gc watermark")]
     fn a_registry_below_its_watermark_refuses_to_boot() {
         let mut store = TestRegistry::default();
-        store.registry.insert(ballot(1, 1), config(&[0]));
+        store
+            .registry
+            .insert(ballot(1, 1), Registration::belief(config(&[0])));
         store.hard_state.gc_watermark = ballot(2, 0);
         let _ = Matchmaker::new(MatchmakerId(0), &store);
     }

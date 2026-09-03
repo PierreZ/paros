@@ -1558,7 +1558,11 @@ impl RawNode {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
-        let request = MatchRequest::new(self.config.id, m.ballot, m.config.clone());
+        let request = if m.reconfiguration {
+            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone())
+        } else {
+            MatchRequest::new(self.config.id, m.ballot, m.config.clone())
+        };
         let unanswered: Vec<MatchmakerId> = self
             .config
             .matchmakers
@@ -1601,10 +1605,12 @@ impl RawNode {
     ///   **quorum of matchmakers** has registered the ballot, `H_b` is
     ///   computed (the union, filtered by the maximum watermark) and handed to
     ///   Phase 1 through [`RawNode::start_phase1`] — no `Prepare` ever leaves
-    ///   before that instant (invariant 1). An ordinary campaign whose history
-    ///   names a configuration newer than the one it registered abandons the
-    ///   campaign and adopts that configuration instead (see
-    ///   `super::matchmaking`).
+    ///   before that instant (invariant 1). An ordinary campaign whose
+    ///   histories name a **reconfiguration** to a configuration other than
+    ///   the one it registered abandons the campaign and adopts that
+    ///   configuration instead — `StaleConfiguration`, the rule that keeps a
+    ///   superseded configuration from being reinstated by a candidate that
+    ///   missed the change (see [`crate::Registration`]).
     /// - `Refused`: the campaign is abandoned and this node steps back to
     ///   follower; the refusal's payload is diagnostic only. A refused
     ///   registration never becomes a leadership (invariant 4).
@@ -1638,22 +1644,34 @@ impl RawNode {
                         MatchStep::Registered {
                             remaining: quorum - registered,
                         }
+                    } else if let Some((newest, config)) = m.stale_belief() {
+                        // Stale belief: the quorum's histories name a
+                        // reconfiguration to a configuration other than the
+                        // one this ordinary campaign registered. Adopt the
+                        // effective configuration and abandon the campaign;
+                        // the next one registers it. Only *reconfiguration*
+                        // registrations count as facts here: the ledger also
+                        // records every candidate's belief, and "adopt the
+                        // newest registration" made two candidates re-adopt
+                        // each other's abandoned beliefs and flip-flop one
+                        // round per election timeout (seed
+                        // 7519660681720567139: 182 aborts, no leader for a
+                        // 50 s tail). A reconfiguration request is monotone
+                        // by ballot and never manufactured by a campaign, so
+                        // adopting the highest one cannot flip-flop — and
+                        // without it a candidate that missed a completed
+                        // reconfiguration could be elected under the
+                        // superseded configuration, rolling the cluster back
+                        // without anyone asking (review of #132).
+                        self.acceptors = config;
+                        self.acceptors_since = newest;
+                        self.become_follower(None);
+                        MatchStep::StaleConfiguration { newest }
                     } else {
                         // The history is `H_b`, the prior set Phase 1 must
-                        // cover — never a reason to change this node's own
-                        // belief about the configuration in force. The ledger
-                        // records every *registration*, aborted campaigns
-                        // included, so "adopt the newest registered
-                        // configuration" made a candidate re-adopt its own
-                        // and its rival's abandoned beliefs and flip-flop
-                        // between two configurations one round per election
-                        // timeout (seed 7519660681720567139: 182 aborts, no
-                        // leader for a 50 s tail). A belief changes only on
-                        // a fact from a leader — a `Prepare`, `Heartbeat` or
-                        // `Relinquish` carrying its configuration — and a
-                        // stale belief is safe: Phase 1 still covers `H_b`,
-                        // and the leadership simply runs under the
-                        // configuration it registered.
+                        // cover. A belief that matches the effective
+                        // configuration (or predates any reconfiguration)
+                        // runs the leadership under what it registered.
                         let prior = m.prior();
                         let watermark = m.watermark;
                         let config = m.config.clone();
@@ -1694,7 +1712,7 @@ impl RawNode {
         // left nothing Phase-1-shaped behind, and a completed one
         // closed the matchmaking phase before opening Phase 1.
         match &step {
-            MatchStep::Refused(_) => {
+            MatchStep::Refused(_) | MatchStep::StaleConfiguration { .. } => {
                 assert!(
                     self.role == NodeRole::Follower,
                     "a refused registration never becomes a leadership"

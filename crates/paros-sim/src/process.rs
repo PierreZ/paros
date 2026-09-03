@@ -513,8 +513,13 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         // reboot reads back exactly the last flush — the read-side pair of
         // the driver's persist-before-reply ordering.
         {
-            use paros::{AcceptorConfig, Ballot, MatchmakerStorage, NodeId, RegistryStorage};
-            let config = AcceptorConfig::new(vec![NodeId(0)], paros::QuorumSystem::Majority);
+            use paros::{
+                AcceptorConfig, Ballot, MatchmakerStorage, NodeId, Registration, RegistryStorage,
+            };
+            let config = Registration::belief(AcceptorConfig::new(
+                vec![NodeId(0)],
+                paros::QuorumSystem::Majority,
+            ));
             let ballot = |round: u64| Ballot {
                 round,
                 node: NodeId(1),

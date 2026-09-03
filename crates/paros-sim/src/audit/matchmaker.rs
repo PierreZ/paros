@@ -46,18 +46,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-use paros::{AcceptorConfig, Ballot, MatchRefusal, MatchmakerId, NodeId, Seam};
+use paros::{AcceptorConfig, Ballot, MatchRefusal, MatchmakerId, NodeId, Registration, Seam};
 
 /// One matchmaker's folded registry.
 #[derive(Default)]
 struct Registry {
     /// Durable registrations, exactly as the disk holds them (pruned by GC).
-    registered: BTreeMap<Ballot, AcceptorConfig>,
+    registered: BTreeMap<Ballot, Registration>,
     /// The durable watermark.
     watermark: Ballot,
     /// Ballots a `Registered` reply escaped for, with the history each first
     /// answer carried (a re-answer may only shrink it).
-    replied: BTreeMap<Ballot, Vec<(Ballot, AcceptorConfig)>>,
+    replied: BTreeMap<Ballot, Vec<(Ballot, Registration)>>,
     /// Boots observed (1 after the first).
     boots: u64,
 }
@@ -70,13 +70,16 @@ struct Campaign {
     /// The `Registered` replies the matchmakers sent this candidate for this
     /// ballot: `matchmaker -> (history, watermark)`. What the candidate may
     /// have received.
-    replies: BTreeMap<u64, (Vec<(Ballot, AcceptorConfig)>, Ballot)>,
+    replies: BTreeMap<u64, (Vec<(Ballot, Registration)>, Ballot)>,
     /// The matchmakers whose replies the candidate reported folding.
     registered_by: BTreeSet<u64>,
     /// A refusal was folded: the campaign is dead.
     refused: bool,
     /// The matchmaking closed with a quorum; Phase 1 is licensed.
     completed: bool,
+    /// Opened by `RawNode::reconfigure`: its registration *is* the next
+    /// effective configuration, so the stale-belief rule does not apply.
+    reconfiguration: bool,
 }
 
 /// The fold and the flag set (independent sticky bits per gate).
@@ -86,7 +89,7 @@ pub(super) struct MatchmakerAudit {
     registries: BTreeMap<u64, Registry>,
     /// Every `(matchmaker, ballot) -> configuration` ever folded, **never**
     /// pruned: the write-once ledger a GC'd-then-reused ballot would trip.
-    ever: BTreeMap<(u64, Ballot), AcceptorConfig>,
+    ever: BTreeMap<(u64, Ballot), Registration>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
     /// The size of the deployed matchmaker set (from the boot reports).
@@ -108,6 +111,9 @@ pub(super) struct MatchmakerAudit {
     campaign_refused: bool,
     clock_reasked: bool,
     refloored: bool,
+    campaign_stale: bool,
+    effective_checked: bool,
+    ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
     /// (a leader's `Prepare`, `Heartbeat` or `Relinquish`), beside the
@@ -124,6 +130,28 @@ pub(super) struct MatchmakerAudit {
     resend_skipped: bool,
     request_resent: bool,
     reconfiguration_opened: bool,
+}
+
+/// The union of every distinct configuration the registering replies name
+/// at or above `watermark` (invariant 3's expectation), and the set of
+/// distinct ballot sequences the histories had (to see whether they
+/// differed at all).
+fn union_above<'a>(
+    replies: &[&'a (Vec<(Ballot, Registration)>, Ballot)],
+    watermark: Ballot,
+) -> (Vec<&'a AcceptorConfig>, BTreeSet<Vec<Ballot>>) {
+    let mut expected: Vec<&AcceptorConfig> = Vec::new();
+    let mut histories: BTreeSet<Vec<Ballot>> = BTreeSet::new();
+    for (history, _) in replies {
+        histories.insert(history.iter().map(|(b, _)| *b).collect());
+        for (b, registration) in history {
+            let config = &registration.config;
+            if *b >= watermark && !expected.contains(&config) {
+                expected.push(config);
+            }
+        }
+    }
+    (expected, histories)
 }
 
 impl MatchmakerAudit {
@@ -163,14 +191,14 @@ impl MatchmakerAudit {
         self.ever
             .range((0, ballot)..=(u64::MAX, ballot))
             .find(|((_, b), _)| *b == ballot)
-            .map(|(_, c)| c)
+            .map(|(_, r)| &r.config)
     }
 
     /// A matchmaker booted from its durable registry.
     pub(super) fn recovered(
         &mut self,
         matchmaker: MatchmakerId,
-        registry: &[(Ballot, AcceptorConfig)],
+        registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         self.deployed = true;
@@ -202,7 +230,7 @@ impl MatchmakerAudit {
                         "matchmaker" => matchmaker.0,
                         "round" => ballot.round,
                         "bnode" => ballot.node.0,
-                        "read_back" => read_back.map_or(0, |c| c.members.len())
+                        "read_back" => read_back.map_or(0, |r| r.config.members.len())
                     }
                 );
             }
@@ -237,8 +265,9 @@ impl MatchmakerAudit {
         &mut self,
         matchmaker: MatchmakerId,
         ballot: Ballot,
-        config: &AcceptorConfig,
+        registration: &Registration,
     ) {
+        let config = registration;
         let entry = self.registries.entry(matchmaker.0).or_default();
         // Invariant 3: strictly above everything registered.
         let highest = entry.registered.keys().next_back().copied();
@@ -328,7 +357,7 @@ impl MatchmakerAudit {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
-        history: &[(Ballot, AcceptorConfig)],
+        history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -355,7 +384,7 @@ impl MatchmakerAudit {
         );
         // Invariant 4: the history is the folded window `[watermark, ballot)`
         // — nothing missing (under-reporting), nothing foreign.
-        let expected: Vec<(Ballot, AcceptorConfig)> = entry
+        let expected: Vec<(Ballot, Registration)> = entry
             .registered
             .range(entry.watermark..ballot)
             .map(|(b, c)| (*b, c.clone()))
@@ -370,7 +399,34 @@ impl MatchmakerAudit {
                 "expected" => expected.len()
             }
         );
+        // The registry protocol itself, judged on every reply: each entry
+        // the history names agrees with what *any* matchmaker durably
+        // registered for that ballot. Together with the completion-time
+        // `disagreements == 0`, this is the claim that two honest
+        // matchmakers never disagree — not merely that a disagreeing pair
+        // would still be safe (review of #132).
+        let disagreeing = history
+            .iter()
+            .find(|(b, r)| {
+                self.ever
+                    .range((0, *b)..=(u64::MAX, *b))
+                    .any(|((_, eb), er)| *eb == *b && er != r)
+            })
+            .map(|(b, _)| b.round);
+        assert_always!(
+            disagreeing.is_none(),
+            "matchmaker: a reply's history agrees with every matchmaker's ledger",
+            {
+                "matchmaker" => matchmaker.0,
+                "round" => ballot.round,
+                "disagreeing_round" => disagreeing.unwrap_or(0)
+            }
+        );
         if !history.is_empty() {
+            reach_once!(
+                self.ledger_agreement_checked,
+                "matchmaker: a reply's history is checked against the other ledgers"
+            );
             reach_once!(
                 self.history_nonempty,
                 "matchmaker: a reply carries a prior configuration"
@@ -537,6 +593,7 @@ impl MatchmakerAudit {
             { "node" => node.0, "bnode" => ballot.node.0 }
         );
         campaign.config = Some(config.clone());
+        campaign.reconfiguration = reconfiguration;
         reach_once!(
             self.campaign_opened,
             "matchmaking: a candidate opens a matchmaking phase"
@@ -663,11 +720,36 @@ impl MatchmakerAudit {
         );
         // Invariants 2 and 3, re-derived from the replies the registering
         // matchmakers sent: the max watermark, and the union at or above it.
-        let replies: Vec<&(Vec<(Ballot, AcceptorConfig)>, Ballot)> = campaign
+        let replies: Vec<&(Vec<(Ballot, Registration)>, Ballot)> = campaign
             .registered_by
             .iter()
             .filter_map(|m| campaign.replies.get(m))
             .collect();
+        // The effective configuration (review of #132): the highest-ballot
+        // *reconfiguration* registration the registering replies name. An
+        // ordinary campaign completes only if it registered exactly that —
+        // a stale belief must have aborted instead (`campaign_stale`), so a
+        // superseded configuration is never reinstated by an election. A
+        // reconfiguration campaign is exempt: it is the next one.
+        let effective = replies
+            .iter()
+            .flat_map(|(history, _)| history.iter())
+            .filter(|(_, r)| r.reconfiguration)
+            .max_by_key(|(b, _)| *b)
+            .map(|(b, r)| (*b, &r.config));
+        if !campaign.reconfiguration
+            && let Some((newest, config)) = effective
+        {
+            assert_always!(
+                campaign.config.as_ref() == Some(config),
+                "matchmaking: a completed ordinary campaign registered the effective configuration",
+                { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
+            );
+            reach_once!(
+                self.effective_checked,
+                "matchmaking: a completed campaign is checked against the effective configuration"
+            );
+        }
         let expected_watermark = replies.iter().map(|(_, w)| *w).max().unwrap_or_default();
         assert_always!(
             watermark == expected_watermark,
@@ -679,16 +761,7 @@ impl MatchmakerAudit {
                 "max_round" => expected_watermark.round
             }
         );
-        let mut expected: Vec<&AcceptorConfig> = Vec::new();
-        let mut histories: BTreeSet<Vec<Ballot>> = BTreeSet::new();
-        for (history, _) in &replies {
-            histories.insert(history.iter().map(|(b, _)| *b).collect());
-            for (b, config) in history {
-                if *b >= expected_watermark && !expected.contains(&config) {
-                    expected.push(config);
-                }
-            }
-        }
+        let (expected, histories) = union_above(&replies, expected_watermark);
         let union_matches = prior.len() == expected.len()
             && expected.iter().all(|c| prior.contains(c))
             && prior.iter().all(|c| expected.contains(&c));
@@ -730,6 +803,41 @@ impl MatchmakerAudit {
                 "matchmaking: a campaign unions histories that differ between matchmakers"
             );
         }
+    }
+
+    /// The candidate abandoned an ordinary campaign because the quorum's
+    /// histories named a reconfiguration to another configuration, and
+    /// adopted the one registered at `newest`. That ballot must hold a
+    /// *reconfiguration* registration in the write-once ledger: only a
+    /// leader's explicit change ever moves a belief, never another
+    /// candidate's belief (the flip-flop of #132's hunt).
+    pub(super) fn campaign_stale(&mut self, node: NodeId, ballot: Ballot, newest: Ballot) {
+        let named = self
+            .ever
+            .range((0, newest)..=(u64::MAX, newest))
+            .find(|((_, b), _)| *b == newest)
+            .map(|(_, r)| r.reconfiguration);
+        assert_always!(
+            named == Some(true),
+            "matchmaking: a stale-belief abort adopts a reconfiguration registration",
+            {
+                "node" => node.0,
+                "round" => ballot.round,
+                "newest_round" => newest.round,
+                "registered" => named.is_some()
+            }
+        );
+        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
+        assert_always!(
+            !campaign.completed && !campaign.reconfiguration,
+            "matchmaking: a stale-configuration abort never follows Phase 1 and never hits a reconfiguration",
+            { "node" => node.0, "round" => ballot.round }
+        );
+        campaign.refused = true;
+        reach_once!(
+            self.campaign_stale,
+            "matchmaking: a candidate adopts the effective configuration and re-campaigns"
+        );
     }
 
     /// The candidate folded a refusal and abandoned the campaign.

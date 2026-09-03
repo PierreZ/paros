@@ -37,15 +37,40 @@ fn registered(
     history: &[(Ballot, AcceptorConfig)],
     wm: Ballot,
 ) -> MatchReply {
+    let history = history
+        .iter()
+        .map(|(b, c)| (*b, Registration::belief(c.clone())))
+        .collect();
+    registered_with(mm, ballot, history, wm)
+}
+
+/// A registered reply carrying an explicit ledger (beliefs and
+/// reconfigurations).
+fn registered_with(
+    mm: u64,
+    ballot: Ballot,
+    history: BTreeMap<Ballot, Registration>,
+    wm: Ballot,
+) -> MatchReply {
     MatchReply {
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
         ballot,
         outcome: MatchOutcome::Registered {
-            history: history.iter().cloned().collect(),
+            history,
             gc_watermark: wm,
         },
     }
+}
+
+/// A ledger entry that was a candidate's belief.
+fn belief(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
+    (ballot, Registration::belief(cfg(members)))
+}
+
+/// A ledger entry that was a reconfiguration request.
+fn reconfigured(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
+    (ballot, Registration::reconfiguration(cfg(members)))
 }
 
 fn promise(from: u64, ballot: Ballot) -> Message {
@@ -531,4 +556,136 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     });
     assert_eq!(*plain.acceptors(), cfg(&[0, 1, 2]));
     assert_eq!(plain.acceptors_since(), Ballot::zero());
+}
+
+// ---- the effective configuration (#122, review of #132) --------------------
+
+/// A stale candidate never reinstates a superseded configuration: the
+/// quorum's histories name a reconfiguration to `{2, 3, 4}`, so a campaign
+/// that registered the bootstrap `{0, 1, 2}` abandons, adopts it, and its
+/// next campaign registers it.
+#[test]
+fn a_stale_candidate_adopts_the_highest_reconfiguration_and_re_campaigns() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let history = BTreeMap::from([
+        belief(ballot(1, 0), &[0, 1, 2]),
+        reconfigured(ballot(4, 1), &[2, 3, 4]),
+        // A later *belief* in the old set (a rival that was itself stale)
+        // does not outrank the reconfiguration.
+        belief(ballot(6, 0), &[0, 1, 2]),
+    ]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert_eq!(
+        step,
+        MatchStep::StaleConfiguration {
+            newest: ballot(4, 1)
+        }
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "no Prepare under the stale belief"
+    );
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.reconfiguration)
+    );
+}
+
+/// Beliefs are not facts: a history made only of other candidates'
+/// registrations — however many, however new — never moves a belief. This is
+/// the negative space of the flip-flop the hunt found.
+#[test]
+fn other_candidates_beliefs_never_change_a_belief() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let history = BTreeMap::from([
+        belief(ballot(3, 1), &[2, 3, 4]),
+        belief(ballot(5, 2), &[1, 2, 3]),
+        belief(ballot(7, 1), &[3, 4]),
+    ]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]), "the belief stands");
+    assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// The highest reconfiguration wins, across replies: matchmaker 0 knows an
+/// older change, matchmaker 1 a newer one, and the union's highest is the
+/// effective configuration. A belief that already matches it completes.
+#[test]
+fn the_effective_configuration_is_the_highest_reconfiguration_across_the_quorum() {
+    let mut stale = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 3);
+    campaign(&mut stale);
+    let b = stale.ballot();
+    drain_match_requests(&mut stale);
+    let older = BTreeMap::from([reconfigured(ballot(2, 1), &[1, 2, 3])]);
+    let newer = BTreeMap::from([
+        reconfigured(ballot(2, 1), &[1, 2, 3]),
+        reconfigured(ballot(5, 2), &[2, 3, 4]),
+    ]);
+    assert_eq!(
+        stale.on_match_reply(registered_with(0, b, older, Ballot::zero())),
+        MatchStep::Registered { remaining: 1 }
+    );
+    assert_eq!(
+        stale.on_match_reply(registered_with(1, b, newer.clone(), Ballot::zero())),
+        MatchStep::StaleConfiguration {
+            newest: ballot(5, 2)
+        }
+    );
+    assert_eq!(*stale.acceptors(), cfg(&[2, 3, 4]));
+
+    let mut current = deployed_node(2, &[2, 3, 4], &[0, 1, 2, 3, 4], 1);
+    campaign(&mut current);
+    let b = current.ballot();
+    drain_match_requests(&mut current);
+    let step = current.on_match_reply(registered_with(0, b, newer, Ballot::zero()));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+}
+
+/// A reconfiguring leader is exempt: its own registration *is* the next
+/// effective configuration, whatever the ledger held before — and the
+/// request it sends is flagged as one.
+#[test]
+fn a_reconfiguration_campaign_is_never_stale() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    let mut mms = registries(1);
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    assert!(requests.iter().all(|(_, r)| !r.reconfiguration));
+    for reply in matchmake(&mut mms, requests) {
+        n.on_match_reply(reply);
+    }
+    drain(&mut n);
+    n.step(promise(1, n.ballot()));
+    assert!(n.is_leader());
+    let new = cfg(&[0, 1, 3]);
+    assert!(matches!(n.reconfigure(&new), ReconfigureResult::Started(_)));
+    let b = n.ballot();
+    let requests = drain_match_requests(&mut n);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, r)| r.reconfiguration && r.config == new)
+    );
+    // The ledger names an unrelated older reconfiguration: irrelevant to a
+    // reconfiguration campaign, which completes and prepares its own target.
+    let history = BTreeMap::from([
+        belief(ballot(1, 0), &[0, 1, 2]),
+        reconfigured(ballot(2, 2), &[1, 2, 3]),
+    ]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    assert_eq!(n.role(), NodeRole::Candidate);
 }

@@ -219,3 +219,19 @@ fn a_reconfiguration_waits_for_a_settled_leadership() {
     assert!(nodes[0].is_leader());
     assert_eq!(*nodes[0].acceptors(), cfg(&[0, 1, 2, 3]));
 }
+
+/// A malformed configuration is refused at the boundary, never carried into
+/// a quorum tally that would have to panic on it.
+#[test]
+fn a_malformed_configuration_is_refused_not_carried() {
+    let (mut nodes, _mms) = deployed_cluster();
+    let mut hollow = cfg(&[0, 1]);
+    hollow.members.clear();
+    assert!(!hollow.is_well_formed());
+    assert!(cfg(&[0, 1, 3]).is_well_formed());
+    assert_eq!(
+        nodes[0].reconfigure(&hollow),
+        ReconfigureResult::Refused(ReconfigureRefusal::Malformed)
+    );
+    assert!(nodes[0].is_leader(), "nothing moved");
+}

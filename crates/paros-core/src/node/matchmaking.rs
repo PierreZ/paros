@@ -47,14 +47,23 @@
 //!   diagnostic, never adopted as a campaign hint, exactly like
 //!   [`crate::Message::Nack`]'s `promised`.
 //! - A **stale configuration**: an ordinary campaign registers the
-//!   configuration this node believes is the latest, and a node that was down
-//!   or partitioned through a reconfiguration believes an old one. When the
-//!   returned history names a *newer* configuration than the one just
-//!   registered, the candidate abandons the campaign, adopts the newest, and
-//!   re-campaigns — so a leader change can never quietly revert a
-//!   reconfiguration. Its abandoned registration stays in the registry and is
-//!   honored by every later leader's Phase 1 (nothing was ever accepted at it,
-//!   but the registry cannot know that); GC retires it later (#123).
+//!   configuration this node believes is in force, and a node that was down
+//!   or partitioned through a reconfiguration believes an old one. The ledger
+//!   distinguishes a **reconfiguration** registration (a leader's explicit
+//!   change, [`crate::Registration::reconfiguration`]) from a candidate's
+//!   belief, and the highest-ballot reconfiguration the quorum's histories
+//!   name is the **effective configuration**. When it differs from the one an
+//!   ordinary campaign just registered, the candidate abandons the campaign,
+//!   adopts it, and re-campaigns — so a leader change can never quietly
+//!   reinstate a superseded configuration. Beliefs never trigger this:
+//!   "adopt the newest *registration*" made two candidates re-adopt each
+//!   other's abandoned beliefs and flip-flop forever, while reconfiguration
+//!   requests are monotone by ballot and never manufactured by a campaign.
+//!   Its abandoned registration stays in the registry and is honored by every
+//!   later leader's Phase 1 (nothing was ever accepted at it, but the registry
+//!   cannot know that); GC retires it later (#123) — and must never retire
+//!   the highest reconfiguration registration, the effective configuration's
+//!   only durable record.
 //! - **Lost replies** are the driver's business: [`super::RawNode::resend_matchmaking`]
 //!   re-queues the request for every matchmaker that has not answered, and
 //!   skipping the call is always safe — the matchmaker answers a repeated
@@ -62,7 +71,9 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{BTreeMap, BTreeSet, Ballot, NodeId};
-use crate::matchmaker::{AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchmakerId};
+use crate::matchmaker::{
+    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchmakerId, Registration,
+};
 
 /// Volatile per-ballot matchmaking state while a Candidate registers its
 /// configuration and collects the prior ones.
@@ -85,6 +96,11 @@ pub(super) struct Matchmaking {
     /// and rather than assert on wire input the union keeps *both* — Phase 1
     /// then needs a quorum of each, which is always safe.
     pub(super) history: BTreeMap<Ballot, Vec<AcceptorConfig>>,
+    /// The highest-ballot **reconfiguration** registration any reply named:
+    /// the effective configuration below this ballot (see
+    /// [`crate::Registration`]). `None` when no reply named one — the
+    /// bootstrap configuration is then the only one ever in force.
+    pub(super) effective: Option<(Ballot, AcceptorConfig)>,
     /// The **maximum** reported GC watermark (§3.2's `w = max(w, ...)`):
     /// entries below it are excluded from `H_b`.
     pub(super) watermark: Ballot,
@@ -121,6 +137,14 @@ pub enum MatchStep {
     /// A matchmaker refused the registration: the campaign is abandoned and
     /// this node is a follower again.
     Refused(MatchRefusal),
+    /// The quorum's histories named a reconfiguration to a configuration
+    /// other than the one this ordinary campaign registered: the belief was
+    /// stale. The campaign is abandoned, the effective configuration adopted
+    /// as this node's belief, and the next campaign registers it.
+    StaleConfiguration {
+        /// The ballot the effective configuration was registered under.
+        newest: Ballot,
+    },
 }
 
 impl Matchmaking {
@@ -132,6 +156,7 @@ impl Matchmaking {
             reconfiguration,
             registered_by: BTreeSet::new(),
             history: BTreeMap::new(),
+            effective: None,
             watermark: Ballot::zero(),
             disagreements: 0,
         }
@@ -148,13 +173,25 @@ impl Matchmaking {
     pub(super) fn fold(
         &mut self,
         matchmaker: MatchmakerId,
-        history: BTreeMap<Ballot, AcceptorConfig>,
+        history: BTreeMap<Ballot, Registration>,
         watermark: Ballot,
     ) -> bool {
         if !self.registered_by.insert(matchmaker) {
             return false;
         }
-        for (ballot, config) in history {
+        for (ballot, registration) in history {
+            let Registration {
+                config,
+                reconfiguration,
+            } = registration;
+            if reconfiguration
+                && self
+                    .effective
+                    .as_ref()
+                    .is_none_or(|(newest, _)| ballot > *newest)
+            {
+                self.effective = Some((ballot, config.clone()));
+            }
             let entry = self.history.entry(ballot).or_default();
             if !entry.contains(&config) {
                 if !entry.is_empty() {
@@ -182,11 +219,27 @@ impl Matchmaking {
         }
         prior
     }
+
+    /// The stale-belief signal: the effective configuration the quorum's
+    /// histories name, when this is an ordinary campaign that registered
+    /// something else. A reconfiguration campaign is exempt — it *is* the
+    /// next effective configuration. `None` when no reconfiguration was ever
+    /// registered below this ballot, or the belief already matches it.
+    pub(super) fn stale_belief(&self) -> Option<(Ballot, AcceptorConfig)> {
+        if self.reconfiguration {
+            return None;
+        }
+        let (newest, config) = self.effective.as_ref()?;
+        if *config == self.config {
+            return None;
+        }
+        Some((*newest, config.clone()))
+    }
 }
 
 /// What one matchmaker answered: the history and watermark of a
 /// registration, or the refusal.
-pub(super) type MatchAnswer = Result<(BTreeMap<Ballot, AcceptorConfig>, Ballot), MatchRefusal>;
+pub(super) type MatchAnswer = Result<(BTreeMap<Ballot, Registration>, Ballot), MatchRefusal>;
 
 /// Decode one reply into the answer the campaign folds.
 pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, MatchAnswer) {

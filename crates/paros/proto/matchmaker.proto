@@ -37,11 +37,15 @@ message MatchRequest {
   uint64 from = 1;
   Ballot ballot = 2;
   AcceptorConfig config = 3;
+  // Whether this registers a reconfiguration (a leader's explicit change)
+  // rather than a candidate's belief about the configuration in force.
+  bool reconfiguration = 4;
 }
 
 message Registration {
   Ballot ballot = 1;
   AcceptorConfig config = 2;
+  bool reconfiguration = 3;
 }
 
 // The successful answer: every registration strictly below the request's
