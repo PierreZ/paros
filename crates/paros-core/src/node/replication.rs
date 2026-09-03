@@ -90,6 +90,13 @@ impl RawNode {
                 self.hard_state.max_promised_ballot <= ballot,
                 "a beat ack never claims a promise above the acked ballot"
             );
+            // The chosen index rides the ack on a matchmaker deployment only
+            // (#123's GC counts it); a plain deployment's ack is unchanged.
+            let chosen = self
+                .config
+                .has_matchmakers()
+                .then_some(self.hard_state.chosen_index)
+                .flatten();
             self.pending_messages.push((
                 from,
                 Message::HeartbeatAck {
@@ -97,6 +104,7 @@ impl RawNode {
                     from: me,
                     ballot,
                     seq,
+                    chosen,
                 },
             ));
         }
@@ -151,7 +159,13 @@ impl RawNode {
     /// about leadership after the round began, so it never counts. Stale or
     /// cross-ballot acks are dropped whole.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, seq)))]
-    pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
+    pub(super) fn on_heartbeat_ack(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        seq: u64,
+        chosen: Option<Slot>,
+    ) {
         // Quorum sets are keyed by NodeId, over the **active configuration**:
         // a beat reaches the whole pool, but only a member's ack may count
         // toward a read round or the `CheckQuorum` window (a joining acceptor
@@ -171,5 +185,7 @@ impl RawNode {
             }
         }
         self.try_confirm_reads();
+        // The GC fence tally (#123): a configured member's chosen index.
+        self.note_peer_chosen(from, chosen);
     }
 }

@@ -56,6 +56,7 @@ fn registered_with(
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
         ballot,
+        generation: MatchmakerGeneration(0),
         outcome: MatchOutcome::Registered {
             history,
             gc_watermark: wm,
@@ -170,7 +171,12 @@ fn a_refused_registration_never_becomes_a_leadership() {
     let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
     let mut mms = registries(3);
     // Another proposer is already registered above us everywhere.
-    let above = MatchRequest::new(NodeId(1), ballot(7, 1), cfg(&[0, 1, 2]));
+    let above = MatchRequest::new(
+        NodeId(1),
+        ballot(7, 1),
+        cfg(&[0, 1, 2]),
+        MatchmakerGeneration(0),
+    );
     for mm in &mut mms {
         mm.step(above.clone());
         mm.ready().advance();

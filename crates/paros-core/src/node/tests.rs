@@ -9,8 +9,8 @@ use super::{
     ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerId,
-    Registration,
+    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, Registration,
 };
 use crate::message::Message;
 use crate::state::{Config, HardState};
@@ -42,6 +42,7 @@ impl TestStorage {
                 quorum_system: crate::state::QuorumSystem::Majority,
                 nodes: Vec::new(),
                 matchmakers: Vec::new(),
+                matchmaker_pool: Vec::new(),
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
@@ -131,7 +132,15 @@ fn matchmake(
 /// Fresh in-memory registries, `MatchmakerId(0..n)`.
 fn registries(n: u64) -> Vec<Matchmaker> {
     (0..n)
-        .map(|i| Matchmaker::new(MatchmakerId(i), &MemRegistry))
+        .map(|i| {
+            Matchmaker::new(
+                &MatchmakerConfig {
+                    id: MatchmakerId(i),
+                    bootstrap: (0..n).map(MatchmakerId).collect(),
+                },
+                &MemRegistry,
+            )
+        })
         .collect()
 }
 

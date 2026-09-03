@@ -5,6 +5,7 @@ mod acceptor;
 mod catch_up_snapshot;
 mod decide_apply;
 mod election;
+mod gc;
 mod handoff;
 mod helpers;
 mod matchmaking;
@@ -16,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use self::decide_apply::Proposing;
 use self::election::{Election, LeaderRecovery, RepairProbe};
+use self::gc::GcState;
+pub use self::gc::GcStep;
 pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
@@ -24,7 +27,10 @@ use self::matchmaking::Matchmaking;
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 use self::replication::HEARTBEAT_TICKS;
-use crate::matchmaker::{AcceptorConfig, MatchRefusal, MatchReply, MatchRequest, MatchmakerId};
+use crate::matchmaker::{
+    AcceptorConfig, GcRequest, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
+    MatchmakerId, MatchmakerSet,
+};
 use crate::message::Message;
 use crate::ready::Ready;
 use crate::state::{Config, HardState};
@@ -266,6 +272,19 @@ pub struct RawNode {
     /// the matchmaker contract is its own RPC service, spoken only by a
     /// deployment that names matchmakers.
     pending_match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    /// Garbage-collection requests to send this batch (#123), drained via
+    /// [`Ready::gc_requests`] over the same matchmaker wire.
+    pending_gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    /// The matchmaker set this node believes authoritative (#125): the
+    /// bootstrap set at generation 0 on boot, moved forward by a refusal
+    /// naming a successor, by a matchmaker-set reconfiguration this node
+    /// drove, or by a reply from a later generation. Volatile: a fresh
+    /// incarnation walks the successor chain from the bootstrap set again.
+    /// Empty members on plain Multi-Paxos, always.
+    matchmakers: MatchmakerSet,
+    /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
+    /// Leader-only, volatile, `None` on plain Multi-Paxos.
+    gc: Option<GcState>,
     /// Monotone campaign-phase counters this incarnation, for the driver's
     /// audit report: campaigns this node declined to open because it is not
     /// a member of the configuration it would register, and leaderships it
@@ -452,6 +471,14 @@ impl RawNode {
             );
         }
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
+        let matchmakers = MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone());
+        assert!(
+            config
+                .matchmakers
+                .iter()
+                .all(|m| config.matchmaker_pool().binary_search(m).is_ok()),
+            "the bootstrap matchmaker set is drawn from the matchmaker pool"
+        );
         let ballot = hard_state.max_promised_ballot;
 
         // Rebuild the working accepted log by scanning the durable per-slot log
@@ -610,6 +637,9 @@ impl RawNode {
             proposer: BTreeMap::new(),
             matchmaking: None,
             pending_match_requests: Vec::new(),
+            pending_gc_requests: Vec::new(),
+            matchmakers,
+            gc: None,
             non_member_campaigns_skipped: 0,
             non_member_step_downs: 0,
             round_floor: 0,
@@ -729,7 +759,12 @@ impl RawNode {
         // The deployment couplings: plain Multi-Paxos never matchmakes and
         // never leaves its bootstrap configuration; a matchmaker deployment
         // runs Phase 2 under a configuration drawn from the pool.
-        if !self.config.has_matchmakers() {
+        if self.config.has_matchmakers() {
+            assert!(
+                !self.matchmakers.members.is_empty(),
+                "a matchmaker deployment always believes in a matchmaker set"
+            );
+        } else {
             assert!(
                 self.matchmaking.is_none(),
                 "a plain deployment never opens a matchmaking phase"
@@ -741,6 +776,20 @@ impl RawNode {
             assert!(
                 self.acceptors_since == Ballot::zero(),
                 "a plain deployment's configuration is bound to no ballot"
+            );
+            assert!(
+                self.matchmakers.members.is_empty(),
+                "a plain deployment names no matchmaker set"
+            );
+            assert!(
+                self.gc.is_none(),
+                "a plain deployment never opens a GC campaign"
+            );
+        }
+        if self.gc.is_some() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds an open GC campaign"
             );
         }
         assert!(
@@ -981,9 +1030,13 @@ impl RawNode {
                 ..
             } => self.on_heartbeat(from, ballot, commit, seq, config),
             Message::HeartbeatAck {
-                from, ballot, seq, ..
+                from,
+                ballot,
+                seq,
+                chosen,
+                ..
             } => {
-                self.on_heartbeat_ack(from, ballot, seq);
+                self.on_heartbeat_ack(from, ballot, seq, chosen);
             }
             // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
             // driver's repair layer owns these end to end and normally
@@ -1386,6 +1439,9 @@ impl RawNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
+        // The GC preconditions can become true without a message (the last
+        // inherited round decided on this tick's re-send): re-check per tick.
+        self.try_gc();
         self.assert_invariants();
     }
 
@@ -1558,14 +1614,15 @@ impl RawNode {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
+        let generation = self.matchmakers.generation;
         let request = if m.reconfiguration {
-            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone())
+            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone(), generation)
         } else {
-            MatchRequest::new(self.config.id, m.ballot, m.config.clone())
+            MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
         };
         let unanswered: Vec<MatchmakerId> = self
-            .config
             .matchmakers
+            .members
             .iter()
             .copied()
             .filter(|mm| !m.registered_by.contains(mm))
@@ -1597,9 +1654,10 @@ impl RawNode {
 
     /// Fold one matchmaker's answer into the open matchmaking phase — the
     /// leader-side half of the matchmaker contract (#120). A reply for another
-    /// ballot, another node, or a matchmaker that already answered is ignored
-    /// whole (wire input, never asserted). Returns what the reply did, so the
-    /// driver can report the transition it caused.
+    /// ballot, another node, another generation, or a matchmaker that already
+    /// answered (or is outside the believed set) is ignored whole (wire
+    /// input, never asserted). Returns what the reply did, so the driver can
+    /// report the transition it caused.
     ///
     /// - `Registered`: the history is unioned and the watermark maxed; once a
     ///   **quorum of matchmakers** has registered the ballot, `H_b` is
@@ -1612,26 +1670,33 @@ impl RawNode {
     ///   superseded configuration from being reinstated by a candidate that
     ///   missed the change (see [`crate::Registration`]).
     /// - `Refused`: the campaign is abandoned and this node steps back to
-    ///   follower; the refusal's payload is diagnostic only. A refused
+    ///   follower; a refusal's ballot is diagnostic only (a `Stale` or
+    ///   `BelowWatermark` refusal raises the round floor the next campaign
+    ///   opens above). A refusal naming a **chosen successor set** (#125:
+    ///   `Stopped { successor }`, or `Generation` from a later generation) is
+    ///   adopted through [`RawNode::learn_matchmakers`] and reported as
+    ///   `Superseded`; the next campaign asks the new set. A refused
     ///   registration never becomes a leadership (invariant 4).
     ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[allow(clippy::too_many_lines)]
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        let generation = reply.generation;
         let (matchmaker, to, ballot, answer) = matchmaking::split_reply(reply);
         let me = self.config.id;
-        if to != me || !self.config.matchmakers.contains(&matchmaker) {
+        if to != me || !self.matchmakers.contains(matchmaker) {
             return MatchStep::Ignored;
         }
-        let quorum = Matchmaking::quorum(self.config.matchmakers.len());
+        let quorum = self.matchmakers.quorum_size();
         let step = {
             let Some(m) = self.matchmaking.as_mut() else {
                 return MatchStep::Ignored;
             };
-            if m.ballot != ballot {
+            if m.ballot != ballot || generation != self.matchmakers.generation {
                 return MatchStep::Ignored;
             }
             match answer {
@@ -1698,13 +1763,39 @@ impl RawNode {
                     }
                 }
                 Err(refusal) => {
-                    if let MatchRefusal::Stale { highest } = refusal {
-                        // The next campaign opens above the round that
-                        // refused this one (see `round_floor`).
-                        self.round_floor = self.round_floor.max(highest.round);
+                    match &refusal {
+                        MatchRefusal::Stale { highest } => {
+                            // The next campaign opens above the round that
+                            // refused this one (see `round_floor`).
+                            self.round_floor = self.round_floor.max(highest.round);
+                        }
+                        MatchRefusal::BelowWatermark { watermark } => {
+                            // A collected round is never campaigned again: the
+                            // next one opens above the floor (#123 — a
+                            // partitioned leader that outlived a GC recovers by
+                            // campaigning higher).
+                            self.round_floor = self.round_floor.max(watermark.round);
+                        }
+                        MatchRefusal::Stopped { .. }
+                        | MatchRefusal::Generation { .. }
+                        | MatchRefusal::Inactive => {}
                     }
+                    let successor = match &refusal {
+                        MatchRefusal::Stopped {
+                            successor: Some(set),
+                        } => Some(set.clone()),
+                        MatchRefusal::Generation { current }
+                            if current.generation > self.matchmakers.generation =>
+                        {
+                            Some(current.clone())
+                        }
+                        _ => None,
+                    };
                     self.become_follower(None);
-                    MatchStep::Refused(refusal)
+                    match successor {
+                        Some(set) if self.learn_matchmakers(&set) => MatchStep::Superseded { set },
+                        _ => MatchStep::Refused(refusal),
+                    }
                 }
             }
         };
@@ -1712,7 +1803,9 @@ impl RawNode {
         // left nothing Phase-1-shaped behind, and a completed one
         // closed the matchmaking phase before opening Phase 1.
         match &step {
-            MatchStep::Refused(_) | MatchStep::StaleConfiguration { .. } => {
+            MatchStep::Refused(_)
+            | MatchStep::StaleConfiguration { .. }
+            | MatchStep::Superseded { .. } => {
                 assert!(
                     self.role == NodeRole::Follower,
                     "a refused registration never becomes a leadership"
@@ -1875,6 +1968,13 @@ impl RawNode {
         self.needs_election_timeout = false;
     }
 
+    /// The election timeout in force (in ticks; zero until the driver set
+    /// one) — the unit the driver paces its other timeouts in.
+    #[must_use]
+    pub fn election_timeout(&self) -> u64 {
+        self.election_timeout
+    }
+
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
     /// the unique `&mut` borrow, so a second `ready()` before [`Ready::advance`]
     /// is a **compile error**.
@@ -1940,6 +2040,54 @@ impl RawNode {
     #[must_use]
     pub fn matchmaking_disagreements(&self) -> u64 {
         self.matchmaking.as_ref().map_or(0, |m| m.disagreements)
+    }
+
+    /// The matchmaker set this node believes authoritative (#125): the
+    /// bootstrap set at generation 0 until a later one is learned. Empty on
+    /// plain Multi-Paxos.
+    #[must_use]
+    pub fn matchmaker_set(&self) -> &MatchmakerSet {
+        &self.matchmakers
+    }
+
+    /// Adopt `set` as the authoritative matchmaker set if it is a strictly
+    /// later generation than the one believed (#125): a refusal naming a
+    /// successor, a reconfiguration this node's driver completed, or a reply
+    /// from a later generation. An open matchmaking against the superseded
+    /// set is abandoned (the next election timeout re-campaigns against the
+    /// new one), a pending GC tally starts over, and a plain deployment never
+    /// moves (it has no generation to move). Returns whether the belief
+    /// moved.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, generation = set.generation.0)))]
+    pub fn learn_matchmakers(&mut self, set: &MatchmakerSet) -> bool {
+        if !self.config.has_matchmakers()
+            || set.generation <= self.matchmakers.generation
+            || set.members.is_empty()
+        {
+            return false;
+        }
+        // Wire hygiene: a set naming a matchmaker outside the pool is not one
+        // this deployment can reach; ignore it whole.
+        if !set
+            .members
+            .iter()
+            .all(|m| self.config.matchmaker_pool().binary_search(m).is_ok())
+        {
+            return false;
+        }
+        self.matchmakers = MatchmakerSet::new(set.generation, set.members.clone());
+        if self.matchmaking.is_some() {
+            // The registrations collected so far were for a replaced
+            // generation; a stopped quorum will never complete them.
+            self.become_follower(None);
+        }
+        self.reset_gc_for_generation();
+        self.assert_invariants();
+        true
     }
 
     /// The current durable scalars (promised ballot + chosen index).
@@ -2171,6 +2319,10 @@ impl RawNode {
         &self.pending_match_requests
     }
 
+    pub(crate) fn pending_gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
+        &self.pending_gc_requests
+    }
+
     pub(crate) fn pending_recovery_batch(&self) -> Option<(usize, usize, usize)> {
         self.pending_recovery_batch
     }
@@ -2182,6 +2334,7 @@ impl RawNode {
         self.pending_snapshot_offers.clear();
         self.pending_read_states.clear();
         self.pending_match_requests.clear();
+        self.pending_gc_requests.clear();
         self.pending_recovery_batch = None;
     }
 }

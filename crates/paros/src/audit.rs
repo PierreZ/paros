@@ -18,8 +18,9 @@
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
 use paros_core::{
-    AcceptorConfig, Ballot, Handoff, MatchRefusal, MatchmakerId, Message, NodeId,
-    ReconfigureResult, Registration, Slot,
+    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, Slot,
 };
 
 use crate::grpc::EdgeRejection;
@@ -46,8 +47,11 @@ pub struct Deployment {
     pub bootstrap: AcceptorConfig,
     /// Every node that may ever be an acceptor (`Config::pool()`).
     pub pool: Vec<NodeId>,
-    /// The matchmaker set (`Config::matchmakers`).
+    /// The bootstrap matchmaker set (`Config::matchmakers`).
     pub matchmakers: Vec<MatchmakerId>,
+    /// Every matchmaker a matchmaker-set reconfiguration may draw from
+    /// (`Config::matchmaker_pool()`).
+    pub matchmaker_pool: Vec<MatchmakerId>,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
@@ -374,6 +378,7 @@ pub trait Audit {
         ballot: Ballot,
         config: &AcceptorConfig,
         reconfiguration: bool,
+        generation: u64,
     ) {
     }
 
@@ -453,18 +458,156 @@ pub trait Audit {
     /// (started at a fresh ballot, refused with a reason, or redirected).
     fn reconfigure_acked(&self, node: NodeId, members: &[NodeId], result: ReconfigureResult) {}
 
+    // ---- garbage collection (#123) ------------------------------------------
+
+    /// This leader handed a garbage-collection request to the transport,
+    /// addressed to `matchmaker`, asking `generation`'s registry to raise its
+    /// floor to `watermark` (the leader's own ballot) — the first send or a
+    /// re-send. Fires only once the forgettability condition held
+    /// (`fence` is the election fence a quorum of the configuration in
+    /// force reported holding).
+    fn gc_request_sent(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        generation: u64,
+        watermark: Ballot,
+        fence: Option<Slot>,
+    ) {
+    }
+
+    /// This leader deliberately skipped re-sending its open GC request this
+    /// beat ([`DriverHooks::skip_gc_resend`](crate::DriverHooks)).
+    fn gc_resend_skipped(&self, node: NodeId) {}
+
+    /// This leader folded `matchmaker`'s GC ack: what it did to the campaign
+    /// — one more ack, or the quorum that makes the floor effective and
+    /// names the retirable acceptors.
+    fn gc_step(&self, node: NodeId, matchmaker: MatchmakerId, ack: &GcAck, step: &GcStep) {}
+
+    // ---- the matchmaker set and its reconfiguration (#125) ------------------
+
+    /// This node adopted `set` as the authoritative matchmaker set (a
+    /// refusal naming a chosen successor, a reply from a later generation, or
+    /// a handover this node drove to completion).
+    fn matchmakers_learned(&self, node: NodeId, set: &MatchmakerSet) {}
+
+    /// This node started a matchmaker-set reconfiguration from `old` toward
+    /// `target` (a client `ReconfigureMatchmakers`, or a frozen registry
+    /// without a successor that this node finishes on its own).
+    fn reconfigurer_started(&self, node: NodeId, old: &MatchmakerSet, target: &[MatchmakerId]) {}
+
+    /// This node answered a client `ReconfigureMatchmakers` request: started
+    /// (`refusal` empty) or refused for `refusal`.
+    fn reconfigure_matchmakers_acked(&self, node: NodeId, refusal: &'static str) {}
+
+    /// This node's reconfigurer handed `request` to the transport, addressed
+    /// to `matchmaker` (the first send or a re-send).
+    fn reconfigure_request_sent(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        request: &ReconfigureRequest,
+    ) {
+    }
+
+    /// This node deliberately skipped re-sending its running handover's
+    /// requests this beat ([`DriverHooks::skip_reconfigurer_resend`](crate::DriverHooks)).
+    fn reconfigurer_resend_skipped(&self, node: NodeId) {}
+
+    /// This node abandoned a handover whose running phase made no progress
+    /// for `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (a member that
+    /// never answers); the frozen generation stays for the next node that
+    /// meets it to finish.
+    fn reconfigurer_aborted(&self, node: NodeId) {}
+
+    /// This node's successor decree was preempted and it will wait `ticks`
+    /// (a jittered draw) before reopening at a higher ballot.
+    fn reconfigurer_backoff(&self, node: NodeId, ticks: u64) {}
+
+    /// This node's reconfigurer folded `reply` from `matchmaker`: what it did
+    /// to the handover.
+    fn reconfigurer_step(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        reply: &ReconfigureReply,
+        step: &ReconfigurerStep,
+    ) {
+    }
+
+    /// This node told `matchmaker` — a straggler that answered `Inactive`
+    /// or from a lower generation — the chosen `successor` it knows.
+    fn successor_republished(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        successor: &MatchmakerSet,
+    ) {
+    }
+
+    /// This node answered an operator `Retire` request: accepted (the node
+    /// shuts down for good at its next tick) or refused because it is still
+    /// a member of the configuration it believes in force.
+    fn retire_acked(&self, node: NodeId, accepted: bool) {}
+
+    /// This node is shutting down for good, retired by its operator after a
+    /// leader's garbage collection named it retirable.
+    fn retired(&self, node: NodeId) {}
+
     // ---- the matchmaker (`run_matchmaker`), a distinct role and namespace ----
 
-    /// This matchmaker (re)booted from its durable registry: every
-    /// `(ballot, configuration)` it read back, and its watermark. Fires on
-    /// the first boot (an empty registry) and on every restart.
+    /// This matchmaker (re)booted from its durable registry: the set it is
+    /// active or frozen for and its phase, every `(ballot, configuration)` it
+    /// read back, and its watermark. Fires on the first boot (an empty
+    /// registry) and on every restart.
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        phase: MatchmakerPhase,
         registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
     }
+
+    /// This matchmaker durably persisted its generation scalars whole (after
+    /// the fsync): a freeze, a successor link, a decree promise or vote, a
+    /// pending bootstrap (#125).
+    fn matchmaker_scalars_persisted(
+        &self,
+        matchmaker: MatchmakerId,
+        scalars: &MatchmakerHardState,
+    ) {
+    }
+
+    /// This matchmaker durably activated a successor generation (after the
+    /// fsync): `set` is the new set, `gc_watermark` the reconstructed floor,
+    /// and `registry` the reconstructed registry it now serves from.
+    fn matchmaker_activated(
+        &self,
+        matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        gc_watermark: Ballot,
+        registry: &[(Ballot, Registration)],
+    ) {
+    }
+
+    /// This matchmaker is answering a reconfiguration `request` with `reply`.
+    /// Reported at the instant the reply leaves — after the batch's fsync
+    /// and its durable reports.
+    fn matchmaker_reconfigure_replied(
+        &self,
+        matchmaker: MatchmakerId,
+        request: &ReconfigureRequest,
+        reply: &ReconfigureReply,
+    ) {
+    }
+
+    /// This matchmaker is answering a GC request with `ack` (applied, or
+    /// refused for a generation it is not active for). Reported at the
+    /// instant the ack leaves, after the raise's fsync and its report.
+    fn matchmaker_gc_replied(&self, matchmaker: MatchmakerId, ack: &GcAck) {}
 
     /// This matchmaker durably registered `config` under `ballot` (after the
     /// fsync).
@@ -482,7 +625,8 @@ pub trait Audit {
 
     /// This matchmaker is answering `to`'s request for `ballot` with a
     /// registration: `history` is every `(ballot, registration)` the reply
-    /// names and `gc_watermark` the floor it reports. Reported at the instant
+    /// names, `generation` the matchmaker set the reply speaks for, and
+    /// `gc_watermark` the floor it reports. Reported at the instant
     /// the reply leaves — after the registration's fsync and its
     /// [`Audit::match_registered`] report, which is what lets a checker judge
     /// persist-before-reply.
@@ -491,6 +635,7 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
+        generation: u64,
         history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
@@ -510,10 +655,11 @@ pub trait Audit {
     /// This matchmaker crashed at a durability `seam` inside one batch.
     fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
 
-    /// The driver deliberately dropped one matchmaker reply after the
-    /// registration was durable ([`DriverHooks::drop_client_reply`] with
-    /// [`Reply::Match`](crate::Reply::Match)).
-    fn match_reply_dropped(&self, matchmaker: MatchmakerId) {}
+    /// The driver deliberately dropped one matchmaker reply after its write
+    /// was durable ([`DriverHooks::drop_client_reply`] with
+    /// [`Reply::Match`](crate::Reply::Match), [`Reply::GcAck`](crate::Reply::GcAck)
+    /// or [`Reply::MatchmakerReconfigure`](crate::Reply::MatchmakerReconfigure)).
+    fn match_reply_dropped(&self, matchmaker: MatchmakerId, reply: crate::hooks::Reply) {}
 
     /// A [`MatchmakerStorage`](crate::MatchmakerStorage) call surfaced `error`
     /// and the driver decided `decision` (see [`Audit::storage_fault`]).

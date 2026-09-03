@@ -25,10 +25,12 @@ use moonpool_core::{
 };
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, HandoffCounters,
-    LeadershipOrigin, MatchReply, MatchRequest, MatchStep, MatchmakerId, Message, NodeId, NodeRole,
-    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
-    ReconfigureResult, SessionEntry, Slot, Value, WriteOp,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, GcAck, GcRequest,
+    HandoffCounters, LeadershipOrigin, MatchRefusal, MatchReply, MatchRequest, MatchStep,
+    MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, NodeRole,
+    ProposeResult, QuorumSystem, RECONFIGURE_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult,
+    ReadState, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
+    ReconfigurerStep, SessionEntry, Slot, StartRefusal, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::mpsc;
@@ -37,10 +39,13 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::{Audit, Deployment, StorageFaultDecision};
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
-    ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReplySender, RpcInbox, internal,
-    match_reply_from_wire, message_to_proto, rpc_channel, wire_checksum, wire_match_request,
+    ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, ReplySender,
+    RetireAck, RpcInbox, garbage_collect_ack_from_wire, internal, match_reply_from_wire,
+    message_to_proto, reconfigure_reply_from_wire, rpc_channel, wire_checksum,
+    wire_garbage_collect, wire_match_request, wire_reconfigure_request,
 };
 use crate::hooks::{DriverHooks, HandoffContext, Reply, Seam};
+use crate::matchmaker::reconfigure_kind;
 use crate::storage::{NodeStorage, StorageError};
 
 /// How often a node advances its logical clock.
@@ -1646,7 +1651,7 @@ fn drain_ready<S, H, A>(
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
-) -> Result<Vec<(MatchmakerId, MatchRequest)>, RunError>
+) -> Result<Outbox, RunError>
 where
     S: NodeStorage,
     H: DriverHooks,
@@ -1686,7 +1691,11 @@ where
     // peer messages (the candidate's promise raise is in this batch) and are
     // handed back to the loop, which owns the matchmaker links.
     let match_requests: Vec<(MatchmakerId, MatchRequest)> = ready.match_requests().to_vec();
+    // The GC requests (#123) ride the same edge: the leader's own fence
+    // tally decided them, and they leave only with the batch.
+    let gc_requests: Vec<(MatchmakerId, GcRequest)> = ready.gc_requests().to_vec();
     ready.advance();
+    let gc_fence = node.gc_fence();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
     //    surface the persisted state for the safety + recovery oracles. The
@@ -1737,6 +1746,7 @@ where
     if (!writes.is_empty()
         || !messages.is_empty()
         || !match_requests.is_empty()
+        || !gc_requests.is_empty()
         || snapshot_offer_count > 0)
         && hooks.crash_at(Seam::AfterSyncBeforeSend)
     {
@@ -1883,7 +1893,11 @@ where
     // I/O the async driver is still performing.
     node.advance_recovery();
 
-    Ok(match_requests)
+    Ok(Outbox {
+        match_requests,
+        gc_requests,
+        gc_fence,
+    })
 }
 
 /// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
@@ -2230,6 +2244,7 @@ struct Deltas {
     membership: (u64, u64),
     matchmaking: Option<Ballot>,
     matchmaking_timeouts: u64,
+    matchmaker_generation: u64,
 }
 
 /// The driver's **matchmaker links** (#120): one reconnecting channel per
@@ -2240,8 +2255,165 @@ struct MatchmakerLinks<P: Providers> {
     clients:
         BTreeMap<MatchmakerId, ParosMatchmakerClient<ReconnectingChannel<P, tonic::body::Body>>>,
     replies: mpsc::Sender<MatchReply>,
+    gc_acks: mpsc::Sender<GcAck>,
+    reconfigure_replies: mpsc::Sender<ReconfigureReply>,
     timeout: Duration,
     shutdown: CancellationToken,
+}
+
+/// What one drained batch hands the loop to send over the matchmaker wire
+/// (the loop owns the links, the drain owns the persist-before-send edge).
+struct Outbox {
+    match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    /// The election fence the GC requests were licensed by (audit context).
+    gc_fence: Option<Slot>,
+}
+
+/// Send one batch's matchmaker-wire requests.
+fn send_outbox<P: Providers, A: Audit>(
+    providers: &P,
+    links: &MatchmakerLinks<P>,
+    audit: &A,
+    self_id: u64,
+    outbox: Outbox,
+) {
+    send_match_requests(providers, links, audit, self_id, outbox.match_requests);
+    send_gc_requests(
+        providers,
+        links,
+        audit,
+        self_id,
+        outbox.gc_requests,
+        outbox.gc_fence,
+    );
+}
+
+/// Send one batch of garbage-collection requests (#123), each as its own RPC
+/// task whose ack is fed back into the node loop through the ack inbox.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
+fn send_gc_requests<P: Providers, A: Audit>(
+    providers: &P,
+    links: &MatchmakerLinks<P>,
+    audit: &A,
+    self_id: u64,
+    requests: Vec<(MatchmakerId, GcRequest)>,
+    fence: Option<Slot>,
+) {
+    for (matchmaker, request) in requests {
+        let Some(client) = links.clients.get(&matchmaker) else {
+            tracing::warn!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                "unknown matchmaker"
+            );
+            continue;
+        };
+        audit.gc_request_sent(
+            NodeId(self_id),
+            matchmaker,
+            request.generation.0,
+            request.watermark,
+            fence,
+        );
+        tracing::info!(
+            node = self_id,
+            matchmaker = matchmaker.0,
+            generation = request.generation.0,
+            round = request.watermark.round,
+            fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+            "gc_request_sent"
+        );
+        let mut client = client.clone();
+        let acks = links.gc_acks.clone();
+        let time = providers.time().clone();
+        let timeout = links.timeout;
+        let shutdown = links.shutdown.clone();
+        let wire = wire_garbage_collect(&request);
+        providers
+            .task()
+            .spawn_task("paros-gc-request", async move {
+                let answer = moonpool_core::select! {
+                    biased;
+                    () = shutdown.cancelled() => return,
+                    result = time.timeout(timeout, client.garbage_collect(wire)) => result,
+                };
+                match answer {
+                    Ok(Ok(response)) => {
+                        match garbage_collect_ack_from_wire(response.into_inner()) {
+                            Ok(ack) => {
+                                let _ = acks.send(ack).await;
+                            }
+                            Err(error) => tracing::warn!(node = self_id, error, "bad gc ack"),
+                        }
+                    }
+                    Ok(Err(status)) => {
+                        tracing::debug!(node = self_id, %status, "gc RPC failed");
+                    }
+                    Err(_) => tracing::debug!(node = self_id, "gc RPC timed out"),
+                }
+            })
+            .detach();
+    }
+}
+
+/// Send one batch of matchmaker-reconfiguration requests (#125), each as its
+/// own RPC task whose reply is fed back into the node loop.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
+fn send_reconfigure_requests<P: Providers, A: Audit>(
+    providers: &P,
+    links: &MatchmakerLinks<P>,
+    audit: &A,
+    self_id: u64,
+    requests: Vec<(MatchmakerId, ReconfigureRequest)>,
+) {
+    for (matchmaker, request) in requests {
+        let Some(client) = links.clients.get(&matchmaker) else {
+            tracing::warn!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                "unknown matchmaker"
+            );
+            continue;
+        };
+        audit.reconfigure_request_sent(NodeId(self_id), matchmaker, &request);
+        tracing::info!(
+            node = self_id,
+            matchmaker = matchmaker.0,
+            kind = reconfigure_kind(&request),
+            "reconfigure_request_sent"
+        );
+        let mut client = client.clone();
+        let replies = links.reconfigure_replies.clone();
+        let time = providers.time().clone();
+        let timeout = links.timeout;
+        let shutdown = links.shutdown.clone();
+        let wire = wire_reconfigure_request(&request);
+        providers
+            .task()
+            .spawn_task("paros-reconfigure-request", async move {
+                let answer = moonpool_core::select! {
+                    biased;
+                    () = shutdown.cancelled() => return,
+                    result = time.timeout(timeout, client.reconfigure(wire)) => result,
+                };
+                match answer {
+                    Ok(Ok(response)) => match reconfigure_reply_from_wire(response.into_inner()) {
+                        Ok(reply) => {
+                            let _ = replies.send(reply).await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(node = self_id, error, "bad reconfigure reply");
+                        }
+                    },
+                    Ok(Err(status)) => {
+                        tracing::debug!(node = self_id, %status, "reconfigure RPC failed");
+                    }
+                    Err(_) => tracing::debug!(node = self_id, "reconfigure RPC timed out"),
+                }
+            })
+            .detach();
+    }
 }
 
 /// Surface a matchmaking phase the batch just opened (#120): once per
@@ -2258,7 +2430,8 @@ fn surface_matchmaking<A: Audit>(
         && *last_matchmaking != Some(ballot)
     {
         *last_matchmaking = Some(ballot);
-        audit.matchmaking_started(NodeId(self_id), ballot, config, reconfiguration);
+        let generation = node.matchmaker_set().generation.0;
+        audit.matchmaking_started(NodeId(self_id), ballot, config, reconfiguration, generation);
         tracing::info!(
             node = self_id,
             round = ballot.round,
@@ -2384,8 +2557,19 @@ fn report_match_step<A: Audit>(
                 "matchmaking_stale_configuration"
             );
         }
+        MatchStep::Superseded { set } => {
+            audit.matchmakers_learned(NodeId(self_id), set);
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = ballot.round,
+                generation = set.generation.0,
+                members = set.members.len() as u64,
+                "matchmakers_learned"
+            );
+        }
         MatchStep::Refused(refusal) => {
-            audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, *refusal);
+            audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, refusal.clone());
             tracing::info!(
                 node = self_id,
                 matchmaker = matchmaker.0,
@@ -2434,7 +2618,7 @@ fn report_membership<A: Audit>(
 // The `last_*` parameters are the loop's cross-batch delta trackers (role,
 // #94 suppressions, `CheckQuorum` step-downs); bundling them into a struct
 // would only rename the same nine things.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
@@ -2455,6 +2639,7 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         membership: last_membership,
         matchmaking: _,
         matchmaking_timeouts: last_matchmaking_timeouts,
+        matchmaker_generation: last_generation,
     } = last;
     if node.needs_election_timeout() {
         node.set_election_timeout(draw_election_timeout(
@@ -2493,6 +2678,21 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     }
     let installed_now = report_handoff(node, last_handoff, self_id, audit);
     report_membership(node, last_membership, self_id, audit);
+    // Surface a matchmaker set learned through a path that reports nothing
+    // itself (#125): a handover this node's reconfigurer completed, a reply
+    // from a later generation.
+    let generation = node.matchmaker_set().generation.0;
+    if generation != *last_generation {
+        *last_generation = generation;
+        let set = node.matchmaker_set();
+        audit.matchmakers_learned(NodeId(self_id), set);
+        tracing::info!(
+            node = self_id,
+            generation,
+            members = set.members.len() as u64,
+            "matchmakers_learned"
+        );
+    }
     // Surface an election timeout that re-asked an open matchmaking (#120)
     // instead of abandoning it: the campaign's ballot travels with it so the
     // audit can hold the clock to "moved nothing".
@@ -2645,6 +2845,7 @@ fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         bootstrap: AcceptorConfig::new(node.config().peers.clone(), node.config().quorum_system),
         pool: node.config().pool().to_vec(),
         matchmakers: node.config().matchmakers.clone(),
+        matchmaker_pool: node.config().matchmaker_pool().to_vec(),
     };
     audit.recovered(
         NodeId(self_id),
@@ -2971,12 +3172,23 @@ where
             Ok((id, ParosMatchmakerClient::with_origin(channel, origin)))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let (gc_ack_tx, mut gc_acks) = mpsc::channel::<GcAck>(tunables.peer_inbox_capacity);
+    let (reconfigure_reply_tx, mut reconfigure_replies) =
+        mpsc::channel::<ReconfigureReply>(tunables.peer_inbox_capacity);
     let links = MatchmakerLinks {
         clients: matchmaker_clients,
         replies: match_reply_tx,
+        gc_acks: gc_ack_tx,
+        reconfigure_replies: reconfigure_reply_tx,
         timeout: tunables.delivery_timeout,
         shutdown: incarnation_shutdown.clone(),
     };
+    // The matchmaker-set reconfigurer (#125): idle until a client asks, or
+    // until this node meets a frozen registry nobody finished replacing.
+    let mut reconfigurer = MatchmakerReconfigurer::new(NodeId(self_id));
+    // Set by an accepted operator `Retire`: the node exits at its next tick,
+    // after the ack had a beat to leave.
+    let mut retiring = false;
 
     // `close` is terminal and shared by every clone held by tonic clients. It
     // cancels connect/backoff/keepalive work immediately when this incarnation
@@ -3026,9 +3238,18 @@ where
         membership: node.membership_counters(),
         matchmaking: None,
         matchmaking_timeouts: node.matchmaking_timeouts(),
+        matchmaker_generation: node.matchmaker_set().generation.0,
     };
     // Ticks since the open matchmaking request was last (re-)sent.
     let mut match_resend_elapsed: u64 = 0;
+    // Ticks since the open GC request / the running handover were last (re-)sent.
+    let mut gc_resend_elapsed: u64 = 0;
+    let mut reconfigure_resend_elapsed: u64 = 0;
+    // Ticks this node's preempted successor decree waits before reopening at
+    // a higher ballot: a jittered draw, so dueling reconfigurers (every node
+    // that met the same frozen generation finishes it) fall out of lockstep
+    // — the same symmetry break the election timeout's jitter provides.
+    let mut reconfigure_backoff: u64 = 0;
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -3096,9 +3317,9 @@ where
                         }
                     }
                 }
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
@@ -3123,9 +3344,9 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
@@ -3250,9 +3471,9 @@ where
                 if !snap_handled {
                     node.step(msg);
                 }
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 let _ = reply.send(());
             }
@@ -3270,10 +3491,166 @@ where
                 );
                 let step = node.on_match_reply(reply);
                 report_match_step(&node, audit, self_id, matchmaker, ballot, &step);
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                // The two straggler paths of a handover (#125), taken by
+                // whichever node meets them: a registry frozen with no
+                // successor is finished by this node (the reconfigurer's
+                // decree adopts whatever was voted, or re-chooses the same
+                // members under a fresh generation); a member left inactive
+                // or behind is told the chosen set this node already knows.
+                match &step {
+                    MatchStep::Refused(MatchRefusal::Stopped { successor: None }) if !reconfigurer.is_busy() => {
+                        let current = node.matchmaker_set().clone();
+                        if reconfigurer.finish(&current).is_ok() {
+                            audit.reconfigurer_started(NodeId(self_id), &current, &current.members);
+                            tracing::info!(
+                                node = self_id,
+                                generation = current.generation.0,
+                                target = current.members.len() as u64,
+                                finishing = true,
+                                "reconfigurer_started"
+                            );
+                            send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                        }
+                    }
+                    MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
+                        let set = node.matchmaker_set().clone();
+                        let behind = match &step {
+                            MatchStep::Refused(MatchRefusal::Generation { current }) => current.generation < set.generation,
+                            _ => true,
+                        };
+                        if behind && set.generation.0 > 0 {
+                            audit.successor_republished(NodeId(self_id), matchmaker, &set);
+                            tracing::info!(node = self_id, matchmaker = matchmaker.0, generation = set.generation.0, "successor_republished");
+                            let request = ReconfigureRequest::Chosen {
+                                from: NodeId(self_id),
+                                generation: MatchmakerGeneration(set.generation.0 - 1),
+                                successor: set,
+                            };
+                            send_reconfigure_requests(&providers, &links, audit, self_id, vec![(matchmaker, request)]);
+                        }
+                    }
+                    _ => {}
+                }
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+            }
+            Some(ack) = gc_acks.recv() => {
+                // A matchmaker's answer to this leader's GC request (#123):
+                // fold it; a quorum makes the floor effective and names the
+                // retirable acceptors (reported in the step).
+                let step = node.on_gc_ack(&ack);
+                audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
+                tracing::info!(
+                    node = self_id,
+                    matchmaker = ack.matchmaker.0,
+                    generation = ack.generation.0,
+                    applied = ack.applied,
+                    round = ack.watermark.round,
+                    step = ?step,
+                    "gc_ack_received"
+                );
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_outbox(&providers, &links, audit, self_id, outbox);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+            }
+            Some(reply) = reconfigure_replies.recv() => {
+                // A matchmaker's answer to this node's handover step (#125).
+                let matchmaker = reply.matchmaker();
+                let step = reconfigurer.on_reply(reply.clone());
+                audit.reconfigurer_step(NodeId(self_id), matchmaker, &reply, &step);
+                tracing::info!(
+                    node = self_id,
+                    matchmaker = matchmaker.0,
+                    reply = crate::matchmaker::reconfigure_reply_kind(&reply),
+                    step = ?step,
+                    "reconfigurer_step"
+                );
+                // The chosen set is authoritative the instant it is chosen —
+                // this node adopts it before its publication completes.
+                if let ReconfigurerStep::Chosen { successor }
+                | ReconfigurerStep::Done { successor }
+                | ReconfigurerStep::Superseded { successor } = &step
+                {
+                    node.learn_matchmakers(successor);
+                }
+                if let ReconfigurerStep::Preempted { .. } = &step {
+                    let base = tunables.election_timeout_base.max(1);
+                    reconfigure_backoff = providers.random().random_range(1..base * 2 + 1);
+                    audit.reconfigurer_backoff(NodeId(self_id), reconfigure_backoff);
+                    tracing::info!(node = self_id, ticks = reconfigure_backoff, "reconfigurer_backoff");
+                }
+                send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_outbox(&providers, &links, audit, self_id, outbox);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+            }
+            Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
+                // A matchmaker-set reconfiguration (#125): any node may drive
+                // it. Refusable like every operator request; a started
+                // handover runs to completion on this node's own cadence.
+                let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
+                let refusal = if !node.config().has_matchmakers() {
+                    "no_matchmakers"
+                } else if target.is_empty() {
+                    "empty"
+                } else if !target.iter().all(|m| links.clients.contains_key(m)) {
+                    "unknown_matchmaker"
+                } else {
+                    match reconfigurer.start(node.matchmaker_set(), target.clone()) {
+                        Ok(()) => "",
+                        Err(StartRefusal::Busy) => "busy",
+                        Err(StartRefusal::Empty) => "empty",
+                    }
+                };
+                let generation = node.matchmaker_set().generation.0;
+                if refusal.is_empty() {
+                    audit.reconfigurer_started(NodeId(self_id), node.matchmaker_set(), &target);
+                    tracing::info!(
+                        node = self_id,
+                        generation,
+                        target = target.len() as u64,
+                        finishing = false,
+                        "reconfigurer_started"
+                    );
+                    send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                }
+                audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
+                tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
+                if hooks.drop_client_reply(Reply::ReconfigureMatchmakers) {
+                    audit.client_reply_dropped(NodeId(self_id), Reply::ReconfigureMatchmakers);
+                    tracing::info!(node = self_id, reply = "reconfigure_matchmakers", "client_reply_dropped");
+                } else {
+                    let _ = reply.send(ReconfigureMatchmakersAck {
+                        accepted: refusal.is_empty(),
+                        refusal: refusal.to_string(),
+                        generation: refusal.is_empty().then_some(generation),
+                    });
+                }
+            }
+            Some((_req, reply)) = rpc.retire.recv() => {
+                // Operator decommissioning (#123): a node a leader's GC named
+                // retirable is shut down for good. Refused while this node is
+                // a member of the configuration it believes in force, or
+                // leads: "retirable" is never "still needed".
+                let accepted = node.config().has_matchmakers() && !node.is_acceptor() && !node.is_leader();
+                audit.retire_acked(NodeId(self_id), accepted);
+                tracing::info!(node = self_id, accepted, "retire_acked");
+                if accepted {
+                    retiring = true;
+                }
+                if hooks.drop_client_reply(Reply::Retire) {
+                    audit.client_reply_dropped(NodeId(self_id), Reply::Retire);
+                    tracing::info!(node = self_id, reply = "retire", "client_reply_dropped");
+                } else {
+                    let _ = reply.send(RetireAck {
+                        accepted,
+                        refusal: if accepted { String::new() } else { "member".to_string() },
+                    });
+                }
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An online reconfiguration (#122): the leader moves to a fresh
@@ -3310,9 +3687,9 @@ where
                     round = round.unwrap_or(0),
                     "reconfigure_acked"
                 );
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
@@ -3400,9 +3777,9 @@ where
                     }
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
@@ -3415,6 +3792,13 @@ where
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
                 let since = node.acceptors_since();
+                let set = node.matchmaker_set();
+                let (gc_watermark, retirable) = node.gc_effective().map_or((None, Vec::new()), |(w, retired)| {
+                    (
+                        Some(internal::Ballot { round: w.round, node: w.node.0 }),
+                        retired.iter().map(|n| n.0).collect(),
+                    )
+                });
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.first_slot().0,
@@ -3422,6 +3806,10 @@ where
                     members: node.acceptors().members.iter().map(|n| n.0).collect(),
                     config_ballot: Some(internal::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
+                    matchmaker_generation: set.generation.0,
+                    matchmakers: set.members.iter().map(|m| m.0).collect(),
+                    retirable,
+                    gc_watermark,
                 });
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
@@ -3433,6 +3821,13 @@ where
                 // the election and read-round timers actually run on.
                 next_tick = time.now()
                     + if hooks.stretch_tick_interval() { tunables.tick_interval * 2 } else { tunables.tick_interval };
+                if retiring {
+                    // The operator's decommissioning takes effect: this
+                    // incarnation ends and never comes back as this identity.
+                    audit.retired(NodeId(self_id));
+                    tracing::info!(node = self_id, "retired");
+                    return Ok(());
+                }
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision
@@ -3461,6 +3856,53 @@ where
                     }
                 } else {
                     match_resend_elapsed = 0;
+                }
+                // The open GC request's re-send (#123): the same cadence as
+                // matchmaking, its own BUGGIFY location.
+                if node.gc_pending() {
+                    gc_resend_elapsed += 1;
+                    if gc_resend_elapsed >= tunables.match_resend_ticks.max(1) {
+                        gc_resend_elapsed = 0;
+                        if hooks.skip_gc_resend() {
+                            audit.gc_resend_skipped(NodeId(self_id));
+                            tracing::info!(node = self_id, "gc_resend_skipped");
+                        } else {
+                            node.resend_gc();
+                        }
+                    }
+                } else {
+                    gc_resend_elapsed = 0;
+                }
+                // The running handover's re-send (#125): the same cadence,
+                // its own location; a preempted decree reopens only here, so
+                // two dueling reconfigurers are paced by their drivers.
+                if reconfigurer.is_busy()
+                    && reconfigurer.tick(node.election_timeout().saturating_mul(RECONFIGURE_TIMEOUT_ELECTIONS))
+                {
+                    // A phase that no member answers any more (a lost
+                    // registry, a machine gone) is abandoned: the frozen
+                    // generation is finished by the next node to meet it,
+                    // with the members that do answer.
+                    audit.reconfigurer_aborted(NodeId(self_id));
+                    tracing::info!(node = self_id, "reconfigurer_aborted");
+                }
+                if reconfigurer.is_busy() && reconfigure_backoff > 0 {
+                    // Backing off after a preemption: no re-send, no reopen.
+                    reconfigure_backoff -= 1;
+                } else if reconfigurer.is_busy() {
+                    reconfigure_resend_elapsed += 1;
+                    if reconfigure_resend_elapsed >= tunables.match_resend_ticks.max(1) {
+                        reconfigure_resend_elapsed = 0;
+                        if hooks.skip_reconfigurer_resend() {
+                            audit.reconfigurer_resend_skipped(NodeId(self_id));
+                            tracing::info!(node = self_id, "reconfigurer_resend_skipped");
+                        } else {
+                            reconfigurer.resend();
+                            send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                        }
+                    }
+                } else {
+                    reconfigure_resend_elapsed = 0;
                 }
                 // Cooperative leader handoff (`DPaxos`): move the existing
                 // Phase-2 authority to another physical node instead of letting
@@ -3536,9 +3978,9 @@ where
                         }
                     }
                 }
-                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                let outbox = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
                 surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
-                send_match_requests(&providers, &links, audit, self_id, requests);
+                send_outbox(&providers, &links, audit, self_id, outbox);
                 maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so

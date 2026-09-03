@@ -60,36 +60,130 @@
 //!   analogue of the acceptor's persist-before-`Promise` rule on
 //!   [`crate::HardState`].
 //!
+//! # Generations: the matchmaker set is itself a chosen value (#125)
+//!
+//! The matchmakers are the source of truth for configurations, so their own
+//! membership cannot be a static fact forever: a matchmaker that dies or
+//! loses its disk would be unreplaceable. Following §5 of the paper, the
+//! matchmaker set carries a **generation**, and generation `g + 1` is chosen
+//! by a **single-decree Paxos instance whose acceptors are generation `g`'s
+//! matchmakers** ([`crate::DecreeAcceptor`] is the durable half every
+//! matchmaker keeps). The handover is stop-the-world, which is acceptable
+//! because matchmakers are idle whenever a leader is stable:
+//!
+//! ```text
+//! Stop        a quorum of M_g freezes (durably; a frozen matchmaker registers
+//!             nothing for g ever again) and answers with its registry + watermark
+//! Bootstrap   the reconfigurer reconstructs (max watermark, union above it) and
+//!             hands it to every member of the proposed M_{g+1}, stored *pending*
+//! Decree      Phase 1 / Phase 2 over M_g choose the successor set (P2c adopts
+//!             a competing proposal already voted, so two reconfigurers never
+//!             install two successors)
+//! Chosen      every matchmaker told: M_g members record the successor (the
+//!             discovery chain), M_{g+1} members activate their pending bootstrap
+//! ```
+//!
+//! Every message is **fenced by generation**: a request naming another
+//! generation is refused with what this matchmaker knows (its current set,
+//! or its successor), never served. A frozen matchmaker stays alive: it keeps
+//! answering `Stop`, votes in the decree, and points late proposers at its
+//! successor — "stopped" is a protocol freeze, not a process death.
+//!
+//! Replacement is also how paros recovers a matchmaker whose durable state is
+//! unusable: there is deliberately no matchmaker-specific in-place disk
+//! repair. Such a matchmaker is fenced out of the next generation and a fresh
+//! one bootstrapped in its place from the surviving quorum's frozen registries.
+//!
 //! # What this proves, and what it does not
 //!
 //! Everything above is a property of **one matchmaker**: each registry, taken
 //! alone, is write-once, monotone, complete below any ballot it answers, and
-//! durable before it answers. That is the whole of M4.1 (#119). The paper's
-//! safety argument (§3.3) rests on something more: a proposer collects
-//! `MatchB` from `f + 1` of the `2f + 1` matchmakers and runs Phase 1 against
-//! the **union** of their histories, and it is the intersection of any two
-//! such `f + 1` sets that guarantees no configuration used below the
-//! proposer's ballot is missed. That union, the quorum it needs, and the
-//! cross-configuration Phase 1 it feeds belong to the leader-side matchmaking
-//! phase, the next issue; nothing here claims them, and the simulation that
-//! exercises this module proves per-matchmaker correctness only.
+//! durable before it answers. The paper's safety argument (§3.3) rests on
+//! something more: a proposer collects `MatchB` from `f + 1` of the `2f + 1`
+//! matchmakers and runs Phase 1 against the **union** of their histories, and
+//! it is the intersection of any two such `f + 1` sets that guarantees no
+//! configuration used below the proposer's ballot is missed. That union, the
+//! quorum it needs, and the cross-configuration Phase 1 it feeds belong to the
+//! leader-side matchmaking phase (`node/matchmaking.rs`); the reconstruction
+//! across generations rests on the same intersection (Appendix B: every
+//! completed registration reached a quorum of `M_g`, which intersects the
+//! frozen quorum the successor was reconstructed from).
+
+mod reconfigurer;
 
 use std::collections::BTreeMap;
 
+pub use self::reconfigurer::{
+    MatchmakerReconfigurer, RECONFIGURE_TIMEOUT_ELECTIONS, ReconfigurerPhase, ReconfigurerStep,
+    StartRefusal,
+};
+use crate::single_decree::DecreeAcceptor;
 use crate::state::QuorumSystem;
 use crate::types::{Ballot, NodeId};
 
-/// Stable identity of a matchmaker in the (fixed, for now) matchmaker set. A
-/// distinct namespace from [`NodeId`]: a matchmaker is not an acceptor.
+/// Stable identity of a matchmaker within the matchmaker pool. A distinct
+/// namespace from [`NodeId`]: a matchmaker is not an acceptor.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerId(pub u64);
 
+/// A matchmaker-set **generation** (#125): which matchmaker set is
+/// authoritative. Distinct from a Paxos ballot (consensus leadership, and the
+/// acceptor configuration bound to it) and from [`crate::ConfigId`] (the
+/// durable cluster-configuration tag). Generation 0 is the bootstrap set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MatchmakerGeneration(pub u64);
+
+impl MatchmakerGeneration {
+    /// The next generation.
+    #[must_use]
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// A matchmaker set bound to its generation: the value the successor decree
+/// chooses, and what every matchmaking message is fenced by.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MatchmakerSet {
+    /// The generation this set is authoritative for.
+    pub generation: MatchmakerGeneration,
+    /// The members, sorted and deduplicated.
+    pub members: Vec<MatchmakerId>,
+}
+
+impl MatchmakerSet {
+    /// A set of `members` (sorted and deduplicated here) for `generation`.
+    #[must_use]
+    pub fn new(generation: MatchmakerGeneration, mut members: Vec<MatchmakerId>) -> Self {
+        members.sort_unstable();
+        members.dedup();
+        Self {
+            generation,
+            members,
+        }
+    }
+
+    /// The matchmaker quorum over this set: a majority, so any two
+    /// registration quorums (and any two stop / decree quorums) intersect.
+    #[must_use]
+    pub fn quorum_size(&self) -> usize {
+        self.members.len() / 2 + 1
+    }
+
+    /// Whether `id` is a member.
+    #[must_use]
+    pub fn contains(&self, id: MatchmakerId) -> bool {
+        self.members.binary_search(&id).is_ok()
+    }
+}
+
 /// An acceptor configuration as registered with a matchmaker: a membership
 /// plus the quorum system in force over it — [`crate::Config`] minus the
 /// per-node `id`. The core never interprets it beyond storing and reporting it;
-/// the leader-side matchmaking phase (a later issue) is what runs Phase 1
-/// against it.
+/// the leader-side matchmaking phase is what runs Phase 1 against it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcceptorConfig {
@@ -169,11 +263,46 @@ impl AcceptorConfig {
     }
 }
 
+/// The phase of a matchmaker's current generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MatchmakerPhase {
+    /// A fresh store: nothing was ever written. Resolved at boot from the
+    /// deployment's bootstrap set — a bootstrap member is active for
+    /// generation 0, any other matchmaker is inactive (a spare, until a
+    /// bootstrap and a decree bring it into a later generation).
+    #[default]
+    Fresh,
+    /// Not authoritative for any generation: a spare, or a member of a
+    /// proposed successor whose decree has not been learned yet.
+    Inactive,
+    /// Serving matchmaking for its generation.
+    Active,
+    /// Frozen for its generation: registers nothing, keeps voting in the
+    /// successor decree, and points late proposers at the successor.
+    Stopped,
+}
+
+/// A successor generation's initial state, handed to each of its members by
+/// the reconfigurer and held **pending** until the decree chooses that set.
+/// Stored as one record: it arrives in one message, is replaced whole, and
+/// becomes the per-record registry only at activation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PendingBootstrap {
+    /// The proposed successor set.
+    pub set: MatchmakerSet,
+    /// The reconstructed GC watermark (the maximum over the frozen quorum).
+    pub gc_watermark: Ballot,
+    /// The reconstructed registry (the union over the frozen quorum, at or
+    /// above `gc_watermark`).
+    pub history: BTreeMap<Ballot, Registration>,
+}
+
 /// The small, persisted-whole durable scalars of a matchmaker — the
-/// registry's [`crate::HardState`]. Today that is the GC watermark alone; the
-/// matchmaker-set generation tag (#22's later step) lands here as a new field,
-/// which is why the struct is `#[non_exhaustive]` and built through
-/// [`Default`].
+/// registry's [`crate::HardState`]: the GC watermark, the generation state,
+/// and the successor decree's acceptor record. `#[non_exhaustive]` and built
+/// through [`Default`] so a field can land without breaking every store.
 ///
 /// The per-ballot registrations are deliberately **not** here: they are
 /// persisted one record at a time and read back one record at a time through
@@ -184,12 +313,39 @@ impl AcceptorConfig {
 #[non_exhaustive]
 pub struct MatchmakerHardState {
     /// The GC watermark (§3.4): a monotone floor below which no request may
-    /// register and below which registrations have been dropped. This stage
-    /// only *stores, enforces and reports* it — the protocol that decides when
-    /// raising it is safe is a separate issue;
-    /// [`Matchmaker::advance_gc_watermark`] is the primitive it will call. [`Ballot::zero`] is the "nothing
-    /// collected" floor: no ballot sits below it.
+    /// register and below which registrations have been dropped. Raised only
+    /// by [`Matchmaker::advance_gc_watermark`] — the leader's GC protocol
+    /// (`node/gc.rs`) owns the §3.5 preconditions — and carried forward into
+    /// every successor generation. [`Ballot::zero`] is the "nothing
+    /// collected" floor.
     pub gc_watermark: Ballot,
+    /// The generation `members` and `phase` describe. Generation 0's members
+    /// are the deployment's bootstrap set (configuration, never written).
+    pub generation: MatchmakerGeneration,
+    /// The members of `generation` for a generation this matchmaker
+    /// activated (empty at generation 0, whose set is configuration).
+    pub members: Vec<MatchmakerId>,
+    /// Where this matchmaker stands in `generation`.
+    pub phase: MatchmakerPhase,
+    /// The chosen successor of `generation`, once learned: what a frozen
+    /// matchmaker answers a late proposer with (the discovery chain).
+    pub successor: Option<MatchmakerSet>,
+    /// This matchmaker's acceptor record in the decree that chooses
+    /// `generation`'s successor. Reset at every activation.
+    pub decree: DecreeAcceptor<Vec<MatchmakerId>>,
+    /// Bootstraps for proposed later generations this matchmaker is a member
+    /// of, keyed by the proposed set, inactive until one is chosen.
+    pub pending: Vec<PendingBootstrap>,
+}
+
+/// A matchmaker's static configuration: its identity and the deployment's
+/// bootstrap matchmaker set (generation 0).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchmakerConfig {
+    /// This matchmaker's identity.
+    pub id: MatchmakerId,
+    /// The bootstrap set: the members of generation 0.
+    pub bootstrap: Vec<MatchmakerId>,
 }
 
 /// The read-only recovery port of a matchmaker — the registry's
@@ -218,11 +374,10 @@ pub struct MatchmakerHardState {
 ///   `faulty`, never as "nothing here" — holds for the registry with the same
 ///   force: a lost registration answered as "no configuration below `b`"
 ///   under-reports a history, which is precisely the bug class matchmakers
-///   exist to prevent. The repair is the log's too: the identity is known,
-///   the other matchmakers hold the bytes. When that stage lands it adds a
-///   defaulted `faulty_registrations()` beside [`Self::registration`], the
-///   twin of [`crate::Storage::faulty_entries`], and the core reports the
-///   ballot instead of a history that silently omits it.
+///   exist to prevent. The repair is not a local one: a matchmaker whose
+///   durable state is unusable is **replaced** through a matchmaker-set
+///   reconfiguration (the module doc's *Generations*), reconstructed from the
+///   surviving quorum — never repaired in place.
 /// - **Per-record writes are what make the seams honest.** The driver applies
 ///   one [`MatchmakerWriteOp`] per record and fsyncs the batch before the
 ///   reply leaves; a boot that reads records back one by one is the read-side
@@ -303,11 +458,8 @@ impl Registration {
 }
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
-/// me every configuration registered below it" (the paper's `MatchA`).
-///
-/// Evolution (a matchmaker-set generation tag, #22's later step) happens by
-/// appending fields here and on the wire contract — never by re-keying the
-/// registry or reshaping the reply.
+/// me every configuration registered below it" (the paper's `MatchA`), fenced
+/// by the matchmaker generation the proposer believes authoritative.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchRequest {
@@ -320,29 +472,45 @@ pub struct MatchRequest {
     pub config: AcceptorConfig,
     /// Whether this is a reconfiguration request (see [`Registration`]).
     pub reconfiguration: bool,
+    /// The matchmaker generation the proposer addresses. A matchmaker not
+    /// active for exactly this generation refuses with what it knows.
+    pub generation: MatchmakerGeneration,
 }
 
 impl MatchRequest {
-    /// A candidate's request to register its belief `config` under `ballot`.
+    /// A candidate's request to register its belief `config` under `ballot`
+    /// at `generation`.
     #[must_use]
-    pub fn new(from: NodeId, ballot: Ballot, config: AcceptorConfig) -> Self {
+    pub fn new(
+        from: NodeId,
+        ballot: Ballot,
+        config: AcceptorConfig,
+        generation: MatchmakerGeneration,
+    ) -> Self {
         Self {
             from,
             ballot,
             config,
             reconfiguration: false,
+            generation,
         }
     }
 
     /// A leader's request to register the reconfiguration to `config` under
-    /// `ballot` (see [`Registration`]).
+    /// `ballot` at `generation` (see [`Registration`]).
     #[must_use]
-    pub fn reconfigure(from: NodeId, ballot: Ballot, config: AcceptorConfig) -> Self {
+    pub fn reconfigure(
+        from: NodeId,
+        ballot: Ballot,
+        config: AcceptorConfig,
+        generation: MatchmakerGeneration,
+    ) -> Self {
         Self {
             from,
             ballot,
             config,
             reconfiguration: true,
+            generation,
         }
     }
 
@@ -357,11 +525,13 @@ impl MatchRequest {
 }
 
 /// Why a matchmaker refused a request. Each variant carries enough for the
-/// requester to make progress — the highest registered ballot, the watermark
-/// — exactly as [`crate::Message::Nack`] carries `promised`; and, like
-/// `Nack.promised`, the requester must treat it as a **diagnostic**, never as
-/// trusted future-ballot input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// requester to make progress — the highest registered ballot, the watermark,
+/// the set that superseded the one it addressed — exactly as
+/// [`crate::Message::Nack`] carries `promised`. A ballot in a refusal is a
+/// **diagnostic**, never trusted future-ballot input; a matchmaker set in a
+/// refusal is a **chosen** one (a matchmaker only ever names a set it
+/// activated or learned chosen), which is why a proposer may adopt it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MatchRefusal {
     /// The requested ballot is not strictly above every registered ballot
@@ -377,6 +547,24 @@ pub enum MatchRefusal {
         /// The matchmaker's current watermark.
         watermark: Ballot,
     },
+    /// The addressed generation is frozen at this matchmaker: a successor is
+    /// being chosen, or was chosen (`successor`), and nothing registers for
+    /// it again. The proposer adopts the successor if named, else retries
+    /// later.
+    Stopped {
+        /// The chosen successor, if this matchmaker has learned it.
+        successor: Option<MatchmakerSet>,
+    },
+    /// This matchmaker is active for a generation other than the addressed
+    /// one: the proposer is stale (adopt `current` if it is higher) or ahead
+    /// of a matchmaker that has not activated yet (never adopt a lower one).
+    Generation {
+        /// The set this matchmaker is active for.
+        current: MatchmakerSet,
+    },
+    /// This matchmaker is not authoritative for any generation: a spare, or
+    /// a proposed successor's member whose decree it has not learned.
+    Inactive,
 }
 
 /// What a matchmaker answered a request with.
@@ -408,8 +596,200 @@ pub struct MatchReply {
     pub to: NodeId,
     /// The request's ballot, echoed.
     pub ballot: Ballot,
+    /// The request's generation, echoed.
+    pub generation: MatchmakerGeneration,
     /// The answer.
     pub outcome: MatchOutcome,
+}
+
+/// A leader's garbage-collection request (the paper's `GarbageA`): raise the
+/// watermark of `generation`'s registry to `watermark`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GcRequest {
+    /// The requesting leader.
+    pub from: NodeId,
+    /// The generation addressed.
+    pub generation: MatchmakerGeneration,
+    /// The floor to raise to — the leader's own ballot.
+    pub watermark: Ballot,
+}
+
+/// A matchmaker's answer to a [`GcRequest`] (the paper's `GarbageB`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GcAck {
+    /// The answering matchmaker.
+    pub matchmaker: MatchmakerId,
+    /// The request's generation, echoed.
+    pub generation: MatchmakerGeneration,
+    /// Whether the request was applied at that generation (a matchmaker not
+    /// active for it refuses, and `watermark` then names its own floor).
+    pub applied: bool,
+    /// The durable watermark after the request.
+    pub watermark: Ballot,
+}
+
+/// A reconfigurer's message to a matchmaker (#125): one step of the
+/// stop / bootstrap / decree / publish handover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ReconfigureRequest {
+    /// Freeze `generation` and report its registry (`StopA`).
+    Stop {
+        /// The requesting node.
+        from: NodeId,
+        /// The generation to freeze.
+        generation: MatchmakerGeneration,
+    },
+    /// Hand a proposed successor's initial state to one of its members.
+    Bootstrap {
+        /// The requesting node.
+        from: NodeId,
+        /// The proposed set, its reconstructed watermark and registry.
+        bootstrap: PendingBootstrap,
+    },
+    /// Phase 1a of the successor decree over `generation`'s matchmakers.
+    DecreePrepare {
+        /// The requesting node.
+        from: NodeId,
+        /// The generation whose successor is being decided.
+        generation: MatchmakerGeneration,
+        /// The decree ballot.
+        ballot: Ballot,
+    },
+    /// Phase 2a of the successor decree: accept `members` as the successor.
+    DecreeAccept {
+        /// The requesting node.
+        from: NodeId,
+        /// The generation whose successor is being decided.
+        generation: MatchmakerGeneration,
+        /// The decree ballot.
+        ballot: Ballot,
+        /// The proposed successor membership.
+        members: Vec<MatchmakerId>,
+    },
+    /// The successor of `generation` was chosen: a member of `generation`
+    /// records it (and freezes, if it had not), a member of the successor
+    /// activates its pending bootstrap.
+    Chosen {
+        /// The requesting node.
+        from: NodeId,
+        /// The generation succeeded.
+        generation: MatchmakerGeneration,
+        /// The chosen successor.
+        successor: MatchmakerSet,
+    },
+}
+
+impl ReconfigureRequest {
+    /// The requesting node.
+    #[must_use]
+    pub fn from(&self) -> NodeId {
+        match self {
+            Self::Stop { from, .. }
+            | Self::Bootstrap { from, .. }
+            | Self::DecreePrepare { from, .. }
+            | Self::DecreeAccept { from, .. }
+            | Self::Chosen { from, .. } => *from,
+        }
+    }
+}
+
+/// A matchmaker's answer to one [`ReconfigureRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ReconfigureReply {
+    /// `generation` is frozen here (`StopB`): its durable registry, watermark,
+    /// and the successor if already learned.
+    Stopped {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The frozen generation.
+        generation: MatchmakerGeneration,
+        /// The durable watermark.
+        gc_watermark: Ballot,
+        /// The durable registry at or above the watermark.
+        history: BTreeMap<Ballot, Registration>,
+        /// The chosen successor, if learned.
+        successor: Option<MatchmakerSet>,
+    },
+    /// The bootstrap for `set` is durably pending here.
+    Bootstrapped {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The proposed set the bootstrap was for.
+        set: MatchmakerSet,
+    },
+    /// Phase 1b: promised `ballot`, reporting the vote held.
+    Promised {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The generation decided over.
+        generation: MatchmakerGeneration,
+        /// The promised ballot.
+        ballot: Ballot,
+        /// The highest-ballot vote held, if any.
+        vote: Option<(Ballot, Vec<MatchmakerId>)>,
+    },
+    /// Phase 2b: accepted `ballot`'s proposal.
+    Accepted {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The generation decided over.
+        generation: MatchmakerGeneration,
+        /// The accepted ballot.
+        ballot: Ballot,
+    },
+    /// A decree message at a ballot a higher promise refuses.
+    Nacked {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The generation decided over.
+        generation: MatchmakerGeneration,
+        /// The refused ballot.
+        ballot: Ballot,
+        /// The promise that refused it.
+        promised: Ballot,
+    },
+    /// The chosen successor was learned (recorded, or activated).
+    Learned {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The generation succeeded.
+        generation: MatchmakerGeneration,
+        /// Whether this matchmaker activated the successor (it is a member
+        /// holding the pending bootstrap) rather than only recording it.
+        activated: bool,
+    },
+    /// The request addressed a generation this matchmaker is not at, or
+    /// asked something its phase cannot do: what it knows instead.
+    Refused {
+        /// The answering matchmaker.
+        matchmaker: MatchmakerId,
+        /// The set this matchmaker is active or frozen for.
+        current: MatchmakerSet,
+        /// Where this matchmaker stands.
+        phase: MatchmakerPhase,
+        /// The successor of `current`, if learned.
+        successor: Option<MatchmakerSet>,
+    },
+}
+
+impl ReconfigureReply {
+    /// The answering matchmaker.
+    #[must_use]
+    pub fn matchmaker(&self) -> MatchmakerId {
+        match self {
+            Self::Stopped { matchmaker, .. }
+            | Self::Bootstrapped { matchmaker, .. }
+            | Self::Promised { matchmaker, .. }
+            | Self::Accepted { matchmaker, .. }
+            | Self::Nacked { matchmaker, .. }
+            | Self::Learned { matchmaker, .. }
+            | Self::Refused { matchmaker, .. } => *matchmaker,
+        }
+    }
 }
 
 /// A single semantic durable write the driver must apply to stable storage
@@ -429,6 +809,18 @@ pub enum MatchmakerWriteOp {
     /// Raise the durable GC watermark to `watermark` and drop every
     /// registration below it. Monotone: never below the current watermark.
     SetGcWatermark(Ballot),
+    /// Persist the durable scalars whole (the generation state and the
+    /// decree record). The watermark inside equals the durable one.
+    SetScalars(MatchmakerHardState),
+    /// Replace the registry whole — the activation of a successor generation:
+    /// every record dropped, these written, and the scalars (whose watermark
+    /// is the reconstructed one) persisted in the same batch.
+    InstallRegistry {
+        /// The scalars after activation.
+        scalars: MatchmakerHardState,
+        /// The reconstructed registry.
+        registrations: BTreeMap<Ballot, Registration>,
+    },
 }
 
 /// One batch of matchmaker work, and the compile-time gate enforcing one batch
@@ -438,11 +830,13 @@ pub enum MatchmakerWriteOp {
 ///
 /// 1. **Persist** [`MatchmakerReady::writes`] to stable storage, in order, and
 ///    fsync them. Every write here is safety-critical.
-/// 2. **Send** [`MatchmakerReady::replies`] — *only after* step 1 is durable.
-///    A `Registered` reply published before its registration is on disk is
-///    the matchmaker's version of an un-promise: a crash then forgets a
-///    configuration the proposer already believes every later leader will be
-///    told about.
+/// 2. **Send** [`MatchmakerReady::replies`] and
+///    [`MatchmakerReady::reconfigure_replies`] — *only after* step 1 is
+///    durable. A `Registered` reply published before its registration is on
+///    disk is the matchmaker's version of an un-promise: a crash then forgets
+///    a configuration the proposer already believes every later leader will
+///    be told about. The same holds for a `Stopped` that left before the
+///    freeze was durable, and for a decree promise or vote.
 /// 3. Call [`MatchmakerReady::advance`] to release the gate.
 #[must_use = "a MatchmakerReady must be processed and then advanced; dropping it silently skips a batch"]
 pub struct MatchmakerReady<'a> {
@@ -456,28 +850,48 @@ impl MatchmakerReady<'_> {
         &self.matchmaker.pending_writes
     }
 
-    /// The replies to send **after** the writes are durable (step 2).
+    /// The matchmaking replies to send **after** the writes are durable
+    /// (step 2).
     #[must_use]
     pub fn replies(&self) -> &[MatchReply] {
         &self.matchmaker.pending_replies
     }
 
+    /// The reconfiguration replies to send **after** the writes are durable
+    /// (step 2).
+    #[must_use]
+    pub fn reconfigure_replies(&self) -> &[ReconfigureReply] {
+        &self.matchmaker.pending_reconfigure_replies
+    }
+
     /// Acknowledge the batch: clears the pending buckets and releases the
     /// unique borrow. Consumes `self` — the guard cannot be reused.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(matchmaker = self.matchmaker.id.0)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(matchmaker = self.matchmaker.config.id.0)))]
     pub fn advance(self) {
         self.matchmaker.pending_writes.clear();
         self.matchmaker.pending_replies.clear();
+        self.matchmaker.pending_reconfigure_replies.clear();
     }
 }
 
-/// The matchmaker state machine: the registry, the watermark, and one pending
-/// batch of writes and replies. Pure — no I/O, no clock, no randomness; the
-/// driver ([`paros::run_matchmaker`](https://docs.rs/paros)) performs every
-/// side effect it describes.
+/// What a GC request did at this matchmaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcOutcome {
+    /// The watermark rose (a durable write is staged).
+    Raised,
+    /// At or below the floor already in force: nothing changed.
+    Unchanged,
+    /// Not active for the addressed generation: refused.
+    Refused,
+}
+
+/// The matchmaker state machine: the registry, the watermark, the generation
+/// state, and one pending batch of writes and replies. Pure — no I/O, no
+/// clock, no randomness; the driver ([`paros::run_matchmaker`](https://docs.rs/paros))
+/// performs every side effect it describes.
 #[derive(Clone, Debug)]
 pub struct Matchmaker {
-    id: MatchmakerId,
+    config: MatchmakerConfig,
     hard_state: MatchmakerHardState,
     /// Every registered `ballot -> registration`, strictly increasing in
     /// ballot order (a [`BTreeMap`] keeps the order; the state machine keeps
@@ -485,13 +899,17 @@ pub struct Matchmaker {
     registry: BTreeMap<Ballot, Registration>,
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
+    pending_reconfigure_replies: Vec<ReconfigureReply>,
 }
 
 impl Matchmaker {
     /// Boot a matchmaker from its durable storage: read the scalars once, then
     /// walk the registry record by record (a fresh matchmaker is an empty
     /// port). Restart and first boot are the same path, so a rebooted
-    /// matchmaker answers exactly as it would have without the crash.
+    /// matchmaker answers exactly as it would have without the crash. A
+    /// [`MatchmakerPhase::Fresh`] store resolves against `config.bootstrap`
+    /// without a write: a bootstrap member is active for generation 0, any
+    /// other matchmaker inactive.
     ///
     /// # Panics
     ///
@@ -501,8 +919,8 @@ impl Matchmaker {
     /// evaded the scan or a broken storage implementation; crashing beats
     /// answering from it.
     #[must_use]
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0)))]
-    pub fn new<S: RegistryStorage>(id: MatchmakerId, storage: &S) -> Self {
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0)))]
+    pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S) -> Self {
         let hard_state = storage.initial_state();
         let mut registry = BTreeMap::new();
         for ballot in storage.registered_ballots() {
@@ -515,12 +933,19 @@ impl Matchmaker {
                 "the registry walk names each ballot once"
             );
         }
+        let mut bootstrap = config.bootstrap.clone();
+        bootstrap.sort_unstable();
+        bootstrap.dedup();
         let matchmaker = Self {
-            id,
+            config: MatchmakerConfig {
+                id: config.id,
+                bootstrap,
+            },
             hard_state,
             registry,
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
+            pending_reconfigure_replies: Vec::new(),
         };
         matchmaker.assert_invariants();
         matchmaker
@@ -529,10 +954,10 @@ impl Matchmaker {
     /// This matchmaker's identity.
     #[must_use]
     pub fn id(&self) -> MatchmakerId {
-        self.id
+        self.config.id
     }
 
-    /// The durable scalars as they stand (including a raise not yet flushed
+    /// The durable scalars as they stand (including a write not yet flushed
     /// by the driver — the core applies a write the instant it decides it,
     /// exactly as [`crate::RawNode`] does).
     #[must_use]
@@ -553,8 +978,49 @@ impl Matchmaker {
         self.registry.keys().next_back().copied()
     }
 
+    /// Where this matchmaker stands, with a fresh store resolved against the
+    /// bootstrap set.
+    #[must_use]
+    pub fn phase(&self) -> MatchmakerPhase {
+        match self.hard_state.phase {
+            MatchmakerPhase::Fresh => {
+                if self.config.bootstrap.binary_search(&self.config.id).is_ok() {
+                    MatchmakerPhase::Active
+                } else {
+                    MatchmakerPhase::Inactive
+                }
+            }
+            phase => phase,
+        }
+    }
+
+    /// The set this matchmaker is active or frozen for: generation 0's
+    /// bootstrap set, or the activated one.
+    #[must_use]
+    pub fn set(&self) -> MatchmakerSet {
+        if self.hard_state.generation == MatchmakerGeneration(0)
+            && self.hard_state.members.is_empty()
+        {
+            MatchmakerSet::new(MatchmakerGeneration(0), self.config.bootstrap.clone())
+        } else {
+            MatchmakerSet {
+                generation: self.hard_state.generation,
+                members: self.hard_state.members.clone(),
+            }
+        }
+    }
+
+    /// The chosen successor of this matchmaker's generation, if learned.
+    #[must_use]
+    pub fn successor(&self) -> Option<&MatchmakerSet> {
+        self.hard_state.successor.as_ref()
+    }
+
     /// Answer one matchmaking request (the paper's `MatchA` handler, §3.2):
     ///
+    /// - not active for the request's generation → [`MatchRefusal::Stopped`]
+    ///   (frozen, with the successor if learned), [`MatchRefusal::Generation`]
+    ///   (active elsewhere) or [`MatchRefusal::Inactive`];
     /// - below the watermark → [`MatchRefusal::BelowWatermark`];
     /// - not strictly above the highest registered ballot → the same request
     ///   again (the ballot is registered with exactly this configuration) is
@@ -579,7 +1045,7 @@ impl Matchmaker {
     /// If processing exposes a broken internal invariant (a programmer error,
     /// never an operating condition — a stale or below-floor request is a
     /// refusal, not a panic).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.id.0, from = request.from.0, round = request.ballot.round)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, from = request.from.0, round = request.ballot.round)))]
     pub fn step(&mut self, request: MatchRequest) {
         self.assert_invariants();
         let MatchRequest {
@@ -587,12 +1053,15 @@ impl Matchmaker {
             ballot,
             config,
             reconfiguration,
+            generation,
         } = request;
         let registration = Registration {
             config,
             reconfiguration,
         };
-        let outcome = if ballot < self.hard_state.gc_watermark {
+        let outcome = if let Some(refusal) = self.generation_refusal(generation) {
+            MatchOutcome::Refused(refusal)
+        } else if ballot < self.hard_state.gc_watermark {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                 watermark: self.hard_state.gc_watermark,
             })
@@ -631,7 +1100,8 @@ impl Matchmaker {
         };
         if let MatchOutcome::Registered { history, .. } = &outcome {
             // Postconditions of a successful answer: the ballot is registered,
-            // and the history is exactly the window below it.
+            // the history is exactly the window below it, and only an active
+            // matchmaker of the addressed generation ever registers.
             assert!(
                 self.registry.contains_key(&ballot),
                 "a Registered reply names a registered ballot"
@@ -644,59 +1114,358 @@ impl Matchmaker {
                 history.keys().all(|b| *b >= self.hard_state.gc_watermark),
                 "a history never reaches below the watermark"
             );
+            assert!(
+                self.phase() == MatchmakerPhase::Active && self.set().generation == generation,
+                "only an active matchmaker of the addressed generation registers"
+            );
         }
         self.pending_replies.push(MatchReply {
-            matchmaker: self.id,
+            matchmaker: self.config.id,
             to: from,
             ballot,
+            generation,
             outcome,
         });
         self.assert_invariants();
     }
 
-    /// Advance the GC watermark to `watermark` (§3.4: `w = max(w, i)`),
-    /// dropping every registration below it, and stage the durable write.
-    /// Returns whether the watermark actually rose; a request at or below the
-    /// current floor is a no-op (monotone by construction, never an error).
+    /// The generation fence for a matchmaking or GC request: `None` when
+    /// this matchmaker is active for exactly `generation`.
+    fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
+        let current = self.set();
+        match self.phase() {
+            MatchmakerPhase::Active if current.generation == generation => None,
+            MatchmakerPhase::Active => Some(MatchRefusal::Generation { current }),
+            MatchmakerPhase::Stopped if current.generation == generation => {
+                Some(MatchRefusal::Stopped {
+                    successor: self.hard_state.successor.clone(),
+                })
+            }
+            MatchmakerPhase::Stopped => {
+                // Frozen for another generation. A proposer *behind* this
+                // generation learns the chain link if there is one, else the
+                // set in force here — never `Inactive`, which would leave a
+                // restarted node (it boots believing the bootstrap
+                // generation) with no way to discover the generation it
+                // must campaign in while the successor is still undecided
+                // (the sweep found exactly that cluster: every campaign
+                // refused, no leader for a whole run). A proposer *ahead*
+                // of this generation is simply not served here.
+                match &self.hard_state.successor {
+                    Some(successor) if generation < current.generation.next() => {
+                        Some(MatchRefusal::Stopped {
+                            successor: Some(successor.clone()),
+                        })
+                    }
+                    None if generation < current.generation => {
+                        Some(MatchRefusal::Generation { current })
+                    }
+                    _ => Some(MatchRefusal::Inactive),
+                }
+            }
+            MatchmakerPhase::Inactive | MatchmakerPhase::Fresh => Some(MatchRefusal::Inactive),
+        }
+    }
+
+    /// Advance the GC watermark to `watermark` (§3.4: `w = max(w, i)`) for
+    /// `generation`, dropping every registration below it, and stage the
+    /// durable write. A request at or below the current floor is a no-op
+    /// (monotone by construction, never an error); one addressing a
+    /// generation this matchmaker is not active for is refused.
     ///
     /// # This is a correctness-critical primitive, not the GC protocol
     ///
     /// Nothing here checks that the collected configurations are no longer
-    /// needed. The paper's garbage collection (§3.4–§3.5) is a *protocol*: a
-    /// proposer may send `GarbageA⟨i⟩` only after establishing one of three
-    /// conditions (a value chosen in round `i`; Phase 1 at `i` found nothing
-    /// chosen below; or the chosen value is safely replicated and a Phase 2
-    /// quorum of `Ci` informed), and only then do the matchmakers drop rounds
-    /// below `i`. **The caller must have established those preconditions**;
-    /// a floor raised above a configuration some future proposer still has to
-    /// contact makes that proposer's history incomplete, which is a safety
-    /// violation of the whole protocol — one this state machine can neither
-    /// detect nor refuse, because the knowledge lives with the proposer.
-    /// Until the GC protocol lands (a later issue), the only callers are the
-    /// driver's `GarbageCollect` RPC and the simulation that drives it, where
-    /// no leader depends on the registry yet.
+    /// needed. The paper's garbage collection (§3.4–§3.5) is a *protocol*
+    /// whose preconditions the leader establishes (`node/gc.rs`: every slot
+    /// below its election fence held by a Phase-2 quorum of its own
+    /// configuration, nothing chosen below its ballot above the fence) before
+    /// it sends `GarbageA`; a floor raised above a configuration some future
+    /// proposer still has to contact makes that proposer's history
+    /// incomplete, which is a safety violation of the whole protocol — one
+    /// this state machine can neither detect nor refuse, because the
+    /// knowledge lives with the proposer.
     ///
     /// # Panics
     ///
     /// If raising the floor exposes a broken internal invariant.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.id.0, round = watermark.round)))]
-    pub fn advance_gc_watermark(&mut self, watermark: Ballot) -> bool {
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, round = watermark.round)))]
+    pub fn advance_gc_watermark(
+        &mut self,
+        generation: MatchmakerGeneration,
+        watermark: Ballot,
+    ) -> GcOutcome {
         self.assert_invariants();
+        if self.generation_refusal(generation).is_some() {
+            return GcOutcome::Refused;
+        }
         if watermark <= self.hard_state.gc_watermark {
-            return false;
+            return GcOutcome::Unchanged;
         }
         self.hard_state.gc_watermark = watermark;
         self.registry = self.registry.split_off(&watermark);
         self.pending_writes
             .push(MatchmakerWriteOp::SetGcWatermark(watermark));
         self.assert_invariants();
+        GcOutcome::Raised
+    }
+
+    /// Answer one reconfiguration message (the module doc's *Generations*).
+    /// Every arm is fenced by generation and phase; a refusal names what this
+    /// matchmaker knows so a stale or ahead reconfigurer can adopt or abort.
+    ///
+    /// # Panics
+    ///
+    /// If processing exposes a broken internal invariant.
+    #[allow(clippy::too_many_lines)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, from = request.from().0)))]
+    pub fn step_reconfigure(&mut self, request: ReconfigureRequest) {
+        self.assert_invariants();
+        let me = self.config.id;
+        let current = self.set();
+        let phase = self.phase();
+        let refused = |this: &Self| ReconfigureReply::Refused {
+            matchmaker: me,
+            current: this.set(),
+            phase: this.phase(),
+            successor: this.hard_state.successor.clone(),
+        };
+        let reply = match request {
+            ReconfigureRequest::Stop { generation, .. } => {
+                if current.generation != generation
+                    || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
+                {
+                    refused(self)
+                } else {
+                    if phase == MatchmakerPhase::Active {
+                        // The freeze, durable before the answer leaves: a
+                        // matchmaker that forgot it stopped and resumed
+                        // registering would break the reconstruction the
+                        // successor rests on.
+                        self.freeze();
+                    }
+                    ReconfigureReply::Stopped {
+                        matchmaker: me,
+                        generation,
+                        gc_watermark: self.hard_state.gc_watermark,
+                        history: self.history_below(Ballot {
+                            round: u64::MAX,
+                            node: NodeId(u64::MAX),
+                        }),
+                        successor: self.hard_state.successor.clone(),
+                    }
+                }
+            }
+            ReconfigureRequest::Bootstrap { bootstrap, .. } => {
+                let set = bootstrap.set.clone();
+                if !set.contains(me) || set.generation <= current.generation {
+                    refused(self)
+                } else {
+                    // Keyed by the proposed set: two reconfigurers may
+                    // bootstrap this matchmaker into two different proposed
+                    // successors of one generation, and only the chosen one
+                    // activates. Idempotent for the same set (a resent
+                    // bootstrap from the same reconstruction).
+                    if let Some(existing) =
+                        self.hard_state.pending.iter_mut().find(|p| p.set == set)
+                    {
+                        if *existing != bootstrap {
+                            // A different reconstruction of the same
+                            // proposal (two reconfigurers, two frozen
+                            // quorums): the later one supersedes, whole.
+                            *existing = bootstrap;
+                            self.stage_scalars();
+                        }
+                    } else {
+                        self.hard_state.pending.push(bootstrap);
+                        self.stage_scalars();
+                    }
+                    ReconfigureReply::Bootstrapped {
+                        matchmaker: me,
+                        set,
+                    }
+                }
+            }
+            ReconfigureRequest::DecreePrepare {
+                generation, ballot, ..
+            } => {
+                if current.generation != generation
+                    || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
+                {
+                    refused(self)
+                } else {
+                    let before = self.hard_state.decree.promised;
+                    match self.hard_state.decree.prepare(ballot) {
+                        Ok(vote) => {
+                            if self.hard_state.decree.promised != before {
+                                self.stage_scalars();
+                            }
+                            ReconfigureReply::Promised {
+                                matchmaker: me,
+                                generation,
+                                ballot,
+                                vote,
+                            }
+                        }
+                        Err(promised) => ReconfigureReply::Nacked {
+                            matchmaker: me,
+                            generation,
+                            ballot,
+                            promised,
+                        },
+                    }
+                }
+            }
+            ReconfigureRequest::DecreeAccept {
+                generation,
+                ballot,
+                members,
+                ..
+            } => {
+                if current.generation != generation
+                    || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
+                {
+                    refused(self)
+                } else {
+                    let mut members = members;
+                    members.sort_unstable();
+                    members.dedup();
+                    match self.hard_state.decree.accept(ballot, members) {
+                        Ok(()) => {
+                            self.stage_scalars();
+                            ReconfigureReply::Accepted {
+                                matchmaker: me,
+                                generation,
+                                ballot,
+                            }
+                        }
+                        Err(promised) => ReconfigureReply::Nacked {
+                            matchmaker: me,
+                            generation,
+                            ballot,
+                            promised,
+                        },
+                    }
+                }
+            }
+            ReconfigureRequest::Chosen {
+                generation,
+                successor,
+                ..
+            } => {
+                let successor = MatchmakerSet::new(successor.generation, successor.members);
+                if successor.generation != generation.next() {
+                    refused(self)
+                } else if current.generation == generation
+                    && matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
+                {
+                    // A member of the succeeded generation: record the chain
+                    // link (freezing if it had not — once a successor is
+                    // chosen the generation is over), then activate if it is
+                    // also a member of the successor holding its bootstrap.
+                    if self.hard_state.successor.is_none() {
+                        if phase == MatchmakerPhase::Active {
+                            self.freeze();
+                        }
+                        self.hard_state.successor = Some(successor.clone());
+                        self.stage_scalars();
+                    }
+                    let activated = self.activate(&successor);
+                    ReconfigureReply::Learned {
+                        matchmaker: me,
+                        generation,
+                        activated,
+                    }
+                } else if successor.generation > current.generation
+                    || matches!(phase, MatchmakerPhase::Inactive | MatchmakerPhase::Fresh)
+                {
+                    // Not a member of the succeeded generation (a spare, or
+                    // frozen further back): only an activation can apply.
+                    let activated = self.activate(&successor);
+                    if activated {
+                        ReconfigureReply::Learned {
+                            matchmaker: me,
+                            generation,
+                            activated,
+                        }
+                    } else {
+                        refused(self)
+                    }
+                } else {
+                    refused(self)
+                }
+            }
+        };
+        self.pending_reconfigure_replies.push(reply);
+        self.assert_invariants();
+    }
+
+    /// Freeze the current generation (durable before any reply).
+    fn freeze(&mut self) {
+        let set = self.set();
+        self.hard_state.generation = set.generation;
+        self.hard_state.members = set.members;
+        self.hard_state.phase = MatchmakerPhase::Stopped;
+        self.stage_scalars();
+    }
+
+    /// Activate `successor` if this matchmaker is one of its members holding
+    /// its pending bootstrap and stands strictly below it: the reconstructed
+    /// registry replaces the current one whole, the watermark becomes the
+    /// reconstructed one (never lower than the one held — the maximum over a
+    /// frozen quorum that this matchmaker, if it was in it, contributed to),
+    /// the decree record resets for the new generation, and every pending
+    /// bootstrap at or below the new generation is dropped.
+    fn activate(&mut self, successor: &MatchmakerSet) -> bool {
+        if !successor.contains(self.config.id) || successor.generation <= self.set().generation {
+            return false;
+        }
+        let Some(index) = self
+            .hard_state
+            .pending
+            .iter()
+            .position(|p| p.set == *successor)
+        else {
+            return false;
+        };
+        let bootstrap = self.hard_state.pending.remove(index);
+        let watermark = bootstrap.gc_watermark.max(self.hard_state.gc_watermark);
+        let registry: BTreeMap<Ballot, Registration> = bootstrap
+            .history
+            .into_iter()
+            .filter(|(b, _)| *b >= watermark)
+            .collect();
+        self.hard_state.generation = successor.generation;
+        self.hard_state.members.clone_from(&successor.members);
+        self.hard_state.phase = MatchmakerPhase::Active;
+        self.hard_state.successor = None;
+        self.hard_state.decree = DecreeAcceptor::default();
+        self.hard_state.gc_watermark = watermark;
+        self.hard_state
+            .pending
+            .retain(|p| p.set.generation > successor.generation);
+        self.registry = registry.clone();
+        // One write for the whole activation: a crash between "registry
+        // replaced" and "scalars advanced" would boot a matchmaker answering
+        // the wrong generation from the wrong registry.
+        self.pending_writes
+            .push(MatchmakerWriteOp::InstallRegistry {
+                scalars: self.hard_state.clone(),
+                registrations: registry,
+            });
         true
+    }
+
+    /// Stage a whole-scalars write.
+    fn stage_scalars(&mut self) {
+        self.pending_writes
+            .push(MatchmakerWriteOp::SetScalars(self.hard_state.clone()));
     }
 
     /// Drain the pending batch. Holds the unique borrow until
     /// [`MatchmakerReady::advance`], so a second `ready()` before `advance()`
     /// is a compile error.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(matchmaker = self.id.0)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(matchmaker = self.config.id.0)))]
     pub fn ready(&mut self) -> MatchmakerReady<'_> {
         MatchmakerReady { matchmaker: self }
     }
@@ -710,8 +1479,9 @@ impl Matchmaker {
     }
 
     /// The cross-field checker, called at boot and at every public mutating
-    /// entry point: no registration below the watermark, and every
-    /// registration a well-formed configuration.
+    /// entry point: no registration below the watermark, every registration
+    /// a well-formed configuration, a frozen or activated generation with a
+    /// durable membership, and pending bootstraps strictly above it.
     fn assert_invariants(&self) {
         assert!(
             self.registry
@@ -730,6 +1500,34 @@ impl Matchmaker {
                 "a registered membership is sorted and deduplicated"
             );
         }
+        if self.hard_state.generation > MatchmakerGeneration(0) {
+            assert!(
+                !self.hard_state.members.is_empty(),
+                "an activated generation has a durable membership"
+            );
+            assert!(
+                self.hard_state.phase != MatchmakerPhase::Fresh,
+                "an activated generation is never fresh"
+            );
+        }
+        if let Some(successor) = &self.hard_state.successor {
+            assert!(
+                successor.generation == self.hard_state.generation.next(),
+                "a recorded successor is the next generation"
+            );
+            assert!(
+                self.hard_state.phase == MatchmakerPhase::Stopped,
+                "a generation with a successor is frozen"
+            );
+        }
+        let current = self.set().generation;
+        assert!(
+            self.hard_state
+                .pending
+                .iter()
+                .all(|p| p.set.generation > current && p.set.contains(self.config.id)),
+            "a pending bootstrap is for a later generation this matchmaker is a member of"
+        );
     }
 }
 
@@ -768,8 +1566,17 @@ mod tests {
         }
     }
 
+    const G0: MatchmakerGeneration = MatchmakerGeneration(0);
+
+    fn mmconfig(id: u64, bootstrap: &[u64]) -> MatchmakerConfig {
+        MatchmakerConfig {
+            id: MatchmakerId(id),
+            bootstrap: bootstrap.iter().copied().map(MatchmakerId).collect(),
+        }
+    }
+
     fn fresh(id: u64) -> Matchmaker {
-        Matchmaker::new(MatchmakerId(id), &TestRegistry::default())
+        Matchmaker::new(&mmconfig(id, &[0, 1, 2]), &TestRegistry::default())
     }
 
     fn ballot(round: u64, node: u64) -> Ballot {
@@ -786,10 +1593,22 @@ mod tests {
         )
     }
 
+    fn request(from: u64, ballot: Ballot, members: &[u64]) -> MatchRequest {
+        MatchRequest::new(NodeId(from), ballot, config(members), G0)
+    }
+
     fn drain(mm: &mut Matchmaker) -> (Vec<MatchmakerWriteOp>, Vec<MatchReply>) {
         let ready = mm.ready();
         let writes = ready.writes().to_vec();
         let replies = ready.replies().to_vec();
+        ready.advance();
+        (writes, replies)
+    }
+
+    fn drain_reconfigure(mm: &mut Matchmaker) -> (Vec<MatchmakerWriteOp>, Vec<ReconfigureReply>) {
+        let ready = mm.ready();
+        let writes = ready.writes().to_vec();
+        let replies = ready.reconfigure_replies().to_vec();
         ready.advance();
         (writes, replies)
     }
@@ -804,14 +1623,17 @@ mod tests {
         }
     }
 
+    fn set(generation: u64, members: &[u64]) -> MatchmakerSet {
+        MatchmakerSet::new(
+            MatchmakerGeneration(generation),
+            members.iter().copied().map(MatchmakerId).collect(),
+        )
+    }
+
     #[test]
     fn a_fresh_request_registers_and_reports_the_history_strictly_below() {
         let mut mm = fresh(0);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(1, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
         assert_eq!(
             writes,
@@ -822,15 +1644,12 @@ mod tests {
         );
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].to, NodeId(1));
+        assert_eq!(replies[0].generation, G0);
         let (history, watermark) = registered(&replies[0]);
         assert!(history.is_empty(), "the first registration has no past");
         assert_eq!(watermark, Ballot::zero());
 
-        mm.step(MatchRequest::new(
-            NodeId(2),
-            ballot(3, 2),
-            config(&[1, 2, 3]),
-        ));
+        mm.step(request(2, ballot(3, 2), &[1, 2, 3]));
         let (_, replies) = drain(&mut mm);
         let (history, _) = registered(&replies[0]);
         // Exactly the ballots strictly below: `< b`, not `<= b`.
@@ -845,24 +1664,12 @@ mod tests {
     #[test]
     fn a_request_at_or_below_the_highest_is_refused_with_the_highest() {
         let mut mm = fresh(0);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(5, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(5, 1), &[0, 1, 2]));
         drain(&mut mm);
         // Strictly below.
-        mm.step(MatchRequest::new(
-            NodeId(2),
-            ballot(4, 9),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(2, ballot(4, 9), &[0, 1, 2]));
         // Same round, lower node: below in the total order.
-        mm.step(MatchRequest::new(
-            NodeId(0),
-            ballot(5, 0),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(0, ballot(5, 0), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
         assert!(writes.is_empty(), "a refusal writes nothing");
         for reply in &replies {
@@ -879,26 +1686,14 @@ mod tests {
     #[test]
     fn the_same_request_again_is_answered_without_a_second_registration() {
         let mut mm = fresh(0);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(1, 1),
-            config(&[0, 1, 2]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(2, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+        mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
         assert_eq!(writes.len(), 2);
         let (first_history, _) = registered(&replies[1]);
         let first_history = first_history.clone();
 
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(2, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
         assert!(writes.is_empty(), "a duplicate never re-registers");
         let (history, _) = registered(&replies[0]);
@@ -909,13 +1704,9 @@ mod tests {
     #[test]
     fn a_registered_ballot_with_different_bytes_is_refused_write_once() {
         let mut mm = fresh(0);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(1, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
         drain(&mut mm);
-        mm.step(MatchRequest::new(NodeId(1), ballot(1, 1), config(&[0, 1])));
+        mm.step(request(1, ballot(1, 1), &[0, 1]));
         let (writes, replies) = drain(&mut mm);
         assert!(writes.is_empty());
         assert_eq!(
@@ -931,21 +1722,24 @@ mod tests {
     fn a_request_below_the_watermark_is_refused_and_the_history_starts_at_it() {
         let mut mm = fresh(0);
         for round in 1..=4 {
-            mm.step(MatchRequest::new(
-                NodeId(1),
-                ballot(round, 1),
-                config(&[0, 1, 2]),
-            ));
+            mm.step(request(1, ballot(round, 1), &[0, 1, 2]));
         }
         drain(&mut mm);
-        assert!(mm.advance_gc_watermark(ballot(3, 1)));
-        assert!(
-            !mm.advance_gc_watermark(ballot(2, 1)),
+        assert_eq!(mm.advance_gc_watermark(G0, ballot(3, 1)), GcOutcome::Raised);
+        assert_eq!(
+            mm.advance_gc_watermark(G0, ballot(2, 1)),
+            GcOutcome::Unchanged,
             "the floor never lowers"
         );
-        assert!(
-            !mm.advance_gc_watermark(ballot(3, 1)),
+        assert_eq!(
+            mm.advance_gc_watermark(G0, ballot(3, 1)),
+            GcOutcome::Unchanged,
             "re-raising is a no-op"
+        );
+        assert_eq!(
+            mm.advance_gc_watermark(MatchmakerGeneration(1), ballot(9, 1)),
+            GcOutcome::Refused,
+            "another generation's floor is refused"
         );
         let (writes, _) = drain(&mut mm);
         assert_eq!(
@@ -958,16 +1752,8 @@ mod tests {
             "collected registrations are dropped"
         );
 
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(2, 1),
-            config(&[0, 1, 2]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(6, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
+        mm.step(request(1, ballot(6, 1), &[0, 1, 2]));
         let (_, replies) = drain(&mut mm);
         assert_eq!(
             replies[0].outcome,
@@ -990,11 +1776,7 @@ mod tests {
     fn a_retry_after_gc_is_answered_from_the_retained_history() {
         let mut mm = fresh(0);
         for round in 1..=3 {
-            mm.step(MatchRequest::new(
-                NodeId(1),
-                ballot(round, 1),
-                config(&[0, 1, 2]),
-            ));
+            mm.step(request(1, ballot(round, 1), &[0, 1, 2]));
         }
         let (_, replies) = drain(&mut mm);
         let (first, watermark) = registered(&replies[2]);
@@ -1005,13 +1787,9 @@ mod tests {
         assert_eq!(watermark, Ballot::zero());
 
         // The first reply is lost; GC moves the floor; the client retries.
-        assert!(mm.advance_gc_watermark(ballot(2, 1)));
+        assert_eq!(mm.advance_gc_watermark(G0, ballot(2, 1)), GcOutcome::Raised);
         drain(&mut mm);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(3, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(1, ballot(3, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
         assert!(writes.is_empty(), "a retry never re-registers");
         let (retry, watermark) = registered(&replies[0]);
@@ -1034,16 +1812,8 @@ mod tests {
     #[test]
     fn ballots_at_one_round_from_two_proposers_are_distinct_keys() {
         let mut mm = fresh(0);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(5, 1),
-            config(&[0, 1, 2]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(2),
-            ballot(5, 2),
-            config(&[3, 4, 5]),
-        ));
+        mm.step(request(1, ballot(5, 1), &[0, 1, 2]));
+        mm.step(request(2, ballot(5, 2), &[3, 4, 5]));
         let (writes, replies) = drain(&mut mm);
         assert_eq!(writes.len(), 2, "two keys, two registrations");
         let (history, _) = registered(&replies[1]);
@@ -1059,16 +1829,8 @@ mod tests {
         // The reverse arrival order: the lower node's ballot is stale once
         // the higher node's is registered, and refused — never merged into it.
         let mut mm = fresh(1);
-        mm.step(MatchRequest::new(
-            NodeId(2),
-            ballot(5, 2),
-            config(&[3, 4, 5]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(5, 1),
-            config(&[0, 1, 2]),
-        ));
+        mm.step(request(2, ballot(5, 2), &[3, 4, 5]));
+        mm.step(request(1, ballot(5, 1), &[0, 1, 2]));
         let (_, replies) = drain(&mut mm);
         assert_eq!(
             replies[1].outcome,
@@ -1082,29 +1844,13 @@ mod tests {
     #[test]
     fn a_restart_answers_exactly_as_the_original_would_have() {
         let mut mm = fresh(2);
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(1, 1),
-            config(&[0, 1, 2]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(2),
-            ballot(2, 2),
-            config(&[0, 1, 2, 3]),
-        ));
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+        mm.step(request(2, ballot(2, 2), &[0, 1, 2, 3]));
         drain(&mut mm);
         // A reboot walks the durable records back through the port.
-        let mut rebooted = Matchmaker::new(MatchmakerId(2), &TestRegistry::of(&mm));
-        rebooted.step(MatchRequest::new(
-            NodeId(1),
-            ballot(3, 1),
-            config(&[1, 2, 3]),
-        ));
-        mm.step(MatchRequest::new(
-            NodeId(1),
-            ballot(3, 1),
-            config(&[1, 2, 3]),
-        ));
+        let mut rebooted = Matchmaker::new(&mmconfig(2, &[0, 1, 2]), &TestRegistry::of(&mm));
+        rebooted.step(request(1, ballot(3, 1), &[1, 2, 3]));
+        mm.step(request(1, ballot(3, 1), &[1, 2, 3]));
         let (_, expected) = drain(&mut mm);
         let (_, observed) = drain(&mut rebooted);
         assert_eq!(observed, expected);
@@ -1118,7 +1864,7 @@ mod tests {
             .registry
             .insert(ballot(1, 1), Registration::belief(config(&[0])));
         store.hard_state.gc_watermark = ballot(2, 0);
-        let _ = Matchmaker::new(MatchmakerId(0), &store);
+        let _ = Matchmaker::new(&mmconfig(0, &[0]), &store);
     }
 
     #[test]
@@ -1129,5 +1875,297 @@ mod tests {
         );
         assert_eq!(config.members, vec![NodeId(0), NodeId(1), NodeId(2)]);
         assert_eq!(config.quorum_size(), 2);
+    }
+
+    // ---- generations (#125) ---------------------------------------------
+
+    /// A fresh store resolves against the bootstrap set: a member is active
+    /// for generation 0, a spare is inactive and refuses everything with
+    /// `Inactive` — neither writes anything at boot.
+    #[test]
+    fn a_fresh_matchmaker_resolves_its_phase_from_the_bootstrap_set() {
+        let member = fresh(0);
+        assert_eq!(member.phase(), MatchmakerPhase::Active);
+        assert_eq!(member.set(), set(0, &[0, 1, 2]));
+        let mut spare = Matchmaker::new(&mmconfig(7, &[0, 1, 2]), &TestRegistry::default());
+        assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
+        spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
+        let (writes, replies) = drain(&mut spare);
+        assert!(writes.is_empty());
+        assert_eq!(
+            replies[0].outcome,
+            MatchOutcome::Refused(MatchRefusal::Inactive)
+        );
+    }
+
+    /// A request fenced by another generation is refused with the current
+    /// set, never served.
+    #[test]
+    fn a_request_for_another_generation_is_refused_with_the_current_set() {
+        let mut mm = fresh(0);
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(1, 1),
+            config(&[0, 1, 2]),
+            MatchmakerGeneration(3),
+        ));
+        let (writes, replies) = drain(&mut mm);
+        assert!(writes.is_empty());
+        assert_eq!(
+            replies[0].outcome,
+            MatchOutcome::Refused(MatchRefusal::Generation {
+                current: set(0, &[0, 1, 2])
+            })
+        );
+    }
+
+    /// The freeze: a stop is durable before its answer, idempotent, and a
+    /// frozen matchmaker registers nothing for its generation ever again —
+    /// across a reboot too.
+    #[test]
+    fn a_stop_freezes_durably_and_is_idempotent() {
+        let mut mm = fresh(0);
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+        drain(&mut mm);
+        mm.step_reconfigure(ReconfigureRequest::Stop {
+            from: NodeId(5),
+            generation: G0,
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(
+            matches!(writes.as_slice(), [MatchmakerWriteOp::SetScalars(s)] if s.phase == MatchmakerPhase::Stopped)
+        );
+        let ReconfigureReply::Stopped {
+            generation,
+            history,
+            successor,
+            ..
+        } = &replies[0]
+        else {
+            panic!("expected Stopped, got {:?}", replies[0]);
+        };
+        assert_eq!(*generation, G0);
+        assert_eq!(history.len(), 1);
+        assert!(successor.is_none());
+        // Idempotent: no second write.
+        mm.step_reconfigure(ReconfigureRequest::Stop {
+            from: NodeId(6),
+            generation: G0,
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(writes.is_empty(), "a re-sent stop writes nothing");
+        assert!(matches!(replies[0], ReconfigureReply::Stopped { .. }));
+        // Frozen, and still frozen after a reboot.
+        for mm in [
+            &mut mm.clone(),
+            &mut Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm)),
+        ] {
+            mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
+            let (writes, replies) = drain(mm);
+            assert!(writes.is_empty());
+            assert_eq!(
+                replies[0].outcome,
+                MatchOutcome::Refused(MatchRefusal::Stopped { successor: None })
+            );
+        }
+        // A stop for another generation is refused with what is known.
+        mm.step_reconfigure(ReconfigureRequest::Stop {
+            from: NodeId(5),
+            generation: MatchmakerGeneration(4),
+        });
+        let (_, replies) = drain_reconfigure(&mut mm);
+        assert!(matches!(
+            &replies[0],
+            ReconfigureReply::Refused { current, phase: MatchmakerPhase::Stopped, .. } if *current == set(0, &[0, 1, 2])
+        ));
+    }
+
+    /// The handover end to end at one matchmaker in both generations: stop,
+    /// bootstrap (pending, refused to serve), decree votes (durable), chosen
+    /// (activates the pending registry whole, at the reconstructed
+    /// watermark), and the new generation serves from the reconstruction.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn a_chosen_successor_activates_its_pending_bootstrap() {
+        let mut mm = fresh(0);
+        mm.step(request(1, ballot(1, 1), &[0, 1, 2]));
+        drain(&mut mm);
+        mm.step_reconfigure(ReconfigureRequest::Stop {
+            from: NodeId(5),
+            generation: G0,
+        });
+        drain_reconfigure(&mut mm);
+        let successor = set(1, &[0, 3, 4]);
+        let mut history = BTreeMap::new();
+        history.insert(ballot(1, 1), Registration::belief(config(&[0, 1, 2])));
+        history.insert(ballot(2, 2), Registration::belief(config(&[1, 2, 3])));
+        let bootstrap = PendingBootstrap {
+            set: successor.clone(),
+            gc_watermark: ballot(1, 1),
+            history,
+        };
+        // A bootstrap for a set this matchmaker is not in is refused.
+        mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+            from: NodeId(5),
+            bootstrap: PendingBootstrap {
+                set: set(1, &[3, 4, 5]),
+                ..bootstrap.clone()
+            },
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(writes.is_empty());
+        assert!(matches!(replies[0], ReconfigureReply::Refused { .. }));
+        mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+            from: NodeId(5),
+            bootstrap: bootstrap.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert_eq!(writes.len(), 1, "the pending bootstrap is durable");
+        assert!(
+            matches!(&replies[0], ReconfigureReply::Bootstrapped { set: s, .. } if *s == successor)
+        );
+        // Still frozen at generation 0: generation 1 is not served yet.
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(5, 1),
+            config(&[0, 1, 2]),
+            MatchmakerGeneration(1),
+        ));
+        let (_, replies) = drain(&mut mm);
+        assert!(matches!(
+            replies[0].outcome,
+            MatchOutcome::Refused(MatchRefusal::Inactive)
+        ));
+        // The decree over generation 0.
+        mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+            from: NodeId(5),
+            generation: G0,
+            ballot: ballot(1, 5),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert_eq!(writes.len(), 1, "a promise is durable");
+        assert!(matches!(
+            &replies[0],
+            ReconfigureReply::Promised { vote: None, .. }
+        ));
+        mm.step_reconfigure(ReconfigureRequest::DecreeAccept {
+            from: NodeId(5),
+            generation: G0,
+            ballot: ballot(1, 5),
+            members: successor.members.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert_eq!(writes.len(), 1, "a vote is durable");
+        assert!(matches!(&replies[0], ReconfigureReply::Accepted { .. }));
+        // A lower decree ballot is refused with the promise.
+        mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+            from: NodeId(4),
+            generation: G0,
+            ballot: ballot(1, 4),
+        });
+        let (_, replies) = drain_reconfigure(&mut mm);
+        assert!(
+            matches!(&replies[0], ReconfigureReply::Nacked { promised, .. } if *promised == ballot(1, 5))
+        );
+        // A higher one learns the vote (P2c's input).
+        mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+            from: NodeId(4),
+            generation: G0,
+            ballot: ballot(2, 4),
+        });
+        let (_, replies) = drain_reconfigure(&mut mm);
+        assert!(
+            matches!(&replies[0], ReconfigureReply::Promised { vote: Some((b, m)), .. } if *b == ballot(1, 5) && *m == successor.members)
+        );
+        // Chosen: the successor is recorded for generation 0 and, being a
+        // member holding the bootstrap, this matchmaker activates it.
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: successor.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(matches!(
+            &replies[0],
+            ReconfigureReply::Learned {
+                activated: true,
+                ..
+            }
+        ));
+        assert!(
+            matches!(writes.last(), Some(MatchmakerWriteOp::InstallRegistry { scalars, registrations }) if scalars.generation == MatchmakerGeneration(1) && registrations.len() == 2)
+        );
+        assert_eq!(mm.phase(), MatchmakerPhase::Active);
+        assert_eq!(mm.set(), successor);
+        assert_eq!(mm.hard_state().gc_watermark, ballot(1, 1));
+        assert!(mm.successor().is_none());
+        assert_eq!(mm.hard_state().decree, DecreeAcceptor::default());
+        // Generation 1 serves from the reconstruction; generation 0 is told
+        // the chain link is gone from here (this matchmaker moved on).
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(5, 1),
+            config(&[0, 1, 2]),
+            MatchmakerGeneration(1),
+        ));
+        mm.step(request(1, ballot(6, 1), &[0, 1, 2]));
+        let (_, replies) = drain(&mut mm);
+        let (history, wm) = registered(&replies[0]);
+        assert_eq!(history.len(), 2);
+        assert_eq!(wm, ballot(1, 1));
+        assert_eq!(
+            replies[1].outcome,
+            MatchOutcome::Refused(MatchRefusal::Generation {
+                current: successor.clone()
+            })
+        );
+        // A reboot lands in generation 1 with the installed registry (plus
+        // the one registration generation 1 took above).
+        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
+        assert_eq!(rebooted.set(), successor);
+        assert_eq!(rebooted.registry().len(), 3);
+    }
+
+    /// A member of the succeeded generation that is *not* in the successor
+    /// records the chain link (freezing on the spot if it was still active)
+    /// and points late proposers at it forever.
+    #[test]
+    fn a_departed_matchmaker_answers_with_its_successor() {
+        let mut mm = fresh(2);
+        let successor = set(1, &[0, 1, 3]);
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: successor.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(matches!(
+            &replies[0],
+            ReconfigureReply::Learned {
+                activated: false,
+                ..
+            }
+        ));
+        assert_eq!(writes.len(), 2, "the freeze and the link are durable");
+        assert_eq!(mm.phase(), MatchmakerPhase::Stopped);
+        assert_eq!(mm.successor(), Some(&successor));
+        mm.step(request(1, ballot(9, 1), &[0, 1, 2]));
+        let (_, replies) = drain(&mut mm);
+        assert_eq!(
+            replies[0].outcome,
+            MatchOutcome::Refused(MatchRefusal::Stopped {
+                successor: Some(successor.clone())
+            })
+        );
+        // A second, different "chosen" for the same generation is refused
+        // (the first record stands; the audit judges the conflict).
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(6),
+            generation: G0,
+            successor: set(1, &[4, 5, 6]),
+        });
+        let (writes, _) = drain_reconfigure(&mut mm);
+        assert!(writes.is_empty());
+        assert_eq!(mm.successor(), Some(&successor));
     }
 }

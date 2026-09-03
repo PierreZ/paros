@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, MatchOutcome,
-    MatchRefusal, MatchReply, MatchRequest, MatchmakerId, Message, NodeId, QuorumSystem,
-    Registration, SessionEntry, Slot, Value,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, GcAck,
+    GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
+    ReconfigureReply, ReconfigureRequest, Registration, SessionEntry, Slot, Value,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
@@ -33,17 +34,19 @@ pub mod matchmaker {
 
 pub use internal::paros_internal_client::ParosInternalClient;
 pub(crate) use internal::paros_internal_server::ParosInternalServer;
-pub use internal::{InspectReply, InspectRequest};
+pub use internal::{InspectReply, InspectRequest, RetireAck, RetireRequest};
 pub use matchmaker::paros_matchmaker_client::ParosMatchmakerClient;
 pub(crate) use matchmaker::paros_matchmaker_server::ParosMatchmakerServer;
 pub use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,
     MatchReply as WireMatchReply, MatchRequest as WireMatchRequest,
+    ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
 };
 pub use public::paros_client::ParosClient;
 pub(crate) use public::paros_server::ParosServer;
 pub use public::{
     Compact, CompactAck, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
+    ReconfigureMatchmakers, ReconfigureMatchmakersAck,
 };
 
 pub(crate) type ReplySender<T> = oneshot::Sender<T>;
@@ -423,11 +426,13 @@ pub(crate) fn message_to_proto(
             from,
             ballot,
             seq,
+            chosen,
         } => Kind::HeartbeatAck(internal::HeartbeatAck {
             config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
+            chosen: chosen.map(|s| s.0),
         }),
         Message::SnapAck {
             config_id,
@@ -588,6 +593,7 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             seq: message.seq,
+            chosen: message.chosen.map(Slot),
         }),
         Kind::SnapAck(message) => Ok(Message::SnapAck {
             config_id: ConfigId(message.config_id),
@@ -632,7 +638,10 @@ pub(crate) struct RpcInbox {
     pub(crate) deliver: mpsc::Receiver<Call<Message, ()>>,
     pub(crate) compact: mpsc::Receiver<Call<Compact, CompactAck>>,
     pub(crate) reconfigure: mpsc::Receiver<Call<Reconfigure, ReconfigureAck>>,
+    pub(crate) reconfigure_matchmakers:
+        mpsc::Receiver<Call<ReconfigureMatchmakers, ReconfigureMatchmakersAck>>,
     pub(crate) inspect: mpsc::Receiver<Call<InspectRequest, InspectReply>>,
+    pub(crate) retire: mpsc::Receiver<Call<RetireRequest, RetireAck>>,
 }
 
 /// Why the gRPC edge refused an inbound request before the node loop saw it.
@@ -659,7 +668,9 @@ pub(crate) struct RpcService {
     deliver: mpsc::Sender<Call<Message, ()>>,
     compact: mpsc::Sender<Call<Compact, CompactAck>>,
     reconfigure: mpsc::Sender<Call<Reconfigure, ReconfigureAck>>,
+    reconfigure_matchmakers: mpsc::Sender<Call<ReconfigureMatchmakers, ReconfigureMatchmakersAck>>,
     inspect: mpsc::Sender<Call<InspectRequest, InspectReply>>,
+    retire: mpsc::Sender<Call<RetireRequest, RetireAck>>,
     on_reject: OnReject,
 }
 
@@ -679,7 +690,9 @@ pub(crate) fn rpc_channel(
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
     let (compact_tx, compact_rx) = mpsc::channel(client_inbox);
     let (reconfigure_tx, reconfigure_rx) = mpsc::channel(client_inbox);
+    let (reconfigure_mm_tx, reconfigure_mm_rx) = mpsc::channel(client_inbox);
     let (inspect_tx, inspect_rx) = mpsc::channel(client_inbox);
+    let (retire_tx, retire_rx) = mpsc::channel(client_inbox);
     (
         RpcService {
             propose: propose_tx,
@@ -687,7 +700,9 @@ pub(crate) fn rpc_channel(
             deliver: deliver_tx,
             compact: compact_tx,
             reconfigure: reconfigure_tx,
+            reconfigure_matchmakers: reconfigure_mm_tx,
             inspect: inspect_tx,
+            retire: retire_tx,
             on_reject,
         },
         RpcInbox {
@@ -696,7 +711,9 @@ pub(crate) fn rpc_channel(
             deliver: deliver_rx,
             compact: compact_rx,
             reconfigure: reconfigure_rx,
+            reconfigure_matchmakers: reconfigure_mm_rx,
             inspect: inspect_rx,
+            retire: retire_rx,
         },
     )
 }
@@ -752,6 +769,16 @@ impl public::paros_server::Paros for RpcService {
             .await
             .map(Response::new)
     }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure_matchmakers(
+        &self,
+        request: Request<ReconfigureMatchmakers>,
+    ) -> Result<Response<ReconfigureMatchmakersAck>, Status> {
+        dispatch(&self.reconfigure_matchmakers, request.into_inner())
+            .await
+            .map(Response::new)
+    }
 }
 
 #[tonic::async_trait]
@@ -785,6 +812,13 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         request: Request<InspectRequest>,
     ) -> Result<Response<InspectReply>, Status> {
         dispatch(&self.inspect, request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn retire(&self, request: Request<RetireRequest>) -> Result<Response<RetireAck>, Status> {
+        dispatch(&self.retire, request.into_inner())
             .await
             .map(Response::new)
     }
@@ -833,6 +867,56 @@ fn acceptor_config_from_proto(
     ))
 }
 
+fn mm_set_to_proto(set: &MatchmakerSet) -> matchmaker::MatchmakerSet {
+    matchmaker::MatchmakerSet {
+        generation: set.generation.0,
+        members: set.members.iter().map(|m| m.0).collect(),
+    }
+}
+
+fn mm_set_from_proto(
+    set: Option<matchmaker::MatchmakerSet>,
+) -> Result<MatchmakerSet, &'static str> {
+    let set = set.ok_or("missing matchmaker set")?;
+    if set.members.is_empty() {
+        return Err("empty matchmaker set");
+    }
+    Ok(MatchmakerSet::new(
+        MatchmakerGeneration(set.generation),
+        set.members.into_iter().map(MatchmakerId).collect(),
+    ))
+}
+
+fn registrations_to_proto(
+    history: &BTreeMap<Ballot, Registration>,
+) -> Vec<matchmaker::Registration> {
+    history
+        .iter()
+        .map(|(ballot, registration)| matchmaker::Registration {
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+            config: Some(acceptor_config_to_proto(&registration.config)),
+            reconfiguration: registration.reconfiguration,
+        })
+        .collect()
+}
+
+fn registrations_from_proto(
+    entries: Vec<matchmaker::Registration>,
+) -> Result<BTreeMap<Ballot, Registration>, &'static str> {
+    let mut history = BTreeMap::new();
+    for entry in entries {
+        let ballot = mm_ballot_from_proto(entry.ballot)?;
+        let registration = Registration {
+            config: acceptor_config_from_proto(entry.config)?,
+            reconfiguration: entry.reconfiguration,
+        };
+        if history.insert(ballot, registration).is_some() {
+            return Err("duplicate ballot in history");
+        }
+    }
+    Ok(history)
+}
+
 /// Encode a matchmaking request for the wire.
 #[must_use]
 pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
@@ -841,6 +925,7 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
         ballot: Some(mm_ballot_to_proto(request.ballot)),
         config: Some(acceptor_config_to_proto(&request.config)),
         reconfiguration: request.reconfiguration,
+        generation: request.generation.0,
     }
 }
 
@@ -852,10 +937,11 @@ pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest
     let from = NodeId(request.from);
     let ballot = mm_ballot_from_proto(request.ballot)?;
     let config = acceptor_config_from_proto(request.config)?;
+    let generation = MatchmakerGeneration(request.generation);
     Ok(if request.reconfiguration {
-        MatchRequest::reconfigure(from, ballot, config)
+        MatchRequest::reconfigure(from, ballot, config, generation)
     } else {
-        MatchRequest::new(from, ballot, config)
+        MatchRequest::new(from, ballot, config, generation)
     })
 }
 
@@ -867,14 +953,7 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
             history,
             gc_watermark,
         } => matchmaker::match_reply::Outcome::Registered(matchmaker::Registered {
-            history: history
-                .iter()
-                .map(|(ballot, registration)| matchmaker::Registration {
-                    ballot: Some(mm_ballot_to_proto(*ballot)),
-                    config: Some(acceptor_config_to_proto(&registration.config)),
-                    reconfiguration: registration.reconfiguration,
-                })
-                .collect(),
+            history: registrations_to_proto(history),
             gc_watermark: Some(mm_ballot_to_proto(*gc_watermark)),
         }),
         MatchOutcome::Refused(refusal) => {
@@ -884,6 +963,17 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
                 }
                 MatchRefusal::BelowWatermark { watermark } => {
                     matchmaker::refused::Reason::BelowWatermark(mm_ballot_to_proto(*watermark))
+                }
+                MatchRefusal::Stopped { successor } => {
+                    matchmaker::refused::Reason::Stopped(matchmaker::RefusedStopped {
+                        successor: successor.as_ref().map(mm_set_to_proto),
+                    })
+                }
+                MatchRefusal::Generation { current } => {
+                    matchmaker::refused::Reason::Generation(mm_set_to_proto(current))
+                }
+                MatchRefusal::Inactive => {
+                    matchmaker::refused::Reason::Inactive(matchmaker::RefusedInactive {})
                 }
             };
             matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
@@ -896,6 +986,7 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
         to: reply.to.0,
         ballot: Some(mm_ballot_to_proto(reply.ballot)),
         outcome: Some(outcome),
+        generation: reply.generation.0,
     }
 }
 
@@ -905,23 +996,10 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
 /// Returns a static description of the first malformed field.
 pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'static str> {
     let outcome = match reply.outcome.ok_or("missing match outcome")? {
-        matchmaker::match_reply::Outcome::Registered(registered) => {
-            let mut history = BTreeMap::new();
-            for entry in registered.history {
-                let ballot = mm_ballot_from_proto(entry.ballot)?;
-                let registration = Registration {
-                    config: acceptor_config_from_proto(entry.config)?,
-                    reconfiguration: entry.reconfiguration,
-                };
-                if history.insert(ballot, registration).is_some() {
-                    return Err("duplicate ballot in history");
-                }
-            }
-            MatchOutcome::Registered {
-                history,
-                gc_watermark: mm_ballot_from_proto(registered.gc_watermark)?,
-            }
-        }
+        matchmaker::match_reply::Outcome::Registered(registered) => MatchOutcome::Registered {
+            history: registrations_from_proto(registered.history)?,
+            gc_watermark: mm_ballot_from_proto(registered.gc_watermark)?,
+        },
         matchmaker::match_reply::Outcome::Refused(refused) => {
             MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {
                 matchmaker::refused::Reason::StaleHighest(highest) => MatchRefusal::Stale {
@@ -932,6 +1010,16 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
                         watermark: mm_ballot_from_proto(Some(watermark))?,
                     }
                 }
+                matchmaker::refused::Reason::Stopped(stopped) => MatchRefusal::Stopped {
+                    successor: stopped
+                        .successor
+                        .map(|s| mm_set_from_proto(Some(s)))
+                        .transpose()?,
+                },
+                matchmaker::refused::Reason::Generation(current) => MatchRefusal::Generation {
+                    current: mm_set_from_proto(Some(current))?,
+                },
+                matchmaker::refused::Reason::Inactive(_) => MatchRefusal::Inactive,
             })
         }
     };
@@ -939,62 +1027,332 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
         matchmaker: MatchmakerId(reply.matchmaker),
         to: NodeId(reply.to),
         ballot: mm_ballot_from_proto(reply.ballot)?,
+        generation: MatchmakerGeneration(reply.generation),
         outcome,
     })
 }
 
 /// Encode a garbage-collection request for the wire.
 #[must_use]
-pub fn wire_garbage_collect(from: NodeId, watermark: Ballot) -> WireGarbageCollect {
+pub fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
     WireGarbageCollect {
-        from: from.0,
-        watermark: Some(mm_ballot_to_proto(watermark)),
+        from: request.from.0,
+        watermark: Some(mm_ballot_to_proto(request.watermark)),
+        generation: request.generation.0,
     }
 }
 
-/// Decode a garbage-collection request from the wire into `(from, watermark)`.
+/// Decode a garbage-collection request from the wire.
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn garbage_collect_from_wire(
-    request: WireGarbageCollect,
-) -> Result<(NodeId, Ballot), &'static str> {
-    Ok((
-        NodeId(request.from),
-        mm_ballot_from_proto(request.watermark)?,
-    ))
+pub fn garbage_collect_from_wire(request: WireGarbageCollect) -> Result<GcRequest, &'static str> {
+    Ok(GcRequest {
+        from: NodeId(request.from),
+        generation: MatchmakerGeneration(request.generation),
+        watermark: mm_ballot_from_proto(request.watermark)?,
+    })
 }
 
 /// Encode a garbage-collection acknowledgement for the wire.
 #[must_use]
-pub fn wire_garbage_collect_ack(
-    matchmaker: MatchmakerId,
-    watermark: Ballot,
-) -> WireGarbageCollectAck {
+pub fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
     WireGarbageCollectAck {
-        matchmaker: matchmaker.0,
-        watermark: Some(mm_ballot_to_proto(watermark)),
+        matchmaker: ack.matchmaker.0,
+        watermark: Some(mm_ballot_to_proto(ack.watermark)),
+        generation: ack.generation.0,
+        applied: ack.applied,
     }
 }
 
-/// Decode a garbage-collection acknowledgement into `(matchmaker, watermark)`.
+/// Decode a garbage-collection acknowledgement.
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn garbage_collect_ack_from_wire(
-    ack: WireGarbageCollectAck,
-) -> Result<(MatchmakerId, Ballot), &'static str> {
-    Ok((
-        MatchmakerId(ack.matchmaker),
-        mm_ballot_from_proto(ack.watermark)?,
-    ))
+pub fn garbage_collect_ack_from_wire(ack: WireGarbageCollectAck) -> Result<GcAck, &'static str> {
+    Ok(GcAck {
+        matchmaker: MatchmakerId(ack.matchmaker),
+        generation: MatchmakerGeneration(ack.generation),
+        applied: ack.applied,
+        watermark: mm_ballot_from_proto(ack.watermark)?,
+    })
+}
+
+fn bootstrap_to_proto(bootstrap: &PendingBootstrap) -> matchmaker::Bootstrap {
+    matchmaker::Bootstrap {
+        set: Some(mm_set_to_proto(&bootstrap.set)),
+        gc_watermark: Some(mm_ballot_to_proto(bootstrap.gc_watermark)),
+        history: registrations_to_proto(&bootstrap.history),
+    }
+}
+
+fn bootstrap_from_proto(
+    bootstrap: matchmaker::Bootstrap,
+) -> Result<PendingBootstrap, &'static str> {
+    Ok(PendingBootstrap {
+        set: mm_set_from_proto(bootstrap.set)?,
+        gc_watermark: mm_ballot_from_proto(bootstrap.gc_watermark)?,
+        history: registrations_from_proto(bootstrap.history)?,
+    })
+}
+
+fn phase_to_proto(phase: MatchmakerPhase) -> i32 {
+    match phase {
+        MatchmakerPhase::Fresh => matchmaker::MatchmakerPhase::Fresh,
+        MatchmakerPhase::Inactive => matchmaker::MatchmakerPhase::Inactive,
+        MatchmakerPhase::Active => matchmaker::MatchmakerPhase::Active,
+        MatchmakerPhase::Stopped => matchmaker::MatchmakerPhase::Stopped,
+    }
+    .into()
+}
+
+fn phase_from_proto(phase: i32) -> Result<MatchmakerPhase, &'static str> {
+    match matchmaker::MatchmakerPhase::try_from(phase) {
+        Ok(matchmaker::MatchmakerPhase::Fresh) => Ok(MatchmakerPhase::Fresh),
+        Ok(matchmaker::MatchmakerPhase::Inactive) => Ok(MatchmakerPhase::Inactive),
+        Ok(matchmaker::MatchmakerPhase::Active) => Ok(MatchmakerPhase::Active),
+        Ok(matchmaker::MatchmakerPhase::Stopped) => Ok(MatchmakerPhase::Stopped),
+        Err(_) => Err("unknown matchmaker phase"),
+    }
+}
+
+/// Encode a reconfigurer's request for the wire.
+#[must_use]
+pub fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReconfigureRequest {
+    use matchmaker::reconfigure_request::Kind;
+    let kind = match request {
+        ReconfigureRequest::Stop { generation, .. } => Kind::Stop(matchmaker::Stop {
+            generation: generation.0,
+        }),
+        ReconfigureRequest::Bootstrap { bootstrap, .. } => {
+            Kind::Bootstrap(bootstrap_to_proto(bootstrap))
+        }
+        ReconfigureRequest::DecreePrepare {
+            generation, ballot, ..
+        } => Kind::DecreePrepare(matchmaker::DecreePrepare {
+            generation: generation.0,
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+        }),
+        ReconfigureRequest::DecreeAccept {
+            generation,
+            ballot,
+            members,
+            ..
+        } => Kind::DecreeAccept(matchmaker::DecreeAccept {
+            generation: generation.0,
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+            members: members.iter().map(|m| m.0).collect(),
+        }),
+        ReconfigureRequest::Chosen {
+            generation,
+            successor,
+            ..
+        } => Kind::Chosen(matchmaker::Chosen {
+            generation: generation.0,
+            successor: Some(mm_set_to_proto(successor)),
+        }),
+    };
+    WireReconfigureRequest {
+        from: request.from().0,
+        kind: Some(kind),
+    }
+}
+
+/// Validate and decode a reconfigurer's request from the wire.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn reconfigure_request_from_wire(
+    request: WireReconfigureRequest,
+) -> Result<ReconfigureRequest, &'static str> {
+    use matchmaker::reconfigure_request::Kind;
+    let from = NodeId(request.from);
+    Ok(
+        match request.kind.ok_or("missing reconfigure request kind")? {
+            Kind::Stop(stop) => ReconfigureRequest::Stop {
+                from,
+                generation: MatchmakerGeneration(stop.generation),
+            },
+            Kind::Bootstrap(bootstrap) => ReconfigureRequest::Bootstrap {
+                from,
+                bootstrap: bootstrap_from_proto(bootstrap)?,
+            },
+            Kind::DecreePrepare(prepare) => ReconfigureRequest::DecreePrepare {
+                from,
+                generation: MatchmakerGeneration(prepare.generation),
+                ballot: mm_ballot_from_proto(prepare.ballot)?,
+            },
+            Kind::DecreeAccept(accept) => {
+                if accept.members.is_empty() {
+                    return Err("empty decree proposal");
+                }
+                ReconfigureRequest::DecreeAccept {
+                    from,
+                    generation: MatchmakerGeneration(accept.generation),
+                    ballot: mm_ballot_from_proto(accept.ballot)?,
+                    members: accept.members.into_iter().map(MatchmakerId).collect(),
+                }
+            }
+            Kind::Chosen(chosen) => ReconfigureRequest::Chosen {
+                from,
+                generation: MatchmakerGeneration(chosen.generation),
+                successor: mm_set_from_proto(chosen.successor)?,
+            },
+        },
+    )
+}
+
+/// Encode a matchmaker's reconfiguration reply for the wire.
+#[must_use]
+pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply {
+    use matchmaker::reconfigure_reply::Kind;
+    let kind = match reply {
+        ReconfigureReply::Stopped {
+            generation,
+            gc_watermark,
+            history,
+            successor,
+            ..
+        } => Kind::Stopped(matchmaker::StopAck {
+            generation: generation.0,
+            gc_watermark: Some(mm_ballot_to_proto(*gc_watermark)),
+            history: registrations_to_proto(history),
+            successor: successor.as_ref().map(mm_set_to_proto),
+        }),
+        ReconfigureReply::Bootstrapped { set, .. } => {
+            Kind::Bootstrapped(matchmaker::BootstrapAck {
+                set: Some(mm_set_to_proto(set)),
+            })
+        }
+        ReconfigureReply::Promised {
+            generation,
+            ballot,
+            vote,
+            ..
+        } => Kind::Promised(matchmaker::DecreePromise {
+            generation: generation.0,
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+            vote: vote.as_ref().map(|(b, members)| matchmaker::DecreeVote {
+                ballot: Some(mm_ballot_to_proto(*b)),
+                members: members.iter().map(|m| m.0).collect(),
+            }),
+        }),
+        ReconfigureReply::Accepted {
+            generation, ballot, ..
+        } => Kind::Accepted(matchmaker::DecreeAccepted {
+            generation: generation.0,
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+        }),
+        ReconfigureReply::Nacked {
+            generation,
+            ballot,
+            promised,
+            ..
+        } => Kind::Nacked(matchmaker::DecreeNack {
+            generation: generation.0,
+            ballot: Some(mm_ballot_to_proto(*ballot)),
+            promised: Some(mm_ballot_to_proto(*promised)),
+        }),
+        ReconfigureReply::Learned {
+            generation,
+            activated,
+            ..
+        } => Kind::Learned(matchmaker::Learned {
+            generation: generation.0,
+            activated: *activated,
+        }),
+        ReconfigureReply::Refused {
+            current,
+            phase,
+            successor,
+            ..
+        } => Kind::Refused(matchmaker::ReconfigureRefused {
+            current: Some(mm_set_to_proto(current)),
+            phase: phase_to_proto(*phase),
+            successor: successor.as_ref().map(mm_set_to_proto),
+        }),
+    };
+    WireReconfigureReply {
+        matchmaker: reply.matchmaker().0,
+        kind: Some(kind),
+    }
+}
+
+/// Validate and decode a matchmaker's reconfiguration reply from the wire.
+///
+/// # Errors
+/// Returns a static description of the first malformed field.
+pub fn reconfigure_reply_from_wire(
+    reply: WireReconfigureReply,
+) -> Result<ReconfigureReply, &'static str> {
+    use matchmaker::reconfigure_reply::Kind;
+    let matchmaker = MatchmakerId(reply.matchmaker);
+    Ok(match reply.kind.ok_or("missing reconfigure reply kind")? {
+        Kind::Stopped(ack) => ReconfigureReply::Stopped {
+            matchmaker,
+            generation: MatchmakerGeneration(ack.generation),
+            gc_watermark: mm_ballot_from_proto(ack.gc_watermark)?,
+            history: registrations_from_proto(ack.history)?,
+            successor: ack
+                .successor
+                .map(|s| mm_set_from_proto(Some(s)))
+                .transpose()?,
+        },
+        Kind::Bootstrapped(ack) => ReconfigureReply::Bootstrapped {
+            matchmaker,
+            set: mm_set_from_proto(ack.set)?,
+        },
+        Kind::Promised(promise) => ReconfigureReply::Promised {
+            matchmaker,
+            generation: MatchmakerGeneration(promise.generation),
+            ballot: mm_ballot_from_proto(promise.ballot)?,
+            vote: promise
+                .vote
+                .map(|vote| {
+                    if vote.members.is_empty() {
+                        return Err("empty decree vote");
+                    }
+                    Ok((
+                        mm_ballot_from_proto(vote.ballot)?,
+                        vote.members.into_iter().map(MatchmakerId).collect(),
+                    ))
+                })
+                .transpose()?,
+        },
+        Kind::Accepted(accepted) => ReconfigureReply::Accepted {
+            matchmaker,
+            generation: MatchmakerGeneration(accepted.generation),
+            ballot: mm_ballot_from_proto(accepted.ballot)?,
+        },
+        Kind::Nacked(nack) => ReconfigureReply::Nacked {
+            matchmaker,
+            generation: MatchmakerGeneration(nack.generation),
+            ballot: mm_ballot_from_proto(nack.ballot)?,
+            promised: mm_ballot_from_proto(nack.promised)?,
+        },
+        Kind::Learned(learned) => ReconfigureReply::Learned {
+            matchmaker,
+            generation: MatchmakerGeneration(learned.generation),
+            activated: learned.activated,
+        },
+        Kind::Refused(refused) => ReconfigureReply::Refused {
+            matchmaker,
+            current: mm_set_from_proto(refused.current)?,
+            phase: phase_from_proto(refused.phase)?,
+            successor: refused
+                .successor
+                .map(|s| mm_set_from_proto(Some(s)))
+                .transpose()?,
+        },
+    })
 }
 
 /// Matchmaker requests accepted concurrently by tonic and consumed serially by
 /// the matchmaker driver, which exclusively owns the sans-IO core.
 pub(crate) struct MatchmakerInbox {
     pub(crate) requests: mpsc::Receiver<Call<MatchRequest, MatchReply>>,
-    pub(crate) collects: mpsc::Receiver<Call<(NodeId, Ballot), (MatchmakerId, Ballot)>>,
+    pub(crate) collects: mpsc::Receiver<Call<GcRequest, GcAck>>,
+    pub(crate) reconfigures: mpsc::Receiver<Call<ReconfigureRequest, ReconfigureReply>>,
 }
 
 /// Cloneable tonic handler for the matchmaker contract; each method forwards
@@ -1003,7 +1361,8 @@ pub(crate) struct MatchmakerInbox {
 #[derive(Clone)]
 pub(crate) struct MatchmakerService {
     requests: mpsc::Sender<Call<MatchRequest, MatchReply>>,
-    collects: mpsc::Sender<Call<(NodeId, Ballot), (MatchmakerId, Ballot)>>,
+    collects: mpsc::Sender<Call<GcRequest, GcAck>>,
+    reconfigures: mpsc::Sender<Call<ReconfigureRequest, ReconfigureReply>>,
 }
 
 /// Construct a matchmaker handler/inbox pair; `capacity` bounds each queue
@@ -1012,14 +1371,17 @@ pub(crate) struct MatchmakerService {
 pub(crate) fn matchmaker_channel(capacity: usize) -> (MatchmakerService, MatchmakerInbox) {
     let (requests_tx, requests_rx) = mpsc::channel(capacity);
     let (collects_tx, collects_rx) = mpsc::channel(capacity);
+    let (reconfigures_tx, reconfigures_rx) = mpsc::channel(capacity);
     (
         MatchmakerService {
             requests: requests_tx,
             collects: collects_tx,
+            reconfigures: reconfigures_tx,
         },
         MatchmakerInbox {
             requests: requests_rx,
             collects: collects_rx,
+            reconfigures: reconfigures_rx,
         },
     )
 }
@@ -1048,9 +1410,20 @@ impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService 
         })?;
         dispatch(&self.collects, request)
             .await
-            .map(|(matchmaker, watermark)| {
-                Response::new(wire_garbage_collect_ack(matchmaker, watermark))
-            })
+            .map(|ack| Response::new(wire_garbage_collect_ack(&ack)))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure(
+        &self,
+        request: Request<WireReconfigureRequest>,
+    ) -> Result<Response<WireReconfigureReply>, Status> {
+        let request = reconfigure_request_from_wire(request.into_inner()).map_err(|error| {
+            Status::invalid_argument(format!("invalid reconfigure request: {error}"))
+        })?;
+        dispatch(&self.reconfigures, request)
+            .await
+            .map(|reply| Response::new(wire_reconfigure_reply(&reply)))
     }
 }
 

@@ -43,23 +43,29 @@ mod matchmaker;
 mod message;
 mod node;
 mod ready;
+mod single_decree;
 mod state;
 mod storage;
 mod types;
 mod write;
 
 pub use matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Registration,
-    RegistryStorage,
+    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
+    MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
+    MatchmakerWriteOp, PendingBootstrap, RECONFIGURE_TIMEOUT_ELECTIONS, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Registration, RegistryStorage,
+    StartRefusal,
 };
 pub use message::Message;
 pub use node::{
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS,
-    RawNode, ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
+    GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters,
+    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
+    REPAIR_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
+    ReconfigureResult,
 };
 pub use ready::Ready;
+pub use single_decree::{DecreeAcceptor, DecreePhase, DecreeProposer};
 pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;
 pub use types::{

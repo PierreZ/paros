@@ -103,11 +103,17 @@ pub struct Config {
     /// `peers` that includes `id`. Empty means "exactly `peers`", the plain
     /// deployment's shape.
     pub nodes: Vec<NodeId>,
-    /// The fixed matchmaker set. **Empty is plain Multi-Paxos**: no
-    /// matchmaking phase runs and no reconfiguration is honored. Non-empty
-    /// turns every campaign into matchmaking followed by a
-    /// cross-configuration Phase 1.
+    /// The **bootstrap** matchmaker set (generation 0). **Empty is plain
+    /// Multi-Paxos**: no matchmaking phase runs and no reconfiguration is
+    /// honored. Non-empty turns every campaign into matchmaking followed by a
+    /// cross-configuration Phase 1. A matchmaker-set reconfiguration (#125)
+    /// moves the node's *volatile* belief (`RawNode::matchmaker_set`) to a
+    /// later generation; this stays the set a fresh incarnation asks first.
     pub matchmakers: Vec<MatchmakerId>,
+    /// Every matchmaker that may ever be in a matchmaker set — the pool a
+    /// matchmaker-set reconfiguration draws from, a superset of
+    /// `matchmakers`. Empty means "exactly `matchmakers`".
+    pub matchmaker_pool: Vec<MatchmakerId>,
 }
 
 impl Config {
@@ -126,5 +132,15 @@ impl Config {
     #[must_use]
     pub fn has_matchmakers(&self) -> bool {
         !self.matchmakers.is_empty()
+    }
+
+    /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.
+    #[must_use]
+    pub fn matchmaker_pool(&self) -> &[MatchmakerId] {
+        if self.matchmaker_pool.is_empty() {
+            &self.matchmakers
+        } else {
+            &self.matchmaker_pool
+        }
     }
 }

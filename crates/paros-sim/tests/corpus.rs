@@ -6,7 +6,7 @@
 
 use paros_sim::{
     chunk_corpus_canonical_masks, corpus_canonical_masks, run_bare_quorum_case, run_chunk_mask,
-    run_corpus_mask, run_snapshot_lifecycle_case,
+    run_corpus_mask, run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
 
 fn assert_mask_green(mask: u16) {
@@ -62,6 +62,22 @@ fn bare_quorum_lost_slot_waits() {
     assert!(
         report.assertion_violations.is_empty(),
         "bare-quorum case waited without fabricating: {:?}",
+        report.assertion_violations
+    );
+}
+
+/// The departed straggler (#124): the only clean copy of a decided slot lives
+/// on the acceptor the last reconfiguration removed, and it is down. CTRL
+/// Case 3 across a configuration boundary — the members in force must WAIT
+/// (the leader resigning under `REPAIR_TIMEOUT_ELECTIONS`) and recover the
+/// slot through the prior configuration once the straggler returns.
+#[test]
+fn departed_straggler_waits_then_recovers() {
+    let report = run_departed_straggler_case(0);
+    assert_eq!(report.failed_runs, 0, "departed-straggler case completed");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "departed-straggler case waited, then recovered: {:?}",
         report.assertion_violations
     );
 }

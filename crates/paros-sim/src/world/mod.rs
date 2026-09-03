@@ -295,6 +295,21 @@ pub(crate) struct StorageWorld {
     parked: BTreeSet<String>,
     /// The same set by numeric node id, for correlating the injection ledger.
     parked_ids: BTreeSet<u64>,
+    /// Nodes whose disk was **wiped** at a restart (#124): the identity is
+    /// gone for good — it never boots again, its records are lost, and the
+    /// copy budget counts it exactly like a parked node (it *is* parked). A
+    /// wiped identity is replaced, never rejoined: an empty disk under an old
+    /// identity is indistinguishable from a fresh spare and would answer a
+    /// Phase 1 with "nothing accepted here" for slots it once voted on.
+    wiped: BTreeSet<String>,
+    /// Nodes the operator **retired** (#123): named retirable by a leader's
+    /// garbage collection, shut down for good by the workload. Budgeted like
+    /// a parked node — the world is protocol-blind and stays conservative.
+    retired: BTreeSet<String>,
+    /// Matchmakers whose durable state was lost for good (#125): the
+    /// registry stays down, and the replacement is a matchmaker-set
+    /// reconfiguration reconstructed from the surviving quorum.
+    parked_matchmakers: BTreeSet<String>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
@@ -312,6 +327,69 @@ impl StorageWorld {
     /// Whether `ip` was terminally parked (see `crate::process`).
     pub(crate) fn is_parked(&self, ip: &str) -> bool {
         self.parked.contains(ip)
+    }
+
+    /// Whether `ip`'s disk was wiped (a wiped node is also parked).
+    pub(crate) fn is_wiped(&self, ip: &str) -> bool {
+        self.wiped.contains(ip)
+    }
+
+    /// Whether `ip` was retired by the operator.
+    pub(crate) fn is_retired(&self, ip: &str) -> bool {
+        self.retired.contains(ip)
+    }
+
+    /// Whether `ip`'s registry was lost for good.
+    pub(crate) fn is_matchmaker_parked(&self, ip: &str) -> bool {
+        self.parked_matchmakers.contains(ip)
+    }
+
+    /// Wipe `ip`'s disk at a restart (#124): every record gone, the identity
+    /// parked for the run. Permitted under the same dead-node budget as a
+    /// corruption park — a wipe is one more way to lose every copy a node
+    /// holds — so the cluster keeps a clean quorum of every record and a
+    /// live quorum of every configuration the run may put in force. Returns
+    /// whether it fired.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
+    pub(crate) fn wipe(&mut self, key: &str, node: u64) -> bool {
+        if self.parked.contains(key) || self.retired.contains(key) || !self.may_park(key) {
+            return false;
+        }
+        self.disks.remove(key);
+        self.marks.remove(key);
+        self.park(key, node);
+        self.wiped.insert(key.to_string());
+        tracing::info!(node, "storage_wiped");
+        true
+    }
+
+    /// Retire `ip` for good (#123), under the dead-node budget. Returns
+    /// whether it fired.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
+    pub(crate) fn retire(&mut self, key: &str, node: u64) -> bool {
+        if self.parked.contains(key) || self.retired.contains(key) || !self.may_park(key) {
+            return false;
+        }
+        self.park(key, node);
+        self.retired.insert(key.to_string());
+        tracing::info!(node, "node_retired");
+        true
+    }
+
+    /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
+    /// run, and only where the deployment's bootstrap matchmaker set holds
+    /// three or more members — the smallest set that keeps a quorum without
+    /// the lost one (the workload never shrinks the set below that floor on
+    /// such a seed). Returns whether it fired.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
+    pub(crate) fn park_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
+        if bootstrap < 3 || !self.parked_matchmakers.is_empty() {
+            return false;
+        }
+        self.matchmakers.remove(key);
+        self.parked_matchmakers.insert(key.to_string());
+        tracing::info!(matchmaker = %key, "matchmaker_lost");
+        true
     }
 
     /// How many nodes *other than* `ip` are terminally parked — the persistent
@@ -860,14 +938,27 @@ pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
     guard.unrecoverable.clone()
 }
 
-/// The IPs of nodes terminally parked by a detected persistent corruption
-/// (detect ⇒ crash, stays down). The workload's convergence probe skips
-/// exactly these — the availability cost Stage 7's baseline deliberately pays,
-/// bounded by the dead-node budget so the cluster keeps serving.
+/// The IPs of nodes that are down for good: terminally parked by a detected
+/// persistent corruption (detect ⇒ crash, stays down), wiped at a restart, or
+/// retired by the operator. The workload's convergence probe skips exactly
+/// these — the availability cost the dead-node budget bounds so the cluster
+/// keeps serving — and its reconfigurations never name one of them.
 pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.parked.clone()
+    guard
+        .parked
+        .iter()
+        .chain(guard.retired.iter())
+        .cloned()
+        .collect()
+}
+
+/// The IPs of matchmakers whose registry was lost for good.
+pub(crate) fn parked_matchmakers(handle: &StateHandle) -> BTreeSet<String> {
+    let world = storage_world(handle);
+    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard.parked_matchmakers.clone()
 }
 
 // --- corpus support: world probes + targeted mask injection -------------------
@@ -888,6 +979,17 @@ pub(crate) struct CorpusDiskProbe {
     pub(crate) snap_point: Option<u64>,
     /// The retained point's rotted chunk indexes.
     pub(crate) faulty_chunks: BTreeSet<u32>,
+}
+
+/// A matchmaker's durable GC watermark (`None` until it wrote anything): the
+/// corpus's world-truth probe for "no floor became effective yet".
+pub(crate) fn corpus_matchmaker_watermark(handle: &StateHandle, ip: &str) -> Option<Ballot> {
+    let world = storage_world(handle);
+    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .matchmakers
+        .get(ip)
+        .map(|disk| disk.hard_state.gc_watermark)
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {

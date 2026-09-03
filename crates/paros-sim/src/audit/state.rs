@@ -293,6 +293,21 @@ pub(super) struct AuditState {
     pub(super) corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
+    /// Nodes whose disk was wiped at a restart (#124, fed by the sim node
+    /// loop): the identity is gone for good and excused from convergence —
+    /// the explanation is the harness's own coin, never a driver decision.
+    pub(super) wiped: BTreeSet<u64>,
+    /// Nodes that shut down on an operator's retirement (#123): reported by
+    /// the driver at the instant they exit, or by a boot that found the
+    /// identity retired.
+    pub(super) retired: BTreeSet<u64>,
+    /// Matchmakers whose registry was lost for good (#125).
+    pub(super) matchmakers_lost: BTreeSet<u64>,
+    pub(super) wiped_any: bool,
+    /// A client asked some leader to reconfigure the matchmaker set.
+    pub(super) reconfigure_matchmakers_started: bool,
+    /// Some leader refused a matchmaker-set reconfiguration request.
+    pub(super) reconfigure_matchmakers_refused: bool,
     /// A process-level restart (attrition, or the corpus script) booted while
     /// at least one *other* node sat terminally parked: a transient process
     /// loss overlapped a persistent storage loss.

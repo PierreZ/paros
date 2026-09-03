@@ -120,8 +120,13 @@ pub(crate) const PROCESS_POOL_RANGE: std::ops::RangeInclusive<usize> = 3..=6;
 /// campaign straight to `Prepare`. One and three are the `2f + 1` sets for
 /// `f ∈ {0, 1}`; two is a valid set whose quorum is both members — it
 /// tolerates no matchmaker loss, which is exactly the shape under which a
-/// matchmaker crash must cost a campaign and never safety.
-pub(crate) const MATCHMAKER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=3;
+/// matchmaker crash must cost a campaign and never safety. The pool is the
+/// address book; the **bootstrap matchmaker set** (generation 0, #125) is
+/// drawn from it per seed (`crate::shape::matchmaker_bootstrap_ranks`) and
+/// may be a subset that leaves matchmaker spares for a
+/// `ReconfigureMatchmakers` to pull in; four and five leave room for a
+/// replacement after a matchmaker's registry is lost for good.
+pub(crate) const MATCHMAKER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=5;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -192,9 +197,11 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// pool's `max_dead` budget is spent only by dead acceptors and the
 /// matchmakers' only by dead matchmakers, so a killed matchmaker never keeps
 /// the cluster's own quorum whole by proxy, and both roles can be down at
-/// once. `prob_wipe = 0`: durable state survives a restart, modelling a clean
-/// process crash with intact disk (a wiped disk loses the promise, which is
-/// the amnesia case deferred to node replacement). The recovery window is
+/// once. `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
+/// wipes its own storage provider, which paros does not use (the fake disk is
+/// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
+/// a restart in `crate::process` (#124) and answered by replacement through
+/// reconfiguration, never by a rejoin. The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
@@ -235,7 +242,9 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })
-        .processes(MATCHMAKER_POOL_RANGE, || Box::new(MatchmakerProcess))
+        .processes(MATCHMAKER_POOL_RANGE, || {
+            Box::new(MatchmakerProcess::chaotic())
+        })
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))
@@ -432,6 +441,31 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .chaos_duration(CORPUS_CHAOS)
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// Run the departed-straggler case (see `crate::corpus`, #124): a four-node
+/// pool bootstrapped on three, reconfigured onto the spare, then the only
+/// clean copy of a slot left on the node the reconfiguration removed — CTRL
+/// Case 3 across a configuration boundary. The cluster must WAIT while the
+/// straggler is down (its leader resigning under `REPAIR_TIMEOUT_ELECTIONS`)
+/// and recover the slot through the prior configuration once it returns.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
+    SimulationBuilder::new()
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .processes(corpus::DEPARTED_POOL, || {
+            Box::new(NodeProcess::scripted_with_bootstrap(
+                corpus::DEPARTED_BOOTSTRAP,
+            ))
+        })
+        .processes(1, || Box::new(MatchmakerProcess::scripted()))
+        .fault_factory(|| Box::new(ScriptedLifecycle))
+        .chaos_duration(CORPUS_CHAOS)
+        .workload_factory(|| Box::new(corpus::DepartedStragglerWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()

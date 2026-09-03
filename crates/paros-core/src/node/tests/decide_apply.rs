@@ -380,6 +380,7 @@ fn restart_rebuilds_state_from_hard_state() {
             quorum_system: crate::state::QuorumSystem::Majority,
             nodes: Vec::new(),
             matchmakers: Vec::new(),
+            matchmaker_pool: Vec::new(),
         },
         first_slot: Slot(0),
         faulty: Vec::new(),

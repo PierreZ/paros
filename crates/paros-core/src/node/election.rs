@@ -265,12 +265,13 @@ impl RawNode {
                 config.clone(),
                 reconfiguration,
             ));
+            let generation = self.matchmakers.generation;
             let request = if reconfiguration {
-                MatchRequest::reconfigure(me, self.ballot, config)
+                MatchRequest::reconfigure(me, self.ballot, config, generation)
             } else {
-                MatchRequest::new(me, self.ballot, config)
+                MatchRequest::new(me, self.ballot, config, generation)
             };
-            for matchmaker in self.config.matchmakers.clone() {
+            for matchmaker in self.matchmakers.members.clone() {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
             }
@@ -794,6 +795,7 @@ impl RawNode {
         self.repair_elapsed = 0;
 
         let recovery_start = self.first_unchosen();
+        let prior_for_gc = e.prior.clone();
         let recovered: BTreeMap<Slot, Command> = e
             .recovered
             .into_iter()
@@ -839,6 +841,12 @@ impl RawNode {
             self.next_slot >= self.first_unchosen(),
             "a fresh leader's next slot sits at or past the chosen prefix"
         );
+        // The leadership's garbage-collection campaign (#123): decide, once
+        // the fence is held by a quorum of `C_b`, that every configuration
+        // below this ballot may be forgotten.
+        if self.config.has_matchmakers() {
+            self.open_gc(&prior_for_gc);
+        }
     }
 
     /// Start one bounded page of inherited Phase-2 rounds. The first page is

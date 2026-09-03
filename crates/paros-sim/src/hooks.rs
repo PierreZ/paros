@@ -133,6 +133,20 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.active() && buggify_with_prob!(0.5)
     }
 
+    fn skip_gc_resend(&self) -> bool {
+        // Consulted only when a GC re-send is due; gated in the audit
+        // (`gc_resend_skipped`). A skipped beat stretches the window in which
+        // a leader deposed before its quorum acks leaves the floor un-raised.
+        self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn skip_reconfigurer_resend(&self) -> bool {
+        // Consulted only while a handover runs; gated in the audit
+        // (`reconfigurer_resend_skipped`). A skipped beat stretches the
+        // stop-the-world window and delays a preempted decree's reopening.
+        self.active() && buggify_with_prob!(0.5)
+    }
+
     fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
         // Per message on a non-empty mailbox; a per-peer stream is otherwise
         // delivered in enqueue order, so this is the only in-stream reorder.
@@ -466,6 +480,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // change already under way (refused `not_leader`, then
             // `unchanged`).
             paros::Reply::Reconfigure => buggify_with_prob!(0.10),
+            // A lost GC ack after the floor is durable: the leader re-asks a
+            // floor already in force (the idempotent `Unchanged` answer).
+            paros::Reply::GcAck => buggify_with_prob!(0.20),
+            // A lost handover reply after its write is durable: the
+            // reconfigurer's re-send meets the idempotent stop, the keyed
+            // bootstrap, the durable vote.
+            paros::Reply::MatchmakerReconfigure => buggify_with_prob!(0.20),
+            // A lost matchmaker-reconfiguration ack: the client re-asks and
+            // meets `busy`, or a later generation.
+            paros::Reply::ReconfigureMatchmakers => buggify_with_prob!(0.10),
+            // A lost retirement ack: the operator re-asks a node already
+            // gone; the world already knows it is retired.
+            paros::Reply::Retire => buggify_with_prob!(0.10),
         }
     }
 

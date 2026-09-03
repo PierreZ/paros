@@ -12,6 +12,11 @@ service Paros {
   // leader admits it, and only on a deployment that names matchmakers; every
   // other case is refused (`accepted: false`) and the client may retry.
   rpc Reconfigure(.paros.v1.Reconfigure) returns (.paros.v1.ReconfigureAck);
+  // Change the matchmaker set (Matchmaker Paxos §5, #125): any node of a
+  // deployment that names matchmakers may drive it; refused (`accepted:
+  // false`) on a plain deployment, while another handover runs here, or for
+  // a target outside the matchmaker pool.
+  rpc ReconfigureMatchmakers(.paros.v1.ReconfigureMatchmakers) returns (.paros.v1.ReconfigureMatchmakersAck);
 }
 
 message Propose {
@@ -55,6 +60,21 @@ message CompactAck {
 message Reconfigure {
   // The new acceptor set (node ids drawn from the deployment's pool).
   repeated uint64 members = 1;
+}
+
+message ReconfigureMatchmakers {
+  // The new matchmaker set (matchmaker ids drawn from the deployment's pool).
+  repeated uint64 members = 1;
+}
+
+message ReconfigureMatchmakersAck {
+  // Whether the handover was started at this node.
+  bool accepted = 1;
+  // Why it was refused, when it was: "no_matchmakers", "busy", "empty",
+  // "unknown_matchmaker".
+  string refusal = 2;
+  // The generation being replaced, when accepted.
+  optional uint64 generation = 3;
 }
 
 message ReconfigureAck {

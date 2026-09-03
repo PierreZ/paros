@@ -3,15 +3,17 @@
 //! [`RegistryStorage`] read port served from a boot-time view.
 //!
 //! The registry rides the world's durable-record contract exactly like a
-//! node's disk: the watermark scalar and the per-ballot registration records
-//! are stored separately (never a blob — the shape the CTRL per-record
-//! detection and repair need, see `paros::MatchmakerStorage`), writes stage
-//! locally and reach the durable world only on a `sync`, so a crash before the
-//! fsync loses the whole un-synced batch — a faithful clean crash — and a
+//! node's disk: the scalars and the per-ballot registration records are stored
+//! separately (never a blob — the shape the CTRL per-record detection and
+//! repair need, see `paros::MatchmakerStorage`), writes stage locally **in
+//! order** and reach the durable world only on a `sync`, so a crash before
+//! the fsync loses the whole un-synced batch — a faithful clean crash — and a
 //! restart reads back, record by record, exactly what the last fsync left.
 //! There is deliberately **no matchmaker-specific fault story** (#119): torn
 //! writes, checksums and rot are generic storage concerns already modelled on
-//! the node's records, and the registry's crash seams live in the driver.
+//! the node's records, the registry's crash seams live in the driver, and a
+//! matchmaker whose state is lost for good is *replaced* through a
+//! matchmaker-set reconfiguration (#125), never repaired in place.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError, Weak};
@@ -32,6 +34,58 @@ pub(super) struct MatchmakerDisk {
     pub(super) registry: BTreeMap<Ballot, Registration>,
 }
 
+impl MatchmakerDisk {
+    /// Apply one flushed write, in batch order.
+    fn apply(&mut self, op: Staged) {
+        match op {
+            Staged::Register(ballot, registration) => {
+                // Write-once, seen from the disk: a re-write of a registered
+                // ballot carries the same bytes (the core never re-registers,
+                // and a boot replays nothing).
+                if let Some(previous) = self.registry.insert(ballot, registration.clone()) {
+                    assert_always!(
+                        previous == registration,
+                        "matchmaker: a durable registration is never overwritten with different bytes",
+                        { "round" => ballot.round, "bnode" => ballot.node.0 }
+                    );
+                }
+            }
+            Staged::Watermark(watermark) => self.raise(watermark),
+            Staged::Scalars(scalars) => {
+                // The durable watermark never lowers: a scalar write carries
+                // the core's copy, which can lag a floor already flushed.
+                let durable = self.hard_state.gc_watermark;
+                self.hard_state = scalars;
+                self.hard_state.gc_watermark = self.hard_state.gc_watermark.max(durable);
+                let floor = self.hard_state.gc_watermark;
+                self.registry = self.registry.split_off(&floor);
+            }
+            Staged::Install(scalars, registrations) => {
+                self.registry = registrations
+                    .into_iter()
+                    .filter(|(b, _)| *b >= scalars.gc_watermark)
+                    .collect();
+                self.hard_state = scalars;
+            }
+        }
+    }
+
+    fn raise(&mut self, watermark: Ballot) {
+        if watermark > self.hard_state.gc_watermark {
+            self.hard_state.gc_watermark = watermark;
+            self.registry = self.registry.split_off(&watermark);
+        }
+    }
+}
+
+/// One staged write, replayed in order at the fsync.
+enum Staged {
+    Register(Ballot, Registration),
+    Watermark(Ballot),
+    Scalars(MatchmakerHardState),
+    Install(MatchmakerHardState, BTreeMap<Ballot, Registration>),
+}
+
 /// A [`MatchmakerStorage`] onto one matchmaker's slice of the shared world.
 pub(crate) struct DurableMatchmakerStorage {
     /// Read view: the durable scalars and records as of this boot (the core
@@ -41,10 +95,9 @@ pub(crate) struct DurableMatchmakerStorage {
     world: Weak<Mutex<StorageWorld>>,
     /// This matchmaker's IP — its key into the world.
     key: String,
-    /// Writes staged since the last flush (lost if the incarnation is dropped
-    /// before a sync).
-    staged_registrations: BTreeMap<Ballot, Registration>,
-    staged_watermark: Option<Ballot>,
+    /// Writes staged since the last flush, in order (lost if the incarnation
+    /// is dropped before a sync).
+    staged: Vec<Staged>,
 }
 
 impl DurableMatchmakerStorage {
@@ -67,8 +120,7 @@ impl DurableMatchmakerStorage {
             boot_registry,
             world,
             key,
-            staged_registrations: BTreeMap::new(),
-            staged_watermark: None,
+            staged: Vec::new(),
         }
     }
 
@@ -108,50 +160,48 @@ impl MatchmakerStorage for DurableMatchmakerStorage {
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
-        self.staged_registrations
-            .insert(ballot, registration.clone());
+        self.staged
+            .push(Staged::Register(ballot, registration.clone()));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
     fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        self.staged_watermark = Some(
-            self.staged_watermark
-                .map_or(watermark, |w| w.max(watermark)),
-        );
+        self.staged.push(Staged::Watermark(watermark));
         Ok(())
     }
 
-    /// The fsync: the whole stage reaches the durable world, registrations
-    /// first and the watermark last (so a flushed floor is applied over the
-    /// records it prunes, exactly as the core applied them).
+    #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
+    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
+        self.staged.push(Staged::Scalars(scalars.clone()));
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
+    fn install_registry(
+        &mut self,
+        scalars: &MatchmakerHardState,
+        registrations: &BTreeMap<Ballot, Registration>,
+    ) -> Result<(), StorageError> {
+        self.staged
+            .push(Staged::Install(scalars.clone(), registrations.clone()));
+        Ok(())
+    }
+
+    /// The fsync: the whole stage reaches the durable world in the order the
+    /// core wrote it, so a flushed floor is applied over the records it
+    /// prunes exactly as the core applied them.
     #[tracing::instrument(level = "trace", skip_all)]
     fn sync(&mut self) -> Result<(), StorageError> {
-        let registrations = std::mem::take(&mut self.staged_registrations);
-        let watermark = self.staged_watermark.take();
-        if registrations.is_empty() && watermark.is_none() {
+        let staged = std::mem::take(&mut self.staged);
+        if staged.is_empty() {
             return Ok(());
         }
         let key = self.key.clone();
         self.with_world(|w| {
             let disk = w.matchmakers.entry(key).or_default();
-            for (ballot, config) in registrations {
-                // Write-once, seen from the disk: a re-write of a registered
-                // ballot carries the same bytes (the core never re-registers,
-                // and a boot replays nothing).
-                if let Some(previous) = disk.registry.insert(ballot, config.clone()) {
-                    assert_always!(
-                        previous == config,
-                        "matchmaker: a durable registration is never overwritten with different bytes",
-                        { "round" => ballot.round, "bnode" => ballot.node.0 }
-                    );
-                }
-            }
-            if let Some(watermark) = watermark
-                && watermark > disk.hard_state.gc_watermark
-            {
-                disk.hard_state.gc_watermark = watermark;
-                disk.registry = disk.registry.split_off(&watermark);
+            for op in staged {
+                disk.apply(op);
             }
         })
     }

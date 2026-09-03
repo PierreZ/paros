@@ -1,7 +1,7 @@
 //! The [`Ready`] borrow guard: one batch of work, and the compile-time gate that
 //! enforces "one batch in flight".
 
-use crate::matchmaker::{MatchRequest, MatchmakerId};
+use crate::matchmaker::{GcRequest, MatchRequest, MatchmakerId};
 use crate::message::Message;
 use crate::node::{RawNode, ReadState};
 use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
@@ -128,6 +128,14 @@ impl<'a> Ready<'a> {
     #[must_use]
     pub fn match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
         self.node.pending_match_requests()
+    }
+
+    /// Garbage-collection requests to send this batch (#123), one per
+    /// addressed matchmaker, over the matchmaker RPC service; the acks come
+    /// back through [`RawNode::on_gc_ack`]. Always empty on plain Multi-Paxos.
+    #[must_use]
+    pub fn gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
+        self.node.pending_gc_requests()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

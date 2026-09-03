@@ -103,6 +103,7 @@ impl RawNode {
         self.handoff_fence_elapsed = 0;
         self.election = None;
         self.matchmaking = None;
+        self.gc = None;
         self.leader_recovery = None;
         self.repair_probe = None;
         self.repair_elapsed = 0;
