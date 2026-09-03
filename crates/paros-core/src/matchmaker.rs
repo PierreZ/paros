@@ -1157,10 +1157,21 @@ impl Matchmaker {
                 let set = bootstrap.set.clone();
                 // Wire hygiene: a proposal this matchmaker is not in, one
                 // that would not move it forward, or one that cannot admit
-                // the quorum system is refused whole.
+                // the quorum system is refused whole. So is a competing
+                // proposal for a generation already settled here: once a
+                // successor is recorded, nothing else at its generation can
+                // ever be chosen, and storing it would keep a whole registry
+                // copy durable forever. The refusal names the successor, so
+                // the stale reconfigurer adopts it instead.
+                let settled = self
+                    .hard_state
+                    .successor
+                    .as_ref()
+                    .is_some_and(|s| set.generation <= s.generation && set != *s);
                 if !set.contains(me)
                     || set.generation <= current.generation
                     || !set.is_well_formed()
+                    || settled
                 {
                     refused(self)
                 } else {
@@ -1272,11 +1283,16 @@ impl Matchmaker {
                     // link (freezing if it had not — once a successor is
                     // chosen the generation is over), then activate if it is
                     // also a member of the successor holding its bootstrap.
+                    let mut changed = false;
                     if self.hard_state.successor.is_none() {
                         if phase == MatchmakerPhase::Active {
                             self.freeze();
                         }
                         self.hard_state.successor = Some(successor.clone());
+                        changed = true;
+                    }
+                    changed |= self.prune_settled_pending(&successor);
+                    if changed {
                         self.stage_scalars();
                     }
                     let activated = self.activate(&successor);
@@ -1289,7 +1305,10 @@ impl Matchmaker {
                     || matches!(phase, MatchmakerPhase::Inactive | MatchmakerPhase::Fresh)
                 {
                     // Not a member of the succeeded generation (a spare, or
-                    // frozen further back): only an activation can apply.
+                    // frozen further back): only an activation can apply —
+                    // but the decision settles this matchmaker's losing
+                    // bootstraps either way.
+                    let pruned = self.prune_settled_pending(&successor);
                     let activated = self.activate(&successor);
                     if activated {
                         ReconfigureReply::Learned {
@@ -1298,6 +1317,9 @@ impl Matchmaker {
                             activated,
                         }
                     } else {
+                        if pruned {
+                            self.stage_scalars();
+                        }
                         refused(self)
                     }
                 } else {
@@ -1389,6 +1411,22 @@ impl Matchmaker {
         true
     }
 
+    /// Drop every pending bootstrap the chosen `successor` settles: a
+    /// proposal at or below the successor's generation that is not the
+    /// successor itself lost its decree and can never be activated. Keeping
+    /// one is not free — the pending list holds a whole reconstructed
+    /// registry per proposal and rides inside every later
+    /// [`MatchmakerWriteOp::SetScalars`], so an unpruned loser makes every
+    /// freeze, promise and vote of every later generation more expensive,
+    /// forever. Returns whether anything was dropped.
+    fn prune_settled_pending(&mut self, successor: &MatchmakerSet) -> bool {
+        let before = self.hard_state.pending.len();
+        self.hard_state
+            .pending
+            .retain(|p| p.set.generation > successor.generation || p.set == *successor);
+        self.hard_state.pending.len() != before
+    }
+
     /// Stage a whole-scalars write.
     fn stage_scalars(&mut self) {
         self.pending_writes
@@ -1414,7 +1452,8 @@ impl Matchmaker {
     /// The cross-field checker, called at boot and at every public mutating
     /// entry point: no registration below the watermark, every registration
     /// a well-formed configuration, a frozen or activated generation with a
-    /// durable membership, and pending bootstraps strictly above it.
+    /// durable membership, pending bootstraps strictly above it, and no
+    /// pending bootstrap a recorded successor has already settled.
     fn assert_invariants(&self) {
         assert!(
             self.registry
@@ -1451,6 +1490,13 @@ impl Matchmaker {
             assert!(
                 self.hard_state.phase == MatchmakerPhase::Stopped,
                 "a generation with a successor is frozen"
+            );
+            assert!(
+                self.hard_state
+                    .pending
+                    .iter()
+                    .all(|p| p.set.generation > successor.generation || p.set == *successor),
+                "a settled generation keeps no pending bootstrap but the successor's"
             );
         }
         let current = self.set().generation;
@@ -1647,6 +1693,78 @@ mod tests {
             MatchmakerGeneration(generation),
             members.iter().copied().map(MatchmakerId).collect(),
         )
+    }
+
+    /// Review finding P6: a matchmaker bootstrapped into a proposal that
+    /// *lost* its decree must not carry that whole reconstructed registry in
+    /// its durable scalars forever. The learn path prunes it — here at a
+    /// spare, which is outside the chosen set and so never activates, the
+    /// branch where nothing else would ever drop it.
+    #[test]
+    fn a_losing_bootstrap_is_dropped_when_the_successor_is_learned() {
+        // Matchmaker 3 is a spare of M_0 = {0, 1, 2}: it is a member of the
+        // proposed {0, 1, 3} and of nothing else.
+        let mut mm = Matchmaker::new(&mmconfig(3, &[0, 1, 2]), &TestRegistry::default());
+        assert_eq!(mm.phase(), MatchmakerPhase::Inactive);
+        let losing = set(1, &[0, 1, 3]);
+        let mut history = BTreeMap::new();
+        history.insert(ballot(1, 1), Registration::belief(config(&[0, 1, 2])));
+        mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+            from: NodeId(5),
+            bootstrap: PendingBootstrap {
+                set: losing.clone(),
+                gc_watermark: Ballot::zero(),
+                history: history.clone(),
+            },
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert_eq!(writes.len(), 1, "the pending bootstrap is durable");
+        assert!(matches!(&replies[0], ReconfigureReply::Bootstrapped { .. }));
+        assert_eq!(mm.hard_state().pending.len(), 1);
+        // A different set wins generation 1, and this matchmaker is not in it.
+        let winner = set(1, &[0, 1, 2]);
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: winner.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(
+            matches!(&replies[0], ReconfigureReply::Refused { .. }),
+            "a spare outside the chosen set activates nothing"
+        );
+        assert!(
+            mm.hard_state().pending.is_empty(),
+            "the losing bootstrap is gone"
+        );
+        assert!(
+            writes
+                .iter()
+                .any(|w| matches!(w, MatchmakerWriteOp::SetScalars(scalars) if scalars.pending.is_empty())),
+            "the prune is durable"
+        );
+        // And the loser cannot come back: a resent bootstrap for a settled
+        // generation is refused. (Here from the other side — a member of the
+        // succeeded generation that recorded the successor.)
+        let mut member = fresh(0);
+        member.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: set(1, &[0, 1, 2]),
+        });
+        drain_reconfigure(&mut member);
+        member.step_reconfigure(ReconfigureRequest::Bootstrap {
+            from: NodeId(5),
+            bootstrap: PendingBootstrap {
+                set: set(1, &[0, 1, 3]),
+                gc_watermark: Ballot::zero(),
+                history,
+            },
+        });
+        let (writes, replies) = drain_reconfigure(&mut member);
+        assert!(matches!(&replies[0], ReconfigureReply::Refused { .. }));
+        assert!(writes.is_empty(), "a settled proposal is not stored");
+        assert!(member.hard_state().pending.is_empty());
     }
 
     #[test]

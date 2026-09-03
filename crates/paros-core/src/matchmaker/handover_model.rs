@@ -64,6 +64,10 @@ const ABANDON_TICKS: u64 = 12;
 /// starving the handover it is meant to exercise).
 const MAILBOX: usize = 96;
 
+/// The bounded drain that empties the network before the converged state is
+/// judged: the recovery tail's last probe leaves replies in flight.
+const DRAIN_STEPS: usize = 4_000;
+
 /// A seeded `splitmix64`: deterministic, dependency-free.
 struct Rng(u64);
 
@@ -226,6 +230,9 @@ struct Reach {
     republished: u64,
     /// A reconfigurer was killed while a decree it opened was in flight.
     killed_deciding: u64,
+    /// A matchmaker dropped a pending bootstrap the chosen successor
+    /// settled, without activating anything (review finding P6).
+    pruned_losing_bootstrap: u64,
 }
 
 impl Reach {
@@ -242,6 +249,7 @@ impl Reach {
             ("activated_after_restart", self.activated_after_restart),
             ("republished", self.republished),
             ("killed_deciding", self.killed_deciding),
+            ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
         ];
         for (name, count) in counters {
             assert!(
@@ -411,6 +419,25 @@ impl World {
         &mut self.nodes[usize::try_from(id.0).expect("index")]
     }
 
+    /// Pending bootstraps on `id`'s disk that a chosen `successor` settles:
+    /// at or below its generation and not the successor itself.
+    fn settled_pending(&self, id: MatchmakerId, successor: &MatchmakerSet) -> usize {
+        self.sites[usize::try_from(id.0).expect("index")]
+            .disk
+            .hard_state
+            .pending
+            .iter()
+            .filter(|p| p.set.generation <= successor.generation && p.set != *successor)
+            .count()
+    }
+
+    /// The generation `id`'s disk stands at.
+    fn disk_generation(&self, id: MatchmakerId) -> MatchmakerGeneration {
+        self.sites[usize::try_from(id.0).expect("index")]
+            .disk_set()
+            .generation
+    }
+
     fn queue_requests(&mut self, from: NodeId) {
         let requests = self.node(from).reconfigurer.take_requests();
         for (to, request) in requests {
@@ -515,6 +542,18 @@ impl World {
         match envelope {
             Envelope::Reconfigure { to, request } => {
                 let from = request.from();
+                // Review finding P6: a `Chosen` settles every competing
+                // proposal at or below the successor's generation. What is
+                // counted is the *prune*, not the activation: the generation
+                // is unchanged, so nothing was activated, and the durable
+                // pending list shrank anyway.
+                let published = match &request {
+                    ReconfigureRequest::Chosen { successor, .. } => Some(successor.clone()),
+                    _ => None,
+                };
+                let before = published
+                    .as_ref()
+                    .map(|s| (self.settled_pending(to, s), self.disk_generation(to)));
                 self.at_matchmaker(
                     to,
                     |mm| mm.step_reconfigure(request),
@@ -529,6 +568,12 @@ impl World {
                             .collect()
                     },
                 );
+                if let (Some(successor), Some((settled, generation))) = (published, before)
+                    && self.disk_generation(to) == generation
+                    && self.settled_pending(to, &successor) < settled
+                {
+                    self.reach.pruned_losing_bootstrap += 1;
+                }
             }
             Envelope::Register { to, request } => {
                 self.at_matchmaker(
@@ -983,6 +1028,27 @@ impl World {
                 );
             }
         }
+        for (i, site) in self.sites.iter().enumerate() {
+            let live = site.live.as_ref().expect("quiescence boots everything");
+            // Review finding P6: every proposal at or below the top
+            // generation is settled — the chosen ones were activated, the
+            // losing ones pruned by the learn path — so no matchmaker still
+            // carries one in its durable scalars.
+            assert!(
+                live.hard_state()
+                    .pending
+                    .iter()
+                    .all(|p| p.set.generation > *top),
+                "seed {seed}: no matchmaker keeps a pending bootstrap settled by the top generation {}; mm{i} holds {:?}{}",
+                top.0,
+                live.hard_state()
+                    .pending
+                    .iter()
+                    .map(|p| (p.set.generation.0, p.set.members.clone()))
+                    .collect::<Vec<_>>(),
+                self.dump()
+            );
+        }
         for (i, node) in self.nodes.iter().enumerate() {
             assert!(
                 node.believed == *top_set,
@@ -1031,6 +1097,15 @@ impl World {
         for step in 0..QUIET_STEPS {
             self.quiet_step(step);
             self.check_all();
+        }
+        // Judge the converged state on an empty network: the last probe's
+        // republications are in flight, and a matchmaker left behind learns
+        // the top generation from them.
+        let mut guard = 0;
+        while !self.network.is_empty() && guard < DRAIN_STEPS {
+            self.deliver_random();
+            self.check_all();
+            guard += 1;
         }
         self.assert_converged(seed);
         if self
@@ -1105,6 +1180,7 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.activated_after_restart += reach.activated_after_restart;
         total.republished += reach.republished;
         total.killed_deciding += reach.killed_deciding;
+        total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
