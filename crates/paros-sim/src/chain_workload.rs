@@ -14,12 +14,11 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
-    Slot, parse_addr, proposal_checksum,
+    Reconfigure, Slot, parse_addr, proposal_checksum,
 };
 
 use crate::audit::{ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
-use crate::matchmaking::MatchmakingClient;
 use crate::{CHAOS_DURATION_MS, DigestSink};
 
 const PROPOSE: u8 = 0;
@@ -33,14 +32,26 @@ const COMPACT_STORM: u8 = 7;
 /// The PUBLIC read-index RPC (the driver's leadership-confirmed linearizable
 /// read), as opposed to [`READ_STATE`]'s internal inspect probe.
 const READ_INDEX: u8 = 8;
-/// A matchmaking request to every matchmaker of a seed that deploys them —
-/// fresh, duplicate, conflicting or stale by the step's policy draw (see
-/// `crate::matchmaking`). A no-op on a plain seed.
+/// **Retired.** Once a client-side stand-in for the leader's matchmaking
+/// phase (#119); superseded by the real phase in `paros_core::RawNode`
+/// (#120), which a client must not race — a client-minted registration above
+/// the leader's round would refuse every campaign. The id stays reserved so
+/// the alphabet's ids never shift; the operation is a no-op.
 const MATCHMAKE: u8 = 9;
-/// Raise the matchmakers' GC watermark to a ballot this client saw
-/// registered, then ask below it. A no-op on a plain seed.
+/// **Retired** with [`MATCHMAKE`]: raising the GC watermark from a client is
+/// unsafe once leaders depend on the registry (the GC protocol is #123). A
+/// no-op that keeps its id.
 const MATCH_GC: u8 = 10;
-const OP_COUNT: u8 = 11;
+/// A client-requested **online reconfiguration** (#122): read the acceptor
+/// set in force from a node, compose a new one — grow onto a spare, shrink,
+/// replace one member with a spare, remove the leader itself, or rotate the
+/// whole set through the pool — and ask the leader. On a deployment without
+/// matchmakers the request is still sent, and must be refused.
+const RECONFIGURE: u8 = 11;
+const OP_COUNT: u8 = 12;
+
+/// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
+const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
 
 /// Per-timeline client shape — every field is a `buggify_knob!` (AGENTS.md,
 /// prong 2): the default is production's ordinary client, and an activated seed
@@ -101,6 +112,9 @@ struct ChainConfig {
     compact_beat_ms: u64,
     /// Compaction re-asks per operation. Floor 1.
     compact_attempts: u8,
+    /// Reconfiguration re-asks per operation (following `not_leader`
+    /// redirects, or an `unsettled` leader a beat later). Floor 1.
+    reconfigure_attempts: u8,
     /// The client channel's connect timeout. Floor 250 ms: one round trip
     /// over the default cross-datacenter link; a shorter one never connects.
     connect_timeout_ms: u64,
@@ -138,11 +152,12 @@ impl ChainConfig {
             probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
             compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
+            reconfigure_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
-            // MATCHMAKE, MATCH_GC
+            // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -153,8 +168,13 @@ impl ChainConfig {
                 buggify_knob!(11_u64, 0_u64..41_u64),
                 buggify_knob!(13_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
-                buggify_knob!(10_u64, 0_u64..41_u64),
-                buggify_knob!(4_u64, 0_u64..41_u64),
+                0,
+                0,
+                // Each accepted reconfiguration stalls the cluster for one
+                // matchmaking round trip plus one Phase 1; a run that draws
+                // the ceiling is a cluster that reconfigures more often than
+                // it commits, which is still a valid (slow) client.
+                buggify_knob!(6_u64, 0_u64..41_u64),
             ],
         }
     }
@@ -224,6 +244,86 @@ enum CompactResult {
     Accepted { leader: Option<u64> },
     Rejected { leader: Option<u64> },
     Ambiguous,
+}
+
+/// The terminal outcome of one reconfiguration operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReconfigureResult {
+    Started {
+        leader: Option<u64>,
+        round: u64,
+    },
+    Refused {
+        leader: Option<u64>,
+        refusal: String,
+    },
+    Ambiguous,
+}
+
+/// Compose the acceptor set a [`RECONFIGURE`] step asks for, from the set in
+/// force (`members`, node ids into a pool of `pool` nodes) and the step's
+/// shape draw. `floor` is the smallest configuration the run may put in
+/// force (`crate::shape::config_floor`, the size the storage world's copy
+/// budget is computed over). `None` when the shape is impossible here (no
+/// spare to grow onto, nothing above the floor to shrink); the step is then
+/// a no-op.
+fn compose_reconfiguration(
+    shape: usize,
+    members: &[u64],
+    pool: u64,
+    floor: usize,
+    leader: Option<u64>,
+    draw: u64,
+) -> Option<(&'static str, Vec<u64>)> {
+    let mut current: Vec<u64> = members.to_vec();
+    current.sort_unstable();
+    current.dedup();
+    if current.is_empty() || pool == 0 {
+        return None;
+    }
+    let spares: Vec<u64> = (0..pool).filter(|n| !current.contains(n)).collect();
+    let pick = |len: usize| usize::try_from(draw % u64::try_from(len).unwrap_or(1)).unwrap_or(0);
+    let mut next = current.clone();
+    let name = RECONFIGURE_SHAPES[shape % RECONFIGURE_SHAPES.len()];
+    match name {
+        "grow" => {
+            if spares.is_empty() {
+                return None;
+            }
+            next.push(spares[pick(spares.len())]);
+        }
+        "shrink" => {
+            if current.len() <= floor {
+                return None;
+            }
+            next.remove(pick(current.len()));
+        }
+        "replace" => {
+            if spares.is_empty() {
+                return None;
+            }
+            next[pick(current.len())] = spares[pick(spares.len())];
+        }
+        "remove-leader" => {
+            let leader = leader?;
+            if current.len() <= floor || !current.contains(&leader) {
+                return None;
+            }
+            next.retain(|n| *n != leader);
+        }
+        _ => {
+            // "rotate": every member steps `shift` ranks through the pool —
+            // a mostly or wholly disjoint successor when spares allow it.
+            let shift = 1 + draw % pool.max(2).saturating_sub(1);
+            next = current.iter().map(|n| (n + shift) % pool).collect();
+        }
+    }
+    next.sort_unstable();
+    next.dedup();
+    if next == current || next.len() < floor {
+        return None;
+    }
+    Some((name, next))
 }
 
 #[derive(Clone)]
@@ -310,6 +410,11 @@ struct AdversarialCoverage {
     payload_classes: [bool; 4],
     read_index_executed: bool,
     read_index_committed: bool,
+    /// One flag per [`RECONFIGURE_SHAPES`] entry: the shape was requested and
+    /// the leader started it.
+    reconfigure_started: [bool; 5],
+    /// A deployment without matchmakers refused a reconfiguration outright.
+    reconfigure_refused_plain: bool,
 }
 
 struct OnDrop<F: FnOnce()> {
@@ -447,12 +552,9 @@ impl Workload for ChainWorkload {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The seed's deployment map ranks the topology pool into the acceptor
-        // cluster this client proposes to and the matchmakers it matchmakes
-        // with (none on a plain seed). The chain workload only ever runs on
-        // the perturbing campaign, so the map is the drawn one.
-        let deployment =
-            crate::roles::deployment(ctx.state(), ctx.topology().all_process_ips(), true);
+        // The seed's deployment map: the acceptor pool this client proposes
+        // to.
+        let deployment = crate::roles::deployment(ctx.topology());
         let servers = deployment.acceptors().to_vec();
         if servers.is_empty() {
             return Err(SimulationError::InvalidState(
@@ -470,6 +572,17 @@ impl Workload for ChainWorkload {
             })
             .collect::<SimulationResult<Vec<_>>>()?;
         let config = ChainConfig::for_timeline();
+        // Membership as protocol data (#122): whether this seed deploys
+        // matchmakers (the opt-in for reconfiguration), and the floor no
+        // configuration this client asks for goes below. On a plain seed
+        // every request is refused unread, so any set at all may be asked
+        // for — the point there is the refusal.
+        let has_matchmakers = !deployment.matchmakers().is_empty();
+        let config_floor = if has_matchmakers {
+            crate::shape::config_floor(servers.len(), true)
+        } else {
+            1
+        };
         let channel_config = crate::client_channel_config(
             Duration::from_millis(config.connect_timeout_ms),
             Duration::from_millis(config.keep_alive_interval_ms),
@@ -495,20 +608,6 @@ impl Workload for ChainWorkload {
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-        // The matchmaking side of this client, on a seed that deploys
-        // matchmakers: the stand-in proposer for the leader's matchmaking
-        // phase, with its own channels and its own client-side model.
-        let mut matchmaking = if deployment.has_matchmakers() {
-            Some(MatchmakingClient::new(
-                ctx,
-                deployment.matchmakers(),
-                deployment.acceptors(),
-                client_id,
-                &channel_config,
-            )?)
-        } else {
-            None
-        };
         self.history.set_client(client_id);
         let audit = audit_world(ctx.state());
         let now_ms = {
@@ -632,6 +731,59 @@ impl Workload for ChainWorkload {
                     }
                 }
                 CompactResult::Ambiguous
+            }
+        };
+        let reconfigure_once = |target: usize, members: Vec<u64>| {
+            let clients = public_clients.clone();
+            let time = time.clone();
+            async move {
+                let mut attempt_target = target % clients.len();
+                let mut client = clients[attempt_target].clone();
+                for _attempt in 0..config.reconfigure_attempts {
+                    let request = Reconfigure {
+                        members: members.clone(),
+                    };
+                    let outcome = moonpool_sim::select! {
+                        response = client.reconfigure(request) => match response {
+                            Ok(response) => {
+                                let ack = response.into_inner();
+                                if ack.accepted {
+                                    ReconfigureResult::Started { leader: ack.leader, round: ack.round.unwrap_or(0) }
+                                } else {
+                                    ReconfigureResult::Refused { leader: ack.leader, refusal: ack.refusal }
+                                }
+                            }
+                            Err(_) => ReconfigureResult::Ambiguous,
+                        },
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ReconfigureResult::Ambiguous,
+                    };
+                    match &outcome {
+                        // A redirect: follow the hint. Every other refusal is
+                        // terminal for this operation — `unsettled` included,
+                        // after one beat at the same leader.
+                        ReconfigureResult::Refused {
+                            leader: Some(next),
+                            refusal,
+                        } if refusal == "not_leader" => {
+                            let Ok(next) = usize::try_from(*next) else {
+                                return outcome;
+                            };
+                            attempt_target = next % clients.len();
+                            client = clients[attempt_target].clone();
+                        }
+                        ReconfigureResult::Refused { refusal, .. } if refusal == "unsettled" => {
+                            if time
+                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .await
+                                .is_err()
+                            {
+                                return outcome;
+                            }
+                        }
+                        _ => return outcome,
+                    }
+                }
+                ReconfigureResult::Ambiguous
             }
         };
 
@@ -1433,22 +1585,76 @@ impl Workload for ChainWorkload {
                         () = shutdown.cancelled() => {}
                     }
                 }
-                MATCHMAKE => {
-                    if let Some(matchmaking) = matchmaking.as_mut() {
-                        matchmaking
-                            .matchmake(
-                                ctx,
-                                raw_policy,
-                                Duration::from_millis(config.request_timeout_ms),
-                            )
-                            .await;
-                    }
-                }
-                MATCH_GC => {
-                    if let Some(matchmaking) = matchmaking.as_mut() {
-                        matchmaking
-                            .garbage_collect(ctx, Duration::from_millis(config.request_timeout_ms))
-                            .await;
+                // Retired ids (see the constants): no-ops that keep the
+                // alphabet stable.
+                MATCHMAKE | MATCH_GC => {}
+                RECONFIGURE => {
+                    // Read the configuration in force from the hinted leader
+                    // (or the step's target): every node learns it from the
+                    // ballot's `Prepare`, so a stale answer only makes the
+                    // request refused (`unchanged`, `unknown_member`) — an
+                    // operating condition, never a wrong state.
+                    let probe_target = leader_hint.unwrap_or(target);
+                    let mut probe = internal_clients[probe_target].clone();
+                    let members = moonpool_sim::select! {
+                        response = probe.inspect(InspectRequest {}) => response
+                            .ok()
+                            .map(|response| response.into_inner().members),
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
+                        () = shutdown.cancelled() => None,
+                    };
+                    let shape = usize::try_from(raw_class % 5).unwrap_or(0);
+                    let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
+                    let pool = u64::try_from(server_count).unwrap_or(0);
+                    if let Some((name, next)) = members.as_deref().and_then(|members| {
+                        compose_reconfiguration(
+                            shape,
+                            members,
+                            pool,
+                            config_floor,
+                            leader_id,
+                            raw_payload,
+                        )
+                    }) {
+                        tracing::info!(shape = name, members = ?next, "chain_reconfigure_request");
+                        let outcome = reconfigure_once(probe_target, next).await;
+                        tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
+                        match outcome {
+                            ReconfigureResult::Started { leader, .. } => {
+                                // The AGENTS.md rule, client-visible: a
+                                // deployment without matchmakers never honors
+                                // a reconfiguration.
+                                assert_always!(
+                                    has_matchmakers,
+                                    "reconfiguration: a deployment without matchmakers never accepts a reconfiguration",
+                                    { "shape" => name }
+                                );
+                                self.adversarial.reconfigure_started[shape] = true;
+                                Self::update_leader_hint(
+                                    &mut leader_hint,
+                                    &mut stale_leader_hint,
+                                    leader,
+                                    server_count,
+                                );
+                            }
+                            ReconfigureResult::Refused { leader, refusal } => {
+                                if refusal == "no_matchmakers" {
+                                    assert_always!(
+                                        !has_matchmakers,
+                                        "reconfiguration: only a deployment without matchmakers refuses for lack of them",
+                                        { "shape" => name }
+                                    );
+                                    self.adversarial.reconfigure_refused_plain = true;
+                                }
+                                Self::update_leader_hint(
+                                    &mut leader_hint,
+                                    &mut stale_leader_hint,
+                                    leader,
+                                    server_count,
+                                );
+                            }
+                            ReconfigureResult::Ambiguous => {}
+                        }
                     }
                 }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
@@ -1465,6 +1671,28 @@ impl Workload for ChainWorkload {
         );
         if self.adversarial.dual_submitted {
             assert_reachable!("chain: concurrent dual-submit is exercised");
+        }
+        if self.adversarial.reconfigure_started[0] {
+            assert_reachable!("reconfiguration: the client grows the acceptor set onto a spare");
+        }
+        if self.adversarial.reconfigure_started[1] {
+            assert_reachable!("reconfiguration: the client shrinks the acceptor set");
+        }
+        if self.adversarial.reconfigure_started[2] {
+            assert_reachable!("reconfiguration: the client replaces one acceptor with a spare");
+        }
+        if self.adversarial.reconfigure_started[3] {
+            assert_reachable!(
+                "reconfiguration: the client removes the leader from the acceptor set"
+            );
+        }
+        if self.adversarial.reconfigure_started[4] {
+            assert_reachable!("reconfiguration: the client rotates the whole acceptor set");
+        }
+        if self.adversarial.reconfigure_refused_plain {
+            assert_reachable!(
+                "reconfiguration: a deployment without matchmakers refuses a reconfiguration"
+            );
         }
         if self.adversarial.compact_storm_modes[0] {
             assert_reachable!("chain: compact-storm overask is exercised");
@@ -1804,6 +2032,51 @@ mod tests {
             chain_hash,
             ..ChainState::default()
         }
+    }
+
+    /// The shape composer, pinned at the mechanism: each shape moves the set
+    /// the way its name says, never below the floor, never onto a node outside
+    /// the pool, and never to the set already in force.
+    #[test]
+    fn reconfiguration_shapes_respect_the_floor_and_the_pool() {
+        let members = [1_u64, 2, 3];
+        let grow = compose_reconfiguration(0, &members, 5, 3, Some(1), 7).unwrap();
+        assert_eq!(grow.0, "grow");
+        assert_eq!(grow.1.len(), 4);
+        assert!(grow.1.iter().all(|n| *n < 5));
+        assert!(
+            compose_reconfiguration(0, &[0, 1, 2], 3, 3, None, 0).is_none(),
+            "no spare"
+        );
+        assert!(
+            compose_reconfiguration(1, &members, 5, 3, None, 0).is_none(),
+            "at the floor"
+        );
+        let shrink = compose_reconfiguration(1, &[0, 1, 2, 3], 5, 3, None, 2).unwrap();
+        assert_eq!((shrink.0, shrink.1.len()), ("shrink", 3));
+        let replace = compose_reconfiguration(2, &members, 5, 3, None, 1).unwrap();
+        assert_eq!(replace.0, "replace");
+        assert_eq!(replace.1.len(), 3);
+        assert_ne!(replace.1, members.to_vec());
+        assert!(
+            compose_reconfiguration(3, &members, 5, 3, Some(1), 0).is_none(),
+            "removing the leader at the floor is refused"
+        );
+        let removed = compose_reconfiguration(3, &[0, 1, 2, 3], 5, 3, Some(2), 0).unwrap();
+        assert_eq!(
+            (removed.0, removed.1.clone()),
+            ("remove-leader", vec![0, 1, 3])
+        );
+        assert!(
+            compose_reconfiguration(3, &[0, 1, 2, 3], 5, 3, None, 0).is_none(),
+            "no leader known"
+        );
+        let rotate = compose_reconfiguration(4, &[0, 1, 2], 6, 3, None, 2).unwrap();
+        assert_eq!((rotate.0, rotate.1.clone()), ("rotate", vec![3, 4, 5]));
+        assert!(
+            compose_reconfiguration(4, &[0, 1, 2], 3, 3, None, 0).is_none(),
+            "a rotation through a pool with no spare is the same set"
+        );
     }
 
     /// The identity regression: node 1 is parked and absent from the probe,

@@ -25,17 +25,20 @@ use moonpool_core::{
 };
 use moonpool_hyper::{ChannelConfig, H2Server, H2ServerConfig, KeepAlive, ReconnectingChannel};
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, HandoffCounters, LeadershipOrigin,
-    Message, NodeId, NodeRole, ProposeResult, RawNode, ReadIndexResult, ReadState, SessionEntry,
-    Slot, Value, WriteOp,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, HandoffCounters,
+    LeadershipOrigin, MatchReply, MatchRequest, MatchStep, MatchmakerId, Message, NodeId, NodeRole,
+    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
+    ReconfigureResult, SessionEntry, Slot, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{Audit, StorageFaultDecision};
+use crate::audit::{Audit, Deployment, StorageFaultDecision};
 use crate::grpc::{
-    CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosServer, ProposeAck,
-    ReadAck, ReplySender, RpcInbox, internal, message_to_proto, rpc_channel, wire_checksum,
+    CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
+    ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReplySender, RpcInbox, internal,
+    match_reply_from_wire, message_to_proto, rpc_channel, wire_checksum, wire_match_request,
 };
 use crate::hooks::{DriverHooks, HandoffContext, Reply, Seam};
 use crate::storage::{NodeStorage, StorageError};
@@ -129,6 +132,12 @@ pub struct DriverTunables {
     /// extreme (one per request) maximizes h2 framing pressure and the
     /// batcher's keep-the-newest overflow shedding.
     pub delivery_batch: usize,
+    /// Ticks between re-sends of an open matchmaking request
+    /// (`RawNode::resend_matchmaking`), on a deployment with matchmakers.
+    /// Floor 1: a re-send per tick is a request per tick per matchmaker, which
+    /// the registry answers idempotently. The default is one election-timeout
+    /// base, so a lost reply costs about one round trip before the retry.
+    pub match_resend_ticks: u64,
 }
 
 impl Default for DriverTunables {
@@ -146,6 +155,7 @@ impl Default for DriverTunables {
             peer_inbox_capacity: GRPC_PEER_INBOX_CAPACITY,
             peer_queue_capacity: GRPC_PEER_QUEUE_CAPACITY,
             delivery_batch: GRPC_DELIVERY_BATCH,
+            match_resend_ticks: ELECTION_TIMEOUT_BASE,
         }
     }
 }
@@ -516,6 +526,7 @@ fn message_route(m: &Message) -> Option<(NodeId, ConfigId, Ballot, Option<Slot>)
             from,
             ballot,
             from_slot,
+            ..
         }
         | Message::Promise {
             config_id,
@@ -865,10 +876,7 @@ fn snap_repair_tick<S, H, A>(
         if let Some(point) = latest {
             snap.acks.entry(point.0).or_default().insert(out.self_id);
         }
-        let quorum = node
-            .config()
-            .quorum_system
-            .quorum_size(node.config().peers.len());
+        let quorum = node.acceptors().quorum_size();
         if let Some(marker) = snap.marker_pending
             && snap
                 .acks
@@ -917,9 +925,10 @@ fn snap_repair_tick<S, H, A>(
             return;
         }
         let wanted: Vec<u32> = chunks.iter().copied().collect();
+        // Every pooled node is a replica that may hold the point.
         let requests: Vec<(NodeId, Message)> = node
             .config()
-            .peers
+            .pool()
             .iter()
             .filter(|peer| **peer != me)
             .map(|peer| {
@@ -1637,7 +1646,7 @@ fn drain_ready<S, H, A>(
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
-) -> Result<(), RunError>
+) -> Result<Vec<(MatchmakerId, MatchRequest)>, RunError>
 where
     S: NodeStorage,
     H: DriverHooks,
@@ -1673,6 +1682,10 @@ where
     let snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
+    // The matchmaking requests ride the same persist-before-send edge as the
+    // peer messages (the candidate's promise raise is in this batch) and are
+    // handed back to the loop, which owns the matchmaker links.
+    let match_requests: Vec<(MatchmakerId, MatchRequest)> = ready.match_requests().to_vec();
     ready.advance();
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
@@ -1721,7 +1734,10 @@ where
     // durable writes survive; the batch's messages are dropped (never sent), so a
     // recovered node must re-derive them. Only meaningful when there is durable
     // work or a message to lose.
-    if (!writes.is_empty() || !messages.is_empty() || snapshot_offer_count > 0)
+    if (!writes.is_empty()
+        || !messages.is_empty()
+        || !match_requests.is_empty()
+        || snapshot_offer_count > 0)
         && hooks.crash_at(Seam::AfterSyncBeforeSend)
     {
         audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
@@ -1867,7 +1883,7 @@ where
     // I/O the async driver is still performing.
     node.advance_recovery();
 
-    Ok(())
+    Ok(match_requests)
 }
 
 /// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
@@ -2203,6 +2219,214 @@ fn report_handoff<A: Audit>(
     installed_now
 }
 
+/// The loop's cross-batch delta trackers, so `maintain` reports each monotone
+/// core counter exactly once per change.
+struct Deltas {
+    role: NodeRole,
+    duplicates: u64,
+    quorum_lost: u64,
+    repair: (u64, u64, u64, u64, u64),
+    handoff: HandoffCounters,
+    membership: (u64, u64),
+    matchmaking: Option<Ballot>,
+    matchmaking_timeouts: u64,
+}
+
+/// The driver's **matchmaker links** (#120): one reconnecting channel per
+/// matchmaker of the deployment, and the inbox the answers come back through.
+/// Empty on plain Multi-Paxos, whose driver never speaks the matchmaker
+/// contract.
+struct MatchmakerLinks<P: Providers> {
+    clients:
+        BTreeMap<MatchmakerId, ParosMatchmakerClient<ReconnectingChannel<P, tonic::body::Body>>>,
+    replies: mpsc::Sender<MatchReply>,
+    timeout: Duration,
+    shutdown: CancellationToken,
+}
+
+/// Surface a matchmaking phase the batch just opened (#120): once per
+/// campaign, keyed on its ballot, and *before* the batch's requests leave —
+/// the audit folds the campaign's opening ahead of its first request.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
+fn surface_matchmaking<A: Audit>(
+    node: &RawNode,
+    last_matchmaking: &mut Option<Ballot>,
+    audit: &A,
+    self_id: u64,
+) {
+    if let Some((ballot, config, reconfiguration)) = node.matchmaking()
+        && *last_matchmaking != Some(ballot)
+    {
+        *last_matchmaking = Some(ballot);
+        audit.matchmaking_started(NodeId(self_id), ballot, config, reconfiguration);
+        tracing::info!(
+            node = self_id,
+            round = ballot.round,
+            members = config.members.len() as u64,
+            reconfiguration,
+            "matchmaking_started"
+        );
+    }
+}
+
+/// Send one batch of matchmaking requests, each as its own RPC task whose
+/// answer (if any) is fed back into the node loop through the reply inbox.
+/// The task draws no randomness and consults no hook — a lost or late reply
+/// is exactly what [`RawNode::resend_matchmaking`] exists for.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
+fn send_match_requests<P: Providers, A: Audit>(
+    providers: &P,
+    links: &MatchmakerLinks<P>,
+    audit: &A,
+    self_id: u64,
+    requests: Vec<(MatchmakerId, MatchRequest)>,
+) {
+    for (matchmaker, request) in requests {
+        let Some(client) = links.clients.get(&matchmaker) else {
+            tracing::warn!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                "unknown matchmaker"
+            );
+            continue;
+        };
+        audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
+        tracing::info!(
+            node = self_id,
+            matchmaker = matchmaker.0,
+            round = request.ballot.round,
+            "match_request_sent"
+        );
+        let mut client = client.clone();
+        let replies = links.replies.clone();
+        let time = providers.time().clone();
+        let timeout = links.timeout;
+        let shutdown = links.shutdown.clone();
+        let wire = wire_match_request(&request);
+        providers
+            .task()
+            .spawn_task("paros-matchmaking-request", async move {
+                let answer = moonpool_core::select! {
+                    biased;
+                    () = shutdown.cancelled() => return,
+                    result = time.timeout(timeout, client.matchmake(wire)) => result,
+                };
+                match answer {
+                    Ok(Ok(response)) => match match_reply_from_wire(response.into_inner()) {
+                        Ok(reply) => {
+                            let _ = replies.send(reply).await;
+                        }
+                        Err(error) => tracing::warn!(node = self_id, error, "bad match reply"),
+                    },
+                    Ok(Err(status)) => {
+                        tracing::debug!(node = self_id, %status, "matchmaking RPC failed");
+                    }
+                    Err(_) => tracing::debug!(node = self_id, "matchmaking RPC timed out"),
+                }
+            })
+            .detach();
+    }
+}
+
+/// Report what one matchmaker reply did to the open campaign.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
+fn report_match_step<A: Audit>(
+    node: &RawNode,
+    audit: &A,
+    self_id: u64,
+    matchmaker: MatchmakerId,
+    ballot: Ballot,
+    step: &MatchStep,
+) {
+    match step {
+        MatchStep::Ignored => {}
+        MatchStep::Registered { remaining } => {
+            audit.match_registered_by(NodeId(self_id), matchmaker, ballot, *remaining);
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = ballot.round,
+                remaining = *remaining as u64,
+                "match_registered_by"
+            );
+        }
+        MatchStep::Completed {
+            prior,
+            watermark,
+            registered_by,
+        } => {
+            // The closing reply is a registration too: fold it before the
+            // completion so the audit's registering set is the full quorum.
+            audit.match_registered_by(NodeId(self_id), matchmaker, ballot, 0);
+            audit.matchmaking_completed(
+                NodeId(self_id),
+                ballot,
+                prior,
+                *watermark,
+                *registered_by,
+                node.matchmaking_disagreements(),
+            );
+            tracing::info!(
+                node = self_id,
+                round = ballot.round,
+                prior = prior.len() as u64,
+                watermark_round = watermark.round,
+                registered_by = *registered_by as u64,
+                "matchmaking_completed"
+            );
+        }
+        MatchStep::StaleConfiguration { newest } => {
+            audit.matchmaking_stale_configuration(NodeId(self_id), ballot, *newest);
+            tracing::info!(
+                node = self_id,
+                round = ballot.round,
+                newest_round = newest.round,
+                "matchmaking_stale_configuration"
+            );
+        }
+        MatchStep::Refused(refusal) => {
+            audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, *refusal);
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = ballot.round,
+                reason = ?refusal,
+                "matchmaking_refused"
+            );
+        }
+    }
+}
+
+/// Surface the campaign-membership transitions (#122): a campaign this node
+/// declined as a non-member, and a leadership it resigned once its own
+/// reconfiguration removed it.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
+fn report_membership<A: Audit>(
+    node: &RawNode,
+    last_membership: &mut (u64, u64),
+    self_id: u64,
+    audit: &A,
+) {
+    let membership = node.membership_counters();
+    if membership.0 != last_membership.0 {
+        audit.campaign_skipped_non_member(NodeId(self_id), membership.0);
+        tracing::info!(
+            node = self_id,
+            count = membership.0,
+            "campaign_skipped_non_member"
+        );
+    }
+    if membership.1 != last_membership.1 {
+        audit.non_member_leader_resigned(NodeId(self_id), membership.1);
+        tracing::info!(
+            node = self_id,
+            count = membership.1,
+            "non_member_leader_resigned"
+        );
+    }
+    *last_membership = membership;
+}
+
 /// Post-batch upkeep: feed the core a fresh randomized election timeout whenever
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
@@ -2215,17 +2439,23 @@ fn report_handoff<A: Audit>(
 fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     node: &mut RawNode,
     providers: &P,
-    last_role: &mut NodeRole,
-    last_duplicates: &mut u64,
-    last_quorum_lost: &mut u64,
-    last_repair: &mut (u64, u64, u64, u64, u64),
-    last_handoff: &mut HandoffCounters,
+    last: &mut Deltas,
     waiters: &mut ClientWaiters,
     self_id: u64,
     election_base: u64,
     hooks: &H,
     audit: &A,
 ) {
+    let Deltas {
+        role: last_role,
+        duplicates: last_duplicates,
+        quorum_lost: last_quorum_lost,
+        repair: last_repair,
+        handoff: last_handoff,
+        membership: last_membership,
+        matchmaking: _,
+        matchmaking_timeouts: last_matchmaking_timeouts,
+    } = last;
     if node.needs_election_timeout() {
         node.set_election_timeout(draw_election_timeout(
             providers,
@@ -2262,6 +2492,22 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         );
     }
     let installed_now = report_handoff(node, last_handoff, self_id, audit);
+    report_membership(node, last_membership, self_id, audit);
+    // Surface an election timeout that re-asked an open matchmaking (#120)
+    // instead of abandoning it: the campaign's ballot travels with it so the
+    // audit can hold the clock to "moved nothing".
+    let timeouts = node.matchmaking_timeouts();
+    if timeouts != *last_matchmaking_timeouts {
+        *last_matchmaking_timeouts = timeouts;
+        let ballot = node.ballot();
+        audit.matchmaking_timeout(NodeId(self_id), ballot, timeouts);
+        tracing::info!(
+            node = self_id,
+            round = ballot.round,
+            count = timeouts,
+            "matchmaking_timeout"
+        );
+    }
     // Surface any CheckQuorum step-down the batch's tick performed (#95).
     let quorum_lost = node.quorum_lost_step_downs();
     if quorum_lost > *last_quorum_lost {
@@ -2282,13 +2528,14 @@ fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         let ballot = node.ballot();
         let promised = node.hard_state().max_promised_ballot;
         let gaps = node.election_gap_fills();
-        audit.elected(NodeId(self_id), ballot, promised, gaps);
+        audit.elected(NodeId(self_id), ballot, promised, gaps, node.acceptors());
         tracing::info!(
             node = self_id,
             round = ballot.round,
             bnode = ballot.node.0,
             pround = promised.round,
             pbnode = promised.node.0,
+            members = node.acceptors().members.len() as u64,
             "leader_elected"
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
@@ -2394,11 +2641,16 @@ fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     // the boot report: the index anchors the cross-restart chosen-prefix
     // checks, the size lets a checker do quorum arithmetic without guessing
     // the topology from partial boot observations.
+    let deployment = Deployment {
+        bootstrap: AcceptorConfig::new(node.config().peers.clone(), node.config().quorum_system),
+        pool: node.config().pool().to_vec(),
+        matchmakers: node.config().matchmakers.clone(),
+    };
     audit.recovered(
         NodeId(self_id),
         promised,
         node.hard_state().chosen_index,
-        u64::try_from(node.config().peers.len()).unwrap_or(u64::MAX),
+        &deployment,
         &records,
     );
     let mut replayed_application = false;
@@ -2524,10 +2776,16 @@ fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
 /// peer messages into the core, sends the core's outbound messages to the peers
 /// named in `members`, and ticks until `shutdown` fires.
 ///
-/// `members` is the full cluster membership (`NodeId` → address, *including*
-/// this node): the core addresses each outbound message by `NodeId`, and the
-/// driver resolves it here. It must be consistent across the cluster and agree
-/// with the `Config` the node read from `storage`.
+/// `members` is the full **node pool** (`NodeId` → address, *including* this
+/// node): every node the core may ever address — the bootstrap membership on
+/// plain Multi-Paxos, and every spare a reconfiguration could add on a
+/// matchmaker deployment. The core addresses each outbound message by
+/// `NodeId`, and the driver resolves it here. It must be consistent across
+/// the cluster and agree with the `Config` the node read from `storage`.
+///
+/// `matchmakers` is the matchmaker set (`MatchmakerId` → address), empty on
+/// plain Multi-Paxos; it must agree with the `Config`'s matchmaker set. The
+/// driver speaks the matchmaker contract only when it is non-empty.
 ///
 /// `tunables` is the driver's per-node transport shape ([`DriverTunables`]):
 /// production passes [`DriverTunables::default()`] (the historical constants);
@@ -2551,7 +2809,7 @@ fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
 /// restart path as a seam crash; [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
-#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len()))]
+#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring (providers,
@@ -2563,6 +2821,7 @@ pub async fn run_node<P, S, H, A>(
     mut storage: S,
     local_addr: String,
     members: Vec<(NodeId, String)>,
+    matchmakers: Vec<(MatchmakerId, String)>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -2696,6 +2955,29 @@ where
         })
         .collect::<BTreeMap<_, _>>();
 
+    // The matchmaker links (#120): one reconnecting channel per matchmaker,
+    // and the inbox their answers come back through. Empty on plain
+    // Multi-Paxos.
+    let (match_reply_tx, mut match_replies) =
+        mpsc::channel::<MatchReply>(tunables.peer_inbox_capacity);
+    let matchmaker_clients = matchmakers
+        .into_iter()
+        .map(|(id, addr)| {
+            let origin = http::Uri::try_from(format!("http://{addr}"))
+                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+            let channel =
+                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
+            peer_channels.push(channel.clone());
+            Ok((id, ParosMatchmakerClient::with_origin(channel, origin)))
+        })
+        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let links = MatchmakerLinks {
+        clients: matchmaker_clients,
+        replies: match_reply_tx,
+        timeout: tunables.delivery_timeout,
+        shutdown: incarnation_shutdown.clone(),
+    };
+
     // `close` is terminal and shared by every clone held by tonic clients. It
     // cancels connect/backoff/keepalive work immediately when this incarnation
     // exits, including simulated durability crashes that return via `?`.
@@ -2735,11 +3017,18 @@ where
         self_id,
         tunables.election_timeout_base,
     ));
-    let mut last_role = node.role();
-    let mut last_duplicates = node.duplicates_suppressed();
-    let mut last_quorum_lost = node.quorum_lost_step_downs();
-    let mut last_repair = node.repair_counters();
-    let mut last_handoff = node.handoff_counters();
+    let mut last = Deltas {
+        role: node.role(),
+        duplicates: node.duplicates_suppressed(),
+        quorum_lost: node.quorum_lost_step_downs(),
+        repair: node.repair_counters(),
+        handoff: node.handoff_counters(),
+        membership: node.membership_counters(),
+        matchmaking: None,
+        matchmaking_timeouts: node.matchmaking_timeouts(),
+    };
+    // Ticks since the open matchmaking request was last (re-)sent.
+    let mut match_resend_elapsed: u64 = 0;
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -2807,8 +3096,10 @@ where
                         }
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -2832,8 +3123,10 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -2902,9 +3195,11 @@ where
                         from,
                         at_index,
                     } => {
+                        // Custody counts toward the coupling quorum only from
+                        // members of the active configuration.
                         if *config_id == node.hard_state().config_id
                             && node.is_leader()
-                            && node.config().peers.contains(from)
+                            && node.acceptors().contains(*from)
                         {
                             snap.acks.entry(at_index.0).or_default().insert(from.0);
                         }
@@ -2929,10 +3224,11 @@ where
                         at_index,
                         chunks,
                     } => {
-                        // Membership-checked like a SnapAck: only a cluster
-                        // member's chunk bytes are installed.
+                        // Pool-checked: only a pooled node's chunk bytes are
+                        // installed (a replica outside the active
+                        // configuration holds the same decided point).
                         if *config_id == node.hard_state().config_id
-                            && node.config().peers.contains(from)
+                            && node.config().pool().contains(from)
                         {
                             let at = *at_index;
                             let chunks = chunks.clone();
@@ -2954,9 +3250,79 @@ where
                 if !snap_handled {
                     node.step(msg);
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 let _ = reply.send(());
+            }
+            Some(reply) = match_replies.recv() => {
+                // A matchmaker's answer to this candidate's registration (#120):
+                // fold it into the open matchmaking phase; a quorum closes the
+                // phase and opens Phase 1 in the same step.
+                let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
+                tracing::info!(
+                    node = self_id,
+                    matchmaker = matchmaker.0,
+                    round = ballot.round,
+                    registered = matches!(reply.outcome, paros_core::MatchOutcome::Registered { .. }),
+                    "match_reply_received"
+                );
+                let step = node.on_match_reply(reply);
+                report_match_step(&node, audit, self_id, matchmaker, ballot, &step);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+            }
+            Some((req, reply)) = rpc.reconfigure.recv() => {
+                // An online reconfiguration (#122): the leader moves to a fresh
+                // ballot registered with the new acceptor set. Refusable like
+                // `Compact` — a non-leader redirects, a plain deployment
+                // refuses outright, and an unsettled leadership asks the
+                // client to retry.
+                let members: Vec<NodeId> = req.members.iter().copied().map(NodeId).collect();
+                let result = if members.is_empty() {
+                    ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember)
+                } else {
+                    node.reconfigure(&AcceptorConfig::new(members.clone(), QuorumSystem::Majority))
+                };
+                audit.reconfigure_acked(NodeId(self_id), &members, result);
+                let (accepted, refusal, round) = match result {
+                    ReconfigureResult::Started(ballot) => (true, "", Some(ballot.round)),
+                    ReconfigureResult::NotLeader(_) => (false, "not_leader", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => (false, "no_matchmakers", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => (false, "unknown_member", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => (false, "round_exhausted", None),
+                };
+                let leader = match result {
+                    ReconfigureResult::NotLeader(hint) => hint.map(|n| n.0),
+                    _ => Some(self_id),
+                };
+                tracing::info!(
+                    node = self_id,
+                    members = members.len() as u64,
+                    accepted,
+                    refusal,
+                    round = round.unwrap_or(0),
+                    "reconfigure_acked"
+                );
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                // A lost reconfiguration ack is ambiguous to the client, which
+                // re-asks; a started reconfiguration stands (a retry is refused
+                // as `not_leader` while it runs, then `unchanged` once done).
+                if hooks.drop_client_reply(Reply::Reconfigure) {
+                    audit.client_reply_dropped(NodeId(self_id), Reply::Reconfigure);
+                    tracing::info!(node = self_id, reply = "reconfigure", "client_reply_dropped");
+                } else {
+                    let _ = reply.send(ReconfigureAck { leader, accepted, refusal: refusal.to_string(), round });
+                }
             }
             Some((req, reply)) = rpc.compact.recv() => {
                 // The application permits dropping the log prefix up to `up_to`.
@@ -2974,10 +3340,7 @@ where
                 // the quorum's custody advertisements land. Proposal-side
                 // policy only — the acceptor paths stay fully opaque.
                 let ack = if node.is_leader() {
-                    let quorum = node
-                        .config()
-                        .quorum_system
-                        .quorum_size(node.config().peers.len());
+                    let quorum = node.acceptors().quorum_size();
                     let covered = snap
                         .acks
                         .iter()
@@ -3037,8 +3400,10 @@ where
                     }
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
                 if hooks.drop_client_reply(Reply::Compact) {
@@ -3049,10 +3414,14 @@ where
                 }
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
+                let since = node.acceptors_since();
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.first_slot().0,
                     snapshot: storage.snapshot(),
+                    members: node.acceptors().members.iter().map(|n| n.0).collect(),
+                    config_ballot: Some(internal::Ballot { round: since.round, node: since.node.0 }),
+                    leader: node.is_leader(),
                 });
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
@@ -3075,6 +3444,23 @@ where
                     } else {
                         node.resend_pending();
                     }
+                }
+                // The open matchmaking request's re-send (#120): paced by
+                // `match_resend_ticks`, and its own BUGGIFY location — consulted
+                // only when a re-send is due, so a skip always costs a beat.
+                if node.matchmaking_pending() {
+                    match_resend_elapsed += 1;
+                    if match_resend_elapsed >= tunables.match_resend_ticks.max(1) {
+                        match_resend_elapsed = 0;
+                        if hooks.skip_matchmaking_resend() {
+                            audit.matchmaking_resend_skipped(NodeId(self_id));
+                            tracing::info!(node = self_id, "matchmaking_resend_skipped");
+                        } else {
+                            node.resend_matchmaking();
+                        }
+                    }
+                } else {
+                    match_resend_elapsed = 0;
                 }
                 // Cooperative leader handoff (`DPaxos`): move the existing
                 // Phase-2 authority to another physical node instead of letting
@@ -3150,8 +3536,10 @@ where
                         }
                     }
                 }
-                drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
-                maintain(&mut node, &providers, &mut last_role, &mut last_duplicates, &mut last_quorum_lost, &mut last_repair, &mut last_handoff, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
+                let requests = drain_ready(&mut node, &mut storage, &out, &mut waiters, hooks, audit)?;
+                surface_matchmaking(&node, &mut last.matchmaking, audit, self_id);
+                send_match_requests(&providers, &links, audit, self_id, requests);
+                maintain(&mut node, &providers, &mut last, &mut waiters, self_id, tunables.election_timeout_base, hooks, audit);
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the

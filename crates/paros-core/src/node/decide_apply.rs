@@ -19,10 +19,11 @@ impl RawNode {
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot, vhash: u64) {
-        // Quorum sets are keyed by NodeId: an id outside the configured
-        // membership must never inflate one (wire hygiene; peers are trusted
-        // but a misrouted or misconfigured sender is not a quorum member).
-        if !self.config.peers.contains(&from) {
+        // Quorum sets are keyed by NodeId, over the **active configuration**:
+        // an acceptor outside the ballot's registered configuration must
+        // never inflate an accept quorum (wire hygiene, and #122's "a joining
+        // acceptor never inflates a quorum it is not in").
+        if !self.acceptors.contains(from) {
             return;
         }
         {
@@ -89,7 +90,10 @@ impl RawNode {
         // Never lower our promise: if a competing higher `Prepare` raised it
         // since we became leader, skip the self-accept (the round relies on
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
-        if ballot >= self.hard_state.max_promised_ballot {
+        // A leader that is not a member of its own configuration (a
+        // reconfiguration that removed it, #122) is a proposer and a learner
+        // but not an acceptor: it records nothing and casts no vote.
+        if self.is_acceptor() && ballot >= self.hard_state.max_promised_ballot {
             self.set_promise(ballot);
             self.record_accepted(slot, ballot, command.clone());
             accepted_by.insert(me);
@@ -102,7 +106,9 @@ impl RawNode {
                 accepted_by,
             },
         );
-        self.broadcast(&Message::Accept {
+        // Accepts reach the active configuration only: a removed node is
+        // never contacted for a new ballot's Phase 2.
+        self.broadcast_acceptors(&Message::Accept {
             config_id: self.hard_state.config_id,
             from: me,
             ballot,
@@ -116,7 +122,7 @@ impl RawNode {
     /// `Commit` to the peers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
     pub(super) fn try_decide(&mut self, slot: Slot) {
-        let quorum = self.quorum();
+        let quorum = self.phase2_quorum();
         let me = self.config.id;
         let decided = match self.proposer.get(&slot) {
             Some(p) if p.accepted_by.len() >= quorum => Some((p.ballot, p.command.clone())),
@@ -139,11 +145,10 @@ impl RawNode {
             "a decision is counted at the leadership ballot"
         );
         assert!(
-            self.proposer[&slot].accepted_by.iter().all(|n| self
-                .config
-                .peers
-                .binary_search(n)
-                .is_ok()),
+            self.proposer[&slot]
+                .accepted_by
+                .iter()
+                .all(|n| self.acceptors.contains(*n)),
             "every vote behind a decision comes from a configured acceptor"
         );
         self.mark_chosen(slot, &command, ballot);
@@ -210,6 +215,17 @@ impl RawNode {
                 "a decision at the open round's ballot carries the round's command"
             );
         }
+        // Adopt the choosing ballot *before* the record lands, so the batch
+        // carries the promise ahead of the accept exactly as `on_accept` does:
+        // the write-side ordering the boot scan re-asserts ("the durable
+        // promise dominates every accepted record"). Recording first left a
+        // crash between the two durable ops with a record above the promise;
+        // a spare that only ever learns (never prepared, promise still zero)
+        // hit it on 1 seed in 2,000 (17196295897912962235) and refused to
+        // boot again.
+        if ballot > self.hard_state.max_promised_ballot {
+            self.set_promise(ballot);
+        }
         // Record the *chosen* value as the authoritative accepted command. Using
         // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
         // lower-ballot accept it picked up from a failed earlier ballot, and
@@ -217,9 +233,6 @@ impl RawNode {
         // would resurrect a value the cluster never chose for this slot. A chosen
         // value is durable and safe to record at its choosing ballot.
         self.record_accepted(slot, ballot, command.clone());
-        if ballot > self.hard_state.max_promised_ballot {
-            self.set_promise(ballot);
-        }
         self.chosen.insert(slot, command.clone());
         // Re-point `inflight` at what this slot actually decided. Two halves,
         // and both matter:

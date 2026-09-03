@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::matchmaker::AcceptorConfig;
 use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
@@ -30,6 +31,14 @@ pub enum Message {
         ballot: Ballot,
         /// First slot this prepare covers (the candidate's `chosen_index + 1`).
         from_slot: Slot,
+        /// The acceptor configuration the candidate registered for `ballot`
+        /// (`C_b`), so every acceptor it reaches — the members of every prior
+        /// configuration and of `C_b` itself — learns the latest configuration
+        /// and can register it on its own next campaign. **`None` on plain
+        /// Multi-Paxos**, whose `Prepare` is exactly today's; a plain node
+        /// ignores the field.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config: Option<AcceptorConfig>,
     },
     /// Acceptor → proposer: a promise covering every slot at or after `from_slot`,
     /// reporting all previously accepted `(ballot, entry)` in that suffix so the
@@ -326,6 +335,13 @@ pub enum Message {
         /// `[from_slot, next_slot)`; a payload that does not is rejected
         /// whole, and the cluster falls back to an ordinary election.
         pending: BTreeMap<Slot, Command>,
+        /// The acceptor configuration `ballot` was registered with — the
+        /// authority's Phase-2 membership, transferred verbatim so the
+        /// successor counts its quorums over exactly the registered
+        /// configuration. **`None` on plain Multi-Paxos**; a matchmaker
+        /// deployment refuses a transfer that carries none.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config: Option<AcceptorConfig>,
     },
 
     // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
@@ -359,6 +375,12 @@ pub enum Message {
         /// Echoed by [`Message::HeartbeatAck`] so the leader can tell which
         /// beat an ack answers — the freshness a read-index round counts.
         seq: u64,
+        /// The configuration the leader's ballot runs with, so a follower that
+        /// missed the `Prepare` (down or partitioned through the election)
+        /// still learns the latest configuration from ordinary beats.
+        /// **`None` on plain Multi-Paxos**; a plain node ignores the field.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config: Option<AcceptorConfig>,
     },
 
     /// Follower → leader: acknowledges a [`Message::Heartbeat`] whose ballot the

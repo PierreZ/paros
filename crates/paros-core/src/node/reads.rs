@@ -34,7 +34,7 @@ impl RawNode {
         if self.role != NodeRole::Leader {
             return;
         }
-        let quorum = self.quorum();
+        let quorum = self.phase2_quorum();
         while let Some(round) = self.read_rounds.first() {
             let confirmed =
                 round.acked_by.len() >= quorum && self.hard_state.chosen_index >= round.index;

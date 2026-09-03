@@ -2,6 +2,7 @@ use super::{
     BTreeMap, Ballot, Command, Control, Message, NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot,
     WriteOp, command_fingerprint,
 };
+use crate::matchmaker::AcceptorConfig;
 
 /// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost metric:
 /// a protocol-aware repair moves one entry, not the log).
@@ -19,13 +20,26 @@ impl RawNode {
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
     /// Promote and reply `Promise` (carrying the accepted suffix) if strictly
     /// higher than our promise; otherwise `Nack`.
+    ///
+    /// The membership guard is **not** "the sender is in my current
+    /// configuration" (#121): a leader of a newer configuration must be able
+    /// to prepare the acceptors of every *older* one — the members that keep
+    /// answering Phase 1 for the ballots they took part in until GC retires
+    /// them — and it need not be a member of that older configuration itself.
+    /// The guard is "the sender is the ballot's owner and a pooled node".
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, from_slot = from_slot.0)))]
-    pub(super) fn on_prepare(&mut self, from: NodeId, ballot: Ballot, from_slot: Slot) {
+    pub(super) fn on_prepare(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        from_slot: Slot,
+        config: Option<AcceptorConfig>,
+    ) {
         let me = self.config.id;
         let writes_at_entry = self.pending_writes.len();
-        // A Promise continuation is valid only for the configured proposer
-        // named by the ballot. This also prevents replies to arbitrary wire ids.
-        if !self.config.peers.contains(&from) || ballot.node != from {
+        // A Promise continuation is valid only for the pooled proposer named
+        // by the ballot. This also prevents replies to arbitrary wire ids.
+        if !self.in_pool(from) || ballot.node != from {
             return;
         }
         // Floor guard: a Prepare whose `from_slot` is below our compaction floor
@@ -64,6 +78,9 @@ impl RawNode {
             if ballot > self.ballot {
                 self.ballot = ballot;
             }
+            // The configuration this ballot was registered with: what this
+            // node's own next campaign registers (a matchmaker deployment).
+            self.learn_config(ballot, config);
             // A `Promise` claims exactly this: the promise now sits at the
             // prepared ballot, and the operating ballot followed it up.
             assert!(
@@ -148,11 +165,13 @@ impl RawNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
         // Wire hygiene: this handler adopts the *sender* as the leader hint and
-        // promises the ballot, so neither id may sit outside the configured
-        // membership — the same refusal every quorum-counting handler
+        // promises the ballot, so neither id may sit outside the pool — the
+        // same refusal every quorum-counting handler
         // (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`) already
-        // applies to its sender.
-        if !self.config.peers.contains(&from) || !self.config.peers.contains(&ballot.node) {
+        // applies to its sender. Membership of the ballot's configuration is
+        // the leader's tally's business: an acceptor accepts any ballot at or
+        // above its promise.
+        if !self.in_pool(from) || !self.in_pool(ballot.node) {
             return;
         }
         // Floor guard: a slot below our floor is already chosen (only chosen slots
@@ -290,6 +309,13 @@ impl RawNode {
         assert!(
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
+        );
+        // Write-side pair of the boot scan's "the durable promise dominates
+        // every accepted record": every caller raises the promise first, so
+        // the batch never carries a record above the promise it flushes.
+        assert!(
+            ballot <= self.hard_state.max_promised_ballot,
+            "a record is never accepted above the promise"
         );
         // A fresh record over a faulty entry is the in-place repair (Stage 8):
         // fill or replace-with-proven-identical, never delete. An `Accept`

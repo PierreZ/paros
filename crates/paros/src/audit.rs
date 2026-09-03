@@ -17,7 +17,10 @@
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
-use paros_core::{Ballot, Handoff, MatchRefusal, MatchmakerId, Message, NodeId, Slot};
+use paros_core::{
+    AcceptorConfig, Ballot, Handoff, MatchRefusal, MatchmakerId, Message, NodeId,
+    ReconfigureResult, Registration, Slot,
+};
 
 use crate::grpc::EdgeRejection;
 use crate::hooks::Seam;
@@ -32,6 +35,19 @@ pub enum StorageFaultDecision {
     /// Fail-stop: the node crashes rather than run on state it does not
     /// durably have, and recovery is the ordinary crash/restart path.
     Crash,
+}
+
+/// A node's durable deployment, as reported at boot by [`Audit::recovered`]:
+/// the bootstrap acceptor configuration, the addressable node pool, and the
+/// matchmaker set (empty on plain Multi-Paxos).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deployment {
+    /// The bootstrap acceptor configuration (`Config::peers`).
+    pub bootstrap: AcceptorConfig,
+    /// Every node that may ever be an acceptor (`Config::pool()`).
+    pub pool: Vec<NodeId>,
+    /// The matchmaker set (`Config::matchmakers`).
+    pub matchmakers: Vec<MatchmakerId>,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
@@ -72,8 +88,18 @@ pub trait Audit {
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {}
 
     /// This node became leader at `won`, holding `promised` at that instant and
-    /// having filled `gap_fills` undecided holes with no-ops.
-    fn elected(&self, node: NodeId, won: Ballot, promised: Ballot, gap_fills: u64) {}
+    /// having filled `gap_fills` undecided holes with no-ops, and now runs
+    /// Phase 2 over `config` — the configuration `won` was registered with on
+    /// a matchmaker deployment, the static membership on plain Multi-Paxos.
+    fn elected(
+        &self,
+        node: NodeId,
+        won: Ballot,
+        promised: Ballot,
+        gap_fills: u64,
+        config: &AcceptorConfig,
+    ) {
+    }
 
     /// The driver asked this leader to resign, and it did.
     fn stepped_down(&self, node: NodeId) {}
@@ -146,16 +172,17 @@ pub trait Audit {
 
     /// This node (re)booted, having rebuilt volatile state from durable
     /// storage: its recovered promise, the chosen index it rebuilt
-    /// (`None` = an empty chosen prefix), the full cluster size from its
-    /// durable configuration (so a checker can do quorum arithmetic without
-    /// guessing the topology), plus every `(slot, ballot, vhash)` accepted
-    /// record it read back.
+    /// (`None` = an empty chosen prefix), its durable deployment — the
+    /// bootstrap acceptor configuration, the addressable node pool, and the
+    /// matchmaker set (empty on plain Multi-Paxos) — so a checker can do
+    /// quorum arithmetic without guessing the topology, plus every
+    /// `(slot, ballot, vhash)` accepted record it read back.
     fn recovered(
         &self,
         node: NodeId,
         promised: Ballot,
         chosen_index: Option<Slot>,
-        cluster_size: u64,
+        deployment: &Deployment,
         accepted: &[(Slot, Ballot, u64)],
     ) {
     }
@@ -334,31 +361,129 @@ pub trait Audit {
     /// inside the node changed.
     fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
 
+    // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
+
+    /// This candidate opened a matchmaking phase for `ballot`, registering
+    /// `config` (`C_b`) with every matchmaker; `reconfiguration` marks a
+    /// campaign opened by a reconfiguration request rather than the election
+    /// clock. Reported at the instant the phase opens, before any request is
+    /// sent. Never fires on plain Multi-Paxos.
+    fn matchmaking_started(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        config: &AcceptorConfig,
+        reconfiguration: bool,
+    ) {
+    }
+
+    /// This candidate handed a matchmaking request for `ballot` to the
+    /// transport, addressed to `matchmaker` (the first send or a re-send).
+    fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {}
+
+    /// This candidate deliberately skipped re-sending its open matchmaking
+    /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
+    fn matchmaking_resend_skipped(&self, node: NodeId) {}
+
+    /// This candidate's matchmaking quorum named a reconfiguration to a
+    /// configuration other than the one its ordinary campaign registered for
+    /// `ballot`: the campaign was abandoned and the configuration registered
+    /// at `newest` — the effective configuration — adopted as the node's
+    /// belief (`RawNode::on_match_reply`, `StaleConfiguration`).
+    fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
+
+    /// This candidate's election clock fired while its matchmaking was still
+    /// open and re-asked the unanswered matchmakers instead of abandoning the
+    /// campaign (`RawNode::tick`). `count` is the monotone total for this
+    /// incarnation; the campaign's ballot is unchanged.
+    fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, count: u64) {}
+
+    /// This candidate folded a `Registered` reply from `matchmaker` for
+    /// `ballot`; `remaining` registrations are still needed for the quorum.
+    fn match_registered_by(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        remaining: usize,
+    ) {
+    }
+
+    /// This candidate's matchmaking quorum closed for `ballot`: `prior` is
+    /// `H_b` (the distinct prior configurations Phase 1 must each cover, in
+    /// ballot order), `watermark` the maximum GC watermark it was filtered by,
+    /// `registered_by` how many matchmakers answered, and `disagreements` how
+    /// many ballots two matchmakers reported different configurations for
+    /// (always 0 — the union keeps both). Reported at the matchmaking →
+    /// Phase 1 boundary, before the first `Prepare` is sent.
+    fn matchmaking_completed(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        prior: &[AcceptorConfig],
+        watermark: Ballot,
+        registered_by: usize,
+        disagreements: u64,
+    ) {
+    }
+
+    /// A matchmaker refused this candidate's registration for `ballot`: the
+    /// campaign was abandoned and the node is a follower again.
+    fn matchmaking_refused(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        refusal: MatchRefusal,
+    ) {
+    }
+
+    /// This node declined to campaign because it is not a member of the
+    /// configuration it would have registered (a spare, or a removed node).
+    /// `count` is the monotone total for this incarnation.
+    fn campaign_skipped_non_member(&self, node: NodeId, count: u64) {}
+
+    /// This leader resigned because its own reconfiguration removed it from
+    /// the acceptor set and the change is complete; an ordinary election
+    /// lands leadership inside the new configuration. `count` is the monotone
+    /// total for this incarnation.
+    fn non_member_leader_resigned(&self, node: NodeId, count: u64) {}
+
+    /// This node answered a client `Reconfigure` request with `result`
+    /// (started at a fresh ballot, refused with a reason, or redirected).
+    fn reconfigure_acked(&self, node: NodeId, members: &[NodeId], result: ReconfigureResult) {}
+
     // ---- the matchmaker (`run_matchmaker`), a distinct role and namespace ----
 
     /// This matchmaker (re)booted from its durable registry: every
-    /// `(ballot, configuration hash)` it read back, and its watermark. Fires
-    /// on the first boot (an empty registry) and on every restart.
+    /// `(ballot, configuration)` it read back, and its watermark. Fires on
+    /// the first boot (an empty registry) and on every restart.
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
-        registry: &[(Ballot, u64)],
+        registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
     }
 
-    /// This matchmaker durably registered the configuration hashed to
-    /// `config` under `ballot` (after the fsync).
-    fn match_registered(&self, matchmaker: MatchmakerId, ballot: Ballot, config: u64) {}
+    /// This matchmaker durably registered `config` under `ballot` (after the
+    /// fsync).
+    fn match_registered(
+        &self,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
+    }
 
     /// This matchmaker durably raised its GC watermark (after the fsync),
     /// dropping every registration below it.
     fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {}
 
     /// This matchmaker is answering `to`'s request for `ballot` with a
-    /// registration: `history` is every `(ballot, configuration hash)` the
-    /// reply names and `gc_watermark` the floor it reports. Reported at the
-    /// instant the reply leaves — after the registration's fsync and its
+    /// registration: `history` is every `(ballot, registration)` the reply
+    /// names and `gc_watermark` the floor it reports. Reported at the instant
+    /// the reply leaves — after the registration's fsync and its
     /// [`Audit::match_registered`] report, which is what lets a checker judge
     /// persist-before-reply.
     fn match_replied(
@@ -366,7 +491,7 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
-        history: &[(Ballot, u64)],
+        history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
     }

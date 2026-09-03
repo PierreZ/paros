@@ -26,6 +26,7 @@ use moonpool_core::{
 use moonpool_hyper::{H2Server, H2ServerConfig, KeepAlive};
 use paros_core::{
     AcceptorConfig, Ballot, MatchOutcome, MatchReply, Matchmaker, MatchmakerId, MatchmakerWriteOp,
+    Registration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -107,8 +108,11 @@ where
     // 1. Persist every write, in order.
     for op in &writes {
         match op {
-            MatchmakerWriteOp::Register { ballot, config } => storage
-                .register(*ballot, config)
+            MatchmakerWriteOp::Register {
+                ballot,
+                registration,
+            } => storage
+                .register(*ballot, registration)
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
             MatchmakerWriteOp::SetGcWatermark(watermark) => storage
                 .set_gc_watermark(*watermark)
@@ -133,15 +137,18 @@ where
         // Durable now — report the truthful persisted state.
         for op in &writes {
             match op {
-                MatchmakerWriteOp::Register { ballot, config } => {
-                    let hash = config_hash(config);
-                    audit.match_registered(id, *ballot, hash);
+                MatchmakerWriteOp::Register {
+                    ballot,
+                    registration,
+                } => {
+                    audit.match_registered(id, *ballot, registration);
                     tracing::info!(
                         matchmaker = id.0,
                         round = ballot.round,
                         bnode = ballot.node.0,
-                        members = config.members.len() as u64,
-                        config = hash,
+                        members = registration.config.members.len() as u64,
+                        reconfiguration = registration.reconfiguration,
+                        config = config_hash(&registration.config),
                         "match_registered"
                     );
                 }
@@ -179,9 +186,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
             history,
             gc_watermark,
         } => {
-            let history: Vec<(Ballot, u64)> = history
+            let history: Vec<(Ballot, Registration)> = history
                 .iter()
-                .map(|(ballot, config)| (*ballot, config_hash(config)))
+                .map(|(ballot, registration)| (*ballot, registration.clone()))
                 .collect();
             audit.match_replied(id, reply.to, reply.ballot, &history, *gc_watermark);
             tracing::info!(
@@ -271,10 +278,10 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(id, &storage);
-    let recovered: Vec<(Ballot, u64)> = matchmaker
+    let recovered: Vec<(Ballot, Registration)> = matchmaker
         .registry()
         .iter()
-        .map(|(ballot, config)| (*ballot, config_hash(config)))
+        .map(|(ballot, registration)| (*ballot, registration.clone()))
         .collect();
     let watermark = matchmaker.hard_state().gc_watermark;
     audit.matchmaker_recovered(id, &recovered, watermark);

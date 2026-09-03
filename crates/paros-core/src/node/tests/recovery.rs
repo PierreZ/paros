@@ -52,6 +52,7 @@ fn promise_reports_faulty_tristate_never_none() {
         from: NodeId(2),
         ballot: ballot(9, 2),
         from_slot: Slot(0),
+        config: None,
     });
     let msgs = drain(&mut n);
     let promise = msgs

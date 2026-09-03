@@ -11,11 +11,11 @@
 //! Two axes, one check:
 //!
 //! - the **main campaign** ([`explore`], [`chain_smoke`], [`run_chain_seed`]):
-//!   a 3–6 process pool — ranked per seed into a 3–6 node cluster, or a 3–5
-//!   node cluster plus one or three matchmakers — under swarm network
-//!   turbulence, crash/restart attrition, buggified provider knobs, the
-//!   driver's BUGGIFY hooks and the disk's fault sites, driven by the
-//!   Chain-of-Blocks workload;
+//!   a 3–6 node acceptor pool plus a 0–3 matchmaker pool, each its own
+//!   moonpool process group with its own per-seed count, under swarm network
+//!   turbulence, crash/restart attrition scoped per group, buggified provider
+//!   knobs, the driver's BUGGIFY hooks and the disk's fault sites, driven by
+//!   the Chain-of-Blocks workload;
 //! - the **corpus** ([`corpus_hunt`], [`run_corpus_mask`], …): scripted,
 //!   analytically-judged recovery cases on a fixed three-node cluster.
 //!
@@ -27,7 +27,6 @@ mod chain_workload;
 mod corpus;
 mod hooks;
 mod lifecycle;
-mod matchmaking;
 mod process;
 mod roles;
 mod shape;
@@ -39,13 +38,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    Attrition, AttritionScope, Chaos, ChaosMode, ExplorationConfig, LinkLatencyConfig,
-    LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder, WorkloadCount,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig,
+    LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
+    WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
-use crate::process::NodeProcess;
+use crate::process::{MatchmakerProcess, NodeProcess};
+use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP};
 
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
@@ -98,23 +99,29 @@ fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {
 
 // --- Schedule parameters and oracle clocks ------------------------------------
 
-/// Per-seed **process pool** draw (inclusive), resolved from the seeded RNG at
-/// topology-build time so every seed replays its own shape. The pool is what
-/// the deployment map (`crate::roles`) ranks into acceptors and matchmakers:
-/// on a plain seed (the default) every process is an acceptor, so the cluster
-/// is three to six nodes; a seed that draws a matchmaker set carves one or
-/// three matchmakers out of the pool, keeping at least three acceptors.
+/// Per-seed **acceptor pool** draw (inclusive), resolved from the seeded RNG at
+/// topology-build time so every seed replays its own shape. The pool is the
+/// acceptor process group (`crate::roles::ACCEPTOR_GROUP`), ranked into
+/// `NodeId`s in IP order.
 ///
 /// Three is the smallest cluster that tolerates a failure; five (quorum 3) is
 /// the shape whose accept quorums can avoid any two pinned nodes (the #88
 /// stale-ballot window); four and six sit beside them as three and five with
-/// an extra vote (six is the first even shape with a quorum of four). The
-/// ceiling is what lets a seed deploy three matchmakers *and* keep a
-/// three-node cluster. Singletons and pairs are deliberately out: a pair loses
-/// quorum on every kill and a singleton cannot lose one, so neither exercises
-/// a regime a 3–6 node cluster under attrition does not, and each needed its
-/// own special cases in the checks.
+/// an extra vote (six is the first even shape with a quorum of four).
+/// Singletons and pairs are deliberately out: a pair loses quorum on every
+/// kill and a singleton cannot lose one, so neither exercises a regime a 3–6
+/// node cluster under attrition does not, and each needed its own special
+/// cases in the checks.
 pub(crate) const PROCESS_POOL_RANGE: std::ops::RangeInclusive<usize> = 3..=6;
+/// Per-seed **matchmaker pool** draw (inclusive): the matchmaker process group
+/// (`crate::roles::MATCHMAKER_GROUP`), drawn independently of the acceptor
+/// pool. Zero is the plain Multi-Paxos deployment (AGENTS.md, *Plain
+/// Multi-Paxos is first-class*): no matchmakers, no matchmaking phase, every
+/// campaign straight to `Prepare`. One and three are the `2f + 1` sets for
+/// `f ∈ {0, 1}`; two is a valid set whose quorum is both members — it
+/// tolerates no matchmaker loss, which is exactly the shape under which a
+/// matchmaker crash must cost a campaign and never safety.
+pub(crate) const MATCHMAKER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=3;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -174,31 +181,42 @@ const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 /// and restart nodes at every phase of the script.
 const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 
-/// The main campaign's chaos surfaces: swarm network turbulence, single-node
-/// crash/restart attrition, and buggified provider knobs — one combined axis.
+/// The main campaign's chaos surfaces: swarm network turbulence, one
+/// crash/restart attrition regime **per process group**, and buggified
+/// provider knobs — one combined axis.
 ///
-/// Moonpool re-samples the attrition base per seed under `ChaosMode::Swarm`
-/// (about half the seeds run with no attrition, and the restart window is
-/// rescaled to 50–200% of the range below), so the values here are a base, not
-/// a fixed shape. `prob_wipe = 0`: durable state survives a restart, modelling a
-/// clean process crash with intact disk (a wiped disk loses the promise, which
-/// is the amnesia case deferred to reconfiguration). The recovery window is
+/// Moonpool re-samples each attrition base per seed under `ChaosMode::Swarm`
+/// (about half the seeds run a regime with no attrition, and the restart
+/// window is rescaled to 50–200% of the range below), so the values here are
+/// a base, not a fixed shape. The two regimes are independent: the acceptor
+/// pool's `max_dead` budget is spent only by dead acceptors and the
+/// matchmakers' only by dead matchmakers, so a killed matchmaker never keeps
+/// the cluster's own quorum whole by proxy, and both roles can be down at
+/// once. `prob_wipe = 0`: durable state survives a restart, modelling a clean
+/// process crash with intact disk (a wiped disk loses the promise, which is
+/// the amnesia case deferred to node replacement). The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
-fn chaos_surfaces() -> [Chaos; 3] {
+fn chaos_surfaces() -> [Chaos; 4] {
+    let regime = |victims: AttritionVictims| Attrition {
+        max_dead: 1,
+        prob_graceful: 0.0,
+        prob_crash: 1.0,
+        prob_wipe: 0.0,
+        recovery_delay_ms: Some(1_200..2_500),
+        grace_period_ms: None,
+        scope: AttritionScope::PerProcess,
+        victims,
+    };
     [
         Chaos::Network(ChaosMode::Swarm),
         Chaos::Attrition {
-            config: Attrition {
-                max_dead: 1,
-                prob_graceful: 0.0,
-                prob_crash: 1.0,
-                prob_wipe: 0.0,
-                recovery_delay_ms: Some(1_200..2_500),
-                grace_period_ms: None,
-                scope: AttritionScope::PerProcess,
-            },
+            config: regime(AttritionVictims::group(ACCEPTOR_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::Attrition {
+            config: regime(AttritionVictims::group(MATCHMAKER_GROUP)),
             mode: ChaosMode::Swarm,
         },
         Chaos::BuggifyKnobs,
@@ -217,6 +235,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })
+        .processes(MATCHMAKER_POOL_RANGE, || Box::new(MatchmakerProcess))
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))

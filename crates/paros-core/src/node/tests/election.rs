@@ -338,6 +338,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
             from: NodeId(1),
             ballot: prepared,
             from_slot: cursor,
+            config: None,
         });
         let out = drain(&mut n);
         let [
@@ -431,6 +432,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
         from: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
+        config: None,
     });
 
     assert_eq!(n.role(), NodeRole::Follower);
@@ -512,6 +514,7 @@ fn leader_never_lowers_its_promise_on_self_accept() {
         from: NodeId(2),
         ballot: higher,
         from_slot: Slot(0),
+        config: None,
     });
     let _ = drain(&mut nodes[0]);
     assert_eq!(nodes[0].hard_state().max_promised_ballot, higher);
@@ -742,6 +745,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         from: NodeId(2),
         ballot: b_prime,
         from_slot: Slot(0),
+        config: None,
     });
     let _ = drain(&mut p);
     assert_eq!(p.hard_state.max_promised_ballot, b_prime);
@@ -768,6 +772,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         ballot: b,
         commit: None,
         seq: 1,
+        config: None,
     });
     let out = drain(&mut p);
     assert!(

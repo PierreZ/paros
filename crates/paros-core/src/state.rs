@@ -1,5 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
+use crate::matchmaker::MatchmakerId;
 use crate::types::{Ballot, ConfigId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
@@ -46,7 +47,7 @@ pub struct HardState {
 /// *data* change — a different quorum system per round — rather than a rewrite of
 /// the election/decide logic. Paxos safety rests on every Phase-1 quorum
 /// intersecting every Phase-2 quorum; a simple majority satisfies that trivially.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum QuorumSystem {
     /// A simple majority of the membership: any `⌊n/2⌋ + 1` acceptors. Every two
@@ -66,19 +67,64 @@ impl QuorumSystem {
     }
 }
 
-/// Static, immutable-for-this-instance configuration: who *I* am, who my peers
-/// are, and the quorum system in force.
+/// Static, immutable-for-this-instance configuration: who *I* am, the
+/// **bootstrap** acceptor configuration, the pool of nodes that may ever be an
+/// acceptor, and the matchmaker set (empty for plain Multi-Paxos).
 ///
-/// Cluster membership is fixed at construction in Stage 0 — no reconfiguration
-/// or joint consensus yet (that arrives with the Matchmaker milestone).
+/// Two deployments live in this one struct, told apart by `matchmakers`:
+///
+/// - **Plain Multi-Paxos** (`matchmakers` empty — the default, and permanent:
+///   see AGENTS.md, *Plain Multi-Paxos is first-class*): `peers` is the fixed
+///   membership for the node's whole life, `nodes` is `peers` (or empty, which
+///   means the same), and no matchmaking phase, matchmaker message, or extra
+///   round trip ever exists.
+/// - **Matchmaker Paxos** (`matchmakers` non-empty): `peers` is only the
+///   configuration in force *before any ballot was registered*; every ballot
+///   binds its own acceptor configuration through the matchmakers, drawn from
+///   `nodes`, and the node tracks the configuration of the highest ballot it
+///   has seen (`RawNode::acceptors`). A node may be in `nodes` without being
+///   in `peers` — a spare waiting to be added — and may be in `peers` and
+///   later removed; either way it stays addressable, answers Phase 1 for the
+///   ballots it took part in, and learns the chosen log as a replica.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     /// This node's identity.
     pub id: NodeId,
-    /// The full cluster membership, *including* `id`. A sorted, deduplicated
-    /// `Vec` keeps iteration deterministic without a map.
+    /// The bootstrap acceptor configuration: the full membership before any
+    /// reconfiguration. Sorted and deduplicated (a `Vec` keeps iteration
+    /// deterministic without a map). On a plain deployment it *includes*
+    /// `id`; on a matchmaker deployment a spare's `id` may sit outside it.
     pub peers: Vec<NodeId>,
     /// The quorum system election and decide consult. A value, so config-per-round
-    /// reconfiguration is later a data change, not a logic change.
+    /// reconfiguration is a data change, not a logic change.
     pub quorum_system: QuorumSystem,
+    /// Every node that may ever be an acceptor — the addressable pool a
+    /// reconfiguration draws from. Sorted and deduplicated, a superset of
+    /// `peers` that includes `id`. Empty means "exactly `peers`", the plain
+    /// deployment's shape.
+    pub nodes: Vec<NodeId>,
+    /// The fixed matchmaker set. **Empty is plain Multi-Paxos**: no
+    /// matchmaking phase runs and no reconfiguration is honored. Non-empty
+    /// turns every campaign into matchmaking followed by a
+    /// cross-configuration Phase 1.
+    pub matchmakers: Vec<MatchmakerId>,
+}
+
+impl Config {
+    /// The addressable pool: `nodes`, or `peers` when `nodes` is empty.
+    #[must_use]
+    pub fn pool(&self) -> &[NodeId] {
+        if self.nodes.is_empty() {
+            &self.peers
+        } else {
+            &self.nodes
+        }
+    }
+
+    /// Whether this deployment names matchmakers (the opt-in that enables
+    /// matchmaking and reconfiguration).
+    #[must_use]
+    pub fn has_matchmakers(&self) -> bool {
+        !self.matchmakers.is_empty()
+    }
 }

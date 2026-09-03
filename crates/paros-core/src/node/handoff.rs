@@ -93,6 +93,7 @@
 use super::{
     BTreeMap, BTreeSet, Ballot, Command, LeaderRecovery, Message, NodeId, NodeRole, RawNode, Slot,
 };
+use crate::matchmaker::AcceptorConfig;
 
 /// Maximum slots one [`Message::Relinquish`] transfers (`decided` + `pending`).
 /// A leader whose own chosen prefix trails its allocator by more than this is
@@ -272,8 +273,9 @@ impl RawNode {
     pub fn can_relinquish(&self) -> bool {
         self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
-            && self.config.peers.len() > 1
+            && self.acceptors.members.len() > 1
             && self.election.is_none()
+            && self.matchmaking.is_none()
             && self.leader_recovery.is_none()
             && self.repair_probe.is_none()
             && self.app_repair.is_none()
@@ -282,12 +284,12 @@ impl RawNode {
             && self.next_slot.0.saturating_sub(self.first_unchosen().0) <= HANDOFF_BATCH as u64
     }
 
-    /// The peers a handoff may be addressed to: every configured member except
-    /// this node. Empty on a singleton.
+    /// The peers a handoff may be addressed to: every member of the active
+    /// configuration except this node. Empty on a singleton.
     #[must_use]
     pub fn handoff_candidates(&self) -> Vec<NodeId> {
-        self.config
-            .peers
+        self.acceptors
+            .members
             .iter()
             .copied()
             .filter(|p| *p != self.config.id)
@@ -342,10 +344,7 @@ impl RawNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, target = target.0)))]
     pub fn relinquish_to(&mut self, target: NodeId) -> Option<Handoff> {
-        if !self.can_relinquish()
-            || target == self.config.id
-            || !self.config.peers.contains(&target)
-        {
+        if !self.can_relinquish() || target == self.config.id || !self.acceptors.contains(target) {
             return None;
         }
         let ballot = self.ballot;
@@ -397,6 +396,12 @@ impl RawNode {
             decided: decided.len(),
             pending: pending.len(),
         };
+        // The authority's Phase-2 membership travels with it (a matchmaker
+        // deployment); the plain path carries nothing, as ever.
+        let config = self
+            .config
+            .has_matchmakers()
+            .then(|| self.acceptors.clone());
         self.pending_messages.push((
             target,
             Message::Relinquish {
@@ -408,6 +413,7 @@ impl RawNode {
                 next_slot,
                 decided,
                 pending,
+                config,
             },
         ));
         // THE abdication. Everything above only *described* the authority;
@@ -453,6 +459,7 @@ impl RawNode {
         next_slot: Slot,
         decided: BTreeMap<Slot, (Ballot, Command)>,
         pending: BTreeMap<Slot, Command>,
+        config: Option<AcceptorConfig>,
     ) {
         let me = self.config.id;
         // Addressing. The intended successor travels inside the payload, so a
@@ -466,11 +473,7 @@ impl RawNode {
         // currently holds it. What both ids must be is configured members —
         // the same membership trust boundary `on_accept` already draws around
         // an incoming ballot.
-        if to != me
-            || from == me
-            || !self.config.peers.contains(&from)
-            || !self.config.peers.contains(&ballot.node)
-        {
+        if to != me || from == me || !self.in_pool(from) || !self.in_pool(ballot.node) {
             self.handoff.rejected_target = self.handoff.rejected_target.saturating_add(1);
             return;
         }
@@ -492,6 +495,18 @@ impl RawNode {
             self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
             return;
         }
+        // The authority's configuration: a matchmaker deployment transfers it
+        // verbatim (a payload without one, or naming a node outside the
+        // pool, is malformed); the plain path carries none and keeps its
+        // static membership.
+        let config = match (self.config.has_matchmakers(), config) {
+            (false, None) => None,
+            (true, Some(config)) if config.members.iter().all(|m| self.in_pool(*m)) => Some(config),
+            _ => {
+                self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
+                return;
+            }
+        };
         // The successor must be able to *use* the leadership it is handed. A
         // node holding faulty records, or an open application repair, needs
         // Phase-1-shaped work to heal: the repair probe that resolves a blocked
@@ -527,6 +542,12 @@ impl RawNode {
         self.role = NodeRole::Leader;
         self.leader = Some(me);
         self.ballot = ballot;
+        if let Some(config) = config {
+            // Registration precedes exercise: the successor counts Phase 2
+            // over exactly the configuration the ballot was registered with.
+            self.acceptors = config;
+            self.acceptors_since = ballot;
+        }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.clear();
         self.resend_cursor = None;
@@ -545,7 +566,9 @@ impl RawNode {
         self.read_rounds.clear();
         self.quorum_elapsed = 0;
         self.quorum_acked_by.clear();
-        self.quorum_acked_by.insert(me);
+        if self.is_acceptor() {
+            self.quorum_acked_by.insert(me);
+        }
         self.handoff.installed = self.handoff.installed.saturating_add(1);
 
         // Learn the decided part of the tail. Trusting the predecessor here is

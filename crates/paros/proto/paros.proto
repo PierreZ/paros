@@ -8,6 +8,10 @@ service Paros {
   rpc Propose(.paros.v1.Propose) returns (.paros.v1.ProposeAck);
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
   rpc Compact(.paros.v1.Compact) returns (.paros.v1.CompactAck);
+  // Change the acceptor set (Matchmaker Paxos reconfiguration, #122). Only the
+  // leader admits it, and only on a deployment that names matchmakers; every
+  // other case is refused (`accepted: false`) and the client may retry.
+  rpc Reconfigure(.paros.v1.Reconfigure) returns (.paros.v1.ReconfigureAck);
 }
 
 message Propose {
@@ -46,4 +50,21 @@ message CompactAck {
   optional uint64 leader = 1;
   bool accepted = 2;
   uint64 first_slot = 3;
+}
+
+message Reconfigure {
+  // The new acceptor set (node ids drawn from the deployment's pool).
+  repeated uint64 members = 1;
+}
+
+message ReconfigureAck {
+  optional uint64 leader = 1;
+  // Whether the reconfiguration was started (a fresh ballot registered with
+  // the new configuration). A refusal names its reason for diagnostics.
+  bool accepted = 2;
+  // Why it was refused, when it was: "not_leader", "no_matchmakers",
+  // "unchanged", "unknown_member", "unsettled", "round_exhausted".
+  string refusal = 3;
+  // The ballot round the reconfiguration campaigns at, when accepted.
+  optional uint64 round = 4;
 }

@@ -50,13 +50,14 @@ mod write;
 
 pub use matchmaker::{
     AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, RegistryStorage,
+    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Registration,
+    RegistryStorage,
 };
 pub use message::Message;
 pub use node::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS, RawNode,
-    ReadIndexResult, ReadState,
+    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS,
+    RawNode, ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 pub use ready::Ready;
 pub use state::{Config, HardState, QuorumSystem};

@@ -18,7 +18,7 @@ use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::assert_always;
 use paros::{
-    AcceptorConfig, Ballot, MatchmakerHardState, MatchmakerStorage, RegistryStorage, StorageError,
+    Ballot, MatchmakerHardState, MatchmakerStorage, Registration, RegistryStorage, StorageError,
     StorageRecord, WriteOutcome,
 };
 
@@ -29,7 +29,7 @@ use super::StorageWorld;
 #[derive(Default)]
 pub(super) struct MatchmakerDisk {
     pub(super) hard_state: MatchmakerHardState,
-    pub(super) registry: BTreeMap<Ballot, AcceptorConfig>,
+    pub(super) registry: BTreeMap<Ballot, Registration>,
 }
 
 /// A [`MatchmakerStorage`] onto one matchmaker's slice of the shared world.
@@ -37,13 +37,13 @@ pub(crate) struct DurableMatchmakerStorage {
     /// Read view: the durable scalars and records as of this boot (the core
     /// reads the port once, at construction).
     boot_hard_state: MatchmakerHardState,
-    boot_registry: BTreeMap<Ballot, AcceptorConfig>,
+    boot_registry: BTreeMap<Ballot, Registration>,
     world: Weak<Mutex<StorageWorld>>,
     /// This matchmaker's IP — its key into the world.
     key: String,
     /// Writes staged since the last flush (lost if the incarnation is dropped
     /// before a sync).
-    staged_registrations: BTreeMap<Ballot, AcceptorConfig>,
+    staged_registrations: BTreeMap<Ballot, Registration>,
     staged_watermark: Option<Ballot>,
 }
 
@@ -92,7 +92,7 @@ impl RegistryStorage for DurableMatchmakerStorage {
         self.boot_hard_state.clone()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<AcceptorConfig> {
+    fn registration(&self, ballot: Ballot) -> Option<Registration> {
         self.boot_registry.get(&ballot).cloned()
     }
 
@@ -103,8 +103,13 @@ impl RegistryStorage for DurableMatchmakerStorage {
 
 impl MatchmakerStorage for DurableMatchmakerStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
-    fn register(&mut self, ballot: Ballot, config: &AcceptorConfig) -> Result<(), StorageError> {
-        self.staged_registrations.insert(ballot, config.clone());
+    fn register(
+        &mut self,
+        ballot: Ballot,
+        registration: &Registration,
+    ) -> Result<(), StorageError> {
+        self.staged_registrations
+            .insert(ballot, registration.clone());
         Ok(())
     }
 

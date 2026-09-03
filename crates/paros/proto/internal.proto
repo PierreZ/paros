@@ -91,11 +91,27 @@ message SlotCommand {
   Command command = 3;
 }
 
+// An acceptor configuration bound to a ballot (Matchmaker Paxos): the
+// membership plus the quorum system over it. Carried by the messages that
+// let acceptors learn the configuration a ballot was registered with; absent
+// on plain Multi-Paxos, whose messages are unchanged.
+message AcceptorConfig {
+  repeated uint64 members = 1;
+  QuorumSystem quorum_system = 2;
+}
+
+enum QuorumSystem {
+  QUORUM_SYSTEM_MAJORITY = 0;
+}
+
 message Prepare {
   uint64 from = 1;
   Ballot ballot = 2;
   uint64 from_slot = 3;
   uint64 config_id = 4;
+  // The configuration the candidate registered for `ballot` (absent on plain
+  // Multi-Paxos).
+  optional AcceptorConfig config = 5;
 }
 
 message Promise {
@@ -187,6 +203,8 @@ message Heartbeat {
   optional uint64 commit = 3;
   uint64 seq = 4;
   uint64 config_id = 5;
+  // The leader's registered configuration (absent on plain Multi-Paxos).
+  optional AcceptorConfig config = 6;
 }
 
 message HeartbeatAck {
@@ -241,6 +259,9 @@ message Relinquish {
   // Tail slots with an open Phase-2 round at `ballot` (the ballot is implied).
   repeated SlotCommand pending = 7;
   uint64 config_id = 8;
+  // The authority's registered configuration, transferred verbatim (absent on
+  // plain Multi-Paxos).
+  optional AcceptorConfig config = 9;
 }
 
 message InspectRequest {}
@@ -249,4 +270,11 @@ message InspectReply {
   optional uint64 chosen_index = 1;
   uint64 first_slot = 2;
   bytes snapshot = 3;
+  // The acceptor configuration this node believes is the latest (its
+  // bootstrap membership on plain Multi-Paxos), and the ballot it was
+  // registered under.
+  repeated uint64 members = 4;
+  Ballot config_ballot = 5;
+  // Whether this node currently leads.
+  bool leader = 6;
 }

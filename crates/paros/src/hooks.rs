@@ -112,6 +112,10 @@ pub enum Reply {
     ReadRedirect,
     /// A `CompactAck` (accepted or refused).
     Compact,
+    /// A `ReconfigureAck` (started, refused, or redirected). Dropping it
+    /// after a reconfiguration started makes the client's retry meet the
+    /// change already under way.
+    Reconfigure,
     /// A matchmaker's `MatchReply` (registered or refused). Dropping it after
     /// the registration is durable is what makes the requester's retry the
     /// same request again — the idempotent re-answer path.
@@ -132,6 +136,18 @@ pub trait DriverHooks {
 
     /// Whether to skip a re-send that has pending `Accept`s to send.
     fn skip_accept_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip this beat's re-send of the open matchmaking request
+    /// (`paros_core::RawNode::resend_matchmaking`). Consulted only while a
+    /// matchmaking phase is open, so a `true` always has an effect: the
+    /// campaign waits one more beat for the answers the transport may have
+    /// lost. Always safe — the re-send is a pure optimization, the matchmaker
+    /// answers a repeated request idempotently, and a campaign that never
+    /// completes its matchmaking is abandoned at the election timeout and
+    /// retried at a higher round.
+    fn skip_matchmaking_resend(&self) -> bool {
         false
     }
 

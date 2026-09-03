@@ -23,7 +23,7 @@ mod hooks;
 mod matchmaker;
 mod storage;
 
-pub use audit::{Audit, NoAudit, StorageFaultDecision};
+pub use audit::{Audit, Deployment, NoAudit, StorageFaultDecision};
 pub use corruption::{
     CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
     classify_log, decide,
@@ -40,8 +40,8 @@ pub use driver::{
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck,
-    WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
+    ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck, Reconfigure,
+    ReconfigureAck, WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
     garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
     match_request_from_wire, proposal_checksum, wire_garbage_collect, wire_garbage_collect_ack,
     wire_match_reply, wire_match_request,
@@ -60,10 +60,10 @@ pub use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry,
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Message,
-    MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
-    ReadIndexResult, ReadState, Ready, RegistryStorage, SessionEntry, Slot, Storage, Value,
-    WriteOp, command_fingerprint,
+    MatchStep, Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp,
+    Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
+    ReadIndexResult, ReadState, Ready, ReconfigureRefusal, ReconfigureResult, Registration,
+    RegistryStorage, SessionEntry, Slot, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
@@ -107,6 +107,19 @@ mod tests {
                 from: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
+                config: None,
+            },
+            // A matchmaker deployment's `Prepare` carries the registered
+            // configuration; the plain one above carries none.
+            Message::Prepare {
+                config_id,
+                from: NodeId(1),
+                ballot,
+                from_slot: Slot(5),
+                config: Some(paros_core::AcceptorConfig::new(
+                    vec![NodeId(3), NodeId(1), NodeId(4)],
+                    paros_core::QuorumSystem::Majority,
+                )),
             },
             Message::Promise {
                 config_id,
@@ -176,6 +189,18 @@ mod tests {
                 ballot,
                 commit: Some(Slot(2)),
                 seq: 9,
+                config: None,
+            },
+            Message::Heartbeat {
+                config_id,
+                from: NodeId(0),
+                ballot,
+                commit: Some(Slot(2)),
+                seq: 11,
+                config: Some(paros_core::AcceptorConfig::new(
+                    vec![NodeId(0), NodeId(2)],
+                    paros_core::QuorumSystem::Majority,
+                )),
             },
             // The empty watermark is its own variant of the beat, and the one the
             // wire encoding used to be unable to say (#56): a leader that has
@@ -186,6 +211,7 @@ mod tests {
                 ballot,
                 commit: None,
                 seq: 10,
+                config: None,
             },
             Message::HeartbeatAck {
                 config_id,
@@ -245,6 +271,10 @@ mod tests {
                     ),
                     (Slot(6), Command::Control(Control::Noop)),
                 ]),
+                config: Some(paros_core::AcceptorConfig::new(
+                    vec![NodeId(1), NodeId(2), NodeId(3)],
+                    paros_core::QuorumSystem::Majority,
+                )),
             },
             // The empty tail: a fully settled leader hands over the frontier
             // and nothing else.
@@ -257,6 +287,7 @@ mod tests {
                 next_slot: Slot(9),
                 decided: BTreeMap::new(),
                 pending: BTreeMap::new(),
+                config: None,
             },
         ]
     }
@@ -267,7 +298,7 @@ mod tests {
     fn matchmaker_contract_round_trips() {
         use paros_core::{
             AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerId,
-            QuorumSystem,
+            QuorumSystem, Registration,
         };
         let ballot = |round: u64, node: u64| Ballot {
             round,
@@ -279,14 +310,18 @@ mod tests {
                 QuorumSystem::Majority,
             )
         };
-        let request = MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]));
-        let wire = crate::grpc::wire_match_request(&request);
-        let bytes = wire.encode_to_vec();
-        let decoded = crate::grpc::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
-        assert_eq!(
-            crate::grpc::match_request_from_wire(decoded).expect("request"),
-            request
-        );
+        for request in [
+            MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2])),
+            MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3])),
+        ] {
+            let wire = crate::grpc::wire_match_request(&request);
+            let bytes = wire.encode_to_vec();
+            let decoded = crate::grpc::WireMatchRequest::decode(bytes.as_slice()).expect("decode");
+            assert_eq!(
+                crate::grpc::match_request_from_wire(decoded).expect("request"),
+                request
+            );
+        }
 
         let replies = vec![
             MatchReply {
@@ -295,8 +330,11 @@ mod tests {
                 ballot: ballot(7, 4),
                 outcome: MatchOutcome::Registered {
                     history: BTreeMap::from([
-                        (ballot(2, 1), config(&[0, 1, 2])),
-                        (ballot(5, 3), config(&[1, 2, 3, 4])),
+                        (ballot(2, 1), Registration::belief(config(&[0, 1, 2]))),
+                        (
+                            ballot(5, 3),
+                            Registration::reconfiguration(config(&[1, 2, 3, 4])),
+                        ),
                     ]),
                     gc_watermark: ballot(2, 1),
                 },
