@@ -269,6 +269,9 @@ async fn run_acceptor(
             config.pool().len(),
             config.has_matchmakers(),
         ));
+        // The pool above that floor is the retirement budget (#123): every
+        // identity a configuration may leave behind.
+        guard.set_pool_size(config.pool().len());
         if !perturb {
             guard.set_unbudgeted();
         }
@@ -577,6 +580,10 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .set_cluster_size(1);
+        world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_pool_size(1);
         let faults = StorageFaults::new(
             ctx.time().clone(),
             Duration::ZERO,

@@ -1981,13 +1981,19 @@ impl Workload for ChainWorkload {
                     // no-op.
                     let probe_target = leader_hint.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
-                    let retirable: Vec<u64> = moonpool_sim::select! {
+                    // The retirable list and the configuration in force come
+                    // from the *same* reply, so the world can hold the
+                    // protocol to "a retirable node is outside C_b".
+                    let (retirable, in_force): (Vec<u64>, Vec<u64>) = moonpool_sim::select! {
                         response = probe.inspect(InspectRequest {}) => response
                             .ok()
-                            .map(|response| response.into_inner().retirable)
+                            .map(|response| {
+                                let reply = response.into_inner();
+                                (reply.retirable, reply.members)
+                            })
                             .unwrap_or_default(),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => Vec::new(),
-                        () = shutdown.cancelled() => Vec::new(),
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => (Vec::new(), Vec::new()),
+                        () = shutdown.cancelled() => (Vec::new(), Vec::new()),
                     };
                     assert_always!(
                         retirable.is_empty() || has_matchmakers,
@@ -2012,8 +2018,11 @@ impl Workload for ChainWorkload {
                         let reserved = {
                             let world = crate::world::storage_world(ctx.state());
                             let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-                            guard
-                                .retire(&servers[victim], u64::try_from(victim).unwrap_or(u64::MAX))
+                            guard.retire(
+                                &servers[victim],
+                                u64::try_from(victim).unwrap_or(u64::MAX),
+                                &in_force,
+                            )
                         };
                         if reserved {
                             tracing::info!(node = victim as u64, "chain_retire_request");
