@@ -4,6 +4,7 @@
 //! to the open campaign.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
@@ -39,6 +40,80 @@ pub(crate) struct MatchmakerLinks<P: Providers> {
     pub(crate) shutdown: CancellationToken,
 }
 
+/// One matchmaker's reconnecting gRPC client, as this driver holds it.
+type MatchmakerClient<P> = ParosMatchmakerClient<ReconnectingChannel<P, tonic::body::Body>>;
+
+/// This driver's link to one matchmaker, or `None` with a warning: a request
+/// addressed to a matchmaker there is no channel to (a learned successor
+/// naming a machine outside the deployment) is dropped rather than sent. Kept
+/// ahead of each sender's audit/trace prelude, so an undeliverable request is
+/// never reported as one that left.
+fn link_to<P: Providers>(
+    links: &MatchmakerLinks<P>,
+    self_id: u64,
+    matchmaker: MatchmakerId,
+) -> Option<MatchmakerClient<P>> {
+    let client = links.clients.get(&matchmaker);
+    if client.is_none() {
+        tracing::warn!(
+            node = self_id,
+            matchmaker = matchmaker.0,
+            "unknown matchmaker"
+        );
+    }
+    client.cloned()
+}
+
+/// Carry one matchmaker RPC on its own detached task and feed its decoded
+/// answer back into the node loop's inbox. Shared by all three
+/// matchmaker-wire request kinds (#120 matchmaking, #123 GC, #125 handover),
+/// which differ only in what they encode, which method they call and which
+/// inbox the answer lands in — all of that is `rpc` and `sink`.
+///
+/// The task draws no randomness and consults no hook (AGENTS.md: a hook answer
+/// is a randomness draw, and a detached task is not where the simulation steps
+/// deterministically). A lost, late or undecodable answer is simply not fed
+/// back — which is exactly what each kind's per-tick re-send exists for.
+fn spawn_matchmaker_rpc<P, R, Fut>(
+    providers: &P,
+    links: &MatchmakerLinks<P>,
+    self_id: u64,
+    kind: &'static str,
+    task: &'static str,
+    sink: mpsc::Sender<R>,
+    rpc: Fut,
+) where
+    P: Providers,
+    R: Send + 'static,
+    Fut: Future<Output = Result<Result<R, &'static str>, tonic::Status>> + Send + 'static,
+{
+    let time = providers.time().clone();
+    let timeout = links.timeout;
+    let shutdown = links.shutdown.clone();
+    providers
+        .task()
+        .spawn_task(task, async move {
+            let answer = moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                result = time.timeout(timeout, rpc) => result,
+            };
+            match answer {
+                Ok(Ok(Ok(reply))) => {
+                    let _ = sink.send(reply).await;
+                }
+                Ok(Ok(Err(error))) => {
+                    tracing::warn!(node = self_id, kind, error, "bad matchmaker reply");
+                }
+                Ok(Err(status)) => {
+                    tracing::debug!(node = self_id, kind, %status, "matchmaker RPC failed");
+                }
+                Err(_) => tracing::debug!(node = self_id, kind, "matchmaker RPC timed out"),
+            }
+        })
+        .detach();
+}
+
 /// Send one batch's matchmaker-wire requests.
 pub(crate) fn send_outbox<P: Providers, A: Audit>(
     providers: &P,
@@ -70,12 +145,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
     fence: Option<Slot>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(client) = links.clients.get(&matchmaker) else {
-            tracing::warn!(
-                node = self_id,
-                matchmaker = matchmaker.0,
-                "unknown matchmaker"
-            );
+        let Some(mut client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.gc_request_sent(
@@ -93,36 +163,21 @@ fn send_gc_requests<P: Providers, A: Audit>(
             fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
             "gc_request_sent"
         );
-        let mut client = client.clone();
-        let acks = links.gc_acks.clone();
-        let time = providers.time().clone();
-        let timeout = links.timeout;
-        let shutdown = links.shutdown.clone();
         let wire = wire_garbage_collect(&request);
-        providers
-            .task()
-            .spawn_task("paros-gc-request", async move {
-                let answer = moonpool_core::select! {
-                    biased;
-                    () = shutdown.cancelled() => return,
-                    result = time.timeout(timeout, client.garbage_collect(wire)) => result,
-                };
-                match answer {
-                    Ok(Ok(response)) => {
-                        match garbage_collect_ack_from_wire(response.into_inner()) {
-                            Ok(ack) => {
-                                let _ = acks.send(ack).await;
-                            }
-                            Err(error) => tracing::warn!(node = self_id, error, "bad gc ack"),
-                        }
-                    }
-                    Ok(Err(status)) => {
-                        tracing::debug!(node = self_id, %status, "gc RPC failed");
-                    }
-                    Err(_) => tracing::debug!(node = self_id, "gc RPC timed out"),
-                }
-            })
-            .detach();
+        spawn_matchmaker_rpc(
+            providers,
+            links,
+            self_id,
+            "gc",
+            "paros-gc-request",
+            links.gc_acks.clone(),
+            async move {
+                client
+                    .garbage_collect(wire)
+                    .await
+                    .map(|response| garbage_collect_ack_from_wire(response.into_inner()))
+            },
+        );
     }
 }
 
@@ -137,12 +192,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
     requests: Vec<(MatchmakerId, ReconfigureRequest)>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(client) = links.clients.get(&matchmaker) else {
-            tracing::warn!(
-                node = self_id,
-                matchmaker = matchmaker.0,
-                "unknown matchmaker"
-            );
+        let Some(mut client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.reconfigure_request_sent(NodeId(self_id), matchmaker, &request);
@@ -152,36 +202,21 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             kind = reconfigure_kind(&request),
             "reconfigure_request_sent"
         );
-        let mut client = client.clone();
-        let replies = links.reconfigure_replies.clone();
-        let time = providers.time().clone();
-        let timeout = links.timeout;
-        let shutdown = links.shutdown.clone();
         let wire = wire_reconfigure_request(&request);
-        providers
-            .task()
-            .spawn_task("paros-reconfigure-request", async move {
-                let answer = moonpool_core::select! {
-                    biased;
-                    () = shutdown.cancelled() => return,
-                    result = time.timeout(timeout, client.reconfigure(wire)) => result,
-                };
-                match answer {
-                    Ok(Ok(response)) => match reconfigure_reply_from_wire(response.into_inner()) {
-                        Ok(reply) => {
-                            let _ = replies.send(reply).await;
-                        }
-                        Err(error) => {
-                            tracing::warn!(node = self_id, error, "bad reconfigure reply");
-                        }
-                    },
-                    Ok(Err(status)) => {
-                        tracing::debug!(node = self_id, %status, "reconfigure RPC failed");
-                    }
-                    Err(_) => tracing::debug!(node = self_id, "reconfigure RPC timed out"),
-                }
-            })
-            .detach();
+        spawn_matchmaker_rpc(
+            providers,
+            links,
+            self_id,
+            "reconfigure",
+            "paros-reconfigure-request",
+            links.reconfigure_replies.clone(),
+            async move {
+                client
+                    .reconfigure(wire)
+                    .await
+                    .map(|response| reconfigure_reply_from_wire(response.into_inner()))
+            },
+        );
     }
 }
 
@@ -224,12 +259,7 @@ fn send_match_requests<P: Providers, A: Audit>(
     requests: Vec<(MatchmakerId, MatchRequest)>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(client) = links.clients.get(&matchmaker) else {
-            tracing::warn!(
-                node = self_id,
-                matchmaker = matchmaker.0,
-                "unknown matchmaker"
-            );
+        let Some(mut client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
@@ -239,34 +269,21 @@ fn send_match_requests<P: Providers, A: Audit>(
             round = request.ballot.round,
             "match_request_sent"
         );
-        let mut client = client.clone();
-        let replies = links.replies.clone();
-        let time = providers.time().clone();
-        let timeout = links.timeout;
-        let shutdown = links.shutdown.clone();
         let wire = wire_match_request(&request);
-        providers
-            .task()
-            .spawn_task("paros-matchmaking-request", async move {
-                let answer = moonpool_core::select! {
-                    biased;
-                    () = shutdown.cancelled() => return,
-                    result = time.timeout(timeout, client.matchmake(wire)) => result,
-                };
-                match answer {
-                    Ok(Ok(response)) => match match_reply_from_wire(response.into_inner()) {
-                        Ok(reply) => {
-                            let _ = replies.send(reply).await;
-                        }
-                        Err(error) => tracing::warn!(node = self_id, error, "bad match reply"),
-                    },
-                    Ok(Err(status)) => {
-                        tracing::debug!(node = self_id, %status, "matchmaking RPC failed");
-                    }
-                    Err(_) => tracing::debug!(node = self_id, "matchmaking RPC timed out"),
-                }
-            })
-            .detach();
+        spawn_matchmaker_rpc(
+            providers,
+            links,
+            self_id,
+            "matchmaking",
+            "paros-matchmaking-request",
+            links.replies.clone(),
+            async move {
+                client
+                    .matchmake(wire)
+                    .await
+                    .map(|response| match_reply_from_wire(response.into_inner()))
+            },
+        );
     }
 }
 
