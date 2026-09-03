@@ -533,7 +533,7 @@ impl MatchmakerAudit {
                 continue;
             }
             seen = true;
-            for member in &registration.config.members {
+            for member in registration.config.members() {
                 members.insert(member.0);
             }
         }
@@ -611,7 +611,7 @@ impl MatchmakerAudit {
                         "matchmaker" => matchmaker.0,
                         "round" => ballot.round,
                         "bnode" => ballot.node.0,
-                        "read_back" => read_back.map_or(0, |r| r.config.members.len())
+                        "read_back" => read_back.map_or(0, |r| r.config.members().len())
                     }
                 );
             }
@@ -1047,7 +1047,7 @@ impl MatchmakerAudit {
             assert_always!(
                 known,
                 "matchmaking: a candidate registers only the bootstrap or a configuration a leader put on the wire",
-                { "node" => node.0, "round" => ballot.round, "members" => config.members.len() }
+                { "node" => node.0, "round" => ballot.round, "members" => config.members().len() }
             );
         }
         if reconfiguration {

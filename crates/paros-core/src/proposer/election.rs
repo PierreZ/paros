@@ -91,7 +91,7 @@ impl Election {
             .prior
             .iter()
             .chain(std::iter::once(&self.config))
-            .flat_map(|c| c.members.iter().copied())
+            .flat_map(|c| c.members().iter().copied())
             .filter(|p| *p != me)
             .collect();
         targets.sort_unstable();

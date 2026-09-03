@@ -535,11 +535,15 @@ impl Matchmaker {
         );
         for registration in self.registry.values() {
             assert!(
-                !registration.config.members.is_empty(),
+                !registration.config.members().is_empty(),
                 "a registered configuration names at least one acceptor"
             );
             assert!(
-                registration.config.members.windows(2).all(|w| w[0] < w[1]),
+                registration
+                    .config
+                    .members()
+                    .windows(2)
+                    .all(|w| w[0] < w[1]),
                 "a registered membership is sorted and deduplicated"
             );
         }
@@ -1135,7 +1139,7 @@ mod tests {
             vec![NodeId(2), NodeId(0), NodeId(2), NodeId(1)],
             QuorumSystem::Majority,
         );
-        assert_eq!(config.members, vec![NodeId(0), NodeId(1), NodeId(2)]);
+        assert_eq!(config.members(), vec![NodeId(0), NodeId(1), NodeId(2)]);
         let two: std::collections::BTreeSet<NodeId> = [NodeId(0), NodeId(1)].into_iter().collect();
         let one: std::collections::BTreeSet<NodeId> = [NodeId(0)].into_iter().collect();
         assert!(config.has_phase1_quorum(&two) && config.has_phase2_quorum(&two));

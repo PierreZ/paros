@@ -1432,7 +1432,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         assert_always!(
             bootstrap == deployment.bootstrap,
             "every node derives the same bootstrap configuration",
-            { "node" => node.0, "members" => deployment.bootstrap.members.len() }
+            { "node" => node.0, "members" => deployment.bootstrap.members().len() }
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
         let known = st.pool.get_or_insert_with(|| pool.clone()).clone();
@@ -2277,7 +2277,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut uncovered: Vec<String> = Vec::new();
         let covered = st.config_of(watermark).cloned().map(|config| {
             let holders: BTreeSet<NodeId> = config
-                .members
+                .members()
                 .iter()
                 .filter(|m| {
                     let m = m.0;

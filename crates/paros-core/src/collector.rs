@@ -79,7 +79,7 @@ impl Collector {
             fence,
             prior_members: prior
                 .iter()
-                .flat_map(|c| c.members.iter().copied())
+                .flat_map(|c| c.members().iter().copied())
                 .collect(),
             peer_chosen: BTreeMap::new(),
             requested: false,
@@ -168,7 +168,7 @@ impl Collector {
         }
         holders.extend(
             config
-                .members
+                .members()
                 .iter()
                 .filter(|m| Some(**m) != me)
                 .filter(|m| reached(self.peer_chosen.get(*m).copied()))

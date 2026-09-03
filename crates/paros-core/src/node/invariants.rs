@@ -81,7 +81,7 @@ impl RawNode {
                 "a plain deployment never opens a matchmaking phase"
             );
             assert!(
-                self.acceptors.members == self.config.peers,
+                self.acceptors.members() == self.config.peers,
                 "a plain deployment keeps its bootstrap configuration"
             );
             assert!(
@@ -104,7 +104,7 @@ impl RawNode {
             );
         }
         assert!(
-            self.acceptors.members.iter().all(|m| self.in_pool(*m)),
+            self.acceptors.members().iter().all(|m| self.in_pool(*m)),
             "the active configuration is drawn from the node pool"
         );
         // The retirement fence (#123): `last_member_ballot` is

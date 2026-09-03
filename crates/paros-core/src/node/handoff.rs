@@ -272,7 +272,7 @@ impl RawNode {
     pub fn can_relinquish(&self) -> bool {
         self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
-            && self.acceptors.members.len() > 1
+            && self.acceptors.members().len() > 1
             && self.proposer.election().is_none()
             && self.matchmaking.is_none()
             && self.proposer.recovery().is_none()
@@ -288,7 +288,7 @@ impl RawNode {
     #[must_use]
     pub fn handoff_candidates(&self) -> Vec<NodeId> {
         self.acceptors
-            .members
+            .members()
             .iter()
             .copied()
             .filter(|p| *p != self.config.id)
@@ -501,7 +501,9 @@ impl RawNode {
         // static membership.
         let config = match (self.config.has_matchmakers(), config) {
             (false, None) => None,
-            (true, Some(config)) if config.members.iter().all(|m| self.in_pool(*m)) => Some(config),
+            (true, Some(config)) if config.members().iter().all(|m| self.in_pool(*m)) => {
+                Some(config)
+            }
             _ => {
                 self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
                 return;

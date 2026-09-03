@@ -239,7 +239,7 @@ pub(crate) fn surface_matchmaking<A: Audit>(
         tracing::info!(
             node = self_id,
             round = ballot.round,
-            members = config.members.len() as u64,
+            members = config.members().len() as u64,
             reconfiguration,
             "matchmaking_started"
         );

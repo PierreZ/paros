@@ -114,7 +114,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition — every refusal is a result value).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, members = config.members.len())))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, members = config.members().len())))]
     pub fn reconfigure(&mut self, config: &AcceptorConfig) -> ReconfigureResult {
         if self.role != NodeRole::Leader {
             return ReconfigureResult::NotLeader(self.leader);
@@ -125,7 +125,7 @@ impl RawNode {
         if !config.is_well_formed() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Malformed);
         }
-        if !config.members.iter().all(|m| self.in_pool(*m)) {
+        if !config.members().iter().all(|m| self.in_pool(*m)) {
             return ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember);
         }
         if *config == self.acceptors {

@@ -77,8 +77,8 @@ fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static 
 
 fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
     common::AcceptorConfig {
-        members: config.members.iter().map(|n| n.0).collect(),
-        quorum_system: match config.quorum_system {
+        members: config.members().iter().map(|n| n.0).collect(),
+        quorum_system: match config.quorum_system() {
             QuorumSystem::Majority => common::QuorumSystem::Majority.into(),
         },
     }

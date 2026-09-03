@@ -41,7 +41,7 @@ impl RawNode {
         }
         // Wire hygiene: a configuration naming a node outside the pool is not
         // one this deployment can run; ignore it whole.
-        if !config.members.iter().all(|m| self.in_pool(*m)) {
+        if !config.members().iter().all(|m| self.in_pool(*m)) {
             return;
         }
         self.acceptors = config;

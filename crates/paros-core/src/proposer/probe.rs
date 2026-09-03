@@ -72,7 +72,7 @@ impl RepairProbe {
         let mut unanswered: Vec<NodeId> = self
             .prior
             .iter()
-            .flat_map(|c| c.members.iter().copied())
+            .flat_map(|c| c.members().iter().copied())
             .filter(|p| *p != me && !self.promises.answered.contains(p))
             .collect();
         unanswered.sort_unstable();

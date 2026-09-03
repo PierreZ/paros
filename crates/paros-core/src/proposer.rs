@@ -373,7 +373,7 @@ mod tests {
         let mut p = Proposer::new();
         let mut expected: Vec<NodeId> = prior
             .iter()
-            .flat_map(|c| c.members.iter().copied())
+            .flat_map(|c| c.members().iter().copied())
             .chain([NodeId(1), NodeId(2)])
             .filter(|n| *n != NodeId(0))
             .collect();

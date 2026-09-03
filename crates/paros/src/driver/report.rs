@@ -292,7 +292,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             bnode = ballot.node.0,
             pround = promised.round,
             pbnode = promised.node.0,
-            members = node.acceptors().members.len() as u64,
+            members = node.acceptors().members().len() as u64,
             "leader_elected"
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {

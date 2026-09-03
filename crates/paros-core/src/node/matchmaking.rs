@@ -501,7 +501,7 @@ impl RawNode {
             assert!(
                 prior
                     .iter()
-                    .all(|c| c.members.iter().all(|n| self.in_pool(*n))),
+                    .all(|c| c.members().iter().all(|n| self.in_pool(*n))),
                 "every prior configuration is drawn from the node pool"
             );
             self.matchmaking = None;

@@ -142,14 +142,41 @@ impl QuorumSystem {
 /// plus the quorum system in force over it — [`crate::Config`] minus the
 /// per-node `id`. The core never interprets it beyond storing and reporting it;
 /// the leader-side matchmaking phase is what runs Phase 1 against it.
+///
+/// **Both fields are private and [`AcceptorConfig::new`] is the only way to
+/// build one**, deserialisation included (see `SerdeAcceptorConfig`). The
+/// membership is a sorted, deduplicated [`Vec`] that
+/// [`AcceptorConfig::contains`] and [`QuorumSystem::is_quorum`] binary-search:
+/// an unsorted or duplicated vector would not fail, it would make a quorum
+/// tally *silently miscount*, which is the one failure mode a consensus
+/// membership must not have. Only `new` normalizes, so only `new` may
+/// construct.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "SerdeAcceptorConfig"))]
 pub struct AcceptorConfig {
     /// The full membership, sorted and deduplicated (a [`Vec`] keeps iteration
     /// deterministic without a map).
-    pub members: Vec<NodeId>,
+    members: Vec<NodeId>,
     /// The quorum system election and decide consult over `members`.
-    pub quorum_system: QuorumSystem,
+    quorum_system: QuorumSystem,
+}
+
+/// The wire shape [`AcceptorConfig`] deserialises through, so a serialized
+/// configuration is normalized by [`AcceptorConfig::new`] exactly like a
+/// constructed one and no path can produce an unsorted membership.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct SerdeAcceptorConfig {
+    members: Vec<NodeId>,
+    quorum_system: QuorumSystem,
+}
+
+#[cfg(feature = "serde")]
+impl From<SerdeAcceptorConfig> for AcceptorConfig {
+    fn from(wire: SerdeAcceptorConfig) -> Self {
+        Self::new(wire.members, wire.quorum_system)
+    }
 }
 
 impl AcceptorConfig {
@@ -243,6 +270,18 @@ impl AcceptorConfig {
     #[must_use]
     pub fn phase2_addressees(&self) -> &[NodeId] {
         self.quorum_system.phase2_addressees(&self.members)
+    }
+
+    /// The membership, sorted and deduplicated.
+    #[must_use]
+    pub fn members(&self) -> &[NodeId] {
+        &self.members
+    }
+
+    /// The quorum system this configuration's tallies are judged under.
+    #[must_use]
+    pub fn quorum_system(&self) -> QuorumSystem {
+        self.quorum_system
     }
 
     /// Whether `node` is a member of this configuration.

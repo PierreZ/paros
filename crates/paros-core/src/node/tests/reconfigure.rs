@@ -3,6 +3,7 @@
 //! the new configuration only, and the removed leader's resignation.
 
 use super::*;
+use crate::QuorumSystem;
 
 fn accept_targets(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
     let mut targets: Vec<NodeId> = msgs
@@ -220,18 +221,26 @@ fn a_reconfiguration_waits_for_a_settled_leadership() {
     assert_eq!(*nodes[0].acceptors(), cfg(&[0, 1, 2, 3]));
 }
 
-/// A malformed configuration is refused at the boundary, never carried into
-/// a quorum tally that would have to panic on it.
+/// A malformed configuration never reaches a quorum tally, and now for a
+/// stronger reason than the boundary refusal: since `AcceptorConfig`'s fields
+/// are private and `new` is its only constructor, one cannot be *built*.
+/// `reconfigure`'s `Malformed` leg (and `is_well_formed` itself) survive as
+/// defense in depth for a caller that finds another way in.
 #[test]
-fn a_malformed_configuration_is_refused_not_carried() {
+#[should_panic(expected = "an acceptor configuration names at least one acceptor")]
+fn a_malformed_configuration_cannot_be_built() {
+    let _ = AcceptorConfig::new(Vec::new(), QuorumSystem::Majority);
+}
+
+/// The positive half: a configuration `new` produced is always well formed,
+/// and a well-formed one is what `reconfigure` accepts.
+#[test]
+fn a_constructed_configuration_is_well_formed() {
     let (mut nodes, _mms) = deployed_cluster();
-    let mut hollow = cfg(&[0, 1]);
-    hollow.members.clear();
-    assert!(!hollow.is_well_formed());
     assert!(cfg(&[0, 1, 3]).is_well_formed());
-    assert_eq!(
-        nodes[0].reconfigure(&hollow),
+    assert!(cfg(&[0, 1]).is_well_formed());
+    assert!(!matches!(
+        nodes[0].reconfigure(&cfg(&[0, 1, 3])),
         ReconfigureResult::Refused(ReconfigureRefusal::Malformed)
-    );
-    assert!(nodes[0].is_leader(), "nothing moved");
+    ));
 }

@@ -1012,7 +1012,7 @@ where
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.first_slot().0,
                     snapshot: storage.snapshot(),
-                    members: node.acceptors().members.iter().map(|n| n.0).collect(),
+                    members: node.acceptors().members().iter().map(|n| n.0).collect(),
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
                     matchmaker_generation: set.generation.0,

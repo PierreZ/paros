@@ -52,11 +52,11 @@ pub fn config_hash(config: &AcceptorConfig) -> u64 {
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    fold(&(config.members.len() as u64).to_le_bytes());
-    for member in &config.members {
+    fold(&(config.members().len() as u64).to_le_bytes());
+    for member in config.members() {
         fold(&member.0.to_le_bytes());
     }
-    fold(&[match config.quorum_system {
+    fold(&[match config.quorum_system() {
         paros_core::QuorumSystem::Majority => 0_u8,
     }]);
     h
@@ -166,7 +166,7 @@ where
                         matchmaker = id.0,
                         round = ballot.round,
                         bnode = ballot.node.0,
-                        members = registration.config.members.len() as u64,
+                        members = registration.config.members().len() as u64,
                         reconfiguration = registration.reconfiguration,
                         config = config_hash(&registration.config),
                         "match_registered"
