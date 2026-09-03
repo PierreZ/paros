@@ -184,9 +184,20 @@ pub(super) struct MatchmakerAudit {
     scalars_note: BTreeMap<u64, String>,
     reconfigurer_aborted: bool,
     reconfigurer_backed_off: bool,
+    decree_checked: bool,
     /// Per proposed `(generation, members)`: the matchmakers that durably
     /// hold its bootstrap.
     bootstrapped: BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>,
+    /// The successor decree, folded from the wire (#125): per
+    /// `(generation, decree ballot)`, the members proposed. Keyed by the
+    /// generation too, because a reconfigurer holds no durable state and its
+    /// rounds start over with every handover — a ballot alone names one value
+    /// only *within* the generation it was voted in.
+    decree_proposals: BTreeMap<(u64, Ballot), Vec<u64>>,
+    /// Per `(generation, decree ballot)`: the matchmakers that answered
+    /// `Accepted` — the Phase-2 votes, counted from the replies themselves
+    /// rather than from any reconfigurer's own tally.
+    decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
     /// The highest GC floor proven effective at a matchmaker quorum.
     effective_floor: Ballot,
     /// Nodes an effective floor named retirable.
@@ -1662,6 +1673,17 @@ impl MatchmakerAudit {
             self.reconfigurer_trace.entry(node.0).or_default().2 =
                 format!("{step:?}").chars().take(48).collect();
         }
+        if let ReconfigureReply::Accepted {
+            matchmaker: voter,
+            generation,
+            ballot,
+        } = reply
+        {
+            self.decree_voters
+                .entry((generation.0, *ballot))
+                .or_default()
+                .insert(voter.0);
+        }
         if let ReconfigureReply::Stopped {
             generation,
             gc_watermark,
@@ -1781,7 +1803,32 @@ impl MatchmakerAudit {
                     "generation: the successor decree opens over the old generation"
                 );
             }
-            ReconfigurerStep::Proposing { adopted, .. } => {
+            ReconfigurerStep::Proposing {
+                ballot,
+                members,
+                adopted,
+            } => {
+                // The generation decided over comes from the `Promised`
+                // reply that closed Phase 1, never from the successor's
+                // number.
+                if let ReconfigureReply::Promised { generation, .. } = reply {
+                    let proposed: Vec<u64> = members.iter().map(|m| m.0).collect();
+                    let first = self
+                        .decree_proposals
+                        .entry((generation.0, *ballot))
+                        .or_insert_with(|| proposed.clone());
+                    assert_always!(
+                        *first == proposed,
+                        "generation: one value is voted per decree ballot",
+                        {
+                            "node" => node.0,
+                            "generation" => generation.0,
+                            "round" => ballot.round,
+                            "first" => first.len(),
+                            "proposed" => proposed.len()
+                        }
+                    );
+                }
                 if *adopted {
                     reach_once!(
                         self.reconfigurer_adopted,
@@ -1798,6 +1845,46 @@ impl MatchmakerAudit {
             ReconfigurerStep::Chosen { successor } => {
                 let members: Vec<u64> = successor.members.iter().map(|m| m.0).collect();
                 self.bind_set(successor.generation.0, &members, "chosen");
+                // The decree itself, from the wire: the set published is the
+                // value this node put to the vote, and a majority of the old
+                // generation voted for it at that one ballot. Until now the
+                // only proof of this lived in the sans-IO model checker,
+                // which never runs the driver's plumbing, its crash seams or
+                // its abandon path. The publishing reply names both
+                // coordinates, so the decree judged is exactly the one that
+                // just closed; skipped where the proposal was not observed (a
+                // `finish` that adopts an already-chosen set publishes
+                // without ever proposing).
+                if let ReconfigureReply::Accepted {
+                    generation, ballot, ..
+                } = reply
+                    && let Some(proposed) = self.decree_proposals.get(&(generation.0, *ballot))
+                {
+                    let generation = generation.0;
+                    let proposed = proposed.clone();
+                    let voted = self
+                        .decree_voters
+                        .get(&(generation, *ballot))
+                        .map_or(0, BTreeSet::len);
+                    let quorum = self.quorum(generation);
+                    assert_always!(
+                        proposed == members && voted >= quorum,
+                        "generation: a chosen set was voted by a majority of its old generation at one ballot",
+                        {
+                            "node" => node.0,
+                            "generation" => generation,
+                            "round" => ballot.round,
+                            "proposed" => proposed.len(),
+                            "chosen" => members.len(),
+                            "voted" => voted,
+                            "quorum" => quorum
+                        }
+                    );
+                    reach_once!(
+                        self.decree_checked,
+                        "generation: a chosen set is checked against its decree's votes"
+                    );
+                }
                 reach_once!(
                     self.reconfigurer_chosen,
                     "generation: a successor set is chosen by the decree"
