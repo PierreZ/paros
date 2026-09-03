@@ -647,7 +647,7 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
     }
@@ -692,7 +692,7 @@ pub trait Audit {
         set: &MatchmakerSet,
         gc_watermark: Ballot,
         effective: Option<&(Ballot, AcceptorConfig)>,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
     ) {
     }
 

@@ -1094,7 +1094,7 @@ mod tests {
         assert!(!r.is_busy());
         for i in [0, 1, 3] {
             assert_eq!(pool[i].phase(), MatchmakerPhase::Active);
-            assert_eq!(pool[i].set(), set(1, &[0, 1, 3]));
+            assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
         }
         assert_eq!(pool[2].phase(), MatchmakerPhase::Stopped);
         assert_eq!(pool[2].successor(), Some(&set(1, &[0, 1, 3])));
@@ -1311,7 +1311,7 @@ mod tests {
             r.resend();
         }
         assert!(!r.is_busy(), "the handover completed without matchmaker 2");
-        assert_eq!(pool[3].set(), set(1, &[0, 1, 3]));
+        assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
         assert_eq!(
             pool[2].phase(),
             MatchmakerPhase::Active,
@@ -1359,7 +1359,7 @@ mod tests {
         }
         // One authoritative set for generation 1, everywhere.
         for i in [0, 1, 3] {
-            assert_eq!(pool[i].set(), set(1, &[0, 1, 3]));
+            assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
         }
         assert_eq!(
             pool[4].phase(),
@@ -1434,7 +1434,7 @@ mod tests {
             r.resend();
         }
         assert!(!r.is_busy());
-        assert_eq!(pool[3].set(), set(1, &[0, 1, 3]));
+        assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
     }
 
     /// A decree opens strictly above the promises the stop quorum reports:
@@ -1482,6 +1482,6 @@ mod tests {
             r.resend();
         }
         assert!(!r.is_busy());
-        assert_eq!(pool[3].set(), set(1, &[0, 1, 3]));
+        assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
     }
 }

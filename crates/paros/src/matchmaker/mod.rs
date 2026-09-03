@@ -24,9 +24,9 @@ mod storage;
 use moonpool_core::{NetworkProvider, Providers, SimulationError, TcpListenerTrait};
 use moonpool_hyper::{H2Server, H2ServerConfig};
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
-    MatchmakerConfig, MatchmakerId, MatchmakerWriteOp, ReconfigureReply, ReconfigureRequest,
-    Registration,
+    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
+    MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
+    ReconfigureRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -196,22 +196,27 @@ where
                     scalars,
                     registrations,
                 } => {
-                    let set = matchmaker.set();
-                    let registry: Vec<(Ballot, Registration)> =
-                        registrations.iter().map(|(b, r)| (*b, r.clone())).collect();
+                    // The set the *op* installs, not whatever the live
+                    // handle happens to hold: the two agree today, and a
+                    // report that reads the handle would quietly start
+                    // describing a later generation the moment they do not.
+                    let set = MatchmakerSet {
+                        generation: scalars.generation,
+                        members: scalars.members.clone(),
+                    };
                     audit.matchmaker_activated(
                         id,
                         &set,
                         scalars.gc_watermark,
                         scalars.effective.as_ref(),
-                        &registry,
+                        registrations,
                     );
                     tracing::info!(
                         matchmaker = id.0,
                         generation = set.generation.0,
                         members = set.members.len() as u64,
                         watermark_round = scalars.gc_watermark.round,
-                        registrations = registry.len() as u64,
+                        registrations = registrations.len() as u64,
                         "matchmaker_activated"
                     );
                 }
@@ -354,20 +359,20 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(&config, &storage);
-    let recovered: Vec<(Ballot, Registration)> = matchmaker
-        .registry()
-        .iter()
-        .map(|(ballot, registration)| (*ballot, registration.clone()))
-        .collect();
     let watermark = matchmaker.hard_state().gc_watermark;
-    let set = matchmaker.set();
     let phase = matchmaker.phase();
-    audit.matchmaker_recovered(id, &set, phase, &recovered, watermark);
+    audit.matchmaker_recovered(
+        id,
+        matchmaker.set(),
+        phase,
+        matchmaker.registry(),
+        watermark,
+    );
     tracing::info!(
         matchmaker = id.0,
-        generation = set.generation.0,
+        generation = matchmaker.set().generation.0,
         phase = ?phase,
-        registrations = recovered.len() as u64,
+        registrations = matchmaker.registry().len() as u64,
         watermark_round = watermark.round,
         "matchmaker_booted"
     );

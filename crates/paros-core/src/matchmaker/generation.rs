@@ -60,7 +60,7 @@ impl Matchmaker {
     fn refusal(&self) -> ReconfigureReply {
         ReconfigureReply::Refused {
             matchmaker: self.config.id,
-            current: self.set(),
+            current: self.set().clone(),
             phase: self.phase(),
             successor: self.hard_state.successor.clone(),
         }
@@ -310,10 +310,11 @@ impl Matchmaker {
 
     /// Freeze the current generation (durable before any reply).
     fn freeze(&mut self) {
-        let set = self.set();
+        let set = self.set().clone();
         self.hard_state.generation = set.generation;
         self.hard_state.members = set.members;
         self.hard_state.phase = MatchmakerPhase::Stopped;
+        self.refresh_set();
         self.stage_scalars();
     }
 
@@ -397,6 +398,7 @@ impl Matchmaker {
         self.hard_state
             .pending
             .retain(|p| p.set.generation > successor.generation);
+        self.refresh_set();
         self.registry = registry.clone();
         // One write for the whole activation: a crash between "registry
         // replaced" and "scalars advanced" would boot a matchmaker answering

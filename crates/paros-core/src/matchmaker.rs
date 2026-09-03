@@ -185,6 +185,14 @@ pub enum GcOutcome {
 pub struct Matchmaker {
     config: MatchmakerConfig,
     hard_state: MatchmakerHardState,
+    /// The set this matchmaker is active or frozen for, materialized from
+    /// `hard_state` (and, at generation 0, from the bootstrap
+    /// configuration) so [`Matchmaker::set`] can hand out a reference
+    /// instead of cloning a membership on every caller's behalf — the audit
+    /// port reads it on every reply, and an observation that allocates is a
+    /// port that changes the shipped program. Kept in step by
+    /// `refresh_set`, and `assert_invariants` says so.
+    set: MatchmakerSet,
     /// Every registered `ballot -> registration`, strictly increasing in
     /// ballot order (a [`BTreeMap`] keeps the order; the state machine keeps
     /// the "only ever appended above the highest" discipline).
@@ -228,17 +236,19 @@ impl Matchmaker {
         let mut bootstrap = config.bootstrap.clone();
         bootstrap.sort_unstable();
         bootstrap.dedup();
-        let matchmaker = Self {
+        let mut matchmaker = Self {
             config: MatchmakerConfig {
                 id: config.id,
                 bootstrap,
             },
             hard_state,
+            set: MatchmakerSet::new(MatchmakerGeneration(0), Vec::new()),
             registry,
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
         };
+        matchmaker.refresh_set();
         matchmaker.assert_invariants();
         matchmaker
     }
@@ -289,7 +299,13 @@ impl Matchmaker {
     /// The set this matchmaker is active or frozen for: generation 0's
     /// bootstrap set, or the activated one.
     #[must_use]
-    pub fn set(&self) -> MatchmakerSet {
+    pub fn set(&self) -> &MatchmakerSet {
+        &self.set
+    }
+
+    /// The set `hard_state` describes: generation 0's bootstrap set until a
+    /// generation is durably activated or frozen.
+    fn derive_set(&self) -> MatchmakerSet {
         if self.hard_state.generation == MatchmakerGeneration(0)
             && self.hard_state.members.is_empty()
         {
@@ -300,6 +316,12 @@ impl Matchmaker {
                 members: self.hard_state.members.clone(),
             }
         }
+    }
+
+    /// Re-materialize [`Self::set`] after a durable generation change (the
+    /// freeze and the activation are the only two).
+    pub(super) fn refresh_set(&mut self) {
+        self.set = self.derive_set();
     }
 
     /// The chosen successor of this matchmaker's generation, if learned.
@@ -458,7 +480,7 @@ impl Matchmaker {
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
-        let current = self.set();
+        let current = self.set().clone();
         match self.phase() {
             MatchmakerPhase::Active if current.generation == generation => None,
             MatchmakerPhase::Active => Some(MatchRefusal::Generation { current }),
@@ -652,6 +674,10 @@ impl Matchmaker {
                 .all(|p| p.set.generation > current && p.set.contains(self.config.id)),
             "a pending bootstrap is for a later generation this matchmaker is a member of"
         );
+        assert!(
+            self.set == self.derive_set(),
+            "the materialized set is the one the durable scalars describe"
+        );
         // The effective configuration is a *scalar*, not a record: it may
         // legitimately sit below the watermark (its record was collected),
         // but it never disagrees with a record the registry still holds.
@@ -736,7 +762,7 @@ mod tests {
         let (durable_floor, durable_registry) =
             installed.expect("the activation installs the registry");
         let expected: Vec<Ballot> = vec![ballot(5, 1), ballot(6, 1)];
-        assert_eq!(mm.set(), successor);
+        assert_eq!(*mm.set(), successor);
         assert_eq!(
             mm.hard_state().gc_watermark,
             ballot(5, 1),
@@ -750,7 +776,7 @@ mod tests {
         );
         // The restart reads back exactly that.
         let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
-        assert_eq!(rebooted.set(), successor);
+        assert_eq!(*rebooted.set(), successor);
         assert_eq!(rebooted.hard_state().gc_watermark, ballot(5, 1));
         assert_eq!(
             rebooted.registry().keys().copied().collect::<Vec<_>>(),
@@ -904,7 +930,7 @@ mod tests {
             "a contradiction changes no durable state"
         );
         assert_eq!(mm.successor(), Some(&recorded));
-        assert_eq!(mm.set(), set(0, &[0, 1, 2]), "and activates nothing");
+        assert_eq!(*mm.set(), set(0, &[0, 1, 2]), "and activates nothing");
     }
 
     /// Review finding P6: a matchmaker bootstrapped into a proposal that
@@ -1247,7 +1273,7 @@ mod tests {
     fn a_fresh_matchmaker_resolves_its_phase_from_the_bootstrap_set() {
         let member = fresh(0);
         assert_eq!(member.phase(), MatchmakerPhase::Active);
-        assert_eq!(member.set(), set(0, &[0, 1, 2]));
+        assert_eq!(*member.set(), set(0, &[0, 1, 2]));
         let mut spare = Matchmaker::new(&mmconfig(7, &[0, 1, 2]), &TestRegistry::default());
         assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
         spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
@@ -1458,7 +1484,7 @@ mod tests {
             matches!(writes.last(), Some(MatchmakerWriteOp::InstallRegistry { scalars, registrations }) if scalars.generation == MatchmakerGeneration(1) && registrations.len() == 2)
         );
         assert_eq!(mm.phase(), MatchmakerPhase::Active);
-        assert_eq!(mm.set(), successor);
+        assert_eq!(*mm.set(), successor);
         assert_eq!(mm.hard_state().gc_watermark, ballot(1, 1));
         assert!(mm.successor().is_none());
         assert_eq!(mm.hard_state().decree, DecreeAcceptor::default());
@@ -1484,7 +1510,7 @@ mod tests {
         // A reboot lands in generation 1 with the installed registry (plus
         // the one registration generation 1 took above).
         let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
-        assert_eq!(rebooted.set(), successor);
+        assert_eq!(*rebooted.set(), successor);
         assert_eq!(rebooted.registry().len(), 3);
     }
 

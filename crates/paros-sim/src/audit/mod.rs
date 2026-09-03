@@ -2168,7 +2168,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
         self.state()
@@ -2204,7 +2204,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         set: &MatchmakerSet,
         gc_watermark: Ballot,
         effective: Option<&(Ballot, AcceptorConfig)>,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
     ) {
         self.state()
             .matchmaker

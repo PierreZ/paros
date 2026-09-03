@@ -763,7 +763,7 @@ impl MatchmakerAudit {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
         self.deployed = true;
@@ -811,7 +811,7 @@ impl MatchmakerAudit {
                 if *ballot < gc_watermark {
                     continue;
                 }
-                let read_back = registry.iter().find(|(b, _)| b == ballot).map(|(_, c)| c);
+                let read_back = registry.get(ballot);
                 assert_always!(
                     read_back == Some(config),
                     "matchmaker: a restart recovers every durable registration",
@@ -845,7 +845,7 @@ impl MatchmakerAudit {
                 }
             );
         }
-        entry.registered = registry.iter().cloned().collect();
+        entry.registered = registry.clone();
         entry.watermark = gc_watermark;
         entry.generation = Some((set.generation.0, phase));
     }
@@ -2311,7 +2311,7 @@ impl MatchmakerAudit {
         set: &MatchmakerSet,
         gc_watermark: Ballot,
         effective: Option<&(Ballot, AcceptorConfig)>,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
     ) {
         let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
         self.bind_set(set.generation.0, &members, "activated");
@@ -2340,7 +2340,7 @@ impl MatchmakerAudit {
             .bootstrap_histories
             .get(&(set.generation.0, members.clone()))
         {
-            let reported: BTreeMap<Ballot, Registration> = registry.iter().cloned().collect();
+            let reported = registry;
             // The registry may legitimately have been *pruned* since the
             // bootstrap was recorded — a GC raise at the new generation moves
             // the floor and drops everything below it — so what must hold is
@@ -2353,7 +2353,7 @@ impl MatchmakerAudit {
                         .filter(|(ballot, _)| **ballot >= gc_watermark)
                         .map(|(ballot, registration)| (*ballot, registration.clone()))
                         .collect::<BTreeMap<Ballot, Registration>>()
-                        == reported
+                        == *reported
             });
             assert_always!(
                 matches,
@@ -2370,7 +2370,7 @@ impl MatchmakerAudit {
                 "generation: an activated registry is checked against its reconstruction"
             );
         }
-        entry.registered = registry.iter().cloned().collect();
+        entry.registered = registry.clone();
         entry.watermark = gc_watermark;
         entry.generation = Some((set.generation.0, MatchmakerPhase::Active));
         // The activation inherits the effective configuration (the maximum

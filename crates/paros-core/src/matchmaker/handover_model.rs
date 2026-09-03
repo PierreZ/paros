@@ -1108,7 +1108,7 @@ impl World {
             let member = top_set.contains(MatchmakerId(i as u64));
             if member {
                 assert!(
-                    live.phase() == MatchmakerPhase::Active && live.set() == *top_set,
+                    live.phase() == MatchmakerPhase::Active && *live.set() == *top_set,
                     "seed {seed}: after quiescence every member of the top generation {} is active for it; mm{i} is {:?} at {:?}{}",
                     top.0,
                     live.phase(),
