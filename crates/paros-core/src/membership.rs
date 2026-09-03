@@ -4,11 +4,19 @@
 //!
 //! This is the boundary the rest of the core reasons through and never
 //! around: the proposer, the read rounds, `CheckQuorum` and the GC fence all
-//! ask [`AcceptorConfig::has_quorum`], which asks [`QuorumSystem::is_quorum`];
+//! ask [`AcceptorConfig::has_phase1_quorum`] or
+//! [`AcceptorConfig::has_phase2_quorum`], which ask
+//! [`QuorumSystem::is_phase1_quorum`] / [`QuorumSystem::is_phase2_quorum`];
 //! no tally compares a count against a threshold on its own. Today the one
-//! quorum system is a majority. Flexible quorums, grids and the
-//! compartmentalized deployments are new variants of [`QuorumSystem`] and
-//! new data in a configuration — never a rewrite of the tallies.
+//! quorum system is a majority, where the two predicates are identical.
+//! Flexible quorums, grids and the compartmentalized deployments are new
+//! variants of [`QuorumSystem`] and new data in a configuration — never a
+//! rewrite of the tallies. The predicates are **phase-split** precisely so
+//! such a variant is expressible: Paxos safety needs every Phase-1 quorum to
+//! intersect every Phase-2 quorum (`q1 + q2 > n`, see
+//! [`QuorumSystem::cross_intersects`]), not each phase's quorums to intersect
+//! each other, and a system that exploits the difference cannot be written
+//! against one un-tagged predicate.
 //!
 //! Matchmaker quorums are deliberately **not** parameterized
 //! ([`MatchmakerSet::has_quorum`] is a majority by construction): the
@@ -47,6 +55,24 @@ impl QuorumSystem {
         }
     }
 
+    /// Whether every Phase-1 quorum of a membership of `members` intersects
+    /// every Phase-2 quorum of it — the one arithmetic fact Paxos safety
+    /// rests on, `q1 + q2 > n`. For [`QuorumSystem::Majority`] both phases
+    /// take the same `q`, so it reduces to the familiar `2q > n`; a future
+    /// `Flexible { q1, q2 }` variant would answer `q1 + q2 > n` here and is
+    /// free to let one phase's quorums *not* intersect each other (Flexible
+    /// Paxos's whole point — an even cluster with `|Q2| = n/2`), which the
+    /// old self-intersection assert forbade outright.
+    #[must_use]
+    pub fn cross_intersects(self, members: usize) -> bool {
+        match self {
+            QuorumSystem::Majority => {
+                let q = self.quorum_size(members);
+                q.saturating_add(q) > members
+            }
+        }
+    }
+
     /// Whether `voters` form a quorum over the sorted membership `members`.
     /// The **one** predicate every tally asks — Phase-1 completion, a
     /// Phase-2 decision, a read-index confirmation, `CheckQuorum`, the GC
@@ -71,6 +97,43 @@ impl QuorumSystem {
                     .count();
                 counted >= self.quorum_size(members.len())
             }
+        }
+    }
+
+    /// Whether `voters` form a **Phase-1** quorum over `members`: the
+    /// promises an election (or a CTRL repair probe) must hold before it may
+    /// conclude anything about what an earlier ballot could have chosen.
+    /// Identical to [`QuorumSystem::is_phase2_quorum`] under
+    /// [`QuorumSystem::Majority`]; a flexible system makes them differ.
+    #[must_use]
+    pub fn is_phase1_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
+        match self {
+            QuorumSystem::Majority => self.is_quorum(members, voters),
+        }
+    }
+
+    /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
+    /// that choose a value, and every claim that rests on one — a leader's
+    /// standing authority (`CheckQuorum`), a read's confirmation, the GC
+    /// fence's custody claim.
+    #[must_use]
+    pub fn is_phase2_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
+        match self {
+            QuorumSystem::Majority => self.is_quorum(members, voters),
+        }
+    }
+
+    /// The acceptors a Phase-2 message is addressed to, out of `members`.
+    ///
+    /// A majority addresses the whole membership: any subset large enough may
+    /// answer. A grid or a compartmentalized deployment would address one
+    /// *column* here, and that is the whole of the change — the caller
+    /// ([`crate::RawNode`]'s Phase-2 fan-out) already asks the boundary
+    /// instead of iterating the membership itself.
+    #[must_use]
+    pub fn phase2_addressees(self, members: &[NodeId]) -> &[NodeId] {
+        match self {
+            QuorumSystem::Majority => members,
         }
     }
 }
@@ -111,30 +174,13 @@ impl AcceptorConfig {
         }
     }
 
-    /// The number of acceptors that form a quorum over this configuration.
-    ///
-    /// # Panics
-    ///
-    /// If the quorum system cannot self-intersect over this membership: Paxos
-    /// safety rests on any two quorums of one configuration sharing an
-    /// acceptor (for the majority system, `2q > n`), and a configuration that
-    /// breaks it must fail loudly rather than let two values be chosen for
-    /// one slot.
-    #[must_use]
-    pub fn quorum_size(&self) -> usize {
-        let n = self.members.len();
-        let q = self.quorum_system.quorum_size(n);
-        assert!(q >= 1, "a quorum requires at least one acceptor");
-        assert!(2 * q > n, "any two quorums must intersect");
-        q
-    }
-
     /// Whether this configuration can be run at all: at least one acceptor, a
     /// membership that is sorted and deduplicated, and a quorum system whose
-    /// quorums all intersect (`2q > n`). The operating-condition twin of
-    /// [`AcceptorConfig::quorum_size`]'s hard asserts: a boundary that takes a
-    /// configuration from outside (`RawNode::reconfigure`) refuses a malformed
-    /// one here instead of letting a later quorum tally panic on it.
+    /// Phase-1 and Phase-2 quorums always intersect
+    /// ([`QuorumSystem::cross_intersects`]). Asserted by both quorum
+    /// predicates; a boundary that takes a configuration from outside
+    /// (`RawNode::reconfigure`) refuses a malformed one here instead of
+    /// letting a later quorum tally panic on it.
     ///
     /// The ordering clause is not cosmetic and matches
     /// [`MatchmakerSet::is_well_formed`]: [`AcceptorConfig::contains`]
@@ -148,26 +194,55 @@ impl AcceptorConfig {
             return false;
         }
         let q = self.quorum_system.quorum_size(n);
-        q >= 1 && 2 * q > n && self.members.windows(2).all(|w| w[0] < w[1])
+        q >= 1
+            && self.quorum_system.cross_intersects(n)
+            && self.members.windows(2).all(|w| w[0] < w[1])
     }
 
-    /// Whether `voters` hold a quorum of this configuration under its quorum
-    /// system — the only way a tally over this configuration is ever
-    /// judged ([`QuorumSystem::is_quorum`]); a voter outside the membership
-    /// never counts.
+    /// Whether `voters` hold a **Phase-1** quorum of this configuration —
+    /// the promises an election or a CTRL repair probe must gather before it
+    /// concludes anything about what an earlier ballot could have chosen. A
+    /// voter outside the membership never counts.
     ///
     /// # Panics
     ///
     /// If the configuration is not well formed (see
-    /// [`AcceptorConfig::quorum_size`]): a tally over a configuration whose
-    /// quorums do not intersect is meaningless and must fail loudly.
+    /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
+    /// whose phases do not intersect is meaningless and must fail loudly.
     #[must_use]
-    pub fn has_quorum(&self, voters: &BTreeSet<NodeId>) -> bool {
+    pub fn has_phase1_quorum(&self, voters: &BTreeSet<NodeId>) -> bool {
         assert!(
             self.is_well_formed(),
             "a quorum tally runs over a well-formed configuration"
         );
-        self.quorum_system.is_quorum(&self.members, voters)
+        self.quorum_system.is_phase1_quorum(&self.members, voters)
+    }
+
+    /// Whether `voters` hold a **Phase-2** quorum of this configuration — the
+    /// accepts that choose a value, and every claim that rests on one: a
+    /// leader's standing authority (`CheckQuorum`), a read's confirmation,
+    /// the GC fence's custody claim. A voter outside the membership never
+    /// counts.
+    ///
+    /// # Panics
+    ///
+    /// If the configuration is not well formed (see
+    /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
+    /// whose phases do not intersect is meaningless and must fail loudly.
+    #[must_use]
+    pub fn has_phase2_quorum(&self, voters: &BTreeSet<NodeId>) -> bool {
+        assert!(
+            self.is_well_formed(),
+            "a quorum tally runs over a well-formed configuration"
+        );
+        self.quorum_system.is_phase2_quorum(&self.members, voters)
+    }
+
+    /// The acceptors a Phase-2 message addresses, out of this membership —
+    /// [`QuorumSystem::phase2_addressees`] over it.
+    #[must_use]
+    pub fn phase2_addressees(&self) -> &[NodeId] {
+        self.quorum_system.phase2_addressees(&self.members)
     }
 
     /// Whether `node` is a member of this configuration.
@@ -303,7 +378,6 @@ impl MatchmakerSet {
         if n == 0 {
             return false;
         }
-        let q = n / 2 + 1;
-        2 * q > n && self.members.windows(2).all(|w| w[0] < w[1])
+        QuorumSystem::Majority.cross_intersects(n) && self.members.windows(2).all(|w| w[0] < w[1])
     }
 }

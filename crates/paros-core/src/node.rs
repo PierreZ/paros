@@ -736,10 +736,14 @@ impl RawNode {
             // campaign by the time it steps down. Every beat is acked by every
             // reachable follower each tick, so a healthy leader trivially
             // refills the window.
+            // A **Phase-2** quorum, for the reason spelled out at the read
+            // fence (`node/reads.rs`): a leader's authority is the claim that
+            // no later ballot has decided behind it, which every future
+            // Phase-1 quorum's intersection with this ack set rules out.
             if self.election_timeout != 0 {
                 self.quorum_elapsed += 1;
                 if self.quorum_elapsed >= self.election_timeout {
-                    if self.acceptors.has_quorum(&self.quorum_acked_by) {
+                    if self.acceptors.has_phase2_quorum(&self.quorum_acked_by) {
                         self.quorum_elapsed = 0;
                         self.quorum_acked_by.clear();
                         if self.is_acceptor() {

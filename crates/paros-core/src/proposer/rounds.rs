@@ -103,7 +103,7 @@ impl Proposer {
     #[must_use]
     pub fn decided(&self, slot: Slot, config: &AcceptorConfig) -> Option<(Ballot, Command)> {
         let round = self.rounds.get(&slot)?;
-        if !config.has_quorum(&round.accepted_by) {
+        if !config.has_phase2_quorum(&round.accepted_by) {
             return None;
         }
         assert!(

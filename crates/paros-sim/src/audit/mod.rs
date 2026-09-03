@@ -2294,7 +2294,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // Judged by the configuration's own quorum system, never by a
             // count: the custody claim the leader's GC rests on is the same
             // Phase-2 quorum question `Collector::covered` asks in the core.
-            config.has_quorum(&holders)
+            config.has_phase2_quorum(&holders)
         });
         st.matchmaker
             .gc_requested(node, watermark, fence, covered, &uncovered.join(","));

@@ -77,7 +77,7 @@ impl Election {
     pub fn covered(&self) -> bool {
         self.prior
             .iter()
-            .all(|config| config.has_quorum(&self.promises.answered))
+            .all(|config| config.has_phase1_quorum(&self.promises.answered))
     }
 
     /// The Phase-1 addressees: the union of every prior configuration — the

@@ -316,7 +316,7 @@ pub(crate) fn snap_repair_tick<S, H, A>(
             && snap
                 .acks
                 .get(&marker)
-                .is_some_and(|holders| node.acceptors().has_quorum(holders))
+                .is_some_and(|holders| node.acceptors().has_phase2_quorum(holders))
         {
             snap.marker_pending = None;
         }

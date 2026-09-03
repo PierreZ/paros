@@ -65,14 +65,18 @@ impl RawNode {
         }
     }
 
-    /// Queue `msg` to every member of the active configuration except this
-    /// node — the Phase-2 fan-out: a removed node is never contacted for a new
-    /// ballot's accepts.
+    /// Queue `msg` to every Phase-2 addressee of the active configuration
+    /// except this node — the Phase-2 fan-out: a removed node is never
+    /// contacted for a new ballot's accepts. The addressee list comes from
+    /// the membership boundary ([`AcceptorConfig::phase2_addressees`]), not
+    /// from iterating the membership here, so a grid or compartmentalized
+    /// deployment addresses a column without touching this fan-out. Under
+    /// the majority system that is the whole membership, as before.
     pub(super) fn broadcast_acceptors(&mut self, msg: &Message) {
         let me = self.config.id;
         let targets: Vec<NodeId> = self
             .acceptors
-            .members
+            .phase2_addressees()
             .iter()
             .copied()
             .filter(|&p| p != me)

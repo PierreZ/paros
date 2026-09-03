@@ -1136,7 +1136,10 @@ mod tests {
             QuorumSystem::Majority,
         );
         assert_eq!(config.members, vec![NodeId(0), NodeId(1), NodeId(2)]);
-        assert_eq!(config.quorum_size(), 2);
+        let two: std::collections::BTreeSet<NodeId> = [NodeId(0), NodeId(1)].into_iter().collect();
+        let one: std::collections::BTreeSet<NodeId> = [NodeId(0)].into_iter().collect();
+        assert!(config.has_phase1_quorum(&two) && config.has_phase2_quorum(&two));
+        assert!(!config.has_phase1_quorum(&one) && !config.has_phase2_quorum(&one));
     }
 
     // ---- generations (#125) ---------------------------------------------

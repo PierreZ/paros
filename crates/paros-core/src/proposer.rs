@@ -221,7 +221,9 @@ fn slot_decidable(
     threshold: Option<Ballot>,
 ) -> bool {
     let qualifying = qualifying_answers(answered, reporters, threshold);
-    prior.iter().all(|config| config.has_quorum(&qualifying))
+    prior
+        .iter()
+        .all(|config| config.has_phase1_quorum(&qualifying))
 }
 
 /// A `Promise` page is useful only at the exact requested cursor, carries at

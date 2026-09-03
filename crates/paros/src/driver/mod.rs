@@ -893,7 +893,7 @@ where
                     let covered = snap
                         .acks
                         .iter()
-                        .filter(|(_, holders)| node.acceptors().has_quorum(holders))
+                        .filter(|(_, holders)| node.acceptors().has_phase2_quorum(holders))
                         .map(|(&point, _)| point)
                         .max();
                     let propose_marker = |node: &mut RawNode, snap: &mut SnapRepair| {

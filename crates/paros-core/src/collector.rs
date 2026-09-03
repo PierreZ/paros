@@ -174,7 +174,7 @@ impl Collector {
                 .filter(|m| reached(self.peer_chosen.get(*m).copied()))
                 .copied(),
         );
-        config.has_quorum(&holders)
+        config.has_phase2_quorum(&holders)
     }
 
     /// Fold one matchmaker's GC ack at `ballot` over `config` (the

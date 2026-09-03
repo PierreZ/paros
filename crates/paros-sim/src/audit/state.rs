@@ -576,7 +576,10 @@ impl AuditState {
             .map(|s| s.iter().map(|n| paros::NodeId(*n)).collect())
             .unwrap_or_default();
         promised.insert(ballot.node);
-        let uncovered = prior.iter().filter(|c| !c.has_quorum(&promised)).count();
+        let uncovered = prior
+            .iter()
+            .filter(|c| !c.has_phase1_quorum(&promised))
+            .count();
         assert_always!(
             uncovered == 0,
             "reconfiguration: no Accept leaves before every prior configuration promised a quorum",
@@ -854,7 +857,10 @@ impl AuditState {
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
         let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
-        if config.as_ref().is_some_and(|c| c.has_quorum(&voters)) {
+        if config
+            .as_ref()
+            .is_some_and(|c| c.has_phase2_quorum(&voters))
+        {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -913,7 +919,7 @@ impl AuditState {
             .filter(|(_, p)| **p > ballot)
             .map(|(n, _)| paros::NodeId(*n))
             .collect();
-        let outvoted = config.has_quorum(&above);
+        let outvoted = config.has_phase1_quorum(&above);
         let entry = self.deposed_streaks.entry(node).or_default();
         if entry.round != ballot.round || entry.node != ballot.node.0 {
             *entry = DeposedStreak {

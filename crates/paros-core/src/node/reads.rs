@@ -35,7 +35,21 @@ impl RawNode {
             return;
         }
         while let Some(round) = self.read_rounds.first() {
-            let confirmed = self.acceptors.has_quorum(&round.acked_by)
+            // **A read is confirmed by a Phase-2 quorum**, and so is a
+            // leader's standing authority (`CheckQuorum`, `RawNode::tick`).
+            // Neither is a Phase-1 question: Phase 1 asks what an earlier
+            // ballot *could have chosen*, and a read asks the opposite — that
+            // no later ballot has chosen anything this leader has not seen.
+            // What makes the answer sound is that a Phase-2 quorum of this
+            // ballot's configuration acked a beat at this ballot: every
+            // future Phase-1 quorum intersects it
+            // ([`QuorumSystem::cross_intersects`]), so a successor's election
+            // must meet an acceptor that still held this ballot's promise
+            // when the read was answered, and could therefore not have
+            // decided anything below the read's index behind its back. Under
+            // a flexible quorum system that is a strictly weaker requirement
+            // than a Phase-1 quorum, which is exactly why the tag matters.
+            let confirmed = self.acceptors.has_phase2_quorum(&round.acked_by)
                 && self.replica.chosen_index() >= round.index;
             if !confirmed {
                 break;
