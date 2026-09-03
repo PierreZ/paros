@@ -1730,23 +1730,37 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let shape = usize::try_from(raw_class % 5).unwrap_or(0);
+                    let drawn = usize::try_from(raw_class % 5).unwrap_or(0);
                     let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
                     let candidates =
                         live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
-                    if let Some((name, next)) = members.as_deref().and_then(|members| {
-                        compose_reconfiguration(
-                            shape,
-                            members,
-                            &candidates,
-                            config_floor,
-                            leader_id,
-                            raw_payload,
-                        )
-                    }) {
+                    // Most shapes need a spare, which most seeds do not have:
+                    // walk the shape ring from the draw so an impossible
+                    // shape falls through to the next one instead of making
+                    // the whole step a silent no-op.
+                    let composed = members.as_deref().and_then(|members| {
+                        (0..RECONFIGURE_SHAPES.len()).find_map(|k| {
+                            let shape = (drawn + k) % RECONFIGURE_SHAPES.len();
+                            compose_reconfiguration(
+                                shape,
+                                members,
+                                &candidates,
+                                config_floor,
+                                leader_id,
+                                raw_payload,
+                            )
+                            .map(|(name, next)| (shape, name, next))
+                        })
+                    });
+                    if let Some((shape, name, next)) = composed {
+                        if shape != drawn {
+                            assert_reachable!(
+                                "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_request");
                         let outcome = reconfigure_once(probe_target, next).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
@@ -1803,28 +1817,41 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let shape_slot = usize::try_from(raw_class % 4).unwrap_or(0);
+                    let drawn_slot = usize::try_from(raw_class % 4).unwrap_or(0);
                     let candidates = live_candidates(
                         &matchmaker_ips,
                         &crate::world::parked_matchmakers(ctx.state()),
                     );
                     let request = if has_matchmakers {
+                        // The same shape ring as the acceptor composer: a
+                        // matchmaker set at its floor admits no shrink and a
+                        // full bootstrap leaves no spare, so a fixed shape
+                        // would make the step a no-op for the whole run.
                         current.as_ref().and_then(|(_, members)| {
-                            compose_reconfiguration(
-                                MATCHMAKER_SHAPES[shape_slot],
-                                members,
-                                &candidates,
-                                matchmaker_floor,
-                                None,
-                                raw_payload,
-                            )
+                            (0..MATCHMAKER_SHAPES.len()).find_map(|k| {
+                                let slot = (drawn_slot + k) % MATCHMAKER_SHAPES.len();
+                                compose_reconfiguration(
+                                    MATCHMAKER_SHAPES[slot],
+                                    members,
+                                    &candidates,
+                                    matchmaker_floor,
+                                    None,
+                                    raw_payload,
+                                )
+                                .map(|(name, next)| (slot, name, next))
+                            })
                         })
                     } else {
                         // Plain Multi-Paxos: the request is sent anyway, and
                         // the point is the refusal.
-                        current.is_some().then_some(("plain", vec![0]))
+                        current.is_some().then_some((drawn_slot, "plain", vec![0]))
                     };
-                    if let Some((name, next)) = request {
+                    if let Some((shape_slot, name, next)) = request {
+                        if shape_slot != drawn_slot {
+                            assert_reachable!(
+                                "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_matchmakers_request");
                         let outcome = reconfigure_matchmakers_once(target, next).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_matchmakers_outcome");
