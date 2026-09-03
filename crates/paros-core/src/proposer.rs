@@ -51,7 +51,6 @@ pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
 pub use self::rounds::Round;
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
-use crate::single_decree::select_highest;
 use crate::types::{Ballot, Slot};
 
 /// The paging half every Phase-1 tally shares: which ballot it counts for,
@@ -144,8 +143,12 @@ pub enum PromiseFold {
 /// The campaign a Phase 1 opens for ([`Proposer::open_phase1`]).
 #[derive(Clone, Debug)]
 pub struct Campaign<Id> {
-    /// The candidate: its own first acceptor.
-    pub me: Id,
+    /// The candidate's own acceptor identity, when it has one: it is then
+    /// its own first acceptor, and never one of its own Phase-1 addressees.
+    /// `None` on a deployment where the proposer is not an acceptor at all —
+    /// the matchmaker-set handover's decree, driven by a node over the
+    /// matchmakers of `M_g`.
+    pub me: Option<Id>,
     /// The ballot the campaign runs at.
     pub ballot: Ballot,
     /// `C_b`: the configuration Phase 2 runs under once won.
@@ -262,26 +265,34 @@ fn promise_page_shape_valid<V>(
 }
 
 /// Merge one reported `(ballot, command)` for `slot` into a highest-ballot
-/// tally: the P2c selection rule ([`select_highest`], shared with the decree
-/// kernel), at the merge. A lower report never replaces the recorded one, and
-/// two reports at one ballot are the same command (one proposer per ballot,
-/// P2b) — a disagreement is a protocol violation, not a tie.
+/// tally: **the P2c selection rule**, at the merge. Keep the highest-ballot
+/// report, ignore a lower one, and *assert* that two reports at one ballot
+/// agree — one ballot has exactly one proposer (P2b), so a disagreement is a
+/// protocol violation, not a tie to break. Silently keeping the first of two
+/// would let two proposers with different arrival orders select different
+/// values at one ballot, which is the one thing the rule exists to prevent.
+///
+/// # Panics
+///
+/// If two reports at one ballot disagree.
 fn merge_report<V: PartialEq>(
     tally: &mut BTreeMap<Slot, (Ballot, V)>,
     slot: Slot,
     ballot: Ballot,
     command: V,
 ) {
-    let mut best = tally.remove(&slot);
-    select_highest(
-        &mut best,
-        (ballot, command),
-        "two Phase-1 reports of one (slot, ballot) agree on the command",
-    );
-    tally.insert(
-        slot,
-        best.expect("the selection fold always holds a report"),
-    );
+    match tally.get(&slot) {
+        Some((held, _)) if ballot < *held => return,
+        Some((held, recorded)) if ballot == *held => {
+            assert!(
+                *recorded == command,
+                "two Phase-1 reports of one (slot, ballot) agree on the command"
+            );
+            return;
+        }
+        _ => {}
+    }
+    tally.insert(slot, (ballot, command));
 }
 
 /// Maximum recovered or gap-fill Phase-2 rounds one leader-recovery pump
@@ -434,7 +445,7 @@ mod tests {
         expected.dedup();
         let targets = p.open_phase1(
             Campaign {
-                me: NodeId(0),
+                me: Some(NodeId(0)),
                 ballot: ballot(1, 0),
                 config: config(&[0, 1, 2]),
                 prior,

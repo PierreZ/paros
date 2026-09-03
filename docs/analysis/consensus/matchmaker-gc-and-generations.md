@@ -10,7 +10,7 @@ what the paper says, what paros actually has, and the rule that survives the tra
 Code: `crates/paros-core/src/node/gc.rs` (the leader's GC decision),
 `crates/paros-core/src/matchmaker.rs` (generations, fencing, the durable decree
 acceptor), `crates/paros-core/src/matchmaker/reconfigurer.rs` (the handover state
-machine), `crates/paros-core/src/single_decree.rs` (the kernel it decides with), and the
+machine), `crates/paros-core/src/matchmaker/decree.rs` (the decree it decides with), and the
 harness's wipe / retire model in `crates/paros-sim/src/world/mod.rs`.
 
 ## 1. Garbage collection: when may a configuration be forgotten?
@@ -203,31 +203,35 @@ carve that out of `ColocatedNode`. When the handover landed, `ColocatedNode` *wa
 piece — one `Prepare` per ballot over a log suffix, paged `Promise`s, the CTRL tri-state,
 the cross-configuration completion predicate, the no-op gap fill, the read fence, the
 bounded leader recovery — and extracting a single decree from that would have re-derived
-the proven core around a kernel it never had. So the decree is a **separate, tiny kernel**
-(`single_decree.rs`: `DecreeAcceptor<V>` and `DecreeProposer<A, V>`) whose whole content is
-the value-selection rule (adopt the highest-ballot vote, else propose your own), unit-tested
-against the dueling-proposer case; the matchmaker embeds the acceptor half in its durable
-scalars and the reconfigurer drives the proposer half. Leadership, retries and transport
-stay with the caller.
+the proven core around a kernel it never had. So the decree was, for a while, a **separate, tiny kernel** (`single_decree.rs`) holding its
+own copy of the value-selection rule.
 
-That reason no longer holds as stated. The core has since been decomposed into roles
-(`acceptor.rs`, `proposer.rs`, `replica.rs`, with `membership.rs` as the quorum boundary;
-AGENTS.md, *The core is composable*), and `ColocatedNode` is the wiring that colocates them.
-A single decree is then the same `Proposer` + `Acceptor` over a one-slot log — the
-reconfigurer would drive the shared proposer against the matchmakers' shared acceptor, with
-no second value-selection rule to keep in agreement. Moving the kernel onto those roles is
-the next phase of that plan; until it lands, `single_decree.rs` stays the decree the
-handover runs, and the majority-only rule below binds both.
+That reason stopped holding once the core was decomposed into roles (`acceptor.rs`,
+`proposer.rs`, `replica.rs`, with `membership.rs` as the quorum boundary; AGENTS.md, *The core
+is composable*), leaving `ColocatedNode` as the wiring that colocates them. A single decree is
+then **the same `Proposer` + `Acceptor` over a one-slot log**, and that is what it now is:
+`matchmaker/decree.rs` opens Phase 1 at slot zero over `M_g` as an `AcceptorConfig<MatchmakerId>`,
+closes it into the P2c-selected value, and runs one Phase-2 round; each matchmaker answers
+through the same `Acceptor<Vec<MatchmakerId>>`, reconstructed over the two durable scalars of
+its `DecreeRecord`. There is no second value-selection rule to keep in agreement, and the
+kernel is deleted.
+
+Two things deliberately stay outside the shared role. A `Nack` **preempts** the decree — the
+reconfigurer keeps the refusing promise and reopens strictly above it, where the log side
+discards it and falls back to an ordinary election. And a *duplicate* Phase-2b accept is
+`Ignored` rather than progress: the log deployment credits a repeated `Accepted` on purpose
+(it is leader contact for `CheckQuorum`), while a decree's caller uses the distinction as its
+stall clock.
 
 ### Quorum model: majorities only
 
 Matchmaker Paxos generalizes matchmaker quorums to arbitrary quorum systems (§4). paros does
 not: `MatchmakerSet::quorum_size` is a majority, every matchmaker-side quorum (registration,
-GC ack, freeze, decree, publication) uses it, and `DecreeProposer` takes the acceptor *set*
-and derives the same majority itself — it cannot be constructed with a quorum that fails to
-intersect or exceeds its acceptors, and a reply from an identity outside the set never counts.
-The handover's safety argument below is made under that model only; a flexible matchmaker
-quorum system would have to replace the set's rule and the kernel together.
+GC ack, freeze, decree, publication) uses it, and the decree builds the same majority over the
+set it replaces — it cannot be given a quorum that fails to intersect or exceeds its
+acceptors, and a reply from an identity outside the set never counts. The handover's safety
+argument below is made under that model only; a flexible matchmaker quorum system would have
+to replace the set's rule and the decree's together.
 
 ### The decree ballot must be unique across incarnations
 

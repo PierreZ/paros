@@ -84,19 +84,35 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// addressee list *is* a union, only the completion predicate is not —
     /// plus `C_b` itself, so the incoming members promise the ballot (and
     /// learn the configuration) before Phase 2 reaches them. `me` is never
-    /// addressed (the candidate is its own first acceptor).
+    /// addressed (a candidate that is an acceptor is its own first one).
     #[must_use]
-    pub fn targets(&self, me: Id) -> Vec<Id> {
+    pub fn targets(&self, me: Option<Id>) -> Vec<Id> {
         let mut targets: Vec<Id> = self
             .prior
             .iter()
             .chain(std::iter::once(&self.config))
             .flat_map(|c| c.members().iter().copied())
-            .filter(|p| *p != me)
+            .filter(|p| Some(*p) != me)
             .collect();
         targets.sort_unstable();
         targets.dedup();
         targets
+    }
+
+    /// The addressees whose complete suffix answer is still missing — what a
+    /// Phase-1 re-send targets.
+    #[must_use]
+    pub fn unpromised(&self, me: Option<Id>) -> Vec<Id> {
+        self.targets(me)
+            .into_iter()
+            .filter(|p| !self.promises.answered.contains(p))
+            .collect()
+    }
+
+    /// The acceptors whose complete suffix answer has been counted.
+    #[must_use]
+    pub fn promised(&self) -> &BTreeSet<Id> {
+        &self.promises.answered
     }
 }
 
@@ -144,11 +160,15 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             .map(|(s, v)| (*s, v.clone()))
             .collect();
         let mut faulty_reports: BTreeMap<Slot, BTreeMap<Id, Ballot>> = BTreeMap::new();
-        for (slot, ballot) in own_faulty.range(from_slot..) {
-            faulty_reports.entry(*slot).or_default().insert(me, *ballot);
+        if let Some(me) = me {
+            for (slot, ballot) in own_faulty.range(from_slot..) {
+                faulty_reports.entry(*slot).or_default().insert(me, *ballot);
+            }
         }
         let mut promised_by = BTreeSet::new();
-        promised_by.insert(me);
+        if let Some(me) = me {
+            promised_by.insert(me);
+        }
         let election = Election {
             promises: PromiseTally::new(ballot, from_slot, promised_by),
             config,

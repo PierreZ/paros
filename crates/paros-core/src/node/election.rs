@@ -167,7 +167,7 @@ impl ColocatedNode {
         // per-configuration tally decides).
         let targets = self.proposer.open_phase1(
             Campaign {
-                me,
+                me: Some(me),
                 ballot: self.ballot,
                 config,
                 prior,

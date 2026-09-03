@@ -490,6 +490,22 @@ mod tests {
         })
     }
 
+    /// One ballot carries one value (P2b): a second value at the ballot a
+    /// slot already recorded is a programmer error, not a tie. The proposer
+    /// half of the same rule is
+    /// `proposer::tests::two_reports_at_one_ballot_are_a_programmer_error`;
+    /// this is the half a single-decree deployment leans on, where a silent
+    /// overwrite would let two successor sets be chosen for one generation.
+    #[test]
+    #[should_panic(expected = "an accept at or below the recorded ballot carries the recorded")]
+    fn two_values_at_one_ballot_are_a_programmer_error() {
+        let mut acceptor: Acceptor<Command> =
+            Acceptor::new(ballot(1), BTreeMap::new(), Slot(0), BTreeMap::new());
+        let mut writes: Vec<WriteOp> = Vec::new();
+        acceptor.record_accepted(Slot(0), ballot(1), command(1), &mut writes);
+        acceptor.record_accepted(Slot(0), ballot(1), command(2), &mut writes);
+    }
+
     /// The role classification `write.rs` states: every durable change an
     /// acceptor makes is emitted by the acceptor itself, and every op it
     /// emits needs an fsync. `truncate` and `install` used to change the

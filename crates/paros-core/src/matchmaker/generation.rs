@@ -13,14 +13,20 @@
 //! Every arm is fenced by generation and phase, and a refusal names what this
 //! matchmaker knows so a stale or ahead reconfigurer can adopt or abort.
 
-use super::{
-    Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap, ReconfigureReply,
-    ReconfigureRequest, Registration,
-};
-use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::single_decree::DecreeAcceptor;
-use crate::types::Ballot;
 use std::collections::BTreeMap;
+
+use super::{
+    DecreeRecord, Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap,
+    ReconfigureReply, ReconfigureRequest, Registration,
+};
+use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::types::{Ballot, Slot};
+use crate::write::AcceptorWrite;
+
+/// The one slot a successor decree runs over: a matchmaker set is a single
+/// value, chosen once per generation.
+const DECREE_SLOT: Slot = Slot(0);
 
 impl Matchmaker {
     /// Answer one reconfiguration message (the module doc's *Generations*).
@@ -145,6 +151,47 @@ impl Matchmaker {
         }
     }
 
+    /// This matchmaker's acceptor half of the successor decree, reconstructed
+    /// over the durable record: the shared [`Acceptor`] role over a one-value
+    /// log — slot zero, floor at zero, no tri-state (a lost decree vote is
+    /// not repaired in place; the generation is replaced instead).
+    fn decree_acceptor(&self) -> Acceptor<Vec<MatchmakerId>> {
+        let records = self
+            .hard_state
+            .decree
+            .vote
+            .clone()
+            .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
+            .unwrap_or_default();
+        Acceptor::new(
+            self.hard_state.decree.promised,
+            records,
+            DECREE_SLOT,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Fold an acceptor whose voting moved back into the durable record, and
+    /// stage the scalars that carry it. `writes` is the acceptor's own report
+    /// that something durable changed: a matchmaker persists its scalars
+    /// whole, so its batch carries one [`MatchmakerWriteOp::SetScalars`]
+    /// rather than the role's two ops, and an empty report means there is
+    /// nothing to persist.
+    ///
+    /// [`MatchmakerWriteOp::SetScalars`]: crate::MatchmakerWriteOp::SetScalars
+    fn store_decree(
+        &mut self,
+        acceptor: &Acceptor<Vec<MatchmakerId>>,
+        writes: &[AcceptorWrite<Vec<MatchmakerId>>],
+    ) {
+        if writes.is_empty() {
+            return;
+        }
+        self.hard_state.decree.promised = acceptor.promised();
+        self.hard_state.decree.vote = acceptor.record(DECREE_SLOT).cloned();
+        self.stage_scalars();
+    }
+
     /// Phase 1b of the successor decree.
     fn on_decree_prepare(
         &mut self,
@@ -159,12 +206,14 @@ impl Matchmaker {
         {
             self.refusal()
         } else {
-            let before = self.hard_state.decree.promised;
-            match self.hard_state.decree.prepare(ballot) {
-                Ok(vote) => {
-                    if self.hard_state.decree.promised != before {
-                        self.stage_scalars();
-                    }
+            let mut acceptor = self.decree_acceptor();
+            let mut writes = Vec::new();
+            match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
+                // The floor is slot zero and so is the prepare, so a
+                // below-floor refusal is not expressible here.
+                PrepareOutcome::Promised { .. } => {
+                    let vote = acceptor.record(DECREE_SLOT).cloned();
+                    self.store_decree(&acceptor, &writes);
                     ReconfigureReply::Promised {
                         matchmaker: me,
                         generation,
@@ -172,11 +221,11 @@ impl Matchmaker {
                         vote,
                     }
                 }
-                Err(promised) => ReconfigureReply::Nacked {
+                PrepareOutcome::Refused | PrepareOutcome::BelowFloor => ReconfigureReply::Nacked {
                     matchmaker: me,
                     generation,
                     ballot,
-                    promised,
+                    promised: acceptor.promised(),
                 },
             }
         }
@@ -200,20 +249,26 @@ impl Matchmaker {
             let mut members = members;
             members.sort_unstable();
             members.dedup();
-            match self.hard_state.decree.accept(ballot, members) {
-                Ok(()) => {
-                    self.stage_scalars();
+            let mut acceptor = self.decree_acceptor();
+            let mut writes = Vec::new();
+            match acceptor.admit(ballot, DECREE_SLOT) {
+                // A vote is a promise too: the acceptor raises the promise
+                // before it records, exactly as the log wiring does.
+                AcceptOutcome::Admitted => {
+                    acceptor.set_promise(ballot, &mut writes);
+                    acceptor.record_accepted(DECREE_SLOT, ballot, members, &mut writes);
+                    self.store_decree(&acceptor, &writes);
                     ReconfigureReply::Accepted {
                         matchmaker: me,
                         generation,
                         ballot,
                     }
                 }
-                Err(promised) => ReconfigureReply::Nacked {
+                AcceptOutcome::Refused | AcceptOutcome::BelowFloor => ReconfigureReply::Nacked {
                     matchmaker: me,
                     generation,
                     ballot,
-                    promised,
+                    promised: acceptor.promised(),
                 },
             }
         }
@@ -392,7 +447,7 @@ impl Matchmaker {
         self.hard_state.members.clone_from(&successor.members);
         self.hard_state.phase = MatchmakerPhase::Active;
         self.hard_state.successor = None;
-        self.hard_state.decree = DecreeAcceptor::default();
+        self.hard_state.decree = DecreeRecord::default();
         self.hard_state.gc_watermark = watermark;
         self.hard_state.effective = effective;
         self.hard_state

@@ -67,7 +67,7 @@
 //! loses its disk would be unreplaceable. Following §5 of the paper, the
 //! matchmaker set carries a **generation**, and generation `g + 1` is chosen
 //! by a **single-decree Paxos instance whose acceptors are generation `g`'s
-//! matchmakers** ([`crate::DecreeAcceptor`] is the durable half every
+//! matchmakers** ([`crate::DecreeRecord`] is the durable half every
 //! matchmaker keeps). The handover is stop-the-world, which is acceptable
 //! because matchmakers are idle whenever a leader is stable:
 //!
@@ -128,6 +128,7 @@
 //! produces that message, and an `activated: false` `Learned` would have
 //! made it indistinguishable from a duplicate.
 
+mod decree;
 mod generation;
 #[cfg(test)]
 mod handover_model;
@@ -139,6 +140,7 @@ mod write;
 
 use std::collections::BTreeMap;
 
+pub use self::decree::Decree;
 pub use self::message::{
     GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, ReconfigureReply,
     ReconfigureRequest,
@@ -148,8 +150,8 @@ pub use self::reconfigurer::{
     StartRefusal,
 };
 pub use self::state::{
-    MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration,
-    RegistrationKind,
+    DecreeRecord, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap,
+    Registration, RegistrationKind,
 };
 pub(crate) use self::state::{resolved_phase, resolved_set};
 pub use self::storage::RegistryStorage;
@@ -679,7 +681,6 @@ impl Matchmaker {
 mod tests {
     use super::*;
     use crate::membership::{AcceptorConfig, QuorumSystem};
-    use crate::single_decree::DecreeAcceptor;
     use crate::types::NodeId;
 
     /// Review 3 of #133: a member whose own GC floor sits *above* the
@@ -1470,7 +1471,7 @@ mod tests {
         assert_eq!(*mm.set(), successor);
         assert_eq!(mm.hard_state().gc_watermark, ballot(1, 1));
         assert!(mm.successor().is_none());
-        assert_eq!(mm.hard_state().decree, DecreeAcceptor::default());
+        assert_eq!(mm.hard_state().decree, DecreeRecord::default());
         // Generation 1 serves from the reconstruction; generation 0 is told
         // the chain link is gone from here (this matchmaker moved on).
         mm.step(MatchRequest::new(

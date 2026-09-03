@@ -168,11 +168,12 @@ The rule that shapes every boundary: **a component must not acquire knowledge me
 the current deployment happens to colocate it.** The proposer builds no message and knows no
 role; the acceptor never reads the chosen prefix; the replica never sees a ballot tally; the
 caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
-"is this slot chosen" predicate when a probe closes). What this buys, in order: the single
-decree (`single_decree.rs`, today a separate kernel) becomes the same `Proposer` + `Acceptor`
-over a one-slot log; the matchmaker folds into the role system; flexible quorums and
-Compartmentalized Paxos become deployment data. Each of those is a later phase; the first
-phase extracted the three roles with the behaviour, the public API and the sweep unchanged.
+"is this slot chosen" predicate when a probe closes). What that bought, in order: the single
+decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
+is no second Paxos kernel in the crate). Still to come: the matchmaker folds into the role
+system; flexible quorums and Compartmentalized Paxos become deployment data. Each of those is
+a later phase; the first phase extracted the three roles with the behaviour, the public API
+and the sweep unchanged.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -290,15 +291,18 @@ the explicit sans-IO `MatchmakerReconfigurer` (`crates/paros-core/src/matchmaker
 driven by the provider-generic node driver: **stop** (a quorum of `M_g` freezes durably; a frozen
 matchmaker registers nothing for `g` ever again but stays alive to vote and to point late
 proposers at its successor) → **reconstruct** (max watermark, union above it) → **bootstrap**
-(every proposed member holds it durably, pending) → **decide** (single-decree Paxos over `M_g`,
-the separate kernel in `crates/paros-core/src/single_decree.rs` — still its own kernel today;
-moving it onto the shared `Proposer` + `Acceptor` over a one-slot log is the next phase of the
-composable core, see *The core is composable* above and the design note) → **publish** (`Chosen`: `M_g` records the chain link,
+(every proposed member holds it durably, pending) → **decide** (single-decree Paxos over `M_g`
+— **the shared roles over a one-slot log**, not a second kernel: `matchmaker/decree.rs` drives
+`Proposer<MatchmakerId, Vec<MatchmakerId>>` at slot zero against each matchmaker's own
+`Acceptor<Vec<MatchmakerId>>`, whose two scalars are its durable `DecreeRecord`. The one
+deliberate divergence stays outside the role: a `Nack` preempts the decree and the
+reconfigurer reopens strictly above the promise that refused it, where the log side discards
+the promise and falls back to an election) → **publish** (`Chosen`: `M_g` records the chain link,
 `M_{g+1}` activates its pending bootstrap). Invariant 1 — at most one set is authoritative per
 generation — rests on the decree (the loser adopts the winner's vote); reconstruction
 completeness is asserted in the audit. **Matchmaker quorums are majorities only**
-(`MatchmakerSet::has_quorum`; the decree kernel holds a `QuorumSystem::Majority` derived from
-the acceptor set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
+(`MatchmakerSet::has_quorum`; the decree builds a `QuorumSystem::Majority` over the set it
+replaces and cannot be given any other quorum): the paper's flexible matchmaker
 quorums are deliberately unsupported, and the handover's safety argument is made under the
 majority model alone. The handover is proven by a sans-IO **model checker**
 (`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
@@ -660,8 +664,8 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   role's state) and, beside it, the sans-IO
   matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
   the caller drives, never stepped by `ColocatedNode`), its generation handover
-  (`matchmaker/reconfigurer.rs`) and the single-decree kernel the handover decides with
-  (`single_decree.rs`): std-only, wasm-safe, and dependency-free
+  (`matchmaker/reconfigurer.rs`) and the successor decree it decides with over the shared
+  roles (`matchmaker/decree.rs`): std-only, wasm-safe, and dependency-free
   with `default-features = false` (CI checks that build too). Two features, both observation-only:
   `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
   *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no

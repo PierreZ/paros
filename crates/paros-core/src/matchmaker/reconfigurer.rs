@@ -13,8 +13,9 @@
 //!   |             Bootstrap{g+1, target, w, H} -> every member of the target;
 //!   |             wait for ALL of them (a set is chosen only once fully initialized)
 //!   v
-//! Deciding        single-decree Paxos over M_g as acceptors (`DecreeProposer`, a
-//!   |             majority of M_g for both phases — the only quorum model paros
+//! Deciding        single-decree Paxos over M_g as acceptors (`Decree`: the shared
+//!   |             `Proposer` + `Acceptor` roles over a one-slot log, a majority of M_g
+//!   |             for both phases — the only quorum model paros
 //!   |             supports for matchmakers): Phase 1 at a fresh ballot strictly above
 //!   |             the stop quorum's decree promises (a rebooted node must never reuse
 //!   |             a ballot of its earlier incarnation), P2c adopts a competing proposal
@@ -49,12 +50,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::decree::{AcceptFold, Decree, PromiseFold};
 use super::{
     MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
     Registration,
 };
 use crate::membership::AcceptorConfig;
-use crate::single_decree::{AcceptFold, DecreePhase, DecreeProposer, PromiseFold};
 use crate::types::{Ballot, NodeId};
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
@@ -116,8 +117,10 @@ pub enum ReconfigurerPhase {
         old: MatchmakerSet,
         /// The proposal this reconfigurer bootstrapped.
         bootstrap: PendingBootstrap,
-        /// The single-decree proposer.
-        proposer: DecreeProposer<MatchmakerId, Vec<MatchmakerId>>,
+        /// The single-decree proposal. Boxed: a decree carries the shared
+        /// proposer role's whole tally surface, several times the size of
+        /// any other phase's state.
+        decree: Box<Decree>,
     },
     /// Telling the old and new generations about the chosen successor.
     Publishing {
@@ -595,24 +598,24 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Deciding {
                 old,
                 bootstrap,
-                proposer,
+                decree,
             } => {
-                if let DecreePhase::Preempted(promised) = proposer.phase() {
+                if let Some(promised) = decree.preempted() {
                     // Reopen strictly above the promise that refused us.
                     self.round = self.round.max(promised.round).saturating_add(1);
-                    *proposer = DecreeProposer::new(
+                    **decree = Decree::new(
                         Ballot {
                             round: self.round,
                             node: me,
                         },
-                        old.members.iter().copied(),
+                        old,
                         bootstrap.set.members.clone(),
                     );
                 }
-                let ballot = proposer.ballot();
+                let ballot = decree.ballot();
                 let generation = old.generation;
-                let value = proposer.value().cloned();
-                for m in proposer.unanswered() {
+                let value = decree.value().cloned();
+                for m in decree.unanswered() {
                     queue.push((
                         m,
                         match &value {
@@ -789,20 +792,16 @@ impl MatchmakerReconfigurer {
                     round: self.round,
                     node: self.node,
                 };
-                let proposer = DecreeProposer::new(
-                    ballot,
-                    old.members.iter().copied(),
-                    bootstrap.set.members.clone(),
-                );
+                let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members.clone()));
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),
-                    proposer,
+                    decree,
                 };
                 self.resend();
                 ReconfigurerStep::Deciding { ballot }
             }
-            ReconfigurerPhase::Deciding { old, proposer, .. } => {
+            ReconfigurerPhase::Deciding { old, decree, .. } => {
                 if !old.contains(from) {
                     return ReconfigurerStep::Ignored;
                 }
@@ -813,17 +812,17 @@ impl MatchmakerReconfigurer {
                         vote,
                         ..
                     } => {
-                        if generation != old.generation || ballot != proposer.ballot() {
+                        if generation != old.generation || ballot != decree.ballot() {
                             return ReconfigurerStep::Ignored;
                         }
-                        let members = match proposer.on_promise(from, vote) {
+                        let members = match decree.on_promise(from, vote) {
                             PromiseFold::Ignored => return ReconfigurerStep::Ignored,
                             PromiseFold::Counted { remaining } => {
                                 return ReconfigurerStep::Promised { remaining };
                             }
                             PromiseFold::Quorum(members) => members,
                         };
-                        let adopted = proposer.adopted_prior_vote();
+                        let adopted = decree.adopted_prior_vote();
                         self.resend();
                         ReconfigurerStep::Proposing {
                             ballot,
@@ -834,10 +833,10 @@ impl MatchmakerReconfigurer {
                     ReconfigureReply::Accepted {
                         generation, ballot, ..
                     } => {
-                        if generation != old.generation || ballot != proposer.ballot() {
+                        if generation != old.generation || ballot != decree.ballot() {
                             return ReconfigurerStep::Ignored;
                         }
-                        let members = match proposer.on_accepted(from) {
+                        let members = match decree.on_accepted(from) {
                             AcceptFold::Ignored => return ReconfigurerStep::Ignored,
                             AcceptFold::Counted { remaining } => {
                                 return ReconfigurerStep::Accepted { remaining };
@@ -866,12 +865,12 @@ impl MatchmakerReconfigurer {
                         promised,
                         ..
                     } => {
-                        if generation != old.generation || ballot != proposer.ballot() {
+                        if generation != old.generation || ballot != decree.ballot() {
                             return ReconfigurerStep::Ignored;
                         }
-                        let ballot = proposer.ballot();
-                        proposer.on_nack(promised);
-                        if !matches!(proposer.phase(), DecreePhase::Preempted(_)) {
+                        let ballot = decree.ballot();
+                        decree.on_nack(promised);
+                        if decree.preempted().is_none() {
                             return ReconfigurerStep::Ignored;
                         }
                         // Preempted: the decree is reopened above the refusing
@@ -1427,7 +1426,7 @@ mod tests {
         r.resend();
         assert!(matches!(
             r.phase(),
-            ReconfigurerPhase::Deciding { proposer, .. } if proposer.ballot().round == 6
+            ReconfigurerPhase::Deciding { decree, .. } if decree.ballot().round == 6
         ));
         for _ in 0..4 {
             exchange(&mut r, &mut pool, &[]);

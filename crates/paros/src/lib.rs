@@ -64,16 +64,16 @@ pub use paros_core::proposer::Proposer;
 pub use paros_core::replica::Replica;
 pub use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config,
-    ConfigId, Control, DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome,
-    GcRequest, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff,
-    HandoffCounters, HardState, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome,
-    MatchRefusal, MatchReply, MatchRequest, MatchStep, Matchmaker, MatchmakerConfig,
-    MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerReady,
-    MatchmakerReconfigurer, MatchmakerSet, MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole,
-    PROMISE_BATCH, PendingBootstrap, ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult,
-    ReadState, Ready, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
-    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage,
-    SessionEntry, Slot, StartRefusal, Storage, Value, WriteOp, command_fingerprint,
+    ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
+    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
+    MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
+    MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
+    ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult, ReadState, Ready,
+    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
+    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;

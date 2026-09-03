@@ -8,8 +8,26 @@
 use std::collections::BTreeMap;
 
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::single_decree::DecreeAcceptor;
 use crate::types::Ballot;
+
+/// This matchmaker's durable **acceptor record** in the successor decree: the
+/// promise it made and the vote it cast, the two scalars of Paxos's acceptor
+/// half over a one-value log.
+///
+/// It is the persisted shape only. The decisions are the shared
+/// [`Acceptor`](crate::acceptor::Acceptor)'s
+/// ([`Matchmaker::decree_acceptor`](super::Matchmaker)), reconstructed over
+/// this record for each decree message: a matchmaker is an acceptor of
+/// exactly one value, at slot zero, with no compaction floor and no
+/// tri-state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DecreeRecord {
+    /// The highest ballot promised. Monotone.
+    pub promised: Ballot,
+    /// The highest-ballot value accepted, if any.
+    pub vote: Option<(Ballot, Vec<MatchmakerId>)>,
+}
 
 /// The phase of a matchmaker's current generation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,7 +105,7 @@ pub struct MatchmakerHardState {
     pub successor: Option<MatchmakerSet>,
     /// This matchmaker's acceptor record in the decree that chooses
     /// `generation`'s successor. Reset at every activation.
-    pub decree: DecreeAcceptor<Vec<MatchmakerId>>,
+    pub decree: DecreeRecord,
     /// Bootstraps for proposed later generations this matchmaker is a member
     /// of, keyed by the proposed set, inactive until one is chosen.
     pub pending: Vec<PendingBootstrap>,

@@ -30,6 +30,13 @@ impl<Id, V> Round<Id, V> {
     pub fn command(&self) -> &V {
         &self.command
     }
+
+    /// The acceptors (incl. self) whose accept at this round's ballot has
+    /// been counted — what a Phase-2 re-send addresses the complement of.
+    #[must_use]
+    pub fn accepted_by(&self) -> &BTreeSet<Id> {
+        &self.accepted_by
+    }
 }
 
 impl<Id: Copy + Ord, V> Proposer<Id, V> {

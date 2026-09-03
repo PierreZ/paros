@@ -48,18 +48,17 @@ mod node;
 pub mod proposer;
 mod ready;
 pub mod replica;
-mod single_decree;
 mod state;
 mod storage;
 mod types;
 mod write;
 
 pub use matchmaker::{
-    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
-    MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
-    Registration, RegistrationKind, RegistryStorage, StartRefusal,
+    Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
+    MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
+    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep,
+    Reconstruction, Registration, RegistrationKind, RegistryStorage, StartRefusal,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
@@ -72,7 +71,6 @@ pub use node::{
     ReconfigureResult,
 };
 pub use ready::Ready;
-pub use single_decree::{AcceptFold, DecreeAcceptor, DecreePhase, DecreeProposer, PromiseFold};
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{

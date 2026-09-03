@@ -26,7 +26,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::NodeId;
+use crate::types::{Fingerprint, NodeId};
 
 /// The quorum system a configuration uses: which sets of acceptors count as a
 /// quorum for Phase 1 (election) and Phase 2 (decide).
@@ -313,6 +313,24 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerId(pub u64);
 
+impl Fingerprint for Vec<MatchmakerId> {
+    /// The identity a matchmaker set carries through Phase 2: an FNV-1a fold
+    /// over the members, in their sorted order. The value a decree chooses is
+    /// small and always normalized, so its identity is its content.
+    fn fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = OFFSET;
+        for member in self {
+            for byte in member.0.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(PRIME);
+            }
+        }
+        hash
+    }
+}
+
 /// A matchmaker-set **generation** (#125): which matchmaker set is
 /// authoritative. Distinct from a Paxos ballot (consensus leadership, and the
 /// acceptor configuration bound to it) and from [`crate::ConfigId`] (the
@@ -360,8 +378,8 @@ impl MatchmakerSet {
     /// **Majority quorums only.** Matchmaker Paxos generalizes matchmaker
     /// quorums to arbitrary quorum systems; paros deliberately does not. Every
     /// matchmaker-side quorum — registration, GC ack, freeze, the successor
-    /// decree over `M_g` ([`crate::DecreeProposer`] derives the same majority
-    /// from the acceptor set it is handed) and publication — is this rule,
+    /// decree over `M_g` (whose `Decree` builds the same majority
+    /// from the set it replaces) and publication — is this rule,
     /// and the generation handover's safety argument (quorum intersection
     /// between the freeze quorum and every completed registration, Appendix
     /// B, and between the decree's two phases) is made only under it. A
