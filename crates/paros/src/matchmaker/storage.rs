@@ -36,7 +36,8 @@
 //! more record family.
 
 use paros_core::{
-    AcceptorConfig, Ballot, MatchmakerHardState, NodeId, QuorumSystem, Registration,
+    AcceptorConfig, Ballot, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, QuorumSystem, Registration,
     RegistryStorage,
 };
 use std::collections::BTreeMap;
@@ -77,6 +78,26 @@ pub trait MatchmakerStorage: RegistryStorage {
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError>;
+
+    /// Persist the durable scalars whole (#125: the generation state, the
+    /// freeze, the successor link, the decree record, the pending
+    /// bootstraps). The watermark inside never sits below the durable one.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError>;
+
+    /// Replace the registry whole — a successor generation's activation:
+    /// every record dropped, `registrations` written, and `scalars` (whose
+    /// watermark is the reconstructed one) persisted in the same batch.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn install_registry(
+        &mut self,
+        scalars: &MatchmakerHardState,
+        registrations: &BTreeMap<Ballot, Registration>,
+    ) -> Result<(), StorageError>;
 
     /// Flush this batch's writes to stable storage. Every matchmaker write is
     /// safety-critical, so this is always an fsync: the batch must be durable
@@ -137,6 +158,30 @@ impl MatchmakerStorage for MemMatchmakerStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
+    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
+        let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
+        self.hard_state = scalars.clone();
+        self.hard_state.gc_watermark = watermark;
+        self.registry = self.registry.split_off(&watermark);
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
+    fn install_registry(
+        &mut self,
+        scalars: &MatchmakerHardState,
+        registrations: &BTreeMap<Ballot, Registration>,
+    ) -> Result<(), StorageError> {
+        self.hard_state = scalars.clone();
+        self.registry = registrations
+            .iter()
+            .filter(|(b, _)| **b >= scalars.gc_watermark)
+            .map(|(b, r)| (*b, r.clone()))
+            .collect();
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     fn sync(&mut self) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
@@ -177,12 +222,13 @@ fn suite_belief(n: u64) -> Registration {
 ///
 /// Panics on any contract violation.
 #[doc(hidden)]
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,
 ) {
-    use paros_core::{Matchmaker, MatchmakerId};
+    use paros_core::Matchmaker;
     // What every reopen must satisfy: the durable records and the durable
     // scalars are mutually consistent (no record below the watermark, every
     // walked ballot readable), and — the recovery contract itself — a
@@ -198,7 +244,13 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
             ballots.iter().all(|b| *b >= state.gc_watermark),
             "no registration survives below the durable watermark"
         );
-        let booted = Matchmaker::new(MatchmakerId(0), s);
+        let booted = Matchmaker::new(
+            &MatchmakerConfig {
+                id: MatchmakerId(0),
+                bootstrap: vec![MatchmakerId(0)],
+            },
+            s,
+        );
         assert_eq!(
             *booted.hard_state(),
             state,
@@ -279,12 +331,75 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     // The watermark never lowers.
     s.set_gc_watermark(suite_ballot(1)).expect("re-raise lower");
     s.sync().expect("sync no-op");
-    let s = reopen(s);
+    let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
         suite_ballot(2),
         "the watermark is monotone"
+    );
+
+    // The generation scalars persist whole (#125): a freeze and a successor
+    // link read back, and the watermark inside never lowers the durable one.
+    let mut scalars = s.initial_state();
+    scalars.phase = MatchmakerPhase::Stopped;
+    scalars.members = vec![MatchmakerId(0)];
+    scalars.successor = Some(MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(0), MatchmakerId(1)],
+    ));
+    scalars.gc_watermark = suite_ballot(1);
+    s.set_scalars(&scalars).expect("scalars");
+    s.sync().expect("sync scalars");
+    let mut s = reopen(s);
+    consistent(&s);
+    let read_back = s.initial_state();
+    assert_eq!(
+        read_back.phase,
+        MatchmakerPhase::Stopped,
+        "the freeze is durable"
+    );
+    assert_eq!(
+        read_back.successor, scalars.successor,
+        "the successor link is durable"
+    );
+    assert_eq!(
+        read_back.gc_watermark,
+        suite_ballot(2),
+        "scalars never lower the durable watermark"
+    );
+
+    // An activation replaces the registry whole at the reconstructed
+    // watermark, and drops what sits below it.
+    let mut activated = read_back;
+    activated.generation = MatchmakerGeneration(1);
+    activated.members = vec![MatchmakerId(0), MatchmakerId(1)];
+    activated.phase = MatchmakerPhase::Active;
+    activated.successor = None;
+    activated.gc_watermark = suite_ballot(4);
+    let mut reconstructed = BTreeMap::new();
+    reconstructed.insert(suite_ballot(3), suite_belief(3));
+    reconstructed.insert(suite_ballot(4), suite_belief(6));
+    reconstructed.insert(suite_ballot(7), suite_belief(7));
+    s.install_registry(&activated, &reconstructed)
+        .expect("install");
+    s.sync().expect("sync install");
+    let s = reopen(s);
+    consistent(&s);
+    assert_eq!(
+        s.initial_state(),
+        activated,
+        "the activation's scalars read back"
+    );
+    assert_eq!(
+        s.registered_ballots(),
+        vec![suite_ballot(4), suite_ballot(7)],
+        "the reconstructed registry replaced the old one, above its watermark"
+    );
+    assert_eq!(
+        s.registration(suite_ballot(2)),
+        None,
+        "the replaced generation's records are gone"
     );
 }
 

@@ -172,6 +172,7 @@ fn stale_ballot_heartbeat_ack_never_credits_a_round() {
         from: NodeId(1),
         ballot: stale,
         seq,
+        chosen: None,
     });
     assert!(
         nodes[0].pending_read_states.is_empty(),
@@ -194,6 +195,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
         from: NodeId(1),
         ballot: b,
         seq: required - 1,
+        chosen: None,
     });
     assert!(nodes[0].pending_read_states.is_empty());
 
@@ -203,6 +205,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
         from: NodeId(2),
         ballot: b,
         seq: required + 1,
+        chosen: None,
     });
     assert_eq!(
         nodes[0].pending_read_states,
@@ -235,6 +238,7 @@ fn duplicate_acks_from_one_peer_are_not_a_quorum() {
             from: NodeId(1),
             ballot: b,
             seq,
+            chosen: None,
         });
     }
     assert!(nodes[0].pending_read_states.is_empty());
@@ -245,6 +249,7 @@ fn duplicate_acks_from_one_peer_are_not_a_quorum() {
         from: NodeId(2),
         ballot: b,
         seq,
+        chosen: None,
     });
     assert_eq!(
         nodes[0].pending_read_states,
@@ -284,6 +289,7 @@ fn step_down_drops_pending_read_rounds() {
         from: NodeId(1),
         ballot: b,
         seq,
+        chosen: None,
     });
     assert!(nodes[0].pending_read_states.is_empty());
 }

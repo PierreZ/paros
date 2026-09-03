@@ -199,8 +199,12 @@ fn the_merge_keeps_the_highest_ballot_report() {
     // for slot 0 is the highest-ballot report.
     n.step(promise(3, b, BTreeMap::new()));
     assert!(n.is_leader());
-    let round = n.proposer.get(&Slot(0)).expect("slot 0 is re-proposed");
-    assert_eq!(round.command, ucmd(1, 1, 40));
+    let round = n
+        .proposer
+        .rounds()
+        .get(&Slot(0))
+        .expect("slot 0 is re-proposed");
+    assert_eq!(*round.command(), ucmd(1, 1, 40));
 }
 
 // ---- truncation and snapshot boundaries --------------------------------------
@@ -230,7 +234,7 @@ fn compaction_stops_below_an_open_application_repair() {
 #[test]
 fn a_stale_snapshot_never_rewinds_a_frontier() {
     let mut nodes = cluster_with_three_chosen();
-    let before = nodes[1].hard_state().clone();
+    let before = nodes[1].hard_state();
     let floor = nodes[1].first_slot();
     nodes[1].step(Message::InstallSnapshot {
         config_id: ConfigId::default(),
@@ -240,7 +244,7 @@ fn a_stale_snapshot_never_rewinds_a_frontier() {
         snapshot: Value(vec![]),
         sessions: Vec::new(),
     });
-    assert_eq!(*nodes[1].hard_state(), before);
+    assert_eq!(nodes[1].hard_state(), before);
     assert_eq!(nodes[1].first_slot(), floor);
     assert!(nodes[1].pending_writes.is_empty());
 }

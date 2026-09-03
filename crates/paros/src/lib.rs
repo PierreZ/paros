@@ -41,15 +41,18 @@ pub use driver::{
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
     ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck, Reconfigure,
-    ReconfigureAck, WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
-    garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
-    match_request_from_wire, proposal_checksum, wire_garbage_collect, wire_garbage_collect_ack,
-    wire_match_reply, wire_match_request,
+    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
+    WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
+    WireReconfigureReply, WireReconfigureRequest, garbage_collect_ack_from_wire,
+    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire, proposal_checksum,
+    reconfigure_reply_from_wire, reconfigure_request_from_wire, wire_garbage_collect,
+    wire_garbage_collect_ack, wire_match_reply, wire_match_request, wire_reconfigure_reply,
+    wire_reconfigure_request,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, config_hash, matchmaker_storage_contract_suite,
-    run_matchmaker,
+    reconfigure_kind, reconfigure_reply_kind, run_matchmaker,
 };
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
@@ -57,13 +60,17 @@ pub use storage::{
 };
 
 pub use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control, Entry,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control,
+    DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome, GcRequest, GcStep,
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    MatchStep, Matchmaker, MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp,
-    Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, QuorumSystem, RawNode,
-    ReadIndexResult, ReadState, Ready, ReconfigureRefusal, ReconfigureResult, Registration,
-    RegistryStorage, SessionEntry, Slot, Storage, Value, WriteOp, command_fingerprint,
+    MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
+    MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
+    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, ReconfigureRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase, ReconfigurerStep,
+    Registration, RegistryStorage, SessionEntry, Slot, StartRefusal, Storage, Value, WriteOp,
+    command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
@@ -218,6 +225,7 @@ mod tests {
                 from: NodeId(1),
                 ballot,
                 seq: 9,
+                chosen: Some(Slot(4)),
             },
             // The driver-terminal snap-repair trio carries the configuration
             // identity too (guarded by the driver on receipt, never asserted).
@@ -295,10 +303,12 @@ mod tests {
     /// The matchmaker contract: every outcome and refusal round-trips through
     /// its typed protobuf losslessly.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn matchmaker_contract_round_trips() {
         use paros_core::{
-            AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerId,
-            QuorumSystem, Registration,
+            AcceptorConfig, GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
+            MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerSet, PendingBootstrap,
+            QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration,
         };
         let ballot = |round: u64, node: u64| Ballot {
             round,
@@ -310,9 +320,16 @@ mod tests {
                 QuorumSystem::Majority,
             )
         };
+        let g = MatchmakerGeneration;
+        let set = |generation: u64, members: &[u64]| {
+            MatchmakerSet::new(
+                g(generation),
+                members.iter().copied().map(MatchmakerId).collect(),
+            )
+        };
         for request in [
-            MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2])),
-            MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3])),
+            MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
+            MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
         ] {
             let wire = crate::grpc::wire_match_request(&request);
             let bytes = wire.encode_to_vec();
@@ -323,12 +340,18 @@ mod tests {
             );
         }
 
+        let reply = |matchmaker: u64, ballot: Ballot, outcome: MatchOutcome| MatchReply {
+            matchmaker: MatchmakerId(matchmaker),
+            to: NodeId(4),
+            ballot,
+            generation: g(2),
+            outcome,
+        };
         let replies = vec![
-            MatchReply {
-                matchmaker: MatchmakerId(1),
-                to: NodeId(4),
-                ballot: ballot(7, 4),
-                outcome: MatchOutcome::Registered {
+            reply(
+                1,
+                ballot(7, 4),
+                MatchOutcome::Registered {
                     history: BTreeMap::from([
                         (ballot(2, 1), Registration::belief(config(&[0, 1, 2]))),
                         (
@@ -338,32 +361,53 @@ mod tests {
                     ]),
                     gc_watermark: ballot(2, 1),
                 },
-            },
-            MatchReply {
-                matchmaker: MatchmakerId(2),
-                to: NodeId(4),
-                ballot: ballot(7, 4),
-                outcome: MatchOutcome::Registered {
+            ),
+            reply(
+                2,
+                ballot(7, 4),
+                MatchOutcome::Registered {
                     history: BTreeMap::new(),
                     gc_watermark: Ballot::zero(),
                 },
-            },
-            MatchReply {
-                matchmaker: MatchmakerId(0),
-                to: NodeId(4),
-                ballot: ballot(7, 4),
-                outcome: MatchOutcome::Refused(MatchRefusal::Stale {
+            ),
+            reply(
+                0,
+                ballot(7, 4),
+                MatchOutcome::Refused(MatchRefusal::Stale {
                     highest: ballot(9, 2),
                 }),
-            },
-            MatchReply {
-                matchmaker: MatchmakerId(0),
-                to: NodeId(4),
-                ballot: ballot(1, 4),
-                outcome: MatchOutcome::Refused(MatchRefusal::BelowWatermark {
+            ),
+            reply(
+                0,
+                ballot(1, 4),
+                MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                     watermark: ballot(3, 1),
                 }),
-            },
+            ),
+            reply(
+                0,
+                ballot(1, 4),
+                MatchOutcome::Refused(MatchRefusal::Stopped { successor: None }),
+            ),
+            reply(
+                0,
+                ballot(1, 4),
+                MatchOutcome::Refused(MatchRefusal::Stopped {
+                    successor: Some(set(3, &[0, 4, 5])),
+                }),
+            ),
+            reply(
+                0,
+                ballot(1, 4),
+                MatchOutcome::Refused(MatchRefusal::Generation {
+                    current: set(5, &[1, 2]),
+                }),
+            ),
+            reply(
+                0,
+                ballot(1, 4),
+                MatchOutcome::Refused(MatchRefusal::Inactive),
+            ),
         ];
         for reply in replies {
             let wire = crate::grpc::wire_match_reply(&reply);
@@ -376,20 +420,130 @@ mod tests {
             );
         }
 
-        let ack = crate::grpc::wire_garbage_collect_ack(MatchmakerId(2), ballot(3, 1));
-        let decoded = crate::grpc::WireGarbageCollectAck::decode(ack.encode_to_vec().as_slice())
+        let ack = GcAck {
+            matchmaker: MatchmakerId(2),
+            generation: g(1),
+            applied: true,
+            watermark: ballot(3, 1),
+        };
+        let wire = crate::grpc::wire_garbage_collect_ack(&ack);
+        let decoded = crate::grpc::WireGarbageCollectAck::decode(wire.encode_to_vec().as_slice())
             .expect("decode");
         assert_eq!(
             crate::grpc::garbage_collect_ack_from_wire(decoded).expect("ack"),
-            (MatchmakerId(2), ballot(3, 1))
+            ack
         );
-        let gc = crate::grpc::wire_garbage_collect(NodeId(4), ballot(3, 1));
-        let decoded =
-            crate::grpc::WireGarbageCollect::decode(gc.encode_to_vec().as_slice()).expect("decode");
+        let gc = GcRequest {
+            from: NodeId(4),
+            generation: g(1),
+            watermark: ballot(3, 1),
+        };
+        let wire = crate::grpc::wire_garbage_collect(&gc);
+        let decoded = crate::grpc::WireGarbageCollect::decode(wire.encode_to_vec().as_slice())
+            .expect("decode");
         assert_eq!(
             crate::grpc::garbage_collect_from_wire(decoded).expect("gc"),
-            (NodeId(4), ballot(3, 1))
+            gc
         );
+
+        // The handover contract (#125): every request and reply kind.
+        let bootstrap = PendingBootstrap {
+            set: set(1, &[0, 1, 3]),
+            gc_watermark: ballot(2, 1),
+            history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
+        };
+        for request in [
+            ReconfigureRequest::Stop {
+                from: NodeId(4),
+                generation: g(0),
+            },
+            ReconfigureRequest::Bootstrap {
+                from: NodeId(4),
+                bootstrap: bootstrap.clone(),
+            },
+            ReconfigureRequest::DecreePrepare {
+                from: NodeId(4),
+                generation: g(0),
+                ballot: ballot(1, 4),
+            },
+            ReconfigureRequest::DecreeAccept {
+                from: NodeId(4),
+                generation: g(0),
+                ballot: ballot(1, 4),
+                members: vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(3)],
+            },
+            ReconfigureRequest::Chosen {
+                from: NodeId(4),
+                generation: g(0),
+                successor: set(1, &[0, 1, 3]),
+            },
+        ] {
+            let wire = crate::grpc::wire_reconfigure_request(&request);
+            let decoded =
+                crate::grpc::WireReconfigureRequest::decode(wire.encode_to_vec().as_slice())
+                    .expect("decode");
+            assert_eq!(
+                crate::grpc::reconfigure_request_from_wire(decoded).expect("request"),
+                request
+            );
+        }
+        for reply in [
+            ReconfigureReply::Stopped {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                gc_watermark: ballot(2, 1),
+                history: bootstrap.history.clone(),
+                successor: Some(set(1, &[0, 1, 3])),
+                decree_promised: ballot(3, 2),
+            },
+            ReconfigureReply::Bootstrapped {
+                matchmaker: MatchmakerId(3),
+                set: set(1, &[0, 1, 3]),
+            },
+            ReconfigureReply::Promised {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                ballot: ballot(1, 4),
+                vote: Some((ballot(1, 2), vec![MatchmakerId(1), MatchmakerId(2)])),
+            },
+            ReconfigureReply::Promised {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                ballot: ballot(1, 4),
+                vote: None,
+            },
+            ReconfigureReply::Accepted {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                ballot: ballot(1, 4),
+            },
+            ReconfigureReply::Nacked {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                ballot: ballot(1, 4),
+                promised: ballot(2, 5),
+            },
+            ReconfigureReply::Learned {
+                matchmaker: MatchmakerId(1),
+                generation: g(0),
+                activated: true,
+            },
+            ReconfigureReply::Refused {
+                matchmaker: MatchmakerId(1),
+                current: set(2, &[1, 5]),
+                phase: MatchmakerPhase::Stopped,
+                successor: Some(set(3, &[5, 6])),
+            },
+        ] {
+            let wire = crate::grpc::wire_reconfigure_reply(&reply);
+            let decoded =
+                crate::grpc::WireReconfigureReply::decode(wire.encode_to_vec().as_slice())
+                    .expect("decode");
+            assert_eq!(
+                crate::grpc::reconfigure_reply_from_wire(decoded).expect("reply"),
+                reply
+            );
+        }
     }
 
     /// Every domain variant must round-trip through the typed protobuf contract

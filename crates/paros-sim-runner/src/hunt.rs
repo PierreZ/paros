@@ -18,20 +18,21 @@
 //!        `replay-chunk-seed <seed>` replay one case.
 //!        `sim-paros-hunt replay-bare-quorum <seed>` / `replay-lifecycle
 //!        <seed>` — the bare-quorum lost-slot case and the §5.1.2
-//!        snapshot-lifecycle compound.
+//!        snapshot-lifecycle compound; `replay-departed <seed>` — the
+//!        departed-straggler case (#124).
 
 use paros_sim::{
     chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
     run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_snapshot_lifecycle_case,
+    run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
     if let "replay-main" | "explore-main" | "replay-corpus" | "replay-corpus-mask"
-    | "replay-bare-quorum" | "replay-lifecycle" | "replay-chunk-mask" | "replay-chunk-seed" =
-        axis.as_str()
+    | "replay-bare-quorum" | "replay-lifecycle" | "replay-departed" | "replay-chunk-mask"
+    | "replay-chunk-seed" = axis.as_str()
     {
         let seed = std::env::args()
             .nth(2)
@@ -44,6 +45,7 @@ fn main() {
             "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
             "replay-bare-quorum" => run_bare_quorum_case(seed),
             "replay-lifecycle" => run_snapshot_lifecycle_case(seed),
+            "replay-departed" => run_departed_straggler_case(seed),
             "replay-chunk-mask" => {
                 run_chunk_mask(u32::try_from(seed & 0x7FFF).unwrap_or_default(), false)
             }

@@ -30,6 +30,13 @@
 //!   reaching all four snapshot-recovery paths: local re-replay at floor 0,
 //!   whole-blob `InstallSnapshot` under a truncated log, the below-floor
 //!   `Prepare` refusal, and the truncated-past-everyone WAIT.
+//! - [`DepartedStragglerWorkload`] (#124): the one case that needs a fourth
+//!   node and a matchmaker — a pool bootstrapped on three, reconfigured onto
+//!   the spare, then the only clean copy of a slot left on the node the
+//!   reconfiguration *removed*. CTRL Case 3 across a configuration boundary:
+//!   the cluster must WAIT while the straggler is down (its leader resigning
+//!   under `REPAIR_TIMEOUT_ELECTIONS`, never no-op filling), and recover the
+//!   slot through the prior configuration once it returns.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -39,11 +46,12 @@ use async_trait::async_trait;
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
-    assert_always, assert_sometimes,
+    assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    Command, Compact, Control, Entry, InspectRequest, ParosClient, ParosInternalClient, Propose,
-    Slot, Value, parse_addr, proposal_checksum, snap_chunk_count,
+    Ballot, Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient,
+    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, proposal_checksum,
+    snap_chunk_count,
 };
 
 use crate::audit::audit_world;
@@ -51,12 +59,18 @@ use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 use crate::lifecycle;
 use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
-    unrecoverable_slots,
+    corpus_matchmaker_watermark, unrecoverable_slots,
 };
 
 /// Fixed corpus cluster size. The mask grid and the analytic derivation both
 /// assume it; the workloads assert the topology matches.
 pub(crate) const CORPUS_NODES: usize = 3;
+/// The departed-straggler pool: three bootstrap acceptors and one spare.
+pub(crate) const DEPARTED_POOL: usize = 4;
+/// The departed-straggler bootstrap configuration: ranks `0..3`.
+pub(crate) const DEPARTED_BOOTSTRAP: usize = 3;
+/// The slot whose only clean copy departs with the prior configuration.
+const DEPARTED_LOST_SLOT: u64 = 1;
 /// Decided-prefix length the E1 mask covers: 3 nodes × 3 slots = a 9-bit mask
 /// space of 512 cases, exhaustively enumerable by the hunt axis and densely
 /// sampled by the canonical nextest set.
@@ -344,30 +358,91 @@ impl CorpusClients {
         }
     }
 
-    /// One live application-state read from node `i` (`None` on timeout).
+    /// Ask the leader for the acceptor configuration `members` until one
+    /// accepts the reconfiguration (following `not_leader` hints; an
+    /// `unsettled` leader is re-asked a poll later).
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure_until_accepted(
+        &self,
+        ctx: &SimContext,
+        members: &[u64],
+        deadline: Duration,
+    ) -> bool {
+        let time = ctx.time();
+        let count = self.public.len();
+        let mut target = 0_usize;
+        loop {
+            if time.now() >= deadline || ctx.shutdown().is_cancelled() {
+                return false;
+            }
+            let mut client = self.public[target].clone();
+            let response = moonpool_sim::select! {
+                response = client.reconfigure(Reconfigure { members: members.to_vec() }) => {
+                    response.ok().map(tonic::Response::into_inner)
+                }
+                _ = time.sleep(RPC_TIMEOUT) => None,
+            };
+            match response {
+                Some(ack) if ack.accepted => return true,
+                Some(ack) => {
+                    target = ack
+                        .leader
+                        .and_then(|node| usize::try_from(node).ok())
+                        .filter(|node| *node < count)
+                        .unwrap_or((target + 1) % count);
+                }
+                None => target = (target + 1) % count,
+            }
+            time.sleep(POLL_INTERVAL).await.ok();
+        }
+    }
+
+    /// One live inspect of node `i`, whole (`None` on timeout).
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
-    async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
+    async fn inspect_reply(&self, ctx: &SimContext, i: usize) -> Option<InspectReply> {
         let time = ctx.time();
         let mut client = self.internal[i].clone();
         moonpool_sim::select! {
             response = client.inspect(InspectRequest {}) => response
                 .ok()
-                .and_then(|response| ChainState::decode(&response.into_inner().snapshot).ok()),
+                .map(tonic::Response::into_inner),
             _ = time.sleep(RPC_TIMEOUT) => None,
         }
+    }
+
+    /// One live application-state read from node `i` (`None` on timeout).
+    #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
+    async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
+        self.inspect_reply(ctx, i)
+            .await
+            .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
     }
 
     /// Wait until every live node's inspected state equals `want` (`true`), or
     /// the deadline passes (`false`).
     #[tracing::instrument(level = "debug", skip_all)]
     async fn wait_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
+        let all: Vec<usize> = (0..self.internal.len()).collect();
+        self.wait_nodes_at(ctx, &all, want, deadline).await
+    }
+
+    /// Wait until every node in `nodes` inspects at `want` (`true`), or the
+    /// deadline passes (`false`).
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn wait_nodes_at(
+        &self,
+        ctx: &SimContext,
+        nodes: &[usize],
+        want: &ChainState,
+        deadline: Duration,
+    ) -> bool {
         let time = ctx.time();
         loop {
             if ctx.shutdown().is_cancelled() {
                 return false;
             }
             let mut all = true;
-            for i in 0..self.internal.len() {
+            for &i in nodes {
                 match self.inspect(ctx, i).await {
                     Some(state) if state == *want => {}
                     _ => {
@@ -847,6 +922,278 @@ impl Workload for BareQuorumWorkload {
         assert_sometimes!(
             self.waited,
             "corpus: a bare-quorum lost slot is correctly waited on"
+        );
+        Ok(())
+    }
+}
+
+// --- the departed straggler (#124) --------------------------------------------
+
+/// CTRL Case 3 across a reconfiguration boundary (see the module doc): the
+/// only clean copy of a decided slot lives on the acceptor the last
+/// reconfiguration removed, and that acceptor is down.
+pub(crate) struct DepartedStragglerWorkload {
+    waited: bool,
+    recovered: bool,
+}
+
+impl DepartedStragglerWorkload {
+    pub(crate) fn new() -> Self {
+        Self {
+            waited: false,
+            recovered: false,
+        }
+    }
+}
+
+#[async_trait]
+impl Workload for DepartedStragglerWorkload {
+    fn name(&self) -> &'static str {
+        "corpus-departed-straggler"
+    }
+
+    #[allow(clippy::too_many_lines)] // one linear scripted case
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let deployment = crate::roles::deployment(ctx.topology());
+        let servers = deployment.acceptors().to_vec();
+        let matchmakers = deployment.matchmakers().to_vec();
+        let valid = servers.len() == DEPARTED_POOL && matchmakers.len() == 1;
+        assert_always!(
+            valid,
+            "corpus: the departed-straggler axis runs four nodes and one matchmaker",
+            { "nodes" => servers.len(), "matchmakers" => matchmakers.len() }
+        );
+        if !valid {
+            return Err(invalid("departed-straggler topology mismatch"));
+        }
+        let straggler = 0_usize;
+        let spare = DEPARTED_POOL - 1;
+        let clients = CorpusClients::connect(ctx, &servers)?;
+        let time = ctx.time().clone();
+        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+
+        // Phase 1: prime the prefix on the bootstrap configuration {0, 1, 2}
+        // and let it replicate there (the spare holds nothing yet).
+        let commands =
+            prime_prefix(ctx, &clients, client_id, CORPUS_SLOTS, Some(spare), 0, 0).await?;
+        let expected = expected_states(&commands);
+        let full = expected[commands.len()];
+        let slots: BTreeSet<u64> = (0..CORPUS_SLOTS).collect();
+        let bootstrap: Vec<String> = servers[..DEPARTED_BOOTSTRAP].to_vec();
+        let replicated =
+            wait_replicated(ctx, &bootstrap, &slots, &full, time.now() + PRIME_BUDGET).await;
+        assert_always!(
+            replicated,
+            "corpus: priming replicates and applies the full prefix everywhere"
+        );
+        if !replicated {
+            drop(clients);
+            return Err(invalid("departed-straggler priming did not replicate"));
+        }
+
+        // Phase 2: reconfigure onto the spare, removing the straggler:
+        // {0, 1, 2} -> {1, 2, 3}. Wait until the new configuration is in
+        // force at its members and the joiner holds the whole prefix
+        // durably (it heals as a replica).
+        let successor: Vec<u64> = (1..=3).collect();
+        let accepted = clients
+            .reconfigure_until_accepted(ctx, &successor, time.now() + PRIME_BUDGET)
+            .await;
+        assert_always!(
+            accepted,
+            "corpus: the reconfiguration onto the spare is accepted"
+        );
+        let members_deadline = time.now() + PRIME_BUDGET;
+        let in_force = loop {
+            let mut all = true;
+            for i in 1..=spare {
+                let members = clients
+                    .inspect_reply(ctx, i)
+                    .await
+                    .map(|reply| reply.members)
+                    .unwrap_or_default();
+                if members != successor {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                break true;
+            }
+            if time.now() >= members_deadline || ctx.shutdown().is_cancelled() {
+                break false;
+            }
+            time.sleep(POLL_INTERVAL).await.ok();
+        };
+        assert_always!(
+            in_force,
+            "corpus: the successor configuration is in force at every member"
+        );
+        let joined = wait_replicated(ctx, &servers, &slots, &full, time.now() + PRIME_BUDGET).await;
+        assert_always!(
+            joined,
+            "corpus: the joining spare replicates the prefix through catch-up"
+        );
+        if !(accepted && in_force && joined) {
+            drop(clients);
+            return Err(invalid("departed-straggler reconfiguration did not settle"));
+        }
+
+        // The prior configuration must still be in the matchmaker's ledger
+        // when the cluster dies: hold the matchmaker down from here so the
+        // new leader's GC floor (#123) can never become effective. A floor
+        // already raised makes the run vacuous — GC legitimately forgot the
+        // straggler's configuration, which is the *other* corpus outcome
+        // (a correctly unavailable slot), not this case's.
+        lifecycle::crash(ctx, &matchmakers[0]).await;
+        time.sleep(POLL_INTERVAL).await.ok();
+        let floor_raised = corpus_matchmaker_watermark(ctx.state(), &matchmakers[0])
+            .is_some_and(|watermark| watermark != Ballot::zero());
+        if floor_raised {
+            tracing::info!("corpus_departed_superseded_by_gc");
+            lifecycle::restart(ctx, &matchmakers[0]).await;
+            drop(clients);
+            return Ok(());
+        }
+
+        // Phase 3 (atomic with the deaths): rot every snapshot and the lost
+        // slot's copy on every member of the configuration in force. The
+        // only clean copy is the straggler's — a node no configuration in
+        // force names, reachable only through the prior configuration the
+        // matchmaker still remembers.
+        for (n, ip) in servers.iter().enumerate() {
+            corpus_corrupt_snapshot(ctx.state(), ip, u64::try_from(n).unwrap_or(u64::MAX));
+        }
+        for (n, ip) in servers.iter().enumerate().skip(1) {
+            let landed = corpus_corrupt_entry(
+                ctx.state(),
+                ip,
+                u64::try_from(n).unwrap_or(u64::MAX),
+                DEPARTED_LOST_SLOT,
+            );
+            assert_always!(
+                landed,
+                "corpus: a mask injection lands on a clean replicated record",
+                { "slot" => DEPARTED_LOST_SLOT, "node" => n }
+            );
+        }
+        let ground_truth = unrecoverable_slots(ctx.state());
+        assert_always!(
+            ground_truth.is_empty(),
+            "corpus: the departed straggler keeps the lost slot's only clean copy",
+            { "world" => ground_truth.len() }
+        );
+        for ip in &servers {
+            lifecycle::crash(ctx, ip).await;
+        }
+        time.sleep(POLL_INTERVAL).await.ok();
+        let mask_held = servers.iter().skip(1).all(|ip| {
+            corpus_disk_probe(ctx.state(), ip)
+                .is_some_and(|probe| !probe.clean_slots.contains(&DEPARTED_LOST_SLOT))
+        });
+        // The straggler stays down: it departed with its configuration.
+        for ip in servers.iter().skip(1) {
+            lifecycle::restart(ctx, ip).await;
+        }
+        lifecycle::restart(ctx, &matchmakers[0]).await;
+        if !mask_held {
+            tracing::info!("corpus_departed_superseded_by_late_write");
+            lifecycle::restart(ctx, &servers[straggler]).await;
+            drop(clients);
+            return Ok(());
+        }
+
+        // Phase 4: every live member settles at the prefix below the lost
+        // slot and WAITS. A no-op fill here would be a fabricated value; a
+        // leader that stays blocked resigns under `REPAIR_TIMEOUT_ELECTIONS`
+        // and another campaigns into the same wait.
+        let live: Vec<usize> = (1..=spare).collect();
+        let held_state = expected[usize::try_from(DEPARTED_LOST_SLOT).unwrap_or(0)];
+        let deadline = time.now() + OUTCOME_BUDGET;
+        let reached = clients
+            .wait_nodes_at(ctx, &live, &held_state, deadline)
+            .await;
+        assert_always!(
+            reached,
+            "corpus: a slot whose only clean copy departed with a prior configuration is waited on",
+            { "lost_slot" => DEPARTED_LOST_SLOT }
+        );
+        let mut held = reached;
+        let mut leaders_seen: BTreeSet<usize> = BTreeSet::new();
+        let mut resigned = false;
+        let until = time.now() + WAIT_SETTLE;
+        while held && time.now() < until && !ctx.shutdown().is_cancelled() {
+            for &i in &live {
+                let Some(reply) = clients.inspect_reply(ctx, i).await else {
+                    continue;
+                };
+                if ChainState::decode(&reply.snapshot).ok() != Some(held_state) {
+                    held = false;
+                    break;
+                }
+                if reply.leader {
+                    leaders_seen.insert(i);
+                } else if leaders_seen.contains(&i) {
+                    resigned = true;
+                }
+            }
+            time.sleep(POLL_INTERVAL).await.ok();
+        }
+        assert_always!(
+            held,
+            "corpus: a departed straggler's slot is never fabricated past",
+            { "lost_slot" => DEPARTED_LOST_SLOT }
+        );
+        if resigned {
+            assert_reachable!("corpus: a leader blocked by a departed straggler resigns");
+        }
+        self.waited = reached && held;
+
+        // Phase 5: the straggler returns. The repair probe's straggler
+        // re-query fans out to the union of the prior configurations, so the
+        // clean copy is found through the configuration the reconfiguration
+        // left behind, and every node converges to the pre-injection state.
+        lifecycle::restart(ctx, &servers[straggler]).await;
+        let recovered = clients
+            .wait_all_at(ctx, &full, time.now() + OUTCOME_BUDGET)
+            .await;
+        if !recovered {
+            for (n, ip) in servers.iter().enumerate() {
+                let live = clients.inspect(ctx, n).await;
+                let probe = corpus_disk_probe(ctx.state(), ip);
+                eprintln!(
+                    "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} applied={:?}",
+                    live.map(|s| (s.applied_count, s.chain_hash)),
+                    probe.as_ref().map(|p| p.clean_slots.clone()),
+                    probe.as_ref().map(|p| p.floor),
+                    probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
+                );
+            }
+            eprintln!(
+                "CORPUS-DIAG audit: {}",
+                audit_world(ctx.state()).diagnostics()
+            );
+        }
+        assert_always!(
+            recovered,
+            "corpus: a departed straggler's return recovers the slot through the prior configuration",
+            { "lost_slot" => DEPARTED_LOST_SLOT }
+        );
+        self.recovered = recovered;
+        drop(clients);
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        assert_sometimes!(
+            self.waited,
+            "corpus: a departed straggler's slot is correctly waited on"
+        );
+        assert_sometimes!(
+            self.recovered,
+            "corpus: a departed straggler's slot recovers when it returns"
         );
         Ok(())
     }

@@ -43,7 +43,9 @@ three-to-six process pool of `NodeProcess::chaotic()` plus zero to three `Matchm
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
-restarts through moonpool's `fault_factory`) and an analytically known outcome per mask. Which
+restarts through moonpool's `fault_factory`) and an analytically known outcome per mask — plus
+the one four-node, one-matchmaker case that needs a spare and a prior configuration
+(`DepartedStragglerWorkload`, CTRL Case 3 across a reconfiguration boundary). Which
 process plays which role is the **deployment/role map** (`paros_sim::roles`), read off moonpool's
 **process groups** (moonpool #197: one `.processes()` registration per role, each with its own
 per-seed count and IP range — `paros-node` is the acceptor pool, `paros-matchmaker` the
@@ -89,7 +91,12 @@ leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe), `MATCHMAK
 the leader's own phase — the ids stay reserved so the alphabet never shifts), `RECONFIGURE=11`
 (read the acceptor set in force, compose a new one — grow onto a spare, shrink, replace, remove
 the leader, rotate the whole set — and ask the leader; on a seed without matchmakers the request
-is still sent and must be refused).
+is still sent and must be refused; the composer draws from the *live* pool and moves a dead
+identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the matchmaker set a node believes
+authoritative, compose a successor — grow, shrink, replace, rotate through the matchmaker pool —
+and ask any node to drive the generation handover; refused on a plain seed) and `RETIRE=13`
+(ask the leader which acceptors its effective GC floor released, park one in the storage world
+for good, and tell it to shut down).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
@@ -119,6 +126,40 @@ RNG, or deps. The `ready()`/`advance()` handshake is type-enforced: `ready(&mut 
 holds the node's unique borrow, so a second `ready()` before `advance()` is a *compile* error.
 Persist-before-send durability ordering is documented on `Ready`/`HardState`. Contract reference:
 `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`.
+
+**The core is composable: one file per role, `RawNode` is wiring.** `paros-core` is not one
+state machine but a small set of Paxos *roles*, each its own module and type, and `RawNode` is
+the one deployment that colocates them on a node — it holds the role transitions, the timers,
+the message construction and the persist-before-send batch, and **no protocol tally of its
+own**. The roles:
+
+- `acceptor.rs` — `Acceptor`: the durable promise, the accepted record log, the compaction
+  floor and the CTRL faulty set; it decides `prepare`/`admit` and emits the write ops.
+- `proposer.rs` — `Proposer`: the Phase-1 election (per-configuration completion, the P2c
+  merge), the CTRL repair probe, the Phase-2 rounds and their decision, the bounded recovery a
+  fresh leadership drains. Its policies are **explicit types, never flags**
+  (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
+  `gap_fill: bool` would not).
+- `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
+  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else.
+- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
+  every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum` and
+  the GC fence all ask `AcceptorConfig::has_quorum`, which asks `QuorumSystem::is_quorum`, and
+  no tally compares a count against a threshold on its own. Flexible and grid quorums are new
+  variants there, never a rewrite of a tally.
+- `matchmaker.rs` — `Matchmaker`: the registry and its generations; `matchmaker/reconfigurer.rs`
+  orchestrates the generation handover and *decides* it with a decree — a matchmaker is not an
+  acceptor and never becomes one.
+
+The rule that shapes every boundary: **a component must not acquire knowledge merely because
+the current deployment happens to colocate it.** The proposer builds no message and knows no
+role; the acceptor never reads the chosen prefix; the replica never sees a ballot tally; the
+caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
+"is this slot chosen" predicate when a probe closes). What this buys, in order: the single
+decree (`single_decree.rs`, today a separate kernel) becomes the same `Proposer` + `Acceptor`
+over a one-slot log; the matchmaker folds into the role system; flexible quorums and
+Compartmentalized Paxos become deployment data. Each of those is a later phase; the first
+phase extracted the three roles with the behaviour, the public API and the sweep unchanged.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `RawNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -181,7 +222,7 @@ candidates between their abandoned beliefs forever — and reconfiguration reque
 by ballot and never manufactured by a campaign, so adopting the highest cannot. A
 reconfiguration is guaranteed to be honored once its matchmaking completed at a quorum
 (intersection hands the record to every later campaign); before that it may be lost like any
-proposal that never reached a quorum. GC (#123) must never retire the highest reconfiguration
+proposal that never reached a quorum. GC (#123) never retires the highest reconfiguration
 registration. Phase 1
 then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
 in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
@@ -195,6 +236,79 @@ part in ("removed" is not "shut down"; acceptor guards are pool-based, never con
 The harness treats membership as protocol data: the bootstrap size is the **floor** of every
 configuration a run puts in force, because the storage world's copy budget is sized by it. Module
 docs: `crates/paros-core/src/node/matchmaking.rs`, `crates/paros-core/src/node/reconfigure.rs`.
+
+**Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
+future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
+paros has no replica tier, so the paper's Scenario 3 is *not* what it implements; what it has is
+stronger for the purpose — a node that learns a slot chosen records it as its authoritative
+accepted record before its chosen index advances, and a truncated member refuses a `Prepare`
+below its floor — so the condition is: the leadership is settled (no leader recovery, CTRL probe
+or application repair open) and **a Phase-2 quorum of `C_b` reports a chosen index at or past the
+election fence** (`HeartbeatAck.chosen`, populated only on a matchmaker deployment). The leader
+then asks the current generation's matchmakers to raise the watermark to its own ballot
+(`GcRequest`, re-sent each beat, `DriverHooks::skip_gc_resend`); each matchmaker raises it
+**durably before acking** and refuses campaigns below it; the floor is **effective only once a
+matchmaker quorum acked** (`GcStep::Effective`), and only then does the leader name the
+**retirable** acceptors — `members(H_b) \ C_b` — through `Inspect.retirable`. The compaction floor
+(per node: "these slots are gone here, recover from a snapshot") and the GC watermark (per
+matchmaker: "these configurations are never returned again") never need each other to move.
+Retirement is an operator act: "removed is not shut down" until GC says nobody will ask again,
+and the `Retire` RPC is honored only by a node that is neither a member of the configuration it
+believes in force nor the leader. The wrong rule (installed ⇒ deletable, `DPaxos` Appendix D) and
+its red→green evidence are recorded in the commit that landed the GC. Module doc:
+`crates/paros-core/src/node/gc.rs`; design note:
+`docs/analysis/consensus/matchmaker-gc-and-generations.md`.
+
+**Matchmaker-set generations (M4.7, #125).** The matchmaker set is itself a chosen value:
+`MatchmakerSet { generation, members }`, and every matchmaking message (`MatchRequest`,
+`MatchReply`, `GcRequest`, `GcAck`, every `ReconfigureRequest`) is **fenced by generation** — a
+matchmaker answers only its active generation and refuses everything else with what it knows
+(`Stopped { successor }`, `Generation { current }`, `Inactive`), never serves it. The handover is
+the explicit sans-IO `MatchmakerReconfigurer` (`crates/paros-core/src/matchmaker/reconfigurer.rs`),
+driven by the provider-generic node driver: **stop** (a quorum of `M_g` freezes durably; a frozen
+matchmaker registers nothing for `g` ever again but stays alive to vote and to point late
+proposers at its successor) → **reconstruct** (max watermark, union above it) → **bootstrap**
+(every proposed member holds it durably, pending) → **decide** (single-decree Paxos over `M_g`,
+the separate kernel in `crates/paros-core/src/single_decree.rs` — still its own kernel today;
+moving it onto the shared `Proposer` + `Acceptor` over a one-slot log is the next phase of the
+composable core, see *The core is composable* above and the design note) → **publish** (`Chosen`: `M_g` records the chain link,
+`M_{g+1}` activates its pending bootstrap). Invariant 1 — at most one set is authoritative per
+generation — rests on the decree (the loser adopts the winner's vote); reconstruction
+completeness is asserted in the audit. **Matchmaker quorums are majorities only**
+(`MatchmakerSet::quorum_size`; the decree kernel derives the same majority from the acceptor
+set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
+quorums are deliberately unsupported, and the handover's safety argument is made under the
+majority model alone. The handover is proven by a sans-IO **model checker**
+(`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
+seeded schedules by default, thousands with `HANDOVER_MODEL_SEEDS`): concurrent reconfigurers
+and finishers over the real `Matchmaker` and `MatchmakerReconfigurer` with every message
+dropped, duplicated or reordered, every matchmaker crashed at each durability seam and rebooted
+from its disk, every reconfigurer killed or abandoned at any step and every node rebooted to its
+bootstrap belief — asserting after each step that at most one set is authoritative per
+generation, that a chosen set is what a majority of `M_g` durably voted at one ballot, and that
+every activated registry carries the complete reconstruction; then that the pool converges and
+that a node with no belief rediscovers the top generation from the bootstrap set. It bites:
+publishing the bootstrapped proposal without the decree is red on its first seed, and it found
+that a rebooted node's reconfigurer **reused the decree rounds of its earlier incarnation** (the
+reconfigurer is volatile; seed 103 put two values at one ballot) — hence the rule that the
+`Stopped` reply carries the matchmaker's decree promise and **the decree opens strictly above
+the maximum over the stop quorum** (every promise quorum of an earlier decree at that node
+intersects it). Liveness rules: a frozen generation with no successor is a
+cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
+the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
+freeze — the only liveness it can vouch for); and a phase that makes no progress is
+**abandoned by the driver** after `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (the
+core only reports the stall, `MatchmakerReconfigurer::stalled_for`; the timeout is driver
+policy in `paros::driver`, never a constant inside the state machine; the reconfigurer holds
+no durable state, so the freeze, the bootstrap and the votes stay), so a dead proposed member
+never holds a `busy` refusal for the rest of a run. **A successor set must admit its quorum
+system** (`MatchmakerSet::is_well_formed`): `start` refuses a malformed target, a matchmaker
+refuses a `Bootstrap` or `Chosen` naming one, and a `finish` proposes the members that answered
+the freeze — a quorum of the old set, never fewer. **`Chosen` is a learner notification, not an
+acceptor decision**: a matchmaker records or activates the successor it is told without
+re-deriving the decree, on the protocol precondition that only a reconfigurer holding the
+Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
+state recovers — there is deliberately no matchmaker-specific in-place repair.
 
 **Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
 what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
@@ -388,9 +502,15 @@ application state. The application owns compaction of its own state. What paros 
   enter `RawNode`); a node can restore its application from a decided point it holds. The bytes
   stay opaque throughout — paros ships, stores, and checksums them, never reads them.
 
-A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) is still
-out of scope: a snapshot restores the log, not the promise, so a naive rejoin can regress the
-promise (a real safety violation). That belongs to the disk-fault stage (`prob_wipe` stays 0).
+A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
+rejoins** (#124): a snapshot restores the log, not the promise, so a naive rejoin could regress a
+promise it once made. A wiped identity is parked for the run exactly like a retired one and the
+acceptor set heals around it by reconfiguration — the client's composer draws successors from the
+live pool and moves a dead member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's
+storage layer, which paros does not use); the storage world draws its own wipe coin at a chaotic
+restart on a matchmaker seed, under the same dead-node budget as a corruption park. A moonpool
+issue asks for the reboot kind to be exposed to a restarted process so a harness-owned disk can
+honor `CrashAndWipe` directly.
 
 **Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
 *election* destroys a leader's authority and makes the successor rediscover the log
@@ -502,11 +622,15 @@ Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
-- `crates/paros-core/` — sans-IO Multi-Paxos state machine (`RawNode`, with its leader-side
-  matchmaking phase in `node/matchmaking.rs` and reconfiguration entry point in
-  `node/reconfigure.rs`) and, beside it, the sans-IO matchmaker registry (`Matchmaker`,
-  `crates/paros-core/src/matchmaker.rs` — a separate handle the caller drives, never stepped by
-  `RawNode`): std-only, wasm-safe, and dependency-free
+- `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
+  the membership boundary in `membership.rs`) and `RawNode`, the node that wires them
+  (`node.rs`; its `node/*.rs` submodules are named by *concern* — election, replication,
+  handoff, GC, matchmaking, reconfiguration — and hold the wiring for that concern, never a
+  role's state) and, beside it, the sans-IO
+  matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
+  the caller drives, never stepped by `RawNode`), its generation handover
+  (`matchmaker/reconfigurer.rs`) and the single-decree kernel the handover decides with
+  (`single_decree.rs`): std-only, wasm-safe, and dependency-free
   with `default-features = false` (CI checks that build too). Two features, both observation-only:
   `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
   *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no
@@ -525,7 +649,7 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
 - `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`
-  cooperative leader-handoff restatement).
+  cooperative leader-handoff restatement, the matchmaker GC and generations restatement).
 
 **Organize as you grow.** A module holds one concern. When a file starts holding a second one,
 split it in the same change rather than in a follow-up, and never leave a file that needs a

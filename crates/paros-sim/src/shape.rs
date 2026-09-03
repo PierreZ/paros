@@ -192,6 +192,9 @@ struct Registry {
     /// Run-level: the bootstrap acceptor ranks (see [`bootstrap_ranks`]),
     /// fixed by the first caller — a node or a client.
     bootstrap: Option<Vec<u64>>,
+    /// Run-level: the bootstrap matchmaker ranks (see
+    /// [`matchmaker_bootstrap_ranks`]), fixed by the first caller.
+    matchmaker_bootstrap: Option<Vec<u64>>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -329,6 +332,74 @@ pub(crate) fn bootstrap_ranks(
             ranks
         })
         .clone()
+}
+
+/// A scripted case's **fixed bootstrap ranks**: `0..n`, installed by whoever
+/// asks first (every scripted node asks with the same `n`) so the corpus can
+/// stage a spare outside the bootstrap configuration without a draw.
+pub(crate) fn fixed_bootstrap_ranks(state: &StateHandle, n: usize) -> Vec<u64> {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .bootstrap
+        .get_or_insert_with(|| {
+            (0..n)
+                .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
+                .collect()
+        })
+        .clone()
+}
+
+/// The run's **bootstrap matchmaker ranks** (#125): generation 0's set, drawn
+/// once per seed by whichever process or workload asks first. The default is
+/// the whole matchmaker pool; a perturbing seed with two or more matchmakers
+/// may draw a **subset** (any size from one up — a one- or two-member set is
+/// a valid registry that tolerates no loss), leaving the rest as matchmaker
+/// *spares* a `ReconfigureMatchmakers` pulls in. Two knob locations, as for
+/// the acceptors: the subset size and the rotation that picks the spares.
+#[tracing::instrument(level = "debug", skip(state), fields(pool, perturb))]
+pub(crate) fn matchmaker_bootstrap_ranks(
+    state: &StateHandle,
+    pool: usize,
+    perturb: bool,
+) -> Vec<u64> {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .matchmaker_bootstrap
+        .get_or_insert_with(|| {
+            let all: Vec<u64> = (0..pool)
+                .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
+                .collect();
+            if !(perturb && pool >= 2) {
+                return all;
+            }
+            let size = buggify_knob!(pool, 1_usize..pool);
+            if size == pool {
+                return all;
+            }
+            // BUGGIFY pairing: a seed genuinely bootstraps its matchmakers on
+            // a subset, leaving matchmaker spares.
+            assert_reachable!(
+                "a run bootstraps on a subset of the matchmaker pool, leaving spares"
+            );
+            let rotation = buggify_knob!(0_usize, 1_usize..pool);
+            let mut ranks: Vec<u64> = (0..size)
+                .map(|i| u64::try_from((rotation + i) % pool).unwrap_or(u64::MAX))
+                .collect();
+            ranks.sort_unstable();
+            ranks
+        })
+        .clone()
+}
+
+/// The smallest matchmaker set a run may put in force (#125): three where
+/// the bootstrap set has three or more members (one loss keeps a quorum, and
+/// the world may then lose one matchmaker for good), else the bootstrap size
+/// itself. Not a tunable: it is what the matchmaker-loss budget is computed
+/// over.
+pub(crate) fn matchmaker_floor(bootstrap: usize) -> usize {
+    bootstrap.min(3)
 }
 
 /// The shape gate, evaluated once per run from the workload's `check()`: every

@@ -10,6 +10,7 @@ use super::{
     TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered,
     drain, make_leader, node, ucmd, val,
 };
+use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
 
 /// Pull the single `Relinquish` a leader queued, panicking if there is not
@@ -137,7 +138,7 @@ fn an_accepted_but_unchosen_slot_survives_the_handoff() {
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
     assert!(
-        !nodes[0].chosen.contains_key(&stranded),
+        !nodes[0].replica.is_chosen(stranded),
         "the slot is accepted-but-unchosen at the leader"
     );
 
@@ -560,9 +561,9 @@ fn a_handoff_never_no_op_fills_a_slot_nobody_described() {
     );
     assert!(
         nodes[1]
-            .leader_recovery
-            .as_ref()
-            .is_none_or(|r| !r.gap_fill),
+            .proposer
+            .recovery()
+            .is_none_or(|r| r.policy() == RecoveryPolicy::Inherited),
         "handoff recovery never gap-fills"
     );
 }

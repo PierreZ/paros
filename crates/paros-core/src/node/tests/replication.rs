@@ -106,9 +106,9 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
     let _ = drain(&mut nodes[0]);
     // Snapshot the log *after* the proposal self-accepted into slot 3: that
     // accept is durable and must survive the resignation too.
-    let log_before = nodes[0].accepted.clone();
+    let log_before = nodes[0].accepted().clone();
     assert!(
-        !nodes[0].proposer.is_empty(),
+        !nodes[0].proposer.rounds().is_empty(),
         "a Phase-2 round is in flight"
     );
     assert_eq!(nodes[0].read_rounds.len(), 1, "a read round is pending");
@@ -123,7 +123,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
         "it resigned rather than handing over, so it knows no leader"
     );
     assert!(
-        nodes[0].proposer.is_empty(),
+        nodes[0].proposer.rounds().is_empty(),
         "the volatile in-flight rounds go with the leadership — this is what makes \
          a hole below a decided slot permanent"
     );
@@ -146,7 +146,8 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
         "and its operating ballot is unchanged"
     );
     assert_eq!(
-        nodes[0].accepted, log_before,
+        *nodes[0].accepted(),
+        log_before,
         "the accepted log is durable state, untouched"
     );
 
@@ -264,7 +265,7 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
     // The leader resigns. Slot 1 lived only in its volatile `proposer` map.
     nodes[0].step_down();
     assert!(
-        nodes[0].proposer.is_empty(),
+        nodes[0].proposer.rounds().is_empty(),
         "the only record that slot 1 was still being proposed is gone"
     );
 

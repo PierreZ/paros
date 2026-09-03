@@ -9,11 +9,12 @@
 //! [`MatchmakerReady`](paros_core::MatchmakerReady) in **persist → fsync →
 //! reply** order: a `Registered` reply leaves only once its registration is
 //! durable, the registry's version of the acceptor's persist-before-`Promise`
-//! rule. The registry is read back through the core's
-//! [`RegistryStorage`](paros_core::RegistryStorage) port and written through
-//! [`MatchmakerStorage`] — the node's `Storage` / `NodeStorage` split,
-//! mirrored so the log's CTRL recovery applies to the registry (see
-//! [`storage`]).
+//! rule — and the same order carries a freeze (`StopAck`), a pending
+//! bootstrap, a decree promise or vote, and an activation (#125). The registry
+//! is read back through the core's [`RegistryStorage`](paros_core::RegistryStorage)
+//! port and written through [`MatchmakerStorage`] — the node's `Storage` /
+//! `NodeStorage` split, mirrored so the log's CTRL recovery applies to the
+//! registry (see [`storage`]).
 //!
 //! A cluster deployed without matchmakers never runs this loop; the node
 //! driver does not know it exists.
@@ -25,7 +26,8 @@ use moonpool_core::{
 };
 use moonpool_hyper::{H2Server, H2ServerConfig, KeepAlive};
 use paros_core::{
-    AcceptorConfig, Ballot, MatchOutcome, MatchReply, Matchmaker, MatchmakerId, MatchmakerWriteOp,
+    AcceptorConfig, Ballot, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
+    MatchmakerConfig, MatchmakerId, MatchmakerWriteOp, ReconfigureReply, ReconfigureRequest,
     Registration,
 };
 use tokio_util::sync::CancellationToken;
@@ -71,6 +73,12 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
     RunError::Storage(e)
 }
 
+/// One drained batch: the replies the caller may now send.
+struct Drained {
+    replies: Vec<MatchReply>,
+    reconfigure_replies: Vec<ReconfigureReply>,
+}
+
 /// Run the [`MatchmakerReady`](paros_core::MatchmakerReady) handshake once:
 /// persist the batch's writes, fsync them, report them, and hand back the
 /// replies the caller may now send. The two crash seams sit exactly where a
@@ -86,14 +94,18 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
 /// rule at the reply (`match_replied` must find the registration already
 /// folded durable) and again at every restart (`matchmaker_recovered` must
 /// read back every durable registration), and the two crash seams below are
-/// the BUGGIFY locations that make both crash windows likely.
+/// the BUGGIFY locations that make both crash windows likely. The same
+/// ordering covers the generation writes of #125: a `StopAck` leaves only
+/// once the freeze is durable, a bootstrap ack only once the pending record
+/// is, a decree promise or vote only once the decree record is.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.id().0))]
 fn drain<S, H, A>(
     matchmaker: &mut Matchmaker,
     storage: &mut S,
     hooks: &H,
     audit: &A,
-) -> Result<Vec<MatchReply>, RunError>
+) -> Result<Drained, RunError>
 where
     S: MatchmakerStorage,
     H: DriverHooks,
@@ -103,6 +115,7 @@ where
     let ready = matchmaker.ready();
     let writes = ready.writes().to_vec();
     let replies = ready.replies().to_vec();
+    let reconfigure_replies = ready.reconfigure_replies().to_vec();
     ready.advance();
 
     // 1. Persist every write, in order.
@@ -116,6 +129,15 @@ where
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
             MatchmakerWriteOp::SetGcWatermark(watermark) => storage
                 .set_gc_watermark(*watermark)
+                .map_err(|e| storage_fault_crash(audit, id, e))?,
+            MatchmakerWriteOp::SetScalars(scalars) => storage
+                .set_scalars(scalars)
+                .map_err(|e| storage_fault_crash(audit, id, e))?,
+            MatchmakerWriteOp::InstallRegistry {
+                scalars,
+                registrations,
+            } => storage
+                .install_registry(scalars, registrations)
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
         }
     }
@@ -161,12 +183,42 @@ where
                         "gc_watermark_raised"
                     );
                 }
+                MatchmakerWriteOp::SetScalars(scalars) => {
+                    audit.matchmaker_scalars_persisted(id, scalars);
+                    tracing::info!(
+                        matchmaker = id.0,
+                        generation = scalars.generation.0,
+                        phase = ?scalars.phase,
+                        successor = scalars.successor.as_ref().map_or(0, |s| s.generation.0),
+                        pending = scalars.pending.len() as u64,
+                        "matchmaker_scalars_persisted"
+                    );
+                }
+                MatchmakerWriteOp::InstallRegistry {
+                    scalars,
+                    registrations,
+                } => {
+                    let set = matchmaker.set();
+                    let registry: Vec<(Ballot, Registration)> =
+                        registrations.iter().map(|(b, r)| (*b, r.clone())).collect();
+                    audit.matchmaker_activated(id, &set, scalars.gc_watermark, &registry);
+                    tracing::info!(
+                        matchmaker = id.0,
+                        generation = set.generation.0,
+                        members = set.members.len() as u64,
+                        watermark_round = scalars.gc_watermark.round,
+                        registrations = registry.len() as u64,
+                        "matchmaker_activated"
+                    );
+                }
             }
         }
     }
     // 2. Crash seam: durable, but the reply never leaves. Only meaningful when
     //    there is a reply to lose.
-    if !replies.is_empty() && hooks.crash_at(Seam::MatchAfterSyncBeforeReply) {
+    if (!replies.is_empty() || !reconfigure_replies.is_empty())
+        && hooks.crash_at(Seam::MatchAfterSyncBeforeReply)
+    {
         audit.matchmaker_crashed(id, Seam::MatchAfterSyncBeforeReply);
         tracing::info!(
             matchmaker = id.0,
@@ -175,7 +227,10 @@ where
         );
         return Err(RunError::SeamCrash(Seam::MatchAfterSyncBeforeReply));
     }
-    Ok(replies)
+    Ok(Drained {
+        replies,
+        reconfigure_replies,
+    })
 }
 
 /// Report one reply at the instant it leaves.
@@ -190,24 +245,33 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                 .iter()
                 .map(|(ballot, registration)| (*ballot, registration.clone()))
                 .collect();
-            audit.match_replied(id, reply.to, reply.ballot, &history, *gc_watermark);
+            audit.match_replied(
+                id,
+                reply.to,
+                reply.ballot,
+                reply.generation.0,
+                &history,
+                *gc_watermark,
+            );
             tracing::info!(
                 matchmaker = id.0,
                 to = reply.to.0,
                 round = reply.ballot.round,
                 bnode = reply.ballot.node.0,
+                generation = reply.generation.0,
                 history = history.len() as u64,
                 watermark_round = gc_watermark.round,
                 "match_replied"
             );
         }
         MatchOutcome::Refused(refusal) => {
-            audit.match_refused(id, reply.to, reply.ballot, *refusal);
+            audit.match_refused(id, reply.to, reply.ballot, refusal.clone());
             tracing::info!(
                 matchmaker = id.0,
                 to = reply.to.0,
                 round = reply.ballot.round,
                 bnode = reply.ballot.node.0,
+                generation = reply.generation.0,
                 reason = ?refusal,
                 "match_refused"
             );
@@ -219,14 +283,15 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 ///
 /// Generic over `P: Providers` (production *or* simulation) and
 /// `S: MatchmakerStorage` (the injected durable registry). The loop owns a
-/// [`paros_core::Matchmaker`], serves the matchmaker gRPC contract on
-/// `local_addr`, and answers each request only once its registration is
+/// [`paros_core::Matchmaker`] built from `config` (its identity and the
+/// deployment's bootstrap set), serves the matchmaker gRPC contract on
+/// `local_addr`, and answers each request only once its write is
 /// fsync-durable. `tunables` supplies the h2 keep-alive and inbox shape (the
 /// matchmaker has no tick and no peers); `hooks` and `audit` are the same
 /// provider-generic seams the node driver takes, with the matchmaker's own
 /// crash locations ([`Seam::MatchBeforeSync`],
-/// [`Seam::MatchAfterSyncBeforeReply`]) and reply-drop location
-/// ([`Reply::Match`]).
+/// [`Seam::MatchAfterSyncBeforeReply`]) and reply-drop locations
+/// ([`Reply::Match`], [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]).
 ///
 /// # Errors
 ///
@@ -240,15 +305,15 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 ///
 /// If the core breaks its one-request-one-reply contract (a programmer error,
 /// never an operating condition).
-#[tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0, local_addr = %local_addr))]
+#[tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0, local_addr = %local_addr))]
 // The parameters are the matchmaker's complete wiring; a bundle would only
-// rename them.
-#[allow(clippy::too_many_arguments)]
+// rename them. The loop is one select over the contract's three inboxes.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn run_matchmaker<P, S, H, A>(
     providers: P,
     mut storage: S,
     local_addr: String,
-    id: MatchmakerId,
+    config: MatchmakerConfig,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -260,6 +325,7 @@ where
     H: DriverHooks,
     A: Audit + Clone + Send + Sync + 'static,
 {
+    let id = config.id;
     // Verify the store before the core reads it (the node driver's rule).
     storage
         .boot_scan()
@@ -277,16 +343,20 @@ where
     // The sans-IO core, bootstrapped from durable storage through the
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
-    let mut matchmaker = Matchmaker::new(id, &storage);
+    let mut matchmaker = Matchmaker::new(&config, &storage);
     let recovered: Vec<(Ballot, Registration)> = matchmaker
         .registry()
         .iter()
         .map(|(ballot, registration)| (*ballot, registration.clone()))
         .collect();
     let watermark = matchmaker.hard_state().gc_watermark;
-    audit.matchmaker_recovered(id, &recovered, watermark);
+    let set = matchmaker.set();
+    let phase = matchmaker.phase();
+    audit.matchmaker_recovered(id, &set, phase, &recovered, watermark);
     tracing::info!(
         matchmaker = id.0,
+        generation = set.generation.0,
+        phase = ?phase,
         registrations = recovered.len() as u64,
         watermark_round = watermark.round,
         "matchmaker_booted"
@@ -325,10 +395,10 @@ where
                 // request it is stepped, and the drain hands the reply out
                 // only once the batch is durable.
                 matchmaker.step(request);
-                let mut replies = drain(&mut matchmaker, &mut storage, hooks, audit)?;
-                let answer = replies.pop();
+                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                let answer = drained.replies.pop();
                 assert!(
-                    answer.is_some() && replies.is_empty(),
+                    answer.is_some() && drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
                     "one matchmaking request yields exactly one reply"
                 );
                 if let Some(answer) = answer {
@@ -337,34 +407,112 @@ where
                     // and the requester's retry is the same request again,
                     // answered from the retained history.
                     if hooks.drop_client_reply(Reply::Match) {
-                        audit.match_reply_dropped(id);
+                        audit.match_reply_dropped(id, Reply::Match);
                         tracing::info!(matchmaker = id.0, reply = "match", "match_reply_dropped");
                     } else {
                         let _ = reply.send(answer);
                     }
                 }
             }
-            Some(((from, watermark), reply)) = inbox.collects.recv() => {
+            Some((request, reply)) = inbox.collects.recv() => {
                 // The GC *primitive*, not the GC protocol: raise the floor (a
-                // no-op at or below the current one), persist it, and only
-                // then acknowledge with the floor in force. Nothing here
-                // establishes that the dropped configurations are no longer
-                // needed — see `Matchmaker::advance_gc_watermark`: the
-                // caller owns the paper's §3.5 preconditions.
-                let raised = matchmaker.advance_gc_watermark(watermark);
+                // no-op at or below the current one, refused for a generation
+                // this matchmaker is not active for), persist it, and only
+                // then acknowledge with the floor in force. The leader owns
+                // the paper's §3.5 preconditions (`paros_core` `node/gc.rs`).
+                let GcRequest { from, generation, watermark } = request;
+                let outcome = matchmaker.advance_gc_watermark(generation, watermark);
                 tracing::info!(
                     matchmaker = id.0,
                     from = from.0,
+                    generation = generation.0,
                     round = watermark.round,
-                    raised,
+                    outcome = ?outcome,
                     "garbage_collect_requested"
                 );
-                let replies = drain(&mut matchmaker, &mut storage, hooks, audit)?;
-                assert!(replies.is_empty(), "a garbage-collect request yields no match reply");
-                let _ = reply.send((id, matchmaker.hard_state().gc_watermark));
+                let drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                assert!(
+                    drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
+                    "a garbage-collect request yields no match reply"
+                );
+                let ack = GcAck {
+                    matchmaker: id,
+                    generation,
+                    applied: outcome != GcOutcome::Refused,
+                    watermark: matchmaker.hard_state().gc_watermark,
+                };
+                audit.matchmaker_gc_replied(id, &ack);
+                if hooks.drop_client_reply(Reply::GcAck) {
+                    audit.match_reply_dropped(id, Reply::GcAck);
+                    tracing::info!(matchmaker = id.0, reply = "gc_ack", "match_reply_dropped");
+                } else {
+                    let _ = reply.send(ack);
+                }
+            }
+            Some((request, reply)) = inbox.reconfigures.recv() => {
+                // One step of a matchmaker-set handover (#125): the core
+                // answers it, and the reply leaves only once its write (a
+                // freeze, a pending bootstrap, a promise, a vote, an
+                // activation) is durable.
+                tracing::info!(
+                    matchmaker = id.0,
+                    from = request.from().0,
+                    kind = reconfigure_kind(&request),
+                    "reconfigure_requested"
+                );
+                matchmaker.step_reconfigure(request.clone());
+                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                let answer = drained.reconfigure_replies.pop();
+                assert!(
+                    answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),
+                    "one reconfigure request yields exactly one reply"
+                );
+                if let Some(answer) = answer {
+                    audit.matchmaker_reconfigure_replied(id, &request, &answer);
+                    tracing::info!(
+                        matchmaker = id.0,
+                        kind = reconfigure_kind(&request),
+                        reply = reconfigure_reply_kind(&answer),
+                        generation = matchmaker.set().generation.0,
+                        phase = ?matchmaker.phase(),
+                        "reconfigure_replied"
+                    );
+                    if hooks.drop_client_reply(Reply::MatchmakerReconfigure) {
+                        audit.match_reply_dropped(id, Reply::MatchmakerReconfigure);
+                        tracing::info!(matchmaker = id.0, reply = "reconfigure", "match_reply_dropped");
+                    } else {
+                        let _ = reply.send(answer);
+                    }
+                }
             }
             () = shutdown.cancelled() => return Ok(()),
         }
+    }
+}
+
+/// The trace label of one reconfiguration request.
+#[must_use]
+pub fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
+    match request {
+        ReconfigureRequest::Stop { .. } => "stop",
+        ReconfigureRequest::Bootstrap { .. } => "bootstrap",
+        ReconfigureRequest::DecreePrepare { .. } => "decree_prepare",
+        ReconfigureRequest::DecreeAccept { .. } => "decree_accept",
+        ReconfigureRequest::Chosen { .. } => "chosen",
+    }
+}
+
+/// The trace label of one reconfiguration reply.
+#[must_use]
+pub fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
+    match reply {
+        ReconfigureReply::Stopped { .. } => "stopped",
+        ReconfigureReply::Bootstrapped { .. } => "bootstrapped",
+        ReconfigureReply::Promised { .. } => "promised",
+        ReconfigureReply::Accepted { .. } => "accepted",
+        ReconfigureReply::Nacked { .. } => "nacked",
+        ReconfigureReply::Learned { .. } => "learned",
+        ReconfigureReply::Refused { .. } => "refused",
     }
 }
 

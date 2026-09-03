@@ -120,6 +120,22 @@ pub enum Reply {
     /// the registration is durable is what makes the requester's retry the
     /// same request again — the idempotent re-answer path.
     Match,
+    /// A matchmaker's `GarbageCollectAck` (#123). Dropping it after the
+    /// floor is durable makes the leader re-ask a floor already in force
+    /// (the idempotent `Unchanged` path) and stretches the retirement
+    /// window.
+    GcAck,
+    /// A matchmaker's reconfiguration reply (#125: a `StopAck`, a bootstrap
+    /// ack, a decree promise or vote, a `Learned`). Dropping it after its
+    /// write is durable is what makes the reconfigurer's re-send meet the
+    /// idempotent stop, the keyed bootstrap, and the durable vote.
+    MatchmakerReconfigure,
+    /// A `ReconfigureMatchmakersAck`. Dropping it after a handover started
+    /// makes the client's retry meet `busy`, or a later generation.
+    ReconfigureMatchmakers,
+    /// A `RetireAck`. Dropping it after the node accepted its retirement
+    /// leaves the operator to re-ask a node that is already gone.
+    Retire,
 }
 
 /// Optional driver-level fault and policy hooks.
@@ -148,6 +164,21 @@ pub trait DriverHooks {
     /// completes its matchmaking is abandoned at the election timeout and
     /// retried at a higher round.
     fn skip_matchmaking_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip re-sending the open garbage-collection request this
+    /// beat ([`paros_core::RawNode::resend_gc`]). Consulted only when a
+    /// re-send is due; skipping always costs a beat, never safety.
+    fn skip_gc_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip re-sending the running matchmaker reconfiguration's
+    /// requests this beat ([`paros_core::MatchmakerReconfigurer::resend`]).
+    /// Consulted only while a handover runs; skipping stretches it (and a
+    /// preempted decree waits one more beat to reopen), never breaks it.
+    fn skip_reconfigurer_resend(&self) -> bool {
         false
     }
 

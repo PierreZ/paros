@@ -400,6 +400,12 @@ pub enum Message {
         ballot: Ballot,
         /// The heartbeat's beat sequence number, echoed.
         seq: u64,
+        /// The follower's contiguous chosen index, on a matchmaker
+        /// deployment: what the leader's garbage collection (#123) counts
+        /// toward "a Phase-2 quorum holds the prefix below my fence". Absent
+        /// on plain Multi-Paxos, whose acks are byte-for-byte today's.
+        #[cfg_attr(feature = "serde", serde(default))]
+        chosen: Option<Slot>,
     },
 }
 

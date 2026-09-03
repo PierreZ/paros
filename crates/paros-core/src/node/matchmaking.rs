@@ -104,7 +104,8 @@
 
 use super::{BTreeMap, BTreeSet, Ballot, NodeId};
 use crate::matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchmakerId, Registration,
+    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchmakerId, MatchmakerSet,
+    Registration,
 };
 
 /// Volatile per-ballot matchmaking state while a Candidate registers its
@@ -169,6 +170,13 @@ pub enum MatchStep {
     /// A matchmaker refused the registration: the campaign is abandoned and
     /// this node is a follower again.
     Refused(MatchRefusal),
+    /// The matchmaker set this campaign addressed has a chosen successor
+    /// (#125): the campaign is abandoned, the successor adopted as this
+    /// node's matchmaker set, and the next campaign asks it.
+    Superseded {
+        /// The adopted set.
+        set: MatchmakerSet,
+    },
     /// The quorum's histories named a reconfiguration to a configuration
     /// other than the one this ordinary campaign registered: the belief was
     /// stale. The campaign is abandoned, the effective configuration adopted
@@ -192,12 +200,6 @@ impl Matchmaking {
             watermark: Ballot::zero(),
             disagreements: 0,
         }
-    }
-
-    /// The matchmaker quorum over a set of `matchmakers`: a majority, so any
-    /// two registration quorums intersect (§3.3).
-    pub(super) fn quorum(matchmakers: usize) -> usize {
-        matchmakers / 2 + 1
     }
 
     /// Fold one `Registered` reply's history and watermark. Returns `false`
@@ -280,6 +282,7 @@ pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, M
         to,
         ballot,
         outcome,
+        generation: _,
     } = reply;
     let answer = match outcome {
         MatchOutcome::Registered {

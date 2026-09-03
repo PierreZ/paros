@@ -32,11 +32,16 @@ use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, Role};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::storage_world;
-use paros::{Config, MatchmakerId, NodeId, RunError, parse_addr, run_matchmaker, run_node};
+use paros::{
+    Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, parse_addr, run_matchmaker, run_node,
+};
 
 /// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess {
     mode: NodeMode,
+    /// A scripted case's fixed bootstrap size (`Some(n)`: ranks `0..n` are
+    /// the bootstrap acceptors, the rest spares); `None` draws per the mode.
+    bootstrap: Option<usize>,
 }
 
 /// How a process is perturbed.
@@ -56,12 +61,23 @@ impl NodeProcess {
     pub(crate) fn chaotic() -> Self {
         Self {
             mode: NodeMode::Chaotic,
+            bootstrap: None,
         }
     }
 
     pub(crate) fn scripted() -> Self {
         Self {
             mode: NodeMode::Scripted,
+            bootstrap: None,
+        }
+    }
+
+    /// A scripted node whose bootstrap configuration is the first
+    /// `bootstrap` ranks of the pool — a corpus case that needs a spare.
+    pub(crate) fn scripted_with_bootstrap(bootstrap: usize) -> Self {
+        Self {
+            mode: NodeMode::Scripted,
+            bootstrap: Some(bootstrap),
         }
     }
 }
@@ -69,7 +85,21 @@ impl NodeProcess {
 /// A matchmaker in the simulation: its own process group, so a seed draws
 /// how many it deploys independently of the acceptor pool and attrition can
 /// be scoped to it.
-pub(crate) struct MatchmakerProcess;
+pub(crate) struct MatchmakerProcess {
+    /// Whether the driver hooks, the shape knobs and the loss coin are live
+    /// (the main campaign) or dark (a scripted corpus case).
+    perturb: bool,
+}
+
+impl MatchmakerProcess {
+    pub(crate) fn chaotic() -> Self {
+        Self { perturb: true }
+    }
+
+    pub(crate) fn scripted() -> Self {
+        Self { perturb: false }
+    }
+}
 
 /// One inert topology member that keeps the simulator lifecycle open while a
 /// workload drives something else (the storage contract suite).
@@ -103,7 +133,7 @@ impl Process for NodeProcess {
         let perturb = self.mode == NodeMode::Chaotic;
         match deployment.role_of(&my_ip) {
             Some(Role::Acceptor(self_rank)) => {
-                run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb).await
+                run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb, self.bootstrap).await
             }
             other => {
                 assert_always!(
@@ -130,7 +160,7 @@ impl Process for MatchmakerProcess {
         let my_ip = ctx.my_ip().to_string();
         let deployment = crate::roles::deployment(ctx.topology());
         match deployment.role_of(&my_ip) {
-            Some(Role::Matchmaker(id)) => run_matchmaker_role(ctx, id, &my_ip).await,
+            Some(Role::Matchmaker(id)) => run_matchmaker_role(ctx, id, &my_ip, self.perturb).await,
             other => {
                 assert_always!(
                     false,
@@ -157,6 +187,7 @@ async fn run_acceptor(
     self_rank: NodeId,
     my_ip: &str,
     perturb: bool,
+    fixed_bootstrap: Option<usize>,
 ) -> SimulationResult<()> {
     // The node pool is the map's acceptor list, in `NodeId` order — never
     // "every process in the topology". The matchmaker set is the map's
@@ -187,16 +218,30 @@ async fn run_acceptor(
         })
         .collect::<SimulationResult<Vec<_>>>()?;
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
-    let bootstrap: Vec<NodeId> =
-        crate::shape::bootstrap_ranks(ctx.state(), pool.len(), !matchmakers.is_empty(), perturb)
+    let bootstrap: Vec<NodeId> = match fixed_bootstrap {
+        Some(n) => crate::shape::fixed_bootstrap_ranks(ctx.state(), n),
+        None => {
+            crate::shape::bootstrap_ranks(ctx.state(), pool.len(), !matchmakers.is_empty(), perturb)
+        }
+    }
+    .into_iter()
+    .map(NodeId)
+    .collect();
+    // The matchmaker *pool* is the address book (`matchmakers`, every
+    // matchmaker process); the bootstrap matchmaker set (#125) is protocol
+    // data drawn once per seed, possibly a subset that leaves spares.
+    let matchmaker_pool: Vec<MatchmakerId> = matchmakers.iter().map(|(id, _)| *id).collect();
+    let matchmaker_bootstrap: Vec<MatchmakerId> =
+        crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_pool.len(), perturb)
             .into_iter()
-            .map(NodeId)
+            .map(MatchmakerId)
             .collect();
     let config = Config {
         id: self_rank,
         peers: bootstrap.clone(),
         nodes: pool,
-        matchmakers: matchmakers.iter().map(|(id, _)| *id).collect(),
+        matchmakers: matchmaker_bootstrap,
+        matchmaker_pool,
         ..Config::default()
     };
 
@@ -267,6 +312,32 @@ async fn run_acceptor(
             parked_peers,
             crate::shape::config_floor(config.pool().len(), config.has_matchmakers()),
         );
+        // The disk's wipe coin (#124): a restart that comes back on an empty
+        // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
+        // which paros does not use (the fake disk is the world), so the
+        // amnesia fault is the world's, drawn here at the one place a lost
+        // disk shows — a reboot. The identity never boots again: a wiped
+        // node is replaced through an acceptor reconfiguration, never
+        // rejoined (an empty disk under an old identity would answer a
+        // Phase 1 with "nothing accepted" for slots it voted on). Only a
+        // matchmaker deployment can replace, so the coin is dark on a plain
+        // seed; the world's dead-node budget bounds it either way.
+        let wipe = perturb
+            && config.has_matchmakers()
+            && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
+            && moonpool_sim::buggify_with_prob!(0.35);
+        if wipe
+            && world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .wipe(my_ip, self_rank.0)
+        {
+            // BUGGIFY pairing: the wipe coin fired within the budget.
+            assert_reachable!("storage: a restarted node's disk is wiped and the identity retired");
+            checker.note_wiped(self_rank.0);
+            tracing::info!(node = self_rank.0, "storage_wiped_exit");
+            return Ok(());
+        }
     }
 
     // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
@@ -275,16 +346,31 @@ async fn run_acceptor(
     // handled by the harness; this covers the seams *inside* a Ready batch
     // that attrition cannot reach.
     loop {
-        // A node terminally parked by a detected persistent corruption
-        // stays down: attrition may revive the *process*, but the boot
-        // scan would re-detect the same rotted record forever, and a
+        // A node that is down for good never boots again: retired by the
+        // operator (#123), wiped (#124), or terminally parked by a detected
+        // persistent corruption (attrition may revive the *process*, but the
+        // boot scan would re-detect the same rotted record forever, and a
         // second crash report for one detection would break the 1:1
-        // injected⇔detected correlation. Exit before touching the store.
-        if world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_parked(my_ip)
-        {
+        // injected⇔detected correlation). Exit before touching the store.
+        let (parked, wiped, retired) = {
+            let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                guard.is_parked(my_ip),
+                guard.is_wiped(my_ip),
+                guard.is_retired(my_ip),
+            )
+        };
+        if retired {
+            checker.note_retired_boot(self_rank.0);
+            tracing::info!(node = self_rank.0, "retired_stays_down");
+            return Ok(());
+        }
+        if wiped {
+            checker.note_wiped(self_rank.0);
+            tracing::info!(node = self_rank.0, "wiped_stays_down");
+            return Ok(());
+        }
+        if parked {
             checker.note_storage_dead(self_rank.0);
             tracing::info!(node = self_rank.0, "storage_parked");
             return Ok(());
@@ -381,28 +467,69 @@ async fn run_matchmaker_role(
     ctx: &SimContext,
     id: MatchmakerId,
     my_ip: &str,
+    perturb: bool,
 ) -> SimulationResult<()> {
-    // Only the main campaign deploys matchmakers, so a matchmaker is always
-    // a perturbing process.
-    let perturb = true;
     let world = storage_world(ctx.state());
+    let deployment = crate::roles::deployment(ctx.topology());
+    // Generation 0's set is protocol data drawn once per seed (#125), the
+    // same draw every node makes; this matchmaker may be a spare outside it.
+    let bootstrap: Vec<MatchmakerId> = crate::shape::matchmaker_bootstrap_ranks(
+        ctx.state(),
+        deployment.matchmakers().len(),
+        perturb,
+    )
+    .into_iter()
+    .map(MatchmakerId)
+    .collect();
+    let config = MatchmakerConfig {
+        id,
+        bootstrap: bootstrap.clone(),
+    };
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
-    let shape = crate::shape::boot(ctx.state(), my_ip, perturb).shape;
+    let incarnation = crate::shape::boot(ctx.state(), my_ip, perturb);
+    let shape = incarnation.shape;
     let hooks = BuggifyHooks::new(
         ctx.time().clone(),
         Duration::from_millis(crate::CHAOS_DURATION_MS),
         perturb,
         shape.seam_crash_bias,
     );
-    let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
+    let checker = audit_world(ctx.state());
+    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
+    if incarnation.is_restart()
+        && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
+        && moonpool_sim::buggify_with_prob!(0.35)
+        && world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .park_matchmaker(my_ip, bootstrap.len())
+    {
+        // The registry's loss coin (#125): a restart that finds its durable
+        // state unusable. There is no in-place repair — the registry stays
+        // down for good and the surviving quorum reconstructs a successor
+        // set without it. BUGGIFY pairing: the coin fired within the budget.
+        assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
+        checker.note_matchmaker_lost(id.0);
+        tracing::info!(matchmaker = id.0, "matchmaker_lost_exit");
+        return Ok(());
+    }
     loop {
+        if world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_matchmaker_parked(my_ip)
+        {
+            checker.note_matchmaker_lost(id.0);
+            tracing::info!(matchmaker = id.0, "matchmaker_stays_down");
+            return Ok(());
+        }
         let storage = DurableMatchmakerStorage::restore(Arc::downgrade(&world), my_ip.to_string());
         match run_matchmaker(
             ctx.providers().clone(),
             storage,
             parse_addr(my_ip)?,
-            id,
+            config.clone(),
             shape.tunables,
             ctx.shutdown().clone(),
             &hooks,

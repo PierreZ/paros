@@ -1,17 +1,12 @@
-use super::{
-    BTreeSet, Ballot, Command, Control, Entry, LEADER_RECOVERY_BATCH, Message, NodeId, NodeRole,
-    RawNode, Slot, WriteOp, command_fingerprint,
-};
+//! The node's **Phase-2 and learner wiring**: how an `Accepted` reaches the
+//! [`Proposer`](crate::proposer::Proposer)'s round tally, how a decision is
+//! turned into a `Commit`, and how a chosen value reaches the
+//! [`Acceptor`](crate::acceptor::Acceptor) (its authoritative record) and the
+//! [`Replica`](crate::replica::Replica) (the contiguous prefix). The
+//! components decide; this module builds the messages and keeps the node's
+//! probe, allocator and read rounds consistent with what they decided.
 
-/// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
-pub(super) struct Proposing {
-    /// The ballot this slot is being accepted under.
-    pub(super) ballot: Ballot,
-    /// The command being accepted for this slot.
-    pub(super) command: Command,
-    /// Acceptors (incl. self) that have accepted this slot's command at `ballot`.
-    pub(super) accepted_by: BTreeSet<NodeId>,
-}
+use super::{Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
 
 impl RawNode {
     // ---- proposer / learner ----------------------------------------------
@@ -26,14 +21,8 @@ impl RawNode {
         if !self.acceptors.contains(from) {
             return;
         }
-        {
-            let Some(p) = self.proposer.get_mut(&slot) else {
-                return;
-            };
-            if p.ballot != ballot || command_fingerprint(&p.command) != vhash {
-                return;
-            }
-            p.accepted_by.insert(from);
+        if !self.proposer.fold_accepted(from, ballot, slot, vhash) {
+            return;
         }
         // CheckQuorum: an `Accepted` at our current ballot is leader contact,
         // exactly like a beat ack — a busy leader must not need idle beats to
@@ -62,7 +51,7 @@ impl RawNode {
             "only a leader starts an accept round"
         );
         assert!(
-            slot >= self.first_slot,
+            slot >= self.acceptor.first_slot(),
             "an accept round never starts below the compaction floor"
         );
         // Re-deciding a chosen slot is guarded by the recovery/repair callers;
@@ -70,46 +59,35 @@ impl RawNode {
         // window after a higher-ballot `Commit` passed the allocator (see the
         // role-couplings note in `assert_invariants`), so the check carries the
         // same promise gate.
-        if self.ballot >= self.hard_state.max_promised_ballot {
+        if self.ballot >= self.acceptor.promised() {
             assert!(
-                !self.chosen.contains_key(&slot),
+                !self.replica.is_chosen(slot),
                 "an accept round never re-opens a chosen slot"
             );
         }
-        // One round per slot per leadership: the allocator only hands out
-        // fresh slots, a recovery visits each inherited slot once, and a
-        // blocked slot is opened only by the probe that resolves it. A second
-        // round would let one `(slot, ballot)` carry two commands.
-        assert!(
-            !self.proposer.contains_key(&slot),
-            "a slot has at most one open Phase-2 round"
-        );
         let me = self.config.id;
         let ballot = self.ballot;
-        let mut accepted_by = BTreeSet::new();
         // Never lower our promise: if a competing higher `Prepare` raised it
         // since we became leader, skip the self-accept (the round relies on
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
         // A leader that is not a member of its own configuration (a
         // reconfiguration that removed it, #122) is a proposer and a learner
         // but not an acceptor: it records nothing and casts no vote.
-        if self.is_acceptor() && ballot >= self.hard_state.max_promised_ballot {
-            self.set_promise(ballot);
-            self.record_accepted(slot, ballot, command.clone());
-            accepted_by.insert(me);
-        }
-        self.proposer.insert(
-            slot,
-            Proposing {
-                ballot,
-                command: command.clone(),
-                accepted_by,
-            },
-        );
+        let own_vote = if self.is_acceptor() && ballot >= self.acceptor.promised() {
+            self.acceptor.set_promise(ballot, &mut self.pending_writes);
+            self.acceptor
+                .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+            Some(me)
+        } else {
+            None
+        };
+        // One round per slot per leadership (asserted by the component).
+        self.proposer
+            .open_round(slot, ballot, command.clone(), own_vote);
         // Accepts reach the active configuration only: a removed node is
         // never contacted for a new ballot's Phase 2.
         self.broadcast_acceptors(&Message::Accept {
-            config_id: self.hard_state.config_id,
+            config_id: self.config_id,
             from: me,
             ballot,
             slot,
@@ -122,20 +100,16 @@ impl RawNode {
     /// `Commit` to the peers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
     pub(super) fn try_decide(&mut self, slot: Slot) {
-        let quorum = self.phase2_quorum();
         let me = self.config.id;
-        let decided = match self.proposer.get(&slot) {
-            Some(p) if p.accepted_by.len() >= quorum => Some((p.ballot, p.command.clone())),
-            _ => None,
-        };
-        let Some((ballot, command)) = decided else {
+        // The decision is the proposer's, judged over the active
+        // configuration's quorum system; every vote in it came from a
+        // configured acceptor (`on_accepted` refuses any other sender, and
+        // the component restates it).
+        let Some((ballot, command)) = self.proposer.decided(slot, &self.acceptors) else {
             return;
         };
         // Decision provenance: only this leadership's own tally decides, at
-        // its own ballot, and every vote in it came from a configured
-        // acceptor (`on_accepted` refuses any other sender; restated here so
-        // the quorum arithmetic is never fed an id that could not have made a
-        // durable promise). O(quorum) probes over a sorted membership.
+        // its own ballot.
         assert!(
             self.role == NodeRole::Leader,
             "only a leader decides from its own accept tally"
@@ -144,50 +118,41 @@ impl RawNode {
             ballot == self.ballot,
             "a decision is counted at the leadership ballot"
         );
-        assert!(
-            self.proposer[&slot]
-                .accepted_by
-                .iter()
-                .all(|n| self.acceptors.contains(*n)),
-            "every vote behind a decision comes from a configured acceptor"
-        );
         self.mark_chosen(slot, &command, ballot);
         // Post-decision: the slot now carries exactly the decided command
         // (unless the decision arrived after the slot was chosen elsewhere
         // and compacted away — then `mark_chosen` is a no-op below the floor).
         assert!(
-            slot < self.first_slot || self.chosen.get(&slot) == Some(&command),
+            slot < self.acceptor.first_slot() || self.replica.chosen_at(slot) == Some(&command),
             "a decided slot is chosen with the decided command"
         );
         self.broadcast(&Message::Commit {
-            config_id: self.hard_state.config_id,
+            config_id: self.config_id,
             from: me,
             ballot,
             slot,
             command,
         });
-        self.proposer.remove(&slot);
+        self.proposer.close_round(slot);
     }
-    /// Record `(slot, entry)` as chosen: persist, re-point the in-flight dedup
-    /// mapping at this slot, and advance the contiguous chosen prefix.
-    /// Idempotent.
+    /// Record `(slot, entry)` as chosen: persist the authoritative record,
+    /// hand the fact to the replica, resolve a probe blocked on it, and
+    /// advance the contiguous chosen prefix. Idempotent.
     ///
     /// **Chosen is not applied.** Two of the three callers hand this
     /// non-contiguous slots — `on_commit` takes whatever the network delivers,
     /// and `try_decide` fires the moment a slot's accept quorum completes while
     /// the leader streams later slots concurrently, so slot 6 routinely decides
-    /// before slot 5. So nothing here may record a command as *applied*: the
-    /// `applied_seq` bump lives in the contiguous walk
-    /// ([`RawNode::advance_chosen_index`]) alongside `pending_committed`, which
-    /// is the definition [`RawNode::new`]'s boot rebuild has always used.
+    /// before slot 5. Nothing here records a command as *applied*: that is the
+    /// replica's contiguous walk ([`RawNode::advance_chosen_index`]).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, round = ballot.round)))]
     pub(super) fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it
         // (that would re-insert a record below the floor via `record_accepted`).
-        if slot < self.first_slot {
+        if slot < self.acceptor.first_slot() {
             return;
         }
-        if let Some(known) = self.chosen.get(&slot) {
+        if let Some(known) = self.replica.chosen_at(slot) {
             // Agreement, locally: a slot is chosen once. Relearning it (a
             // duplicated `Commit`, a catch-up replay, a handoff's decided
             // tail) must bring the same value back; a different one is the
@@ -207,11 +172,11 @@ impl RawNode {
         // A decision at the ballot of this node's own open round must be the
         // round's command: one proposer per ballot (P2b), and a handoff
         // successor re-proposes its inherited rounds verbatim.
-        if let Some(round) = self.proposer.get(&slot)
-            && round.ballot == ballot
+        if let Some(round) = self.proposer.rounds().get(&slot)
+            && round.ballot() == ballot
         {
             assert!(
-                round.command == *command,
+                round.command() == command,
                 "a decision at the open round's ballot carries the round's command"
             );
         }
@@ -223,219 +188,54 @@ impl RawNode {
         // a spare that only ever learns (never prepared, promise still zero)
         // hit it on 1 seed in 2,000 (17196295897912962235) and refused to
         // boot again.
-        if ballot > self.hard_state.max_promised_ballot {
-            self.set_promise(ballot);
+        if ballot > self.acceptor.promised() {
+            self.acceptor.set_promise(ballot, &mut self.pending_writes);
         }
-        // Record the *chosen* value as the authoritative accepted command. Using
-        // `insert` (not `or_insert_with`) is load-bearing: a node may hold a stale
-        // lower-ballot accept it picked up from a failed earlier ballot, and
-        // `chosen` is rebuilt from `accepted` on restart. Keeping the stale entry
-        // would resurrect a value the cluster never chose for this slot. A chosen
-        // value is durable and safe to record at its choosing ballot.
-        self.record_accepted(slot, ballot, command.clone());
-        self.chosen.insert(slot, command.clone());
-        // Re-point `inflight` at what this slot actually decided. Two halves,
-        // and both matter:
-        //
-        // - Whatever was decided here, this slot can no longer be the landing
-        //   place of some *other* in-flight client request, so drop any that
-        //   still points at it. Keyed on the *slot*, not on a matching
-        //   `Command::User`: a node that booted holding an accepted-but-unchosen
-        //   entry at this slot (`RawNode::new` rebuilds `inflight` from exactly
-        //   those) keeps a dangling mapping when the slot decides as something
-        //   else — a `Noop` filled in by a new leader, say. The client's retry
-        //   would then get `ProposeResult::Duplicate(slot)` for a slot whose
-        //   commit never acks a proposer (a control command has no client
-        //   waiter), and the reply would hang to the client's deadline forever.
-        //   Clearing by slot lets the retry take a fresh slot and commit.
-        // - Then map the entry this slot *did* decide to it. That is what keeps
-        //   the chosen-but-not-yet-applied window safe: `applied_seq` only
-        //   learns the command when the contiguous walk applies it, so between
-        //   "chosen" and "applied" `inflight` is the only table that knows about
-        //   it. A retry in that window must find it here and get
-        //   `Duplicate(slot)` — the driver then parks the reply on `slot` and
-        //   acks it out of the apply loop, exactly when the write enters the
-        //   applied prefix. Miss both tables instead and the retry allocates a
-        //   *fresh* slot for a command already chosen: duplicate execution,
-        //   strictly worse than the early ack. This insert also covers the node
-        //   that learns a slot chosen by `Commit` alone (it never proposed it,
-        //   so it never had an `inflight` mapping to keep).
-        self.inflight.retain(|_, s| *s != slot);
-        if let Command::User(entry) = command
-            && !self.applied_elsewhere(entry, slot)
-        {
-            // An identity already applied at another slot is a #94 duplicate:
-            // this slot will suppress to a no-op at apply, so pointing a retry
-            // at it would park a reply no commit ever acks. Leaving the table
-            // alone lets the retry hit the `applied_seq` fast path instead.
-            self.inflight.insert((entry.client, entry.seq), slot);
-        }
+        // Record the *chosen* value as the authoritative accepted command. An
+        // upsert is load-bearing: a node may hold a stale lower-ballot accept
+        // it picked up from a failed earlier ballot, and `chosen` is rebuilt
+        // from the accepted log on restart. Keeping the stale entry would
+        // resurrect a value the cluster never chose for this slot.
+        self.acceptor
+            .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+        self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
-        if let Some(probe) = self.repair_probe.as_mut()
-            && probe.blocked.remove(&slot)
-        {
-            probe.best_have.remove(&slot);
-            probe.faulty_reports.remove(&slot);
-            if probe.blocked.is_empty() {
-                self.repair_probe = None;
-                self.repair_elapsed = 0;
-            }
-        }
-        // A slot healed *below* the contiguous prefix (an open application
-        // repair re-learning a faulty chosen record) never reaches the walk, so
-        // its at-most-once ledger fold happens here, min-slot-wins: the ledger
-        // may already hold this identity at a *higher* slot recorded while the
-        // lower record was unreadable, and the cluster-wide first-slot-wins
-        // decision must be restored before the repair pump replays either slot.
-        if slot < self.first_unchosen()
-            && let Command::User(entry) = command
-        {
-            let seqs = self.applied_seq.entry(entry.client).or_default();
-            match seqs.get(&entry.seq).copied() {
-                Some(first) if first < slot => {
-                    self.duplicate_slots.insert(slot);
-                }
-                Some(first) if first > slot => {
-                    self.duplicate_slots.insert(first);
-                    self.duplicate_slots.remove(&slot);
-                    seqs.insert(entry.seq, slot);
-                }
-                _ => {
-                    seqs.insert(entry.seq, slot);
-                }
-            }
+        if self.proposer.probe_resolved_elsewhere(slot) && self.proposer.probe().is_none() {
+            self.repair_elapsed = 0;
         }
         // The chosen/accepted coupling: a chosen slot always holds its
         // authoritative accepted record, at the same command (`serve_catchup`
         // and election recovery both read one map and trust the other).
         // Checked before the walk below, which may compact this very slot away.
         assert!(
-            self.accepted.contains_key(&slot),
+            self.acceptor.record(slot).is_some(),
             "a chosen slot holds its authoritative accepted record"
         );
         assert!(
-            self.accepted.get(&slot).map(|(_, c)| c) == Some(command),
+            self.acceptor.record(slot).map(|(_, c)| c) == Some(command),
             "a chosen slot's accepted record carries the chosen command"
         );
         self.advance_chosen_index();
     }
 
-    /// Whether `entry`'s `(client, seq)` identity is recorded in the applied
-    /// ledger at a slot **other than** `slot` — the #94 duplicate test.
-    pub(super) fn applied_elsewhere(&self, entry: &Entry, slot: Slot) -> bool {
-        self.applied_seq
-            .get(&entry.client)
-            .and_then(|m| m.get(&entry.seq))
-            .is_some_and(|&first| first != slot)
-    }
-
-    /// Walk the contiguous chosen prefix forward, surfacing each newly-applied
-    /// `(slot, entry)` for the application in order (no gaps).
-    ///
-    /// This is also where the **client dedup tables move from "in flight" to
-    /// "applied"**, one slot at a time and only in prefix order. `applied_seq`
-    /// means exactly what its name says and what [`RawNode::new`]'s boot rebuild
-    /// has always meant by it — inside the contiguous chosen prefix — so
-    /// [`RawNode::propose`]'s fast path can answer `Chosen` (an immediate
-    /// `committed: true` to the client) without lying: the write really is in
-    /// the applied prefix by then, and the slot it names really is one the node
-    /// applied.
+    /// Walk the contiguous chosen prefix forward
+    /// ([`crate::replica::Replica::advance`]), then apply what the walk
+    /// decided: the truncation a `Truncate` control command ordered (lazily,
+    /// *after* the walk so the mutation cannot disturb the iteration, its
+    /// [`WriteOp::Truncate`](crate::WriteOp::Truncate) ordered after the
+    /// `SetChosenIndex` writes), the application repair that may now
+    /// advance, and the read rounds waiting on the apply condition (the
+    /// fresh-leader fence).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
-        let mut next = self.first_unchosen();
-        let mut advanced = 0_usize;
-        // Highest `up_to` from any `Truncate` control command that entered the
-        // contiguous chosen prefix this pass. Applied *after* the walk so the
-        // mutation `compact` makes to `chosen`/`accepted` cannot disturb the
-        // iteration above.
-        let mut truncate_up_to: Option<Slot> = None;
-        while advanced < LEADER_RECOVERY_BATCH
-            && let Some(mut command) = self.chosen.get(&next).cloned()
-        {
-            // The walk is the *only* writer of `chosen_index`, and it advances
-            // exactly one slot per iteration — the contiguity the apply seam
-            // and the boot rebuild are built on.
-            assert!(
-                next == self.first_unchosen(),
-                "the chosen prefix advances one slot at a time"
-            );
-            // The chosen/accepted coupling, per applied slot: what the
-            // application is handed is what the authoritative record holds
-            // (the value a Phase 1 would report for this slot).
-            assert!(
-                self.accepted.get(&next).map(|(_, c)| c) == Some(&command),
-                "an applied slot's accepted record carries the applied command"
-            );
-            self.hard_state.chosen_index = Some(next);
-            self.pending_writes.push(WriteOp::SetChosenIndex(next));
-            if let Command::Control(Control::Truncate { up_to }) = &command {
-                truncate_up_to = Some(truncate_up_to.map_or(*up_to, |u| u.max(*up_to)));
-            }
-            // The slot is applied now, so it is no longer in flight — and only a
-            // client entry carries `(client, seq)` dedup state at all (a control
-            // command has none; its `Truncate` effect is handled just below).
-            // Clearing by slot, the same key `mark_chosen` re-pointed the mapping
-            // with, is what makes this the exact hand-off: whatever `inflight`
-            // held for this slot leaves as `applied_seq` takes it over.
-            self.inflight.retain(|_, s| *s != next);
-            if let Command::User(entry) = &command {
-                let seqs = self.applied_seq.entry(entry.client).or_default();
-                match seqs.get(&entry.seq) {
-                    // The #94 duplicate: correct Paxos chose this identity at a
-                    // second slot (a retry served across a partition plus the
-                    // mandatory P2c re-proposal of the deposed leader's lone
-                    // accept). Execute the slot as a no-op. The decision reads
-                    // only the replicated ledger, and the walk runs in slot
-                    // order on every node, so first-slot-wins is cluster-wide
-                    // deterministic — and `RawNode::new` re-derives the same
-                    // set from sealed sessions + the retained log on restart.
-                    Some(&first) if first != next => {
-                        self.duplicate_slots.insert(next);
-                        self.duplicates_suppressed += 1;
-                        command = Command::Control(Control::Noop);
-                    }
-                    // First application of this identity: record it at this
-                    // slot, and never overwrite it later — the ledger entry IS
-                    // the at-most-once claim.
-                    _ => {
-                        seqs.insert(entry.seq, next);
-                    }
-                }
-            }
-            // While an application repair is open, the driver's application sits
-            // below this walk's frontier: surfacing new committed entries now
-            // would apply them out of order. The repair pump re-emits every
-            // decided slot in order from its cursor instead (the walk's other
-            // effects — the durable chosen index, the dedup hand-off — proceed
-            // unchanged, so consensus keeps advancing while the tail heals).
-            if self.app_repair.is_none() {
-                self.pending_committed.push((next, command));
-            }
-            next = Slot(next.0 + 1);
-            advanced += 1;
-        }
-        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        // Apply (lazily, "in the background") the truncation the control command
-        // decided: drop the now-safe prefix and raise the floor. `compact` clamps
-        // to the chosen index just advanced, is idempotent, and emits a
-        // `WriteOp::Truncate` ordered *after* the `SetChosenIndex` writes above, so
-        // a durable floor never outruns the durable chosen index.
+        let truncate_up_to = self
+            .replica
+            .advance(self.acceptor.records(), &mut self.pending_writes);
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        // The walk's exit condition, restated as its postcondition: either it
-        // consumed the entire contiguous chosen prefix, or exactly one bounded
-        // chunk was released and the post-Ready continuation will resume it.
-        assert!(
-            advanced == LEADER_RECOVERY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
-            "the walk consumes or bounds the contiguous chosen prefix"
-        );
-        // An open application repair may now be able to advance (the walk can
-        // have made new decided slots visible to its cursor).
         self.pump_app_repair();
-        // A read round waiting on the apply condition (`chosen_index >= index`,
-        // the fresh-leader fence) resolves exactly here. No-op on a follower.
         self.try_confirm_reads();
     }
 }

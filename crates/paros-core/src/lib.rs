@@ -39,27 +39,36 @@
 //! a cluster deployed without matchmakers never constructs one, and [`RawNode`]
 //! never steps a matchmaker message.
 
+pub mod acceptor;
 mod matchmaker;
+pub mod membership;
 mod message;
 mod node;
+pub mod proposer;
 mod ready;
+pub mod replica;
+mod single_decree;
 mod state;
 mod storage;
 mod types;
 mod write;
 
 pub use matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerHardState, MatchmakerId, MatchmakerReady, MatchmakerWriteOp, Registration,
-    RegistryStorage,
+    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
+    MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
+    MatchmakerWriteOp, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistryStorage, StartRefusal,
 };
 pub use message::Message;
 pub use node::{
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS,
-    RawNode, ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
+    GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters,
+    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
+    REPAIR_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
+    ReconfigureResult,
 };
 pub use ready::Ready;
+pub use single_decree::{DecreeAcceptor, DecreePhase, DecreeProposer};
 pub use state::{Config, HardState, QuorumSystem};
 pub use storage::Storage;
 pub use types::{

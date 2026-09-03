@@ -29,10 +29,10 @@ impl RawNode {
             .has_matchmakers()
             .then(|| self.acceptors.clone());
         self.broadcast(&Message::Heartbeat {
-            config_id: self.hard_state.config_id,
+            config_id: self.config_id,
             from: self.config.id,
             ballot: self.ballot,
-            commit: self.hard_state.chosen_index,
+            commit: self.replica.chosen_index(),
             seq: self.heartbeat_seq,
             config,
         });
@@ -67,7 +67,7 @@ impl RawNode {
         }
         // Follower receiving the leader's beat: adopt its ballot / leadership only
         // if it is at or above our promise.
-        if ballot >= self.hard_state.max_promised_ballot {
+        if ballot >= self.acceptor.promised() {
             if self.role == NodeRole::Follower {
                 self.leader = Some(from);
                 self.election_elapsed = 0;
@@ -87,16 +87,24 @@ impl RawNode {
             // "my promise is at or below `ballot` right now", which is exactly
             // what this restates (and promise monotonicity preserves).
             assert!(
-                self.hard_state.max_promised_ballot <= ballot,
+                self.acceptor.promised() <= ballot,
                 "a beat ack never claims a promise above the acked ballot"
             );
+            // The chosen index rides the ack on a matchmaker deployment only
+            // (#123's GC counts it); a plain deployment's ack is unchanged.
+            let chosen = self
+                .config
+                .has_matchmakers()
+                .then_some(self.replica.chosen_index())
+                .flatten();
             self.pending_messages.push((
                 from,
                 Message::HeartbeatAck {
-                    config_id: self.hard_state.config_id,
+                    config_id: self.config_id,
                     from: me,
                     ballot,
                     seq,
+                    chosen,
                 },
             ));
         }
@@ -113,7 +121,7 @@ impl RawNode {
         // point — those two states are genuinely different, and a wire encoding
         // that folded them together left a follower missing exactly slot 0 with no
         // way to notice (#56).
-        let ci = self.hard_state.chosen_index;
+        let ci = self.replica.chosen_index();
         if commit > ci {
             // We are behind: a `Commit` (and its `Accept`) for a decided slot never
             // reached us — the leader only re-sends `Accept`s for still-*pending*
@@ -151,7 +159,13 @@ impl RawNode {
     /// about leadership after the round began, so it never counts. Stale or
     /// cross-ballot acks are dropped whole.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, seq)))]
-    pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, seq: u64) {
+    pub(super) fn on_heartbeat_ack(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        seq: u64,
+        chosen: Option<Slot>,
+    ) {
         // Quorum sets are keyed by NodeId, over the **active configuration**:
         // a beat reaches the whole pool, but only a member's ack may count
         // toward a read round or the `CheckQuorum` window (a joining acceptor
@@ -171,5 +185,7 @@ impl RawNode {
             }
         }
         self.try_confirm_reads();
+        // The GC fence tally (#123): a configured member's chosen index.
+        self.note_peer_chosen(from, chosen);
     }
 }

@@ -52,8 +52,8 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
         .insert(Slot(1), (ballot(1, 0), ucmd(1, 2, 20)));
     let mut n = RawNode::new(&storage);
     assert_eq!(
-        n.inflight.get(&(ClientId(1), ClientSeq(2))),
-        Some(&Slot(1)),
+        n.replica.inflight_at(ClientId(1), ClientSeq(2)),
+        Some(Slot(1)),
         "the boot rebuilt the in-flight mapping from the unchosen accepted entry"
     );
 
@@ -66,7 +66,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
         command: Command::Control(Control::Noop),
     });
     assert_eq!(
-        n.inflight.get(&(ClientId(1), ClientSeq(2))),
+        n.replica.inflight_at(ClientId(1), ClientSeq(2)),
         None,
         "the decision frees the slot's in-flight client request, whatever was decided"
     );
@@ -246,13 +246,13 @@ fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
         "node 2's applied prefix stalls at the hole"
     );
     assert_eq!(
-        nodes[2].applied_seq.get(&ClientId(7)),
+        nodes[2].replica.session_ledger().get(&ClientId(7)),
         None,
         "a slot chosen above the hole is not applied, so it is not in `applied_seq`"
     );
     assert_eq!(
-        nodes[2].inflight.get(&(ClientId(7), ClientSeq(5))),
-        Some(&Slot(2)),
+        nodes[2].replica.inflight_at(ClientId(7), ClientSeq(5)),
+        Some(Slot(2)),
         "it is in flight at its chosen slot instead — node 2 never proposed it, so \
          only `mark_chosen` could have put it there"
     );
@@ -265,14 +265,15 @@ fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
     assert_eq!(nodes[2].hard_state().chosen_index, Some(Slot(2)));
     assert_eq!(
         nodes[2]
-            .applied_seq
+            .replica
+            .session_ledger()
             .get(&ClientId(7))
             .and_then(|m| m.get(&ClientSeq(5))),
         Some(&Slot(2)),
         "applied now, naming the slot it applied at"
     );
     assert_eq!(
-        nodes[2].inflight.get(&(ClientId(7), ClientSeq(5))),
+        nodes[2].replica.inflight_at(ClientId(7), ClientSeq(5)),
         None,
         "and no longer in flight"
     );
@@ -338,7 +339,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     let ProposeResult::Accepted(slot) = n.propose(ClientId(4), ClientSeq(5), val(6)) else {
         panic!("leader must admit the proposal");
     };
-    let expected = command_fingerprint(&n.proposer[&slot].command);
+    let expected = command_fingerprint(n.proposer.rounds()[&slot].command());
     n.step(Message::Accepted {
         config_id: ConfigId::default(),
         from: NodeId(1),
@@ -380,6 +381,7 @@ fn restart_rebuilds_state_from_hard_state() {
             quorum_system: crate::state::QuorumSystem::Majority,
             nodes: Vec::new(),
             matchmakers: Vec::new(),
+            matchmaker_pool: Vec::new(),
         },
         first_slot: Slot(0),
         faulty: Vec::new(),
@@ -394,12 +396,16 @@ fn restart_rebuilds_state_from_hard_state() {
     assert_eq!(n.role(), NodeRole::Follower);
     // Dedup: applied seqs for the chosen prefix; slot 2 still in flight.
     assert_eq!(
-        n.applied_seq
+        n.replica
+            .session_ledger()
             .get(&ClientId(1))
             .and_then(|m| m.get(&ClientSeq(2))),
         Some(&Slot(1))
     );
-    assert_eq!(n.inflight.get(&(ClientId(1), ClientSeq(3))), Some(&Slot(2)));
+    assert_eq!(
+        n.replica.inflight_at(ClientId(1), ClientSeq(3)),
+        Some(Slot(2))
+    );
 }
 
 #[test]
@@ -498,7 +504,8 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     });
     let _ = drain(&mut x);
     assert_eq!(
-        x.hard_state.chosen_index, None,
+        x.hard_state().chosen_index,
+        None,
         "slot 1 is above the hole at 0"
     );
 
@@ -511,7 +518,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
         command: ucmd(1, 0, 0xCC),
     });
     let _ = drain(&mut x);
-    assert_eq!(x.hard_state.chosen_index, Some(Slot(1)));
+    assert_eq!(x.hard_state().chosen_index, Some(Slot(1)));
 
     // A duplicated / catch-up-replayed commit for a known slot is a no-op for
     // state but must never wedge: the early return still re-drives the walk.
@@ -523,5 +530,5 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
         command: ucmd(1, 1, 0xBB),
     });
     let _ = drain(&mut x);
-    assert_eq!(x.hard_state.chosen_index, Some(Slot(1)));
+    assert_eq!(x.hard_state().chosen_index, Some(Slot(1)));
 }

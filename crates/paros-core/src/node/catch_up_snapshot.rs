@@ -24,21 +24,21 @@ impl RawNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, to = to.0, from_slot = from_slot.0)))]
     pub(super) fn serve_catchup(&mut self, to: NodeId, from_slot: Slot) {
         let me = self.config.id;
-        let Some(ci) = self.hard_state.chosen_index else {
+        let Some(ci) = self.replica.chosen_index() else {
             return;
         };
         // Below our floor the decided entries have been truncated away, so no
         // contiguous `CatchUpResponse` can replay them. Offer a snapshot instead:
         // record the offer (the driver attaches the opaque application bytes and
         // sends the `InstallSnapshot`), bringing the peer up to our chosen prefix.
-        if from_slot < self.first_slot {
+        if from_slot < self.acceptor.first_slot() {
             // An open application repair means this node's own applied state
             // does not cover its chosen index yet: it has no snapshot that
             // matches the boundary an offer would advertise. Stay silent — the
             // requester re-asks each beat, and another peer (or this one, once
             // healed) serves it. Same per-slot-attribution shape as the faulty
             // hole above: never serve what you cannot back.
-            if self.app_repair.is_some() {
+            if self.replica.app_repair().is_some() {
                 return;
             }
             // The offer carries the boundary slot's *choosing* ballot when the
@@ -49,11 +49,11 @@ impl RawNode {
             // accepts, forcing a spurious election. (If compaction dropped the
             // boundary record, the promise remains the safe upper bound.)
             let choosing = self
-                .accepted
-                .get(&ci)
-                .map_or(self.hard_state.max_promised_ballot, |(b, _)| *b);
+                .acceptor
+                .record(ci)
+                .map_or(self.acceptor.promised(), |(b, _)| *b);
             self.pending_snapshot_offers
-                .push((to, ci, choosing, self.hard_state.config_id));
+                .push((to, ci, choosing, self.config_id));
             return;
         }
         if from_slot > ci {
@@ -63,7 +63,7 @@ impl RawNode {
         // our floor (entries below it are truncated) and reaches at most our
         // contiguous chosen prefix (everything served is decided).
         assert!(
-            from_slot >= self.first_slot,
+            from_slot >= self.acceptor.first_slot(),
             "catch-up is served from at or above the floor"
         );
         assert!(
@@ -72,7 +72,7 @@ impl RawNode {
         );
         let mut entries: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut expected = from_slot;
-        for (slot, command) in self.chosen.range(from_slot..=ci) {
+        for (slot, command) in self.replica.chosen().range(from_slot..=ci) {
             if entries.len() >= CATCHUP_BATCH {
                 break;
             }
@@ -89,7 +89,7 @@ impl RawNode {
             expected = Slot(slot.0 + 1);
             // The choosing ballot is the ballot recorded for this slot in the
             // accepted log (a chosen value is recorded authoritatively there).
-            let ballot = self.accepted.get(slot).map_or(self.ballot, |(b, _)| *b);
+            let ballot = self.acceptor.record(*slot).map_or(self.ballot, |(b, _)| *b);
             entries.insert(*slot, (ballot, command.clone()));
         }
         if entries.is_empty() {
@@ -137,19 +137,19 @@ impl RawNode {
         // opaque state it installs covers the very prefix whose decided values
         // this node can no longer read, and installing it closes the repair
         // without moving the chosen index anywhere.
-        if let Some(ci) = self.hard_state.chosen_index {
+        if let Some(ci) = self.replica.chosen_index() {
             if chosen_index < ci {
                 return;
             }
-            if chosen_index == ci && self.app_repair.is_none() {
+            if chosen_index == ci && self.replica.app_repair().is_none() {
                 return;
             }
         }
         // Adopt the choosing ballot. `set_promise` only ever raises the promise
         // (it is a max), so even a far-behind node cannot regress its durable
         // promise here — installing the log does not un-promise a higher ballot.
-        if ballot > self.hard_state.max_promised_ballot {
-            self.set_promise(ballot);
+        if ballot > self.acceptor.promised() {
+            self.acceptor.set_promise(ballot, &mut self.pending_writes);
         }
         // Wire hygiene: the boundary is the validation line for the ledger the
         // snapshot carries. A session record naming a slot *above*
@@ -163,63 +163,27 @@ impl RawNode {
             sessions.iter().all(|(_, _, slot)| *slot <= chosen_index),
             "a merged session record stays inside the snapshot boundary"
         );
-        let old_floor = self.first_slot;
-        let old_chosen_index = self.hard_state.chosen_index;
+        let old_floor = self.acceptor.first_slot();
+        let old_chosen_index = self.replica.chosen_index();
         // The MAX guard at entry makes this addition exact; `saturating_add`
         // stays as defense in depth.
         let first = Slot(chosen_index.0.saturating_add(1));
-        self.hard_state.chosen_index = Some(chosen_index);
         // Fully compact up to the snapshot: everything at or below `chosen_index`
         // is folded into the opaque bytes, so drop the in-memory prefix and raise
-        // the floor to `first`.
-        self.first_slot = first;
-        self.accepted = self.accepted.split_off(&first);
-        self.chosen = self.chosen.split_off(&first);
-        // Faulty entries in the folded prefix are healed by the install: their
-        // decided effects live in the opaque bytes now (the whole-blob repair).
-        self.faulty = self.faulty.split_off(&first);
-        // The folded prefix's duplicate-suppression markers are spent, and a
-        // restarted node re-derives the set from the retained log only — a
-        // live node must not remember more than its own reboot would.
-        self.duplicate_slots = self.duplicate_slots.split_off(&first);
-        // The snapshot's application state covers everything at or below its
-        // boundary, so an open application repair for that range is closed.
-        if self.app_repair.is_some_and(|cursor| cursor <= chosen_index) {
-            self.app_repair = None;
-        }
+        // the floor to `first`. Faulty entries in the folded prefix are healed
+        // by the install: their decided effects live in the opaque bytes now.
+        self.acceptor.truncate(first);
+        // The replica jumps its prefix, closes a repair the boundary covers,
+        // and adopts the serving peer's session ledger for the folded prefix
+        // (#94: those slots' records will never be walked here).
+        self.replica.install(chosen_index, &sessions);
         // A probe blocked below the boundary is resolved by the fold as well.
-        if let Some(probe) = self.repair_probe.as_mut() {
-            probe.blocked = probe.blocked.split_off(&first);
-            probe.best_have = probe.best_have.split_off(&first);
-            probe.faulty_reports = probe.faulty_reports.split_off(&first);
-            if probe.blocked.is_empty() {
-                self.repair_probe = None;
-                self.repair_elapsed = 0;
-            }
+        self.proposer.probe_retain_from(first);
+        if self.proposer.probe().is_none() {
+            self.repair_elapsed = 0;
         }
-        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        self.proposer.retain(|slot, _| *slot >= first);
-        // The prefix jumped without the contiguous walk running, so nothing
-        // handed the folded slots' `inflight` entries over. Drop them: a mapping
-        // to a slot that no longer exists would answer a retry with
-        // `Duplicate(slot)` for a slot whose commit can never ack anyone, and
-        // the reply would hang to the client's deadline every time.
-        self.inflight.retain(|_, s| *s >= first);
+        self.proposer.retain_rounds_from(first);
         self.next_slot = self.next_slot.max(first);
-        // Adopt the serving peer's session ledger for the folded prefix (#94):
-        // those slots' log records will never be walked here, so this transfer
-        // is the only way this node learns their `(client, seq) -> slot` facts —
-        // both for the dedup fast path and for suppressing a later re-choose of
-        // the same identity exactly like every peer does. `or_insert` keeps any
-        // record this node already holds; the prefixes agree cluster-wide, so a
-        // collision carries the same slot either way.
-        for (client, seq, slot) in &sessions {
-            self.applied_seq
-                .entry(*client)
-                .or_default()
-                .entry(*seq)
-                .or_insert(*slot);
-        }
         // Persist the install (opaque bytes + boundary + sealed sessions).
         // Snapshot-xor-entries: this batch surfaces no committed user entries
         // for the folded prefix; the application installs the opaque state via
@@ -234,18 +198,18 @@ impl RawNode {
         // chosen boundary, and the durable promise absorbed the snapshot's
         // ballot without ever regressing.
         assert!(
-            self.first_slot == self.first_unchosen(),
+            self.acceptor.first_slot() == self.first_unchosen(),
             "a snapshot install raises the floor to its boundary"
         );
         assert!(
-            self.hard_state.max_promised_ballot >= ballot,
+            self.acceptor.promised() >= ballot,
             "a snapshot install never lowers the promise"
         );
         // Floor monotonicity, the install-side pair of `compact`'s "the floor
         // strictly rose": the entry guards refuse any snapshot behind our
         // prefix, so the floor an install lands never regresses.
         assert!(
-            self.first_slot >= old_floor,
+            self.acceptor.first_slot() >= old_floor,
             "a snapshot install never lowers the floor"
         );
         // The durable frontiers only move forward: the entry guards refuse a
@@ -256,20 +220,22 @@ impl RawNode {
             "a snapshot install never rewinds the chosen index"
         );
         assert!(
-            self.next_slot >= self.first_slot,
+            self.next_slot >= self.acceptor.first_slot(),
             "a snapshot install carries the allocator past the folded prefix"
         );
         // Every open recovery structure now refers only to retained slots:
         // an application repair the fold did not close sits above the
         // boundary, and a probe keeps only blocked slots at or past the floor.
         assert!(
-            self.app_repair.is_none_or(|cursor| cursor > chosen_index),
+            self.replica
+                .app_repair()
+                .is_none_or(|cursor| cursor > chosen_index),
             "an application repair surviving a snapshot install sits above its boundary"
         );
         assert!(
-            self.repair_probe
-                .as_ref()
-                .is_none_or(|probe| probe.blocked.first().is_none_or(|s| *s >= first)),
+            self.proposer
+                .probe()
+                .is_none_or(|probe| probe.blocked().first().is_none_or(|s| *s >= first)),
             "a repair probe surviving a snapshot install keeps only retained slots"
         );
         // Re-drive the contiguous walk: a `Commit` learned out of order may

@@ -24,7 +24,11 @@ use super::matchmaker::MatchmakerAudit;
 /// `CheckQuorum` bounds the zombie window to one ack-quorum-less election-timeout
 /// window (at most ~10 ticks, one beat per tick); forty beats is ~4x that on
 /// the protocol's own clock, immune to wall-time dilation.
-const DEPOSED_BEAT_STREAK: u64 = 40;
+/// Ticks of slack past two `CheckQuorum` windows a deposed leader may keep
+/// beating: the window it is in when the promise-majority forms may have just
+/// started, so it needs that one and the next to notice, plus the tick that
+/// runs the check. An oracle threshold: never buggified.
+const DEPOSED_TICK_SLACK: u64 = 2;
 
 /// One leader's deposed-heartbeat streak (#95): the ballot it is beating at,
 /// the last beat seq counted (one broadcast fans out to n-1 sends, so the seq
@@ -35,7 +39,14 @@ pub(super) struct DeposedStreak {
     pub(super) round: u64,
     pub(super) node: u64,
     pub(super) seq: u64,
-    pub(super) count: u64,
+    /// Whether the last beat at this ballot was deposed (a promise-majority
+    /// of its configuration sits strictly above it).
+    pub(super) deposed: bool,
+    /// Ticks this node has run while `deposed` held.
+    pub(super) ticks: u64,
+    /// Whether a beat at this ballot was seen since the last tick: a leader
+    /// beats every tick, so a tick with no beat means it stepped down.
+    pub(super) beat_since_tick: bool,
 }
 
 /// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
@@ -224,6 +235,9 @@ pub(super) struct AuditState {
     // --- leadership ---------------------------------------------------------
     /// Per node: its deposed-heartbeat streak (#95, see [`DeposedStreak`]).
     pub(super) deposed_streaks: BTreeMap<u64, DeposedStreak>,
+    /// Per node: the election timeout in force (ticks), from
+    /// [`paros::Audit::election_timeout_set`].
+    pub(super) election_timeouts: BTreeMap<u64, u64>,
     pub(super) leader_round: BTreeMap<u64, u64>,
     pub(super) leader_rounds: BTreeSet<u64>,
     pub(super) first_leader_round: Option<u64>,
@@ -293,6 +307,21 @@ pub(super) struct AuditState {
     pub(super) corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
+    /// Nodes whose disk was wiped at a restart (#124, fed by the sim node
+    /// loop): the identity is gone for good and excused from convergence —
+    /// the explanation is the harness's own coin, never a driver decision.
+    pub(super) wiped: BTreeSet<u64>,
+    /// Nodes that shut down on an operator's retirement (#123): reported by
+    /// the driver at the instant they exit, or by a boot that found the
+    /// identity retired.
+    pub(super) retired: BTreeSet<u64>,
+    /// Matchmakers whose registry was lost for good (#125).
+    pub(super) matchmakers_lost: BTreeSet<u64>,
+    pub(super) wiped_any: bool,
+    /// A client asked some leader to reconfigure the matchmaker set.
+    pub(super) reconfigure_matchmakers_started: bool,
+    /// Some leader refused a matchmaker-set reconfiguration request.
+    pub(super) reconfigure_matchmakers_refused: bool,
     /// A process-level restart (attrition, or the corpus script) booted while
     /// at least one *other* node sat terminally parked: a transient process
     /// loss overlapped a persistent storage loss.
@@ -862,10 +891,15 @@ impl AuditState {
     /// minority can ever ack this ballot again, and no round it starts can
     /// decide. Zombie-ness is a *bounded-liveness* claim — `CheckQuorum` demotes
     /// a leader that spends a full election-timeout window without an ack
-    /// quorum, partition or not — so the streak needs no quiescence gate: it
-    /// counts beats (one per tick per leader; the seq dedups the per-peer
-    /// fan-out) and must reset well inside [`DEPOSED_BEAT_STREAK`].
-    ///
+    /// quorum, partition or not — so the streak needs no quiescence gate. It is
+    /// measured in **ticks against the node's own election timeout**
+    /// ([`Self::observe_tick`]), never in beats against a fixed count: the
+    /// window is exactly one timeout long, the timeout is a per-seed knob with
+    /// a structural floor (a 10 ms tick raises it to 25–49 ticks), and a
+    /// client's `read_index` beats add beats per tick — a fixed budget of 40
+    /// beats went red on a seed (18268997339215266796) where node 0 learned it
+    /// was deposed only at the end of a 49-tick window, with no protocol fault
+    /// anywhere.
     pub(super) fn observe_beat(&mut self, node: u64, ballot: Ballot, seq: u64) {
         // A promise-majority *of the ballot's own configuration*: only its
         // members' promises decide whether the leader can still assemble a
@@ -885,25 +919,52 @@ impl AuditState {
                 round: ballot.round,
                 node: ballot.node.0,
                 seq,
-                count: 0,
+                deposed: false,
+                ticks: 0,
+                beat_since_tick: false,
             };
         } else if entry.seq == seq {
             return;
         }
         entry.seq = seq;
+        entry.beat_since_tick = true;
         if above >= majority {
-            entry.count += 1;
+            entry.deposed = true;
         } else {
-            entry.count = 0;
+            entry.deposed = false;
+            entry.ticks = 0;
         }
-        let streak = entry.count;
+    }
+
+    /// One logical tick at `node`: a deposed leader's clock runs, and it must
+    /// step down within two `CheckQuorum` windows (see [`Self::observe_beat`]).
+    pub(super) fn observe_tick(&mut self, node: u64) {
+        let Some(entry) = self.deposed_streaks.get_mut(&node) else {
+            return;
+        };
+        if !entry.beat_since_tick {
+            // No beat this tick: the leadership is over (a leader beats every
+            // tick), so the streak is closed.
+            self.deposed_streaks.remove(&node);
+            return;
+        }
+        entry.beat_since_tick = false;
+        if !entry.deposed {
+            return;
+        }
+        entry.ticks += 1;
+        let timeout = self.election_timeouts.get(&node).copied().unwrap_or(0);
+        let budget = timeout.saturating_mul(2).saturating_add(DEPOSED_TICK_SLACK);
+        let streak = entry.ticks;
+        let round = entry.round;
         assert_always!(
-            streak < DEPOSED_BEAT_STREAK,
+            streak <= budget,
             "a leader deposed by a promise-majority stops beating within an election timeout (CheckQuorum)",
             {
                 "node" => node,
-                "round" => ballot.round,
-                "streak_beats" => streak
+                "round" => round,
+                "streak_ticks" => streak,
+                "timeout_ticks" => timeout
             }
         );
     }

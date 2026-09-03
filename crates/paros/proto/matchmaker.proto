@@ -16,6 +16,15 @@ service ParosMatchmaker {
   // Raise the garbage-collection watermark (the paper's GarbageA / GarbageB):
   // registrations below it are dropped and nothing below it may register.
   rpc GarbageCollect(.paros.matchmaker.v1.GarbageCollect) returns (.paros.matchmaker.v1.GarbageCollectAck);
+  // One step of a matchmaker-set reconfiguration (the paper's §5: stop,
+  // bootstrap, the successor decree, and the chosen publication).
+  rpc Reconfigure(.paros.matchmaker.v1.ReconfigureRequest) returns (.paros.matchmaker.v1.ReconfigureReply);
+}
+
+// A matchmaker set bound to its generation.
+message MatchmakerSet {
+  uint64 generation = 1;
+  repeated uint64 members = 2;
 }
 
 message Ballot {
@@ -40,6 +49,9 @@ message MatchRequest {
   // Whether this registers a reconfiguration (a leader's explicit change)
   // rather than a candidate's belief about the configuration in force.
   bool reconfiguration = 4;
+  // The matchmaker generation addressed (a matchmaker not active for
+  // exactly this generation refuses with what it knows).
+  uint64 generation = 5;
 }
 
 message Registration {
@@ -57,10 +69,21 @@ message Registered {
 
 // A refusal, carrying what the requester needs to make progress. Diagnostics
 // only: the requester never adopts these ballots as trusted input.
+// A frozen generation: the successor, once learned.
+message RefusedStopped {
+  optional MatchmakerSet successor = 1;
+}
+
+message RefusedInactive {}
+
 message Refused {
   oneof reason {
     Ballot stale_highest = 1;
     Ballot below_watermark = 2;
+    RefusedStopped stopped = 3;
+    // Active for another generation: the set this matchmaker serves.
+    MatchmakerSet generation = 4;
+    RefusedInactive inactive = 5;
   }
 }
 
@@ -72,11 +95,14 @@ message MatchReply {
     Registered registered = 4;
     Refused refused = 5;
   }
+  // The request's generation, echoed.
+  uint64 generation = 6;
 }
 
 message GarbageCollect {
   uint64 from = 1;
   Ballot watermark = 2;
+  uint64 generation = 3;
 }
 
 message GarbageCollectAck {
@@ -84,4 +110,115 @@ message GarbageCollectAck {
   // The durable watermark after the request (at least the requested one, or
   // the higher floor already in force).
   Ballot watermark = 2;
+  uint64 generation = 3;
+  // Whether the request was applied at that generation.
+  bool applied = 4;
+}
+
+// ---- matchmaker-set reconfiguration (#125) ----------------------------------
+
+message Stop {
+  uint64 generation = 1;
+}
+
+message Bootstrap {
+  MatchmakerSet set = 1;
+  Ballot gc_watermark = 2;
+  repeated Registration history = 3;
+}
+
+message DecreePrepare {
+  uint64 generation = 1;
+  Ballot ballot = 2;
+}
+
+message DecreeAccept {
+  uint64 generation = 1;
+  Ballot ballot = 2;
+  repeated uint64 members = 3;
+}
+
+message Chosen {
+  uint64 generation = 1;
+  MatchmakerSet successor = 2;
+}
+
+message ReconfigureRequest {
+  uint64 from = 1;
+  oneof kind {
+    Stop stop = 2;
+    Bootstrap bootstrap = 3;
+    DecreePrepare decree_prepare = 4;
+    DecreeAccept decree_accept = 5;
+    Chosen chosen = 6;
+  }
+}
+
+message StopAck {
+  uint64 generation = 1;
+  Ballot gc_watermark = 2;
+  repeated Registration history = 3;
+  optional MatchmakerSet successor = 4;
+  // The highest decree ballot promised for the frozen generation: the
+  // reconfigurer opens its decree strictly above the maximum over its stop
+  // quorum, so a rebooted node never reuses a ballot of its earlier
+  // incarnation.
+  Ballot decree_promised = 5;
+}
+
+message BootstrapAck {
+  MatchmakerSet set = 1;
+}
+
+message DecreeVote {
+  Ballot ballot = 1;
+  repeated uint64 members = 2;
+}
+
+message DecreePromise {
+  uint64 generation = 1;
+  Ballot ballot = 2;
+  optional DecreeVote vote = 3;
+}
+
+message DecreeAccepted {
+  uint64 generation = 1;
+  Ballot ballot = 2;
+}
+
+message DecreeNack {
+  uint64 generation = 1;
+  Ballot ballot = 2;
+  Ballot promised = 3;
+}
+
+message Learned {
+  uint64 generation = 1;
+  bool activated = 2;
+}
+
+enum MatchmakerPhase {
+  MATCHMAKER_PHASE_FRESH = 0;
+  MATCHMAKER_PHASE_INACTIVE = 1;
+  MATCHMAKER_PHASE_ACTIVE = 2;
+  MATCHMAKER_PHASE_STOPPED = 3;
+}
+
+message ReconfigureRefused {
+  MatchmakerSet current = 1;
+  MatchmakerPhase phase = 2;
+  optional MatchmakerSet successor = 3;
+}
+
+message ReconfigureReply {
+  uint64 matchmaker = 1;
+  oneof kind {
+    StopAck stopped = 2;
+    BootstrapAck bootstrapped = 3;
+    DecreePromise promised = 4;
+    DecreeAccepted accepted = 5;
+    DecreeNack nacked = 6;
+    Learned learned = 7;
+    ReconfigureRefused refused = 8;
+  }
 }

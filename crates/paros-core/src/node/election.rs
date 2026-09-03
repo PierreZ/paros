@@ -1,190 +1,18 @@
+//! The node's **campaign wiring**: how the election clock opens a campaign,
+//! how a `Promise` reaches the [`Proposer`](crate::proposer::Proposer)'s
+//! Phase-1 tally (or its repair probe), how a won Phase 1 becomes a
+//! leadership, and how that leadership drains its recovered suffix one
+//! bounded page at a time. The component tallies and decides; this module
+//! builds the `Prepare`s, moves the role, fixes the allocator and the read
+//! fence, and opens the GC campaign on a matchmaker deployment.
+
 use super::matchmaking::Matchmaking;
 use super::{
-    BTreeMap, BTreeSet, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message,
-    NodeId, NodeRole, PROMISE_BATCH, RawNode, Slot,
+    BTreeMap, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message, NodeId,
+    NodeRole, RawNode, Slot,
 };
 use crate::matchmaker::{AcceptorConfig, MatchRequest};
-
-/// Volatile per-ballot Phase-1 state while a Candidate recovers the log suffix.
-///
-/// # Cross-configuration completion (#121)
-///
-/// Phase 1 is complete when **every** prior configuration in `prior` holds a
-/// Phase-1 quorum of promises at `ballot` — `quorum(C1) AND quorum(C2) AND …`,
-/// never `quorum(union(C1, C2, …))`. The two are not equivalent: a large
-/// promise set drawn mostly from `C1` satisfies the union's quorum while
-/// failing to intersect a Phase-2 quorum of `C2`, so a value `C2` already
-/// chose stays invisible and the new leader proposes another — two values
-/// chosen for one slot. One promise counts toward every configuration that
-/// contains its sender (the normal case: consecutive configurations overlap
-/// heavily), through one shared `promised_by` pool with a per-configuration
-/// tally ([`Election::covered`]). Value selection runs over *all* gathered
-/// promises regardless of configuration (`recovered`), exactly as before.
-///
-/// On a plain deployment `prior` is the one static configuration, so the
-/// predicate is today's single quorum comparison.
-pub(super) struct Election {
-    /// The ballot this election runs under.
-    pub(super) ballot: Ballot,
-    /// `C_b`: the configuration this ballot runs Phase 2 with once won —
-    /// registered with the matchmakers before this election opened, or the
-    /// static configuration on a plain deployment.
-    pub(super) config: AcceptorConfig,
-    /// `H_b`: every distinct prior configuration whose Phase-1 quorum this
-    /// election must independently obtain. Empty means nothing below this
-    /// ballot survives the matchmakers' watermark, so Phase 1 is trivially
-    /// complete (an explicit, gated case, never an accident).
-    pub(super) prior: Vec<AcceptorConfig>,
-    /// First slot this election recovers (`chosen_index + 1`, or `Slot(0)`).
-    pub(super) from_slot: Slot,
-    /// Acceptors (incl. self) that have promised `ballot` — the one shared
-    /// promise pool every configuration's tally is drawn from.
-    pub(super) promised_by: BTreeSet<NodeId>,
-    /// Highest-ballot accepted command per slot seen across the promise quorum,
-    /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
-    pub(super) recovered: BTreeMap<Slot, (Ballot, Command)>,
-    /// The tri-state's third answer, per slot: which acceptor reported its copy
-    /// **faulty** (value lost, identity known) at what accepted ballot. A
-    /// faulty report is silence toward the none-tally, never denial: it blocks
-    /// the no-op gap fill at its slot until [`RawNode::slot_decidable`] finds a
-    /// full Q1 of qualifying reports (Stage 8, CTRL restatement R2/R3).
-    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
-    /// Next suffix-page cursor expected from each non-terminal acceptor.
-    pub(super) promise_next: BTreeMap<NodeId, Slot>,
-}
-
-/// Bounded continuation for a newly elected leader's recovered suffix.
-pub(super) struct LeaderRecovery {
-    /// Highest-ballot command reported for each retained slot.
-    pub(super) recovered: BTreeMap<Slot, Command>,
-    /// Slots the Phase-1 tally could not decide (Case 3: wait): neither
-    /// re-proposed nor no-op-filled by the pump; the open [`RepairProbe`]
-    /// resolves them as stragglers answer.
-    pub(super) blocked: BTreeSet<Slot>,
-    /// Next slot to recover or fill.
-    pub(super) cursor: Slot,
-    /// One past the highest slot covered by the Phase-1 quorum.
-    pub(super) end: Slot,
-    /// Whether a slot the range covers but `recovered` does not name may be
-    /// filled with a [`Control::Noop`].
-    ///
-    /// `true` for an election: quorum intersection guarantees a value already
-    /// chosen there would have been reported, so an unreported slot is
-    /// genuinely free. `false` for a cooperative handoff, which ran **no
-    /// Phase 1**: there is no quorum report behind it, so a slot the
-    /// predecessor did not explicitly describe is simply skipped — filling it
-    /// could overwrite a value chosen under an older ballot.
-    pub(super) gap_fill: bool,
-}
-
-/// The leader's open **distributed commitment determination** (Stage 8): the
-/// faulty slots its winning promise quorum resolved neither as Case 1 (some
-/// `have`) nor Case 2 (a full Q1 of qualifying `none`). The leader keeps
-/// re-querying the peers that have not answered (their `Promise` pages arrive
-/// through the ordinary Phase-1 path, at the leader's own ballot) and decides
-/// each blocked slot the moment the tally allows; a probe that stays blocked
-/// for a full recovery timeout resigns the leadership (CTRL §4.2).
-pub(super) struct RepairProbe {
-    /// The leadership ballot the probe queries at.
-    pub(super) ballot: Ballot,
-    /// The prior configurations the election covered: a blocked slot is
-    /// decidable only once a full Q1 of qualifying answers holds in **every**
-    /// one of them (the same predicate as the election's), and the
-    /// straggler re-query fans out to their union.
-    pub(super) prior: Vec<AcceptorConfig>,
-    /// First slot the original Phase 1 covered (re-sent `Prepare`s echo it).
-    pub(super) from_slot: Slot,
-    /// Acceptors (incl. self) whose complete suffix answer has been merged.
-    pub(super) answered: BTreeSet<NodeId>,
-    /// Faulty reports per still-blocked slot: reporter → accepted ballot.
-    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
-    /// Highest-ballot `have` seen per still-blocked slot.
-    pub(super) best_have: BTreeMap<Slot, (Ballot, Command)>,
-    /// Slots still undecidable (Case 3: wait).
-    pub(super) blocked: BTreeSet<Slot>,
-    /// Next suffix-page cursor expected from each non-terminal straggler.
-    pub(super) promise_next: BTreeMap<NodeId, Slot>,
-}
-
-/// How many members of `config` among `answered` gave a **qualifying**
-/// answer for a faulty-reported slot.
-///
-/// The unified CTRL restatement (R2/R3): let `threshold` be the highest
-/// reported `have` ballot at the slot (`None` when nothing was reported). A
-/// chosen value at or below `threshold` is value-identical to the best `have`
-/// (the P2c chain), and a value chosen *above* it would leave a record at
-/// ballot `> threshold` on some member of every Q2 — so an acceptor's answer
-/// qualifies when it reported either nothing (`none`) or a record at ballot
-/// `<= threshold`.
-fn qualifying_answers(
-    config: &AcceptorConfig,
-    answered: &BTreeSet<NodeId>,
-    reporters: Option<&BTreeMap<NodeId, Ballot>>,
-    threshold: Option<Ballot>,
-) -> usize {
-    answered
-        .iter()
-        .filter(|node| config.contains(**node))
-        .filter(|node| {
-            reporters
-                .and_then(|reporters| reporters.get(*node))
-                .is_none_or(|ballot| Some(*ballot) <= threshold)
-        })
-        .count()
-}
-
-/// Whether a faulty-reported slot is decidable: a full Q1 of qualifying
-/// answers holds in **every** prior configuration, so quorum intersection
-/// rules out a hidden chosen value in each of them. Then the best `have` is
-/// decided (Case 1) or, with no `have` at all, `Noop` (Case 2 — a full Q1 of
-/// `none` per configuration). Anything less is Case 3: wait. With no prior
-/// configuration at all nothing could have been chosen below this ballot, so
-/// the slot is decidable outright.
-fn slot_decidable(
-    prior: &[AcceptorConfig],
-    answered: &BTreeSet<NodeId>,
-    reporters: Option<&BTreeMap<NodeId, Ballot>>,
-    threshold: Option<Ballot>,
-) -> bool {
-    prior.iter().all(|config| {
-        qualifying_answers(config, answered, reporters, threshold) >= config.quorum_size()
-    })
-}
-
-impl Election {
-    /// Whether every prior configuration holds a Phase-1 quorum of promises —
-    /// the completion predicate, in one readable place (see the type doc).
-    pub(super) fn covered(&self) -> bool {
-        self.prior
-            .iter()
-            .all(|config| config.count_members(&self.promised_by) >= config.quorum_size())
-    }
-}
-
-/// A `Promise` page is useful only at the exact requested cursor, carries at
-/// most the advertised bound across both tri-state maps, keeps them disjoint,
-/// and advances its continuation past everything it reported.
-fn promise_page_shape_valid(
-    expected: Slot,
-    accepted: &BTreeMap<Slot, (Ballot, Command)>,
-    faulty: &BTreeMap<Slot, Ballot>,
-    from_slot: Slot,
-    next_from_slot: Option<Slot>,
-) -> bool {
-    let len = accepted.len() + faulty.len();
-    from_slot == expected
-        && len <= PROMISE_BATCH
-        && accepted.keys().all(|slot| *slot >= from_slot)
-        && faulty
-            .keys()
-            .all(|slot| *slot >= from_slot && !accepted.contains_key(slot))
-        && next_from_slot.is_none_or(|next| {
-            len == PROMISE_BATCH
-                && next > from_slot
-                && accepted.keys().next_back().is_none_or(|last| next > *last)
-                && faulty.keys().next_back().is_none_or(|last| next > *last)
-        })
-}
+use crate::proposer::{Campaign, PromiseFold, RecoveryPolicy, RecoveryStep};
 
 impl RawNode {
     // ---- election / leadership --------------------------------------------
@@ -222,8 +50,8 @@ impl RawNode {
     pub(super) fn campaign(&mut self, target: Option<AcceptorConfig>) {
         let me = self.config.id;
         let base_round = self
-            .hard_state
-            .max_promised_ballot
+            .acceptor
+            .promised()
             .round
             .max(self.ballot.round)
             .max(self.round_floor);
@@ -241,12 +69,13 @@ impl RawNode {
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };
-        self.set_promise(self.ballot);
+        self.acceptor
+            .set_promise(self.ballot, &mut self.pending_writes);
         // A campaign opens at a ballot this node itself just promised: the
         // fresh round is strictly above every round in the max above, so the
         // promise landed exactly on the campaign ballot.
         assert!(
-            self.hard_state.max_promised_ballot == self.ballot,
+            self.acceptor.promised() == self.ballot,
             "a candidate promises the ballot it campaigns at"
         );
         // A refused campaign's floor is honoured: the fresh round sits
@@ -265,12 +94,13 @@ impl RawNode {
                 config.clone(),
                 reconfiguration,
             ));
+            let generation = self.matchmakers.generation;
             let request = if reconfiguration {
-                MatchRequest::reconfigure(me, self.ballot, config)
+                MatchRequest::reconfigure(me, self.ballot, config, generation)
             } else {
-                MatchRequest::new(me, self.ballot, config)
+                MatchRequest::new(me, self.ballot, config, generation)
             };
-            for matchmaker in self.config.matchmakers.clone() {
+            for matchmaker in self.matchmakers.members.clone() {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
             }
@@ -283,7 +113,10 @@ impl RawNode {
                     .any(|(_, m)| matches!(m, Message::Prepare { .. })),
                 "a campaign sends no Prepare before its matchmaker quorum"
             );
-            assert!(self.election.is_none(), "matchmaking opens before Phase 1");
+            assert!(
+                self.proposer.election().is_none(),
+                "matchmaking opens before Phase 1"
+            );
         } else {
             // Plain Multi-Paxos: `H_b` is implicitly the static configuration.
             self.start_phase1(config.clone(), vec![config]);
@@ -304,14 +137,14 @@ impl RawNode {
             "Phase 1 opens on a candidate"
         );
         assert!(
-            self.hard_state.max_promised_ballot == self.ballot,
+            self.acceptor.promised() == self.ballot,
             "Phase 1 opens at the ballot the candidate promised"
         );
         assert!(
             self.matchmaking.is_none(),
             "Phase 1 opens once matchmaking has closed"
         );
-        assert!(self.election.is_none(), "one Phase 1 per ballot");
+        assert!(self.proposer.election().is_none(), "one Phase 1 per ballot");
 
         // The campaign's recovery range starts at this node's first *faulty*
         // slot when that sits below the contiguous prefix (Stage 8): a rotted
@@ -320,57 +153,34 @@ impl RawNode {
         // node's own Phase 1 covers the hole and the quorum's reports heal it
         // (see the prefix-heal step in `try_become_leader`).
         let from_slot = self
-            .faulty
+            .acceptor
+            .faulty()
             .keys()
             .next()
             .copied()
             .map_or(self.first_unchosen(), |first_faulty| {
                 first_faulty.min(self.first_unchosen())
             });
-        let recovered: BTreeMap<Slot, (Ballot, Command)> = self
-            .accepted
-            .range(from_slot..)
-            .map(|(s, v)| (*s, v.clone()))
-            .collect();
-        // Seed the tri-state tally with this node's own faulty entries: a
-        // candidate is its own first acceptor, and its rotted copies must block
-        // the none-tally exactly like a peer's (never silently count as
-        // "nothing accepted here").
-        let mut faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
-        for (slot, ballot) in self.faulty.range(from_slot..) {
-            faulty_reports.entry(*slot).or_default().insert(me, *ballot);
-        }
-        // The candidate is its own first acceptor. Its promise counts toward
-        // every prior configuration that contains it, and toward none when it
-        // is in none of them (a fresh member of `C_b`, or a reconfiguring
-        // leader that removed itself): the per-configuration tally decides.
-        let mut promised_by = BTreeSet::new();
-        promised_by.insert(me);
-        // Phase 1 fans out to the union of every prior configuration — the
-        // addressee list *is* a union, only the completion predicate is not —
-        // plus `C_b` itself, so the incoming members promise the ballot (and
-        // learn the configuration) before Phase 2 reaches them.
-        let mut targets: Vec<NodeId> = prior
-            .iter()
-            .chain(std::iter::once(&config))
-            .flat_map(|c| c.members.iter().copied())
-            .filter(|p| *p != me)
-            .collect();
-        targets.sort_unstable();
-        targets.dedup();
         let wire_config = self.config.has_matchmakers().then(|| config.clone());
-        self.election = Some(Election {
-            ballot: self.ballot,
-            config,
-            prior,
-            from_slot,
-            promised_by,
-            recovered,
-            faulty_reports,
-            promise_next: BTreeMap::new(),
-        });
+        // The candidate is its own first acceptor: its records seed the P2c
+        // tally, its faulty entries the tri-state tally, and its promise
+        // counts toward every prior configuration that contains it (and
+        // toward none when it is in none of them — a fresh member of `C_b`,
+        // or a reconfiguring leader that removed itself: the
+        // per-configuration tally decides).
+        let targets = self.proposer.open_phase1(
+            Campaign {
+                me,
+                ballot: self.ballot,
+                config,
+                prior,
+                from_slot,
+            },
+            self.acceptor.records(),
+            self.acceptor.faulty(),
+        );
         let prepare = Message::Prepare {
-            config_id: self.hard_state.config_id,
+            config_id: self.config_id,
             from: me,
             ballot: self.ballot,
             from_slot,
@@ -397,7 +207,7 @@ impl RawNode {
 
     /// Candidate: collect a `Promise`, merging the reported accepted suffix
     /// (highest ballot per slot wins) and the tri-state faulty reports. A
-    /// **leader** with an open [`RepairProbe`] also lands here: a straggler's
+    /// **leader** with an open repair probe also lands here: a straggler's
     /// late answer (or a re-queried peer's fresh one) is merged into the probe
     /// and may resolve a blocked slot.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
@@ -422,66 +232,36 @@ impl RawNode {
             self.on_probe_promise(from, ballot, from_slot, &accepted, &faulty, next_from_slot);
             return;
         }
-        let mut request_next = None;
+        match self
+            .proposer
+            .fold_promise(from, ballot, from_slot, accepted, faulty, next_from_slot)
         {
-            let Some(e) = self.election.as_mut() else {
-                return;
-            };
-            if e.ballot != ballot || e.promised_by.contains(&from) {
-                return;
-            }
-            let expected = e.promise_next.get(&from).copied().unwrap_or(e.from_slot);
-            if !promise_page_shape_valid(expected, &accepted, &faulty, from_slot, next_from_slot) {
-                return;
-            }
-            for (slot, (ab, command)) in accepted {
-                // The P2c selection rule, at the merge: a slot's recovered
-                // value is the one accepted at the highest ballot any promise
-                // reported. A lower report never replaces it, and two reports
-                // at one ballot are the same command (one proposer per ballot,
-                // P2b) — a disagreement is a protocol violation, not a tie.
-                match e.recovered.get(&slot) {
-                    Some((rb, _)) if ab < *rb => {}
-                    Some((rb, recorded)) if ab == *rb => {
-                        assert!(
-                            *recorded == command,
-                            "two Phase-1 reports of one (slot, ballot) agree on the command"
-                        );
-                    }
-                    _ => {
-                        e.recovered.insert(slot, (ab, command));
-                    }
-                }
-            }
-            for (slot, fb) in faulty {
-                e.faulty_reports.entry(slot).or_default().insert(from, fb);
-            }
-            if let Some(next) = next_from_slot {
-                e.promise_next.insert(from, next);
-                request_next = Some(next);
+            PromiseFold::Ignored => return,
+            PromiseFold::Continue(next) => {
                 // A valid page is leader contact for election-timeout purposes;
                 // a long suffix must not make the same campaign expire mid-page.
                 self.election_elapsed = 0;
-            } else {
-                e.promise_next.remove(&from);
-                e.promised_by.insert(from);
+                self.request_promise_page(from, ballot, next);
+                return;
             }
-        }
-        if let Some(next) = request_next {
-            let config = self.phase1_wire_config();
-            self.pending_messages.push((
-                from,
-                Message::Prepare {
-                    config_id: self.hard_state.config_id,
-                    from: self.config.id,
-                    ballot,
-                    from_slot: next,
-                    config,
-                },
-            ));
-            return;
+            PromiseFold::Answered => {}
         }
         self.try_become_leader();
+    }
+
+    /// Ask `from` for its next `Promise` page at `ballot`, from `next`.
+    fn request_promise_page(&mut self, from: NodeId, ballot: Ballot, next: Slot) {
+        let config = self.phase1_wire_config();
+        self.pending_messages.push((
+            from,
+            Message::Prepare {
+                config_id: self.config_id,
+                from: self.config.id,
+                ballot,
+                from_slot: next,
+                config,
+            },
+        ));
     }
 
     /// Merge one straggler `Promise` page into the leader's open repair probe
@@ -496,73 +276,20 @@ impl RawNode {
         faulty: &BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) {
-        let mut request_next = None;
-        {
-            let Some(probe) = self.repair_probe.as_mut() else {
-                return;
-            };
-            if probe.ballot != ballot || probe.answered.contains(&from) {
-                return;
-            }
-            let expected = probe
-                .promise_next
-                .get(&from)
-                .copied()
-                .unwrap_or(probe.from_slot);
-            if !promise_page_shape_valid(expected, accepted, faulty, from_slot, next_from_slot) {
+        match self.proposer.fold_probe_promise(
+            from,
+            ballot,
+            from_slot,
+            accepted,
+            faulty,
+            next_from_slot,
+        ) {
+            PromiseFold::Ignored => return,
+            PromiseFold::Continue(next) => {
+                self.request_promise_page(from, ballot, next);
                 return;
             }
-            // Only the still-blocked slots matter: everything else was decided
-            // or re-proposed when the election closed.
-            for (slot, (ab, command)) in accepted {
-                if !probe.blocked.contains(slot) {
-                    continue;
-                }
-                // Same P2c/P2b rule as the election merge, over the probe's
-                // `have` tally.
-                match probe.best_have.get(slot) {
-                    Some((rb, _)) if ab < rb => {}
-                    Some((rb, recorded)) if ab == rb => {
-                        assert!(
-                            recorded == command,
-                            "two Phase-1 reports of one (slot, ballot) agree on the command"
-                        );
-                    }
-                    _ => {
-                        probe.best_have.insert(*slot, (*ab, command.clone()));
-                    }
-                }
-            }
-            for (slot, fb) in faulty {
-                if probe.blocked.contains(slot) {
-                    probe
-                        .faulty_reports
-                        .entry(*slot)
-                        .or_default()
-                        .insert(from, *fb);
-                }
-            }
-            if let Some(next) = next_from_slot {
-                probe.promise_next.insert(from, next);
-                request_next = Some(next);
-            } else {
-                probe.promise_next.remove(&from);
-                probe.answered.insert(from);
-            }
-        }
-        if let Some(next) = request_next {
-            let config = self.phase1_wire_config();
-            self.pending_messages.push((
-                from,
-                Message::Prepare {
-                    config_id: self.hard_state.config_id,
-                    from: self.config.id,
-                    ballot,
-                    from_slot: next,
-                    config,
-                },
-            ));
-            return;
+            PromiseFold::Answered => {}
         }
         self.resolve_blocked_repairs();
     }
@@ -573,41 +300,16 @@ impl RawNode {
     /// blocked.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
-        let mut decisions: Vec<(Slot, Command, bool)> = Vec::new();
-        {
-            let Some(probe) = self.repair_probe.as_mut() else {
-                return;
-            };
-            for slot in probe.blocked.clone() {
-                let have = probe.best_have.get(&slot);
-                let threshold = have.map(|(b, _)| *b);
-                if !slot_decidable(
-                    &probe.prior,
-                    &probe.answered,
-                    probe.faulty_reports.get(&slot),
-                    threshold,
-                ) {
-                    continue;
-                }
-                let (command, is_have) = have.map_or_else(
-                    || (Command::Control(Control::Noop), false),
-                    |(_b, command)| (command.clone(), true),
-                );
-                probe.blocked.remove(&slot);
-                probe.best_have.remove(&slot);
-                probe.faulty_reports.remove(&slot);
-                decisions.push((slot, command, is_have));
-            }
-            if probe.blocked.is_empty() {
-                self.repair_probe = None;
-                self.repair_elapsed = 0;
-            }
+        let decisions = self.proposer.resolve_probe();
+        if self.proposer.probe().is_none() {
+            self.repair_elapsed = 0;
         }
-        for (slot, command, is_have) in decisions {
-            if self.chosen.contains_key(&slot) || slot < self.first_slot {
+        for decision in decisions {
+            let slot = decision.slot;
+            if self.replica.is_chosen(slot) || slot < self.acceptor.first_slot() {
                 continue;
             }
-            if is_have {
+            if decision.from_have {
                 self.repair_case1 += 1;
             } else {
                 // Case 2 invents a `Noop` from a full Q1 of qualifying `none`.
@@ -621,12 +323,12 @@ impl RawNode {
                 );
                 self.repair_case2 += 1;
             }
-            if let Command::User(entry) = &command
-                && !self.applied_elsewhere(entry, slot)
+            if let Command::User(entry) = &decision.command
+                && !self.replica.applied_elsewhere(entry, slot)
             {
-                self.inflight.insert((entry.client, entry.seq), slot);
+                self.replica.track_inflight(entry.client, entry.seq, slot);
             }
-            self.start_accept_round(slot, command);
+            self.start_accept_round(slot, decision.command);
         }
     }
 
@@ -641,72 +343,68 @@ impl RawNode {
     /// Winning below the own promise breaks "a leader's ballot >= its own
     /// promise": every self-accept is skipped (`start_accept_round`'s
     /// `ballot >= max_promised_ballot` check), so recovered slots reach
-    /// `proposer` but never `accepted`, `next_slot` — derived from `accepted` —
-    /// lands *below* an in-flight slot, and a later `propose` re-proposes a
-    /// different command under the same `(slot, ballot)`: two values can then
-    /// assemble accept quorums for one slot at n >= 5. Refusal is a plain
-    /// non-win: the election stays open and self-heals — the next election
-    /// timeout campaigns at `max(max_promised_ballot.round, ..) + 1`
-    /// (`on_check_leader`), above the promise that caused the refusal.
-    #[allow(clippy::too_many_lines)]
+    /// the round tally but never `accepted`, `next_slot` — derived from
+    /// `accepted` — lands *below* an in-flight slot, and a later `propose`
+    /// re-proposes a different command under the same `(slot, ballot)`: two
+    /// values can then assemble accept quorums for one slot at n >= 5.
+    /// Refusal is a plain non-win: the election stays open and self-heals —
+    /// the next election timeout campaigns at `max(max_promised_ballot.round,
+    /// ..) + 1` (`on_check_leader`), above the promise that caused the
+    /// refusal.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn try_become_leader(&mut self) {
         // The win gate (#121): every prior configuration covered — one
         // predicate, in one place (`Election::covered`) — at a ballot the
         // node's own promise has not moved past.
-        let won = self.role == NodeRole::Candidate
-            && self
-                .election
-                .as_ref()
-                .is_some_and(|e| e.covered() && e.ballot >= self.hard_state.max_promised_ballot);
-        if !won {
+        if self.role != NodeRole::Candidate || !self.proposer.phase1_won(self.acceptor.promised()) {
             return;
         }
         let me = self.config.id;
-        let e = self.election.take().expect("won implies an election");
-        // Post-win restatement of the quorum half of the win condition (the
-        // ballot half is restated in the postcondition block below): the
-        // campaign that just closed really held a Phase-1 quorum of *every*
-        // prior configuration, and every counted promise came from the pool.
+        // Close the campaign: the tally becomes the leadership's, and the
+        // faulty-reported slots it could not decide (Case 3) go to the repair
+        // probe — except those already chosen here, whose value re-replicates
+        // through the normal commit/catch-up paths and repairs the faulty
+        // copies in place.
+        let outcome = self
+            .proposer
+            .close_phase1(|slot| self.replica.is_chosen(slot));
+        // Post-win restatement of the pool half of the win condition (the
+        // quorum half is restated by the component, the ballot half in the
+        // postcondition block below): every counted promise came from the
+        // pool.
         assert!(
-            e.covered(),
-            "a won election holds a promise quorum of every prior configuration"
-        );
-        assert!(
-            e.promised_by.iter().all(|n| self.in_pool(*n)),
+            outcome.promised_by.iter().all(|n| self.in_pool(*n)),
             "every counted promise comes from the addressable pool"
         );
         self.role = NodeRole::Leader;
         self.leader = Some(me);
-        self.ballot = e.ballot;
+        self.ballot = outcome.ballot;
         // Registration precedes exercise (#120, invariant 5): Phase 2 runs
         // under exactly the configuration this ballot was registered with.
         // The plain path's static configuration stays bound to no ballot.
         if self.config.has_matchmakers() {
-            self.acceptors = e.config.clone();
-            self.acceptors_since = e.ballot;
+            self.acceptors = outcome.config.clone();
+            self.acceptors_since = outcome.ballot;
         } else {
             assert!(
-                self.acceptors == e.config,
+                self.acceptors == outcome.config,
                 "a plain campaign runs Phase 1 for its static configuration"
             );
         }
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
-        self.proposer.clear();
-        self.resend_cursor = None;
 
         // Fix the allocator/read fence from the complete Phase-1 result before
         // starting only its first bounded recovery page. Fresh proposals may
         // then allocate strictly above every inherited slot while the suffix is
         // drained across later Ready batches.
         let highest = self
-            .accepted
+            .acceptor
+            .records()
             .keys()
-            .chain(e.recovered.keys())
-            .chain(e.faulty_reports.keys())
-            .max()
-            .copied();
+            .next_back()
+            .copied()
+            .max(outcome.highest_reported);
         // The campaign range can reach below the contiguous prefix (a faulty
         // chosen slot extends it), so the allocator clamps at the prefix: a
         // below-prefix report never pulls `next_slot` into chosen territory.
@@ -735,32 +433,8 @@ impl RawNode {
         // reported it (an acceptor that truncated the range Nacks instead of
         // under-reporting — see the floor guard in `on_prepare`). Nothing was
         // reported, so nothing is chosen there and the slot is genuinely free.
-        // ---- Faulty-slot tally (Stage 8, CTRL): a slot some quorum member
-        // reported *faulty* is fair game for the pump only if the tally already
-        // rules out a hidden chosen value (see [`qualifying_answers`]): then a
-        // reported `have` re-proposes normally and an all-`none` slot no-op
-        // fills normally. Anything else is **blocked** — Case 3: wait — and
-        // moves to the repair probe, which keeps querying stragglers.
-        let mut blocked: BTreeSet<Slot> = BTreeSet::new();
-        let mut probe_have: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
-        let mut probe_faulty: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
-        for (slot, reporters) in &e.faulty_reports {
-            if self.chosen.contains_key(slot) {
-                // Already decided: the value re-replicates through the normal
-                // commit/catch-up paths, repairing the faulty copies in place.
-                continue;
-            }
-            let have = e.recovered.get(slot);
-            let threshold = have.map(|(b, _)| *b);
-            if slot_decidable(&e.prior, &e.promised_by, Some(reporters), threshold) {
-                continue;
-            }
-            blocked.insert(*slot);
-            if let Some((b, command)) = have {
-                probe_have.insert(*slot, (*b, command.clone()));
-            }
-            probe_faulty.insert(*slot, reporters.clone());
-        }
+        // That licence is the recovery's `RecoveryPolicy::Phase1Backed`.
+        //
         // Faulty **chosen** slots — holes below the contiguous prefix — are
         // healed from the quorum's merged reports rather than re-proposed: a
         // chosen value's Q2 intersects this promise quorum, so the
@@ -768,47 +442,33 @@ impl RawNode {
         // accepted record above the choosing ballot carries it, P2c). A slot
         // the tally could not clear (a faulty report above the best `have`)
         // stays blocked and resolves through the probe like any other.
-        let prefix_heals: Vec<(Slot, Ballot, Command)> = e
+        let prefix_heals: Vec<(Slot, Ballot, Command)> = outcome
             .recovered
             .range(..self.first_unchosen())
-            .filter(|(slot, _)| !blocked.contains(slot) && !self.chosen.contains_key(slot))
+            .filter(|(slot, _)| !outcome.blocked.contains(slot) && !self.replica.is_chosen(**slot))
             .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
             .collect();
         for (slot, ballot, command) in prefix_heals {
             self.mark_chosen(slot, &command, ballot);
         }
-        if blocked.is_empty() {
-            self.repair_probe = None;
-        } else {
-            self.repair_probe = Some(RepairProbe {
-                ballot: e.ballot,
-                prior: e.prior.clone(),
-                from_slot: e.from_slot,
-                answered: e.promised_by.clone(),
-                faulty_reports: probe_faulty,
-                best_have: probe_have,
-                blocked: blocked.clone(),
-                promise_next: BTreeMap::new(),
-            });
-        }
         self.repair_elapsed = 0;
 
         let recovery_start = self.first_unchosen();
-        let recovered: BTreeMap<Slot, Command> = e
+        let recovered: BTreeMap<Slot, Command> = outcome
             .recovered
             .into_iter()
             .map(|(slot, (_ballot, command))| (slot, command))
             .collect();
         self.election_gap_fills = 0;
         self.leadership_origin = LeadershipOrigin::Elected;
-        self.leader_recovery = Some(LeaderRecovery {
+        // An election *is* the quorum report that licenses no-op filling.
+        self.proposer.open_recovery(
             recovered,
-            blocked,
-            cursor: recovery_start,
-            end: self.next_slot,
-            // An election *is* the quorum report that licenses no-op filling.
-            gap_fill: true,
-        });
+            outcome.blocked,
+            recovery_start,
+            self.next_slot,
+            RecoveryPolicy::Phase1Backed,
+        );
         self.pump_leader_recovery();
         // The fresh-leader read fence: nothing decided under an earlier ballot
         // can sit above `next_slot - 1` (the prepare quorum reported it all), so
@@ -829,16 +489,25 @@ impl RawNode {
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.
         assert!(
-            self.ballot >= self.hard_state.max_promised_ballot,
+            self.ballot >= self.acceptor.promised(),
             "a fresh leader's ballot is at or above its own promise"
         );
-        assert!(self.election.is_none(), "winning closes the campaign");
+        assert!(
+            self.proposer.election().is_none(),
+            "winning closes the campaign"
+        );
         // Every slot below `next_slot` is chosen, re-proposed, or gap-filled,
         // so the allocator never hands out a slot inside the chosen prefix.
         assert!(
             self.next_slot >= self.first_unchosen(),
             "a fresh leader's next slot sits at or past the chosen prefix"
         );
+        // The leadership's garbage-collection campaign (#123): decide, once
+        // the fence is held by a quorum of `C_b`, that every configuration
+        // below this ballot may be forgotten.
+        if self.config.has_matchmakers() {
+            self.open_gc(&outcome.prior);
+        }
     }
 
     /// Start one bounded page of inherited Phase-2 rounds. The first page is
@@ -853,50 +522,34 @@ impl RawNode {
         let mut started = 0_usize;
         let mut gap_fills = 0_usize;
         while processed < LEADER_RECOVERY_BATCH {
-            let Some((slot, command, is_gap)) =
-                self.leader_recovery.as_mut().and_then(|recovery| {
-                    if recovery.cursor >= recovery.end {
-                        return None;
-                    }
-                    let slot = recovery.cursor;
-                    recovery.cursor = Slot(recovery.cursor.0.saturating_add(1));
-                    let (command, is_gap) = match recovery.recovered.remove(&slot) {
-                        Some(command) => (Some(command), false),
-                        // Only a Phase-1-backed recovery may invent a value for
-                        // a slot nobody reported (see `LeaderRecovery::gap_fill`).
-                        None if recovery.gap_fill => (Some(Command::Control(Control::Noop)), true),
-                        None => (None, false),
-                    };
-                    Some((slot, command, is_gap))
-                })
-            else {
+            let Some((slot, step)) = self.proposer.recovery_next() else {
                 break;
             };
             processed += 1;
-            let Some(command) = command else {
-                continue;
+            let (command, is_gap) = match step {
+                RecoveryStep::Recovered(command) => (command, false),
+                RecoveryStep::Fill => (Command::Control(Control::Noop), true),
+                // A slot the predecessor did not describe: an inherited
+                // recovery skips it (see `RecoveryPolicy::Inherited`).
+                RecoveryStep::Undescribed => continue,
             };
 
             // A previous page can decide and compact slots underneath the
             // continuation (especially in a single-node cluster), so each slot
             // is re-checked at the instant its round starts.
-            if slot < self.first_slot || self.chosen.contains_key(&slot) {
+            if slot < self.acceptor.first_slot() || self.replica.is_chosen(slot) {
                 continue;
             }
             // A blocked slot (Case 3: wait) is neither re-proposed nor
             // no-op-filled here: the open repair probe owns its resolution.
-            if self
-                .leader_recovery
-                .as_ref()
-                .is_some_and(|recovery| recovery.blocked.contains(&slot))
-            {
+            if self.proposer.recovery_blocked(slot) {
                 continue;
             }
             if is_gap {
                 // Only a Phase-1-backed recovery may invent a value: the
                 // promise quorum's silence is the licence. A handoff-installed
-                // leadership ran no Phase 1 (`gap_fill` is off there), and the
-                // fill never reaches into the chosen prefix — the cursor
+                // leadership ran no Phase 1 (its policy is `Inherited`), and
+                // the fill never reaches into the chosen prefix — the cursor
                 // starts at its frontier and a slot the prefix absorbed since
                 // is skipped as chosen above.
                 assert!(
@@ -911,33 +564,20 @@ impl RawNode {
                 self.election_gap_fills = self.election_gap_fills.saturating_add(1);
             }
             if let Command::User(entry) = &command
-                && !self.applied_elsewhere(entry, slot)
+                && !self.replica.applied_elsewhere(entry, slot)
             {
-                self.inflight.insert((entry.client, entry.seq), slot);
+                self.replica.track_inflight(entry.client, entry.seq, slot);
             }
             self.start_accept_round(slot, command);
             started += 1;
         }
 
-        let remaining = self.leader_recovery.as_ref().map_or(0, |recovery| {
-            usize::try_from(recovery.end.0.saturating_sub(recovery.cursor.0)).unwrap_or(usize::MAX)
-        });
-        if remaining == 0
-            && let Some(recovery) = self.leader_recovery.take()
-        {
-            // Closure postconditions: a recovery only closes once its cursor
-            // swept the whole inherited range, and nothing at or past the
-            // cursor was left behind unvisited (consumed entries are removed
-            // as the cursor passes them; what survives is only the
-            // below-prefix residue the prefix heal already handled).
-            assert!(
-                recovery.cursor >= recovery.end,
-                "a closed recovery drained its range"
-            );
-            assert!(
-                recovery.recovered.range(recovery.cursor..).next().is_none(),
-                "a closed recovery leaves no recovered slot unvisited"
-            );
+        let remaining = self.proposer.recovery_remaining();
+        if remaining == 0 {
+            // Closure postconditions live in the component: a recovery only
+            // closes once its cursor swept the whole inherited range, leaving
+            // nothing at or past the cursor unvisited.
+            self.proposer.close_drained_recovery();
         }
         if processed > 0 {
             self.pending_recovery_batch = Some((started, gap_fills, remaining));
@@ -954,9 +594,7 @@ impl RawNode {
         if !self.in_pool(from) {
             return;
         }
-        let superseded = self.election.as_ref().is_some_and(|e| e.ballot == ballot)
-            || self.proposer.get(&slot).is_some_and(|p| p.ballot == ballot);
-        if superseded {
+        if self.proposer.supersedes(ballot, slot) {
             self.become_follower(None);
         }
     }

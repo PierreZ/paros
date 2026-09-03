@@ -65,10 +65,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Audit, Ballot, Deployment, EdgeRejection, HANDOFF_BATCH, Handoff,
-    LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerId, Message, NodeId, PROMISE_BATCH,
-    ReconfigureResult, Registration, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
-    StorageFaultDecision, StorageRecord, command_hash,
+    AcceptorConfig, Audit, Ballot, Command, Control, Deployment, EdgeRejection, GcAck, GcStep,
+    HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState, MatchmakerId,
+    MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, SNAP_CHUNK_BYTES, Seam,
+    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -308,6 +309,32 @@ impl AuditWorld {
         self.lock().storage_dead.insert(node);
     }
 
+    /// A node's disk was wiped at a restart (#124): the identity is gone for
+    /// good. Convergence excuses it; a reconfiguration replaces it.
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
+    pub(crate) fn note_wiped(&self, node: u64) {
+        let mut st = self.lock();
+        st.wiped.insert(node);
+        reach_once!(
+            st.wiped_any,
+            "storage: a wiped identity stays down and is replaced by reconfiguration"
+        );
+    }
+
+    /// A boot found its identity retired by the operator (#123) and exited.
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
+    pub(crate) fn note_retired_boot(&self, node: u64) {
+        self.lock().retired.insert(node);
+    }
+
+    /// A matchmaker's registry was lost for good (#125).
+    #[tracing::instrument(level = "debug", skip(self), fields(matchmaker))]
+    pub(crate) fn note_matchmaker_lost(&self, matchmaker: u64) {
+        let mut st = self.lock();
+        st.matchmakers_lost.insert(matchmaker);
+        st.matchmaker.lost();
+    }
+
     /// A node booted again after a process-level kill (moonpool attrition on
     /// the main campaign, the script on the corpus) while `parked_peers` other
     /// nodes sat terminally parked. Until this very boot the node was down, so
@@ -513,8 +540,20 @@ impl AuditWorld {
                 { "node" => *node }
             );
         }
+        // #123: a retired node stays down only because a leader's effective
+        // floor named it retirable (the operator acted on the leader's word).
+        for node in &st.retired {
+            assert_always!(
+                st.matchmaker.retired_by_gc(*node),
+                "gc: a node that stays down retired only after an effective floor named it",
+                { "node" => *node }
+            );
+        }
         for node in cluster {
-            if st.storage_dead.contains(&node) {
+            if st.storage_dead.contains(&node)
+                || st.wiped.contains(&node)
+                || st.retired.contains(&node)
+            {
                 continue;
             }
             let prefix = st.applied_max.get(&node).copied();
@@ -1394,7 +1433,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );
-        st.matchmaker.note_deployment(deployment.matchmakers.len());
+        st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.matchmaker.node_booted(node);
         st.observe_promise(node.0, promised);
@@ -1754,6 +1793,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 | paros::Reply::ReadRedirect
                 | paros::Reply::Compact
                 | paros::Reply::Reconfigure
+                | paros::Reply::ReconfigureMatchmakers
+                | paros::Reply::Retire
         ) {
             // Nothing committed behind these: the client sees a deadline and
             // retries blind. No dedup edge to track, only the reach.
@@ -1872,6 +1913,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.resend_skipped,
             "the driver skips a pending accept re-send"
         );
+    }
+
+    fn election_timeout_set(&self, node: NodeId, ticks: u64) {
+        self.state().election_timeouts.insert(node.0, ticks);
+    }
+
+    fn ticked(&self, node: NodeId) {
+        self.state().observe_tick(node.0);
     }
 
     fn election_timeout_extreme(&self, _node: NodeId, _ticks: u64) {
@@ -2072,12 +2121,51 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        phase: MatchmakerPhase,
         registry: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         self.state()
             .matchmaker
-            .recovered(matchmaker, registry, gc_watermark);
+            .recovered(matchmaker, set, phase, registry, gc_watermark);
+    }
+
+    fn matchmaker_scalars_persisted(
+        &self,
+        matchmaker: MatchmakerId,
+        scalars: &MatchmakerHardState,
+    ) {
+        self.state()
+            .matchmaker
+            .scalars_persisted(matchmaker, scalars);
+    }
+
+    fn matchmaker_activated(
+        &self,
+        matchmaker: MatchmakerId,
+        set: &MatchmakerSet,
+        gc_watermark: Ballot,
+        registry: &[(Ballot, Registration)],
+    ) {
+        self.state()
+            .matchmaker
+            .activated(matchmaker, set, gc_watermark, registry);
+    }
+
+    fn matchmaker_reconfigure_replied(
+        &self,
+        matchmaker: MatchmakerId,
+        _request: &ReconfigureRequest,
+        reply: &ReconfigureReply,
+    ) {
+        self.state()
+            .matchmaker
+            .reconfigure_replied(matchmaker, reply);
+    }
+
+    fn matchmaker_gc_replied(&self, matchmaker: MatchmakerId, ack: &GcAck) {
+        self.state().matchmaker.gc_replied(matchmaker, ack);
     }
 
     fn match_registered(
@@ -2105,12 +2193,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         to: NodeId,
         ballot: Ballot,
+        generation: u64,
         history: &[(Ballot, Registration)],
         gc_watermark: Ballot,
     ) {
         self.state()
             .matchmaker
-            .replied(matchmaker, to, ballot, history, gc_watermark);
+            .replied(matchmaker, to, ballot, generation, history, gc_watermark);
     }
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
@@ -2121,10 +2210,165 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         ballot: Ballot,
         config: &AcceptorConfig,
         reconfiguration: bool,
+        generation: u64,
     ) {
         self.state()
             .matchmaker
-            .campaign_started(node, ballot, config, reconfiguration);
+            .campaign_started(node, ballot, config, reconfiguration, generation);
+    }
+
+    // ---- garbage collection (#123) ------------------------------------------
+
+    fn gc_request_sent(
+        &self,
+        node: NodeId,
+        _matchmaker: MatchmakerId,
+        _generation: u64,
+        watermark: Ballot,
+        fence: Option<Slot>,
+    ) {
+        let mut st = self.state();
+        // GC invariant 1, re-derived from the audit's own durable fold: a
+        // Phase-2 quorum of the configuration bound to the leader's ballot
+        // holds every slot up to the fence — a durable record carrying the
+        // decided value where the audit knows one (any record otherwise), or
+        // a compaction floor above the slot (the below-floor `Nack` is the
+        // acceptor's "already chosen"). `None` when the configuration is not
+        // known yet (then nothing is judged).
+        // A slot applied as a `Noop` over a *different* durable record is the
+        // #94 duplicate substitution (a repeated `(client, seq)` executes as a
+        // no-op while its record keeps the user command): the record is the
+        // chosen value, and what every Phase 1 would find.
+        let noop = command_hash(&Command::Control(Control::Noop));
+        let mut uncovered: Vec<String> = Vec::new();
+        let covered = st.config_of(watermark).cloned().map(|config| {
+            let holders = config
+                .members
+                .iter()
+                .filter(|m| {
+                    let m = m.0;
+                    match fence {
+                        None => true,
+                        Some(fence) => {
+                            let gap = (0..=fence.0).find(|slot| {
+                                let floor = st.floor.get(&m).map_or(0, |f| f.now);
+                                if floor > *slot {
+                                    return false;
+                                }
+                                match (st.persisted.get(&(m, *slot)), st.chosen.get(slot)) {
+                                    (Some(held), Some(decided)) => {
+                                        held != decided && *decided != noop
+                                    }
+                                    (Some(_), None) => false,
+                                    (None, _) => true,
+                                }
+                            });
+                            if let Some(slot) = gap {
+                                let why = match st.persisted.get(&(m, slot)) {
+                                    Some(_) => "mismatch",
+                                    None => "missing",
+                                };
+                                uncovered.push(format!("{m}@{slot}:{why}"));
+                            }
+                            gap.is_none()
+                        }
+                    }
+                })
+                .count();
+            holders >= config.quorum_size()
+        });
+        st.matchmaker
+            .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
+    }
+
+    fn gc_resend_skipped(&self, _node: NodeId) {
+        self.state().matchmaker.gc_resend_skipped();
+    }
+
+    fn gc_step(&self, node: NodeId, _matchmaker: MatchmakerId, ack: &GcAck, step: &GcStep) {
+        let mut st = self.state();
+        let config = st.config_of(ack.watermark).cloned();
+        st.matchmaker.gc_step(node, ack, step, config.as_ref());
+    }
+
+    // ---- the matchmaker set and its reconfiguration (#125) ------------------
+
+    fn matchmakers_learned(&self, node: NodeId, set: &MatchmakerSet) {
+        self.state().matchmaker.set_learned(node, set);
+    }
+
+    fn reconfigurer_started(&self, node: NodeId, old: &MatchmakerSet, target: &[MatchmakerId]) {
+        self.state()
+            .matchmaker
+            .reconfigurer_started(node, old, target);
+    }
+
+    fn reconfigurer_aborted(&self, node: NodeId) {
+        self.state().matchmaker.reconfigurer_aborted(node);
+    }
+
+    fn reconfigurer_backoff(&self, _node: NodeId, _ticks: u64) {
+        self.state().matchmaker.reconfigurer_backoff();
+    }
+
+    fn reconfigure_matchmakers_acked(&self, _node: NodeId, refusal: &'static str) {
+        let mut st = self.state();
+        if refusal.is_empty() {
+            reach_once!(
+                st.reconfigure_matchmakers_started,
+                "generation: a client's matchmaker reconfiguration is started"
+            );
+        } else {
+            reach_once!(
+                st.reconfigure_matchmakers_refused,
+                "generation: a client's matchmaker reconfiguration is refused"
+            );
+        }
+    }
+
+    fn reconfigure_request_sent(
+        &self,
+        _node: NodeId,
+        _matchmaker: MatchmakerId,
+        _request: &ReconfigureRequest,
+    ) {
+    }
+
+    fn reconfigurer_resend_skipped(&self, _node: NodeId) {
+        self.state().matchmaker.reconfigurer_resend_skipped();
+    }
+
+    fn reconfigurer_step(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        reply: &ReconfigureReply,
+        step: &ReconfigurerStep,
+    ) {
+        self.state()
+            .matchmaker
+            .reconfigurer_step(node, matchmaker, reply, step);
+    }
+
+    fn successor_republished(
+        &self,
+        node: NodeId,
+        _matchmaker: MatchmakerId,
+        successor: &MatchmakerSet,
+    ) {
+        self.state()
+            .matchmaker
+            .successor_republished(node, successor);
+    }
+
+    fn retire_acked(&self, _node: NodeId, accepted: bool) {
+        self.state().matchmaker.retire_acked(accepted);
+    }
+
+    fn retired(&self, node: NodeId) {
+        let mut st = self.state();
+        st.matchmaker.retired(node);
+        st.retired.insert(node.0);
     }
 
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {
@@ -2181,7 +2425,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         self.state()
             .matchmaker
-            .campaign_refused(node, ballot, refusal);
+            .campaign_refused(node, ballot, &refusal);
     }
 
     fn campaign_skipped_non_member(&self, _node: NodeId, _count: u64) {
@@ -2237,8 +2481,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().matchmaker.crashed(seam);
     }
 
-    fn match_reply_dropped(&self, _matchmaker: MatchmakerId) {
-        self.state().matchmaker.reply_dropped();
+    fn match_reply_dropped(&self, _matchmaker: MatchmakerId, reply: paros::Reply) {
+        self.state().matchmaker.reply_dropped(reply);
     }
 
     fn matchmaker_storage_fault(

@@ -5,6 +5,7 @@ mod acceptor;
 mod catch_up_snapshot;
 mod decide_apply;
 mod election;
+mod gc;
 mod handoff;
 mod helpers;
 mod matchmaking;
@@ -14,8 +15,8 @@ mod replication;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use self::decide_apply::Proposing;
-use self::election::{Election, LeaderRecovery, RepairProbe};
+use self::gc::GcState;
+pub use self::gc::GcStep;
 pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
@@ -24,9 +25,15 @@ use self::matchmaking::Matchmaking;
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 use self::replication::HEARTBEAT_TICKS;
-use crate::matchmaker::{AcceptorConfig, MatchRefusal, MatchReply, MatchRequest, MatchmakerId};
+use crate::acceptor::Acceptor;
+use crate::matchmaker::{
+    AcceptorConfig, GcRequest, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
+    MatchmakerId, MatchmakerSet,
+};
 use crate::message::Message;
+use crate::proposer::Proposer;
 use crate::ready::Ready;
+use crate::replica::Replica;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
@@ -149,46 +156,24 @@ pub struct RawNode {
     /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
     /// bootstrap configuration).
     acceptors_since: Ballot,
-    /// The must-be-durable scalars (promised ballot + chosen index), surfaced for
-    /// persistence via [`Ready`].
-    hard_state: HardState,
-    /// The per-slot accepted log: the working copy the protocol reads (range
-    /// scans for Phase-1 recovery / Phase-2 gap-fill). Volatile — rebuilt on boot
-    /// from the durable log (see [`RawNode::new`]); durably persisted one record
-    /// at a time via [`WriteOp::AppendAccepted`], never as a blob.
-    accepted: BTreeMap<Slot, (Ballot, Command)>,
-    /// The compaction floor: the first slot still retained. Everything below it
-    /// has been truncated away (see [`RawNode::compact`]). Rebuilt on boot from
-    /// [`Storage::first_slot`]. Always `<= first_unchosen()`: only chosen slots
-    /// are ever dropped.
-    first_slot: Slot,
-    /// Recoverable **faulty entries** (Stage 8, CTRL): retained slots whose
-    /// accepted value was lost to storage corruption but whose identity
-    /// `(slot, accepted_ballot)` survived the boot scan
-    /// ([`Storage::faulty_entries`]). Reported as the Promise tri-state's third
-    /// answer (never as "nothing accepted here"), never served by catch-up, and
-    /// repaired in place: a fresh `Accept` at or above the promise, a learned
-    /// chosen value, or a snapshot install past the slot each clear the entry
-    /// (fill or replace-with-proven-identical — repair never deletes promised-
-    /// or accepted-ballot state). Disjoint from `accepted` at all times.
-    faulty: BTreeMap<Slot, Ballot>,
-    /// The **application repair cursor** (Stage 8): the first slot whose
-    /// decided command the driver's application still needs, when the boot
-    /// replay could not walk the whole chosen prefix (a faulty chosen record
-    /// blocked it, or the application snapshot was lost below the compaction
-    /// floor). While set, [`RawNode::advance_chosen_index`] defers surfacing
-    /// committed entries to [`RawNode::pump_app_repair`], which re-emits them
-    /// **in slot order from this cursor** so the application never applies out
-    /// of order; the node pulls the missing range via catch-up (or a snapshot,
-    /// when the cursor sits below the floor) each tick. `None` = fully healed.
-    app_repair: Option<Slot>,
+    /// Durable identity of the cluster configuration this node belongs to.
+    config_id: ConfigId,
+    /// The **acceptor** component ([`crate::acceptor::Acceptor`]): the
+    /// durable promise, the per-slot accepted log, the compaction floor and
+    /// the CTRL tri-state's faulty entries. Rebuilt on boot from the durable
+    /// log (see [`RawNode::new`]); persisted one delta at a time through the
+    /// [`WriteOp`]s it emits into this node's batch.
+    acceptor: Acceptor,
+    /// The **replica** component ([`crate::replica::Replica`]): the chosen
+    /// log, the durable chosen index, the contiguous apply walk, the
+    /// at-most-once ledger and the application repair cursor.
+    replica: Replica,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
     // ---- `ready`, cleared by `advance`.
     /// Semantic durable write deltas produced this batch, in apply order.
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(NodeId, Message)>,
-    pending_committed: Vec<(Slot, Command)>,
     /// Snapshot offers to serve this batch:
     /// `(to, chosen_index, ballot, config_id)`. The core decides *who* needs a
     /// snapshot and *up to where* (a below-floor catch-up request), but holds no
@@ -254,8 +239,11 @@ pub struct RawNode {
     read_rounds: Vec<ReadRound>,
 
     // ---- proposer (multi-decree) ----
-    /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
-    proposer: BTreeMap<Slot, Proposing>,
+    /// The proposer component: the open Phase 1, the CTRL repair probe, the
+    /// in-flight Phase-2 rounds and the bounded recovery of the current
+    /// leadership ([`crate::proposer`]). Volatile; dies whole with the
+    /// leadership.
+    proposer: Proposer,
     /// The **matchmaking phase** while a Candidate registers its ballot's
     /// configuration with the matchmakers (#120) — the campaign state that
     /// precedes `election`, and never coexists with it. `None` on a plain
@@ -266,6 +254,19 @@ pub struct RawNode {
     /// the matchmaker contract is its own RPC service, spoken only by a
     /// deployment that names matchmakers.
     pending_match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    /// Garbage-collection requests to send this batch (#123), drained via
+    /// [`Ready::gc_requests`] over the same matchmaker wire.
+    pending_gc_requests: Vec<(MatchmakerId, GcRequest)>,
+    /// The matchmaker set this node believes authoritative (#125): the
+    /// bootstrap set at generation 0 on boot, moved forward by a refusal
+    /// naming a successor, by a matchmaker-set reconfiguration this node
+    /// drove, or by a reply from a later generation. Volatile: a fresh
+    /// incarnation walks the successor chain from the bootstrap set again.
+    /// Empty members on plain Multi-Paxos, always.
+    matchmakers: MatchmakerSet,
+    /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
+    /// Leader-only, volatile, `None` on plain Multi-Paxos.
+    gc: Option<GcState>,
     /// Monotone campaign-phase counters this incarnation, for the driver's
     /// audit report: campaigns this node declined to open because it is not
     /// a member of the configuration it would register, and leaderships it
@@ -285,29 +286,12 @@ pub struct RawNode {
     /// re-sent its requests instead of abandoning the campaign (see
     /// [`RawNode::tick`]). Observability only.
     matchmaking_timeouts: u64,
-    /// Phase-1 (per-ballot) recovery state while a Candidate. `None` once Leader.
-    election: Option<Election>,
-    /// The leader's open **distributed commitment determination** (Stage 8,
-    /// CTRL): faulty slots the winning quorum could resolve neither as Case 1
-    /// (some `have`) nor Case 2 (a full Q1 of `none`). The leader keeps
-    /// querying stragglers at its ballot until each blocked slot resolves, and
-    /// resigns after a recovery timeout so another node can try (CTRL §4.2).
-    /// Leader-only, volatile.
-    repair_probe: Option<RepairProbe>,
-    /// Ticks the current `repair_probe` has been open. Reset when the probe
+    /// Ticks the proposer's current repair probe has been open. Reset when the probe
     /// closes; drives the recovery-timeout resignation.
     repair_elapsed: u64,
     /// Monotone count of recovery-timeout step-downs this incarnation (a leader
     /// resigning because it could not finish repairing its blocked slots).
     repair_step_downs: u64,
-    /// Monotone count of local faulty records repaired in place this
-    /// incarnation (a fresh accept, a learned chosen value, or a snapshot
-    /// install clearing a `faulty` entry).
-    faulty_repaired: u64,
-    /// Cumulative payload bytes shipped into local repairs (the CTRL §5.2
-    /// repair-cost metric: a protocol-aware repair moves one entry, not the
-    /// log).
-    repair_bytes: u64,
     /// Monotone count of blocked slots resolved as Case 1 (re-proposed from a
     /// straggler's `have`) after the election closed.
     repair_case1: u64,
@@ -325,12 +309,6 @@ pub struct RawNode {
     /// Monotone cooperative-handoff counters this incarnation, for the
     /// driver's audit report.
     handoff: HandoffCounters,
-    /// Remaining bounded recovery work for the current leadership.
-    leader_recovery: Option<LeaderRecovery>,
-    /// The bounded chosen-prefix walk stopped with another contiguous slot ready.
-    chosen_advance_pending: bool,
-    /// Fair cursor for bounded pending-Accept re-sends.
-    resend_cursor: Option<Slot>,
     /// Next slot the leader allocates to a fresh client proposal.
     next_slot: Slot,
     /// How many undecided holes this node filled with a [`Control::Noop`] when it
@@ -339,58 +317,6 @@ pub struct RawNode {
     /// Leader and surfaces it, so the simulation can prove the gap-fill path is
     /// genuinely reached rather than merely present.
     election_gap_fills: u64,
-
-    // ---- learner / dedup ----
-    /// Commands this node has learned are chosen, per slot. Volatile.
-    chosen: BTreeMap<Slot, Command>,
-    /// Highest applied `ClientSeq` per client (for at-most-once dedup), with the
-    /// slot that command landed at so the dedup fast path can *name* the slot it
-    /// acks (see [`ProposeResult::Chosen`]). Rebuilt from `HardState` on
-    /// construction.
-    ///
-    /// Written **only** from the contiguous walk in
-    /// [`RawNode::advance_chosen_index`] (and the equivalent boot rebuild), so
-    /// an entry here always means "inside this node's applied prefix" — never
-    /// merely "chosen somewhere above the prefix". That is the whole difference
-    /// between an honest immediate ack and one the client cannot trust.
-    ///
-    /// Per client it maps **each executed seq** to its slot, not merely the
-    /// latest `(seq, slot)`: a `seq <= latest` shortcut would assume a client's
-    /// seqs execute in order, and they do not — an early seq can die without
-    /// ever entering the log (a `NotLeader` window, a lost round the gap fill
-    /// paved over) while a later seq applies, and the shortcut then acked the
-    /// dead command as committed, at another command's slot (the network-axis
-    /// seeds 2791878389799639169 / 8872503201755490526). An exact-seq hit is
-    /// the only honest `Chosen`; a miss falls through and executes the retry
-    /// for real. Volatile and rebuilt from the remaining log on boot, so the
-    /// truncation-across-restart window (see `propose`) is unchanged in kind.
-    applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>>,
-    /// Client requests mapped to the slot they will land in, so a retry dedups
-    /// against that slot instead of allocating a second one. Covers the whole
-    /// span before the command is applied: proposed at a slot
-    /// ([`RawNode::propose`]), recovered into one by a new leader, or already
-    /// *chosen* at one but not yet in the contiguous prefix
-    /// ([`RawNode::mark_chosen`]). The contiguous walk hands each entry over to
-    /// `applied_seq` when its slot applies. Rebuilt from `HardState` on
-    /// construction.
-    inflight: BTreeMap<(ClientId, ClientSeq), Slot>,
-    /// Chosen slots whose `Command::User` identity had **already applied at a
-    /// lower slot** when the contiguous walk reached them — the double-apply
-    /// #94 makes reachable: correct Paxos can choose one `(client, seq)` at two
-    /// slots (a client retry across a partition lands on the majority while the
-    /// deposed leader's lone accept survives above the cluster prefix, and a
-    /// later election's mandatory P2c re-proposal decides it again). The apply
-    /// seam surfaces these slots as a [`Control::Noop`] instead of executing
-    /// the duplicate; membership is derived purely from the replicated ledger
-    /// (walk order + sealed sessions), so every node — and every restart
-    /// ([`RawNode::new`] re-derives this set) — makes the identical decision.
-    duplicate_slots: BTreeSet<Slot>,
-    /// Monotone count of duplicate suppressions performed by the contiguous
-    /// walk this incarnation (boot-rebuild detections excluded). Observability
-    /// only: the driver reads the delta after each batch and reports it through
-    /// its audit port, so the simulation can prove the at-most-once suppression
-    /// path is genuinely reached.
-    duplicates_suppressed: u64,
 }
 
 impl RawNode {
@@ -452,6 +378,14 @@ impl RawNode {
             );
         }
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
+        let matchmakers = MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone());
+        assert!(
+            config
+                .matchmakers
+                .iter()
+                .all(|m| config.matchmaker_pool().binary_search(m).is_ok()),
+            "the bootstrap matchmaker set is drawn from the matchmaker pool"
+        );
         let ballot = hard_state.max_promised_ballot;
 
         // Rebuild the working accepted log by scanning the durable per-slot log
@@ -474,47 +408,12 @@ impl RawNode {
             }
         }
 
-        let mut chosen = BTreeMap::new();
-        // The at-most-once ledger starts from the durable **sealed** records —
-        // the `(client, seq) -> slot` facts whose log records truncation (or a
-        // snapshot install) already dropped — and the walk over the retained log
-        // below layers on top with first-slot-wins semantics. Sealed slots are
-        // always below the compaction floor, so the two sources never disagree;
-        // seeding sealed first is what keeps a restarted (or snapshot-recovered)
-        // node's duplicate-suppression decisions identical to a node that held
-        // the whole log in memory (#94).
-        let mut applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> = BTreeMap::new();
-        for (client, seq, slot) in storage.sealed_sessions() {
-            applied_seq.entry(client).or_default().insert(seq, slot);
-        }
-        let mut inflight = BTreeMap::new();
-        let mut duplicate_slots = BTreeSet::new();
-        for (slot, (_b, command)) in &accepted {
-            let is_chosen = hard_state.chosen_index.is_some_and(|ci| *slot <= ci);
-            if is_chosen {
-                chosen.insert(*slot, command.clone());
-                // Only client entries carry a `(client, seq)` dedup key; a control
-                // command never dedups. Every executed seq is recorded, not just
-                // the latest per client (see the `applied_seq` field doc) — and
-                // only at its **first** (lowest) slot: a second chosen slot for
-                // the same identity is the #94 duplicate, re-derived here exactly
-                // as the live walk derived it, so the boot replay suppresses the
-                // same slots the pre-restart apply did.
-                if let Command::User(entry) = command {
-                    let seqs = applied_seq.entry(entry.client).or_default();
-                    match seqs.get(&entry.seq) {
-                        Some(&first) if first != *slot => {
-                            duplicate_slots.insert(*slot);
-                        }
-                        _ => {
-                            seqs.insert(entry.seq, *slot);
-                        }
-                    }
-                }
-            } else if let Command::User(entry) = command {
-                inflight.insert((entry.client, entry.seq), *slot);
-            }
-        }
+        let replica = Replica::from_boot(
+            hard_state.chosen_index,
+            storage.sealed_sessions(),
+            &accepted,
+        );
+
         // The boot scan's recoverable faulty entries (Stage 8): value lost,
         // identity known. They are *records this node accepted*, so they bound
         // `next_slot` exactly like readable records; they are simply unreadable
@@ -581,14 +480,11 @@ impl RawNode {
             config,
             acceptors,
             acceptors_since: Ballot::zero(),
-            hard_state,
-            accepted,
-            first_slot,
-            faulty,
-            app_repair: None,
+            config_id: hard_state.config_id,
+            acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
+            replica,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
-            pending_committed: Vec::new(),
             pending_snapshot_offers: Vec::new(),
             pending_read_states: Vec::new(),
             pending_recovery_batch: None,
@@ -607,34 +503,25 @@ impl RawNode {
             quorum_lost_step_downs: 0,
             read_floor: None,
             read_rounds: Vec::new(),
-            proposer: BTreeMap::new(),
+            proposer: Proposer::new(),
             matchmaking: None,
             pending_match_requests: Vec::new(),
+            pending_gc_requests: Vec::new(),
+            matchmakers,
+            gc: None,
             non_member_campaigns_skipped: 0,
             non_member_step_downs: 0,
             round_floor: 0,
             matchmaking_timeouts: 0,
-            election: None,
-            repair_probe: None,
             repair_elapsed: 0,
             repair_step_downs: 0,
-            faulty_repaired: 0,
-            repair_bytes: 0,
             repair_case1: 0,
             repair_case2: 0,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),
-            leader_recovery: None,
-            chosen_advance_pending: false,
-            resend_cursor: None,
             next_slot,
             election_gap_fills: 0,
-            chosen,
-            applied_seq,
-            inflight,
-            duplicate_slots,
-            duplicates_suppressed: 0,
         };
         node.assert_invariants();
         node
@@ -649,77 +536,13 @@ impl RawNode {
         // Ordering chain: only chosen slots are ever dropped, so the compaction
         // floor never passes the first unchosen slot.
         assert!(
-            self.first_slot <= self.first_unchosen(),
+            self.acceptor.first_slot() <= self.first_unchosen(),
             "the compaction floor never outruns the chosen prefix"
         );
-        // A chosen first-unchosen slot is legal only as the explicit bounded
-        // continuation left by `advance_chosen_index` — an iff, split into its
-        // two directions so a violation names the side that broke.
-        if self.chosen.contains_key(&self.first_unchosen()) {
-            assert!(
-                self.chosen_advance_pending,
-                "a chosen first-unchosen slot has a deferred prefix continuation"
-            );
-        }
-        if self.chosen_advance_pending {
-            assert!(
-                self.chosen.contains_key(&self.first_unchosen()),
-                "a deferred prefix continuation names a chosen first-unchosen slot"
-            );
-        }
-        // Floor bounds: nothing below the floor survives in any slot map.
-        assert!(
-            self.accepted
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
-            "no accepted record survives below the compaction floor"
-        );
-        assert!(
-            self.faulty
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
-            "no faulty entry survives below the compaction floor"
-        );
-        // The tri-state is a partition: a slot is readable, faulty, or absent —
-        // never two at once (O(N∩) structural check, always-on by choice).
-        assert!(
-            self.faulty.keys().all(|s| !self.accepted.contains_key(s)),
-            "the faulty set stays disjoint from the accepted log"
-        );
-        // The application repair cursor only ever points inside the chosen
-        // prefix (there is nothing decided to re-emit past it).
-        assert!(
-            self.app_repair.is_none_or(|s| s < self.first_unchosen()),
-            "the application repair cursor stays inside the chosen prefix"
-        );
-        assert!(
-            self.chosen
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
-            "no chosen record survives below the compaction floor"
-        );
-        assert!(
-            self.proposer
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
-            "no in-flight round survives below the compaction floor"
-        );
-        assert!(
-            self.duplicate_slots
-                .first()
-                .is_none_or(|s| *s >= self.first_slot),
-            "no duplicate marker survives below the compaction floor"
-        );
-        // Floor-bound structural check needing a full scan (`inflight` is
-        // keyed by client identity, so its slots are unordered).
-        assert!(
-            self.inflight.values().all(|s| *s >= self.first_slot),
-            "no in-flight dedup mapping survives below the compaction floor"
-        );
+        // The replica's and the proposer's own maps against the acceptor's
+        // floor.
+        self.replica.assert_invariants(self.acceptor.first_slot());
+        self.proposer.assert_invariants(self.acceptor.first_slot());
         // Role couplings. Note "leader ballot >= own promise" is deliberately
         // NOT a global invariant: a still-Leader node can learn a higher-ballot
         // `Commit` (raising its promise via `mark_chosen`) before any deposing
@@ -729,7 +552,12 @@ impl RawNode {
         // The deployment couplings: plain Multi-Paxos never matchmakes and
         // never leaves its bootstrap configuration; a matchmaker deployment
         // runs Phase 2 under a configuration drawn from the pool.
-        if !self.config.has_matchmakers() {
+        if self.config.has_matchmakers() {
+            assert!(
+                !self.matchmakers.members.is_empty(),
+                "a matchmaker deployment always believes in a matchmaker set"
+            );
+        } else {
             assert!(
                 self.matchmaking.is_none(),
                 "a plain deployment never opens a matchmaking phase"
@@ -742,6 +570,20 @@ impl RawNode {
                 self.acceptors_since == Ballot::zero(),
                 "a plain deployment's configuration is bound to no ballot"
             );
+            assert!(
+                self.matchmakers.members.is_empty(),
+                "a plain deployment names no matchmaker set"
+            );
+            assert!(
+                self.gc.is_none(),
+                "a plain deployment never opens a GC campaign"
+            );
+        }
+        if self.gc.is_some() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds an open GC campaign"
+            );
         }
         assert!(
             self.acceptors.members.iter().all(|m| self.in_pool(*m)),
@@ -749,7 +591,10 @@ impl RawNode {
         );
         match self.role {
             NodeRole::Leader => {
-                assert!(self.election.is_none(), "a leader has no open campaign");
+                assert!(
+                    self.proposer.election().is_none(),
+                    "a leader has no open campaign"
+                );
                 assert!(
                     self.matchmaking.is_none(),
                     "a leader has no open matchmaking phase"
@@ -789,7 +634,7 @@ impl RawNode {
                 // quorum intersection guarantees the winning Phase 1 reported
                 // everything decided, so the allocator sits at or past the
                 // prefix.
-                if self.ballot >= self.hard_state.max_promised_ballot {
+                if self.ballot >= self.acceptor.promised() {
                     assert!(
                         self.next_slot >= self.first_unchosen(),
                         "a leader's next slot never falls inside the chosen prefix"
@@ -797,6 +642,7 @@ impl RawNode {
                 }
                 assert!(
                     self.proposer
+                        .rounds()
                         .keys()
                         .next_back()
                         .is_none_or(|s| *s < self.next_slot),
@@ -807,7 +653,10 @@ impl RawNode {
                 // path that could strand one demotes (clearing `proposer`)
                 // first. O(N) structural, always-on by choice.
                 assert!(
-                    self.proposer.values().all(|p| p.ballot == self.ballot),
+                    self.proposer
+                        .rounds()
+                        .values()
+                        .all(|p| p.ballot() == self.ballot),
                     "a leader's in-flight rounds all run at its own ballot"
                 );
             }
@@ -817,13 +666,13 @@ impl RawNode {
                 // never neither. The boundary between them is
                 // `start_phase1`.
                 assert!(
-                    self.election.is_some() != self.matchmaking.is_some(),
+                    self.proposer.election().is_some() != self.matchmaking.is_some(),
                     "a candidate holds exactly one open campaign phase"
                 );
                 assert!(
-                    self.election
-                        .as_ref()
-                        .is_none_or(|e| e.ballot == self.ballot),
+                    self.proposer
+                        .election()
+                        .is_none_or(|e| e.ballot() == self.ballot),
                     "a candidate's campaign runs at its own operating ballot"
                 );
                 assert!(
@@ -838,7 +687,10 @@ impl RawNode {
                 );
             }
             NodeRole::Follower => {
-                assert!(self.election.is_none(), "a follower has no open campaign");
+                assert!(
+                    self.proposer.election().is_none(),
+                    "a follower has no open campaign"
+                );
                 assert!(
                     self.matchmaking.is_none(),
                     "a follower has no open matchmaking phase"
@@ -854,7 +706,7 @@ impl RawNode {
             );
         }
         // Volatile leadership state exists only on a leader.
-        if !self.proposer.is_empty() {
+        if !self.proposer.rounds().is_empty() {
             assert!(
                 self.role == NodeRole::Leader,
                 "only a leader holds in-flight accept rounds"
@@ -866,13 +718,13 @@ impl RawNode {
                 "only a leader holds pending read rounds"
             );
         }
-        if self.leader_recovery.is_some() {
+        if self.proposer.recovery().is_some() {
             assert!(
                 self.role == NodeRole::Leader,
                 "only a leader holds deferred recovery work"
             );
         }
-        if self.repair_probe.is_some() {
+        if self.proposer.probe().is_some() {
             assert!(
                 self.role == NodeRole::Leader,
                 "only a leader holds an open repair probe"
@@ -899,7 +751,7 @@ impl RawNode {
         // owns healing the mismatch.
         if msg
             .config_id()
-            .is_some_and(|config_id| config_id != self.hard_state.config_id)
+            .is_some_and(|config_id| config_id != self.config_id)
         {
             return;
         }
@@ -981,9 +833,13 @@ impl RawNode {
                 ..
             } => self.on_heartbeat(from, ballot, commit, seq, config),
             Message::HeartbeatAck {
-                from, ballot, seq, ..
+                from,
+                ballot,
+                seq,
+                chosen,
+                ..
             } => {
-                self.on_heartbeat_ack(from, ballot, seq);
+                self.on_heartbeat_ack(from, ballot, seq, chosen);
             }
             // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
             // driver's repair layer owns these end to end and normally
@@ -1018,8 +874,8 @@ impl RawNode {
         // the ledger's slots are chosen but not yet re-applied here, so the
         // immediate `Chosen` ack would name a slot outside the applied prefix —
         // fall through to the honest slower paths instead.
-        if self.app_repair.is_none()
-            && let Some(&at) = self.applied_seq.get(&client).and_then(|m| m.get(&seq))
+        if self.replica.app_repair().is_none()
+            && let Some(at) = self.replica.applied_at(client, seq)
         {
             // What an immediate ack claims, restated at the reply: the slot is
             // inside this node's applied prefix (the ledger is written only by
@@ -1031,7 +887,7 @@ impl RawNode {
                 "an immediate Chosen names a slot inside the applied prefix"
             );
             assert!(
-                match self.chosen.get(&at) {
+                match self.replica.chosen_at(at) {
                     None => true,
                     Some(Command::User(applied)) => applied.client == client && applied.seq == seq,
                     Some(Command::Control(_)) => false,
@@ -1040,13 +896,13 @@ impl RawNode {
             );
             return ProposeResult::Chosen(at);
         }
-        if let Some(&slot) = self.inflight.get(&(client, seq)) {
+        if let Some(slot) = self.replica.inflight_at(client, seq) {
             return ProposeResult::Duplicate(slot);
         }
         let slot = self.next_slot;
         self.next_slot = Slot(slot.0 + 1);
         let entry = Entry { client, seq, value };
-        self.inflight.insert((client, seq), slot);
+        self.replica.track_inflight(client, seq, slot);
         self.start_accept_round(slot, Command::User(entry));
         self.assert_invariants();
         ProposeResult::Accepted(slot)
@@ -1122,7 +978,7 @@ impl RawNode {
         // The fence dominates: a fresh leader must not serve below the highest
         // slot its prepare quorum reported, even while its own chosen prefix
         // still lags the recovered suffix.
-        let index = self.hard_state.chosen_index.max(self.read_floor);
+        let index = self.replica.chosen_index().max(self.read_floor);
         // Beat immediately (rather than waiting for the next tick) so the
         // round's confirmation costs one network round trip, not a tick.
         self.broadcast_heartbeat();
@@ -1192,8 +1048,8 @@ impl RawNode {
     /// clamped inside the chosen prefix.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
-        let Some(ci) = self.hard_state.chosen_index else {
-            return self.first_slot;
+        let Some(ci) = self.replica.chosen_index() else {
+            return self.acceptor.first_slot();
         };
         let mut highest_drop = up_to.min(ci);
         // An open application repair pins the floor: truncating at or past the
@@ -1201,71 +1057,50 @@ impl RawNode {
         // to re-emit, converting a one-slot repair into a snapshot transfer (or
         // an unrecoverable wait). The floor resumes rising once the repair
         // closes; a decided `Truncate` is idempotent over-asking by design.
-        if let Some(pending) = self.app_repair {
+        if let Some(pending) = self.replica.app_repair() {
             let Some(cap) = pending.0.checked_sub(1) else {
-                return self.first_slot;
+                return self.acceptor.first_slot();
             };
             highest_drop = highest_drop.min(Slot(cap));
         }
-        let first = Slot(highest_drop.0 + 1).max(self.first_slot);
-        if first <= self.first_slot {
-            return self.first_slot;
+        let old_floor = self.acceptor.first_slot();
+        let first = Slot(highest_drop.0 + 1).max(old_floor);
+        if first <= old_floor {
+            return old_floor;
         }
-        let old_floor = self.first_slot;
-        // Seal from the *ledger*, not from the dropped `chosen` range: a
-        // duplicate slot's chosen command is a `User` entry whose ledger record
-        // points at its first slot, and sealing the duplicate's own slot would
-        // corrupt the ledger. Only the delta is sealed — records below the old
+        // Seal from the *ledger*, not from the dropped `chosen` range (see
+        // `Replica::seal`). Only the delta is sealed — records below the old
         // floor were sealed by the truncation (or install) that dropped them.
-        let sealed: Vec<SessionEntry> = self
-            .applied_seq
-            .iter()
-            .flat_map(|(client, seqs)| {
-                seqs.iter()
-                    .filter(|entry| *entry.1 >= self.first_slot && *entry.1 < first)
-                    .map(|(&seq, &slot)| (*client, seq, slot))
-            })
-            .collect();
-        self.accepted = self.accepted.split_off(&first);
-        self.chosen = self.chosen.split_off(&first);
+        let sealed: Vec<SessionEntry> = self.replica.seal(old_floor, first);
         // A faulty entry below the floor is superseded by the compacted state
         // (only chosen slots are dropped, and truncation is decided over the
         // applied prefix): custodianship moved into the application snapshot.
-        self.faulty = self.faulty.split_off(&first);
-        self.chosen_advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        self.proposer.retain(|slot, _| *slot >= first);
-        // Mirror the install path's dedup hand-off (`on_install_snapshot`):
-        // the contiguous walk already handed every applied slot's `inflight`
-        // entry over to `applied_seq`, except the below-prefix heals
-        // `mark_chosen` records while an application repair is open — and a
-        // mapping into the truncated prefix would answer a retry with a
-        // `Duplicate` whose commit can never ack anyone.
-        self.inflight.retain(|_, s| *s >= first);
-        // The duplicate-suppression markers for the dropped prefix are spent:
-        // their slots were applied (as no-ops) before truncation was decided,
-        // and a restarted node re-derives the set from the *retained* log only
-        // — a live node must not remember more than its own reboot would.
-        self.duplicate_slots = self.duplicate_slots.split_off(&first);
-        self.first_slot = first;
+        self.acceptor.truncate(first);
+        self.replica.truncate(first);
+        self.proposer.retain_rounds_from(first);
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
         // Postconditions: the floor strictly rose (the no-op path returned
         // above) and stayed clamped inside the chosen prefix.
-        assert!(self.first_slot > old_floor, "compaction raised the floor");
         assert!(
-            self.first_slot <= self.first_unchosen(),
+            self.acceptor.first_slot() > old_floor,
+            "compaction raised the floor"
+        );
+        assert!(
+            self.acceptor.first_slot() <= self.first_unchosen(),
             "compaction never drops an undecided slot"
         );
         // The cap above, restated as what it protects: an open application
         // repair still needs every decided record from its cursor up, so the
         // floor stops below the cursor (the truncate-before-heal bug class).
         assert!(
-            self.app_repair
-                .is_none_or(|cursor| self.first_slot <= cursor),
+            self.replica
+                .app_repair()
+                .is_none_or(|cursor| self.acceptor.first_slot() <= cursor),
             "compaction never drops a slot an open application repair still needs"
         );
         self.assert_invariants();
-        self.first_slot
+        self.acceptor.first_slot()
     }
 
     /// Advance logical time by one tick, synthesizing `CheckLeader`/`Heartbeat`
@@ -1288,10 +1123,10 @@ impl RawNode {
             if self.heartbeat_elapsed >= self.heartbeat_timeout {
                 self.heartbeat_elapsed = 0;
                 self.step(Message::Heartbeat {
-                    config_id: self.hard_state.config_id,
+                    config_id: self.config_id,
                     from: me,
                     ballot: self.ballot,
-                    commit: self.hard_state.chosen_index,
+                    commit: self.replica.chosen_index(),
                     seq: 0,
                     config: None,
                 });
@@ -1319,7 +1154,7 @@ impl RawNode {
             if self.election_timeout != 0 {
                 self.quorum_elapsed += 1;
                 if self.quorum_elapsed >= self.election_timeout {
-                    if self.quorum_acked_by.len() >= self.phase2_quorum() {
+                    if self.acceptors.has_quorum(&self.quorum_acked_by) {
                         self.quorum_elapsed = 0;
                         self.quorum_acked_by.clear();
                         if self.is_acceptor() {
@@ -1338,9 +1173,9 @@ impl RawNode {
             // new configuration (a node campaigns only as a member).
             if self.role == NodeRole::Leader
                 && !self.is_acceptor()
-                && self.leader_recovery.is_none()
-                && self.repair_probe.is_none()
-                && self.proposer.is_empty()
+                && self.proposer.recovery().is_none()
+                && self.proposer.probe().is_none()
+                && self.proposer.rounds().is_empty()
             {
                 self.non_member_step_downs = self.non_member_step_downs.saturating_add(1);
                 self.become_follower(None);
@@ -1376,7 +1211,7 @@ impl RawNode {
                         "an election timeout keeps a pending matchmaking open"
                     );
                     assert!(
-                        self.election.is_none(),
+                        self.proposer.election().is_none(),
                         "a re-asked matchmaking opens no Phase 1"
                     );
                 } else {
@@ -1386,6 +1221,9 @@ impl RawNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
+        // The GC preconditions can become true without a message (the last
+        // inherited round decided on this tick's re-send): re-check per tick.
+        self.try_gc();
         self.assert_invariants();
     }
 
@@ -1400,7 +1238,7 @@ impl RawNode {
         // when the campaign's Prepare went out only ever answers a re-send). A
         // probe that stays blocked for a full recovery timeout resigns: another
         // node — possibly one holding the missing copy — gets to try.
-        if self.role == NodeRole::Leader && self.repair_probe.is_some() {
+        if self.role == NodeRole::Leader && self.proposer.probe().is_some() {
             self.repair_elapsed += 1;
             let timeout = self
                 .election_timeout
@@ -1410,27 +1248,23 @@ impl RawNode {
                 self.become_follower(None);
             } else {
                 let (ballot, from_slot, unanswered) = {
-                    let probe = self.repair_probe.as_ref().expect("checked above");
+                    let probe = self.proposer.probe().expect("checked above");
                     // The stragglers are the members of the prior
                     // configurations the election covered — the Phase-1
                     // addressee union — that have not answered their full
                     // suffix.
-                    let mut unanswered: Vec<NodeId> = probe
-                        .prior
-                        .iter()
-                        .flat_map(|c| c.members.iter().copied())
-                        .filter(|p| *p != self.config.id && !probe.answered.contains(p))
-                        .collect();
-                    unanswered.sort_unstable();
-                    unanswered.dedup();
-                    (probe.ballot, probe.from_slot, unanswered)
+                    (
+                        probe.ballot(),
+                        probe.from_slot(),
+                        probe.stragglers(self.config.id),
+                    )
                 };
                 let config = self.phase1_wire_config();
                 for to in unanswered {
                     self.pending_messages.push((
                         to,
                         Message::Prepare {
-                            config_id: self.hard_state.config_id,
+                            config_id: self.config_id,
                             from: self.config.id,
                             ballot,
                             from_slot,
@@ -1444,13 +1278,14 @@ impl RawNode {
         // from the cursor. A peer that still holds the slots serves a
         // catch-up replay; one that truncated past them offers a snapshot.
         // Once per tick — the same cadence heartbeat-driven catch-up uses.
-        if let Some(from_slot) = self.app_repair {
+        if let Some(from_slot) = self.replica.app_repair() {
             self.broadcast(&Message::CatchUpRequest {
                 from: self.config.id,
                 from_slot,
             });
         } else if let Some(first_faulty) = self
-            .faulty
+            .acceptor
+            .faulty()
             .keys()
             .next()
             .copied()
@@ -1502,28 +1337,10 @@ impl RawNode {
             return;
         }
         let me = self.config.id;
-        let start = self.resend_cursor.unwrap_or(self.first_slot);
-        let mut pending: Vec<(Slot, Ballot, Command)> = self
-            .proposer
-            .range(start..)
-            .take(LEADER_RECOVERY_BATCH)
-            .map(|(s, p)| (*s, p.ballot, p.command.clone()))
-            .collect();
-        if pending.len() < LEADER_RECOVERY_BATCH {
-            let remaining = LEADER_RECOVERY_BATCH - pending.len();
-            pending.extend(
-                self.proposer
-                    .range(..start)
-                    .take(remaining)
-                    .map(|(s, p)| (*s, p.ballot, p.command.clone())),
-            );
-        }
-        self.resend_cursor = pending
-            .last()
-            .and_then(|(slot, _, _)| slot.0.checked_add(1).map(Slot));
+        let pending = self.proposer.resend_page(self.acceptor.first_slot());
         for (slot, ballot, command) in pending {
             self.broadcast_acceptors(&Message::Accept {
-                config_id: self.hard_state.config_id,
+                config_id: self.config_id,
                 from: me,
                 ballot,
                 slot,
@@ -1558,14 +1375,15 @@ impl RawNode {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
+        let generation = self.matchmakers.generation;
         let request = if m.reconfiguration {
-            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone())
+            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone(), generation)
         } else {
-            MatchRequest::new(self.config.id, m.ballot, m.config.clone())
+            MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
         };
         let unanswered: Vec<MatchmakerId> = self
-            .config
             .matchmakers
+            .members
             .iter()
             .copied()
             .filter(|mm| !m.registered_by.contains(mm))
@@ -1597,9 +1415,10 @@ impl RawNode {
 
     /// Fold one matchmaker's answer into the open matchmaking phase — the
     /// leader-side half of the matchmaker contract (#120). A reply for another
-    /// ballot, another node, or a matchmaker that already answered is ignored
-    /// whole (wire input, never asserted). Returns what the reply did, so the
-    /// driver can report the transition it caused.
+    /// ballot, another node, another generation, or a matchmaker that already
+    /// answered (or is outside the believed set) is ignored whole (wire
+    /// input, never asserted). Returns what the reply did, so the driver can
+    /// report the transition it caused.
     ///
     /// - `Registered`: the history is unioned and the watermark maxed; once a
     ///   **quorum of matchmakers** has registered the ballot, `H_b` is
@@ -1612,26 +1431,33 @@ impl RawNode {
     ///   superseded configuration from being reinstated by a candidate that
     ///   missed the change (see [`crate::Registration`]).
     /// - `Refused`: the campaign is abandoned and this node steps back to
-    ///   follower; the refusal's payload is diagnostic only. A refused
+    ///   follower; a refusal's ballot is diagnostic only (a `Stale` or
+    ///   `BelowWatermark` refusal raises the round floor the next campaign
+    ///   opens above). A refusal naming a **chosen successor set** (#125:
+    ///   `Stopped { successor }`, or `Generation` from a later generation) is
+    ///   adopted through [`RawNode::learn_matchmakers`] and reported as
+    ///   `Superseded`; the next campaign asks the new set. A refused
     ///   registration never becomes a leadership (invariant 4).
     ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
+    #[allow(clippy::too_many_lines)]
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        let generation = reply.generation;
         let (matchmaker, to, ballot, answer) = matchmaking::split_reply(reply);
         let me = self.config.id;
-        if to != me || !self.config.matchmakers.contains(&matchmaker) {
+        if to != me || !self.matchmakers.contains(matchmaker) {
             return MatchStep::Ignored;
         }
-        let quorum = Matchmaking::quorum(self.config.matchmakers.len());
+        let quorum = self.matchmakers.quorum_size();
         let step = {
             let Some(m) = self.matchmaking.as_mut() else {
                 return MatchStep::Ignored;
             };
-            if m.ballot != ballot {
+            if m.ballot != ballot || generation != self.matchmakers.generation {
                 return MatchStep::Ignored;
             }
             match answer {
@@ -1698,13 +1524,39 @@ impl RawNode {
                     }
                 }
                 Err(refusal) => {
-                    if let MatchRefusal::Stale { highest } = refusal {
-                        // The next campaign opens above the round that
-                        // refused this one (see `round_floor`).
-                        self.round_floor = self.round_floor.max(highest.round);
+                    match &refusal {
+                        MatchRefusal::Stale { highest } => {
+                            // The next campaign opens above the round that
+                            // refused this one (see `round_floor`).
+                            self.round_floor = self.round_floor.max(highest.round);
+                        }
+                        MatchRefusal::BelowWatermark { watermark } => {
+                            // A collected round is never campaigned again: the
+                            // next one opens above the floor (#123 — a
+                            // partitioned leader that outlived a GC recovers by
+                            // campaigning higher).
+                            self.round_floor = self.round_floor.max(watermark.round);
+                        }
+                        MatchRefusal::Stopped { .. }
+                        | MatchRefusal::Generation { .. }
+                        | MatchRefusal::Inactive => {}
                     }
+                    let successor = match &refusal {
+                        MatchRefusal::Stopped {
+                            successor: Some(set),
+                        } => Some(set.clone()),
+                        MatchRefusal::Generation { current }
+                            if current.generation > self.matchmakers.generation =>
+                        {
+                            Some(current.clone())
+                        }
+                        _ => None,
+                    };
                     self.become_follower(None);
-                    MatchStep::Refused(refusal)
+                    match successor {
+                        Some(set) if self.learn_matchmakers(&set) => MatchStep::Superseded { set },
+                        _ => MatchStep::Refused(refusal),
+                    }
                 }
             }
         };
@@ -1712,13 +1564,15 @@ impl RawNode {
         // left nothing Phase-1-shaped behind, and a completed one
         // closed the matchmaking phase before opening Phase 1.
         match &step {
-            MatchStep::Refused(_) | MatchStep::StaleConfiguration { .. } => {
+            MatchStep::Refused(_)
+            | MatchStep::StaleConfiguration { .. }
+            | MatchStep::Superseded { .. } => {
                 assert!(
                     self.role == NodeRole::Follower,
                     "a refused registration never becomes a leadership"
                 );
                 assert!(
-                    self.election.is_none() && self.matchmaking.is_none(),
+                    self.proposer.election().is_none() && self.matchmaking.is_none(),
                     "an abandoned campaign leaves no phase open"
                 );
             }
@@ -1763,7 +1617,7 @@ impl RawNode {
     /// a re-send would have no observable effect.
     #[must_use]
     pub fn has_pending_accepts(&self) -> bool {
-        self.role == NodeRole::Leader && !self.proposer.is_empty()
+        self.role == NodeRole::Leader && !self.proposer.rounds().is_empty()
     }
 
     /// Voluntarily resign the leadership: Leader → Follower, keeping every
@@ -1817,14 +1671,7 @@ impl RawNode {
     /// name a slot the durable chosen index already covers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0)))]
     pub fn open_app_repair(&mut self, from: Slot) {
-        assert!(
-            from <= self.first_unchosen(),
-            "an application repair starts inside the chosen prefix"
-        );
-        if from >= self.first_unchosen() {
-            return;
-        }
-        self.app_repair = Some(from);
+        self.replica.open_app_repair(from);
         self.pump_app_repair();
         self.assert_invariants();
     }
@@ -1837,33 +1684,7 @@ impl RawNode {
     /// walk's frontier.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(crate) fn pump_app_repair(&mut self) {
-        let Some(mut cursor) = self.app_repair else {
-            return;
-        };
-        let end = self.first_unchosen();
-        let mut emitted = 0_usize;
-        while cursor < end && emitted < LEADER_RECOVERY_BATCH {
-            if cursor < self.first_slot {
-                // Below the floor the decided values are gone locally; only an
-                // InstallSnapshot can close this repair.
-                break;
-            }
-            let Some(command) = self.chosen.get(&cursor).cloned() else {
-                break;
-            };
-            // The apply seam's duplicate suppression is re-derived exactly as
-            // the contiguous walk derives it (the ledger already holds these
-            // decisions from the boot rebuild plus the heal-time patches).
-            let command = if self.duplicate_slots.contains(&cursor) {
-                Command::Control(Control::Noop)
-            } else {
-                command
-            };
-            self.pending_committed.push((cursor, command));
-            cursor = Slot(cursor.0 + 1);
-            emitted += 1;
-        }
-        self.app_repair = if cursor >= end { None } else { Some(cursor) };
+        self.replica.pump_app_repair(self.acceptor.first_slot());
     }
 
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
@@ -1873,6 +1694,13 @@ impl RawNode {
     pub fn set_election_timeout(&mut self, ticks: u64) {
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
+    }
+
+    /// The election timeout in force (in ticks; zero until the driver set
+    /// one) — the unit the driver paces its other timeouts in.
+    #[must_use]
+    pub fn election_timeout(&self) -> u64 {
+        self.election_timeout
     }
 
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
@@ -1942,24 +1770,77 @@ impl RawNode {
         self.matchmaking.as_ref().map_or(0, |m| m.disagreements)
     }
 
-    /// The current durable scalars (promised ballot + chosen index).
+    /// The matchmaker set this node believes authoritative (#125): the
+    /// bootstrap set at generation 0 until a later one is learned. Empty on
+    /// plain Multi-Paxos.
     #[must_use]
-    pub fn hard_state(&self) -> &HardState {
-        &self.hard_state
+    pub fn matchmaker_set(&self) -> &MatchmakerSet {
+        &self.matchmakers
+    }
+
+    /// Adopt `set` as the authoritative matchmaker set if it is a strictly
+    /// later generation than the one believed (#125): a refusal naming a
+    /// successor, a reconfiguration this node's driver completed, or a reply
+    /// from a later generation. An open matchmaking against the superseded
+    /// set is abandoned (the next election timeout re-campaigns against the
+    /// new one), a pending GC tally starts over, and a plain deployment never
+    /// moves (it has no generation to move). Returns whether the belief
+    /// moved.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, generation = set.generation.0)))]
+    pub fn learn_matchmakers(&mut self, set: &MatchmakerSet) -> bool {
+        if !self.config.has_matchmakers()
+            || set.generation <= self.matchmakers.generation
+            || set.members.is_empty()
+        {
+            return false;
+        }
+        // Wire hygiene: a set naming a matchmaker outside the pool is not one
+        // this deployment can reach; ignore it whole.
+        if !set
+            .members
+            .iter()
+            .all(|m| self.config.matchmaker_pool().binary_search(m).is_ok())
+        {
+            return false;
+        }
+        self.matchmakers = MatchmakerSet::new(set.generation, set.members.clone());
+        if self.matchmaking.is_some() {
+            // The registrations collected so far were for a replaced
+            // generation; a stopped quorum will never complete them.
+            self.become_follower(None);
+        }
+        self.reset_gc_for_generation();
+        self.assert_invariants();
+        true
+    }
+
+    /// The current durable scalars (configuration id, promised ballot, chosen
+    /// index), composed from the components that own them.
+    #[must_use]
+    pub fn hard_state(&self) -> HardState {
+        HardState {
+            config_id: self.config_id,
+            max_promised_ballot: self.acceptor.promised(),
+            chosen_index: self.replica.chosen_index(),
+        }
     }
 
     /// The working per-slot accepted log (rebuilt from durable storage on boot).
     /// A read view for drivers/oracles; writes go through [`Ready`] deltas.
     #[must_use]
     pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Command)> {
-        &self.accepted
+        self.acceptor.records()
     }
 
     /// The compaction floor: the first slot still retained. Slots below it have
     /// been truncated away (see [`RawNode::compact`]).
     #[must_use]
     pub fn first_slot(&self) -> Slot {
-        self.first_slot
+        self.acceptor.first_slot()
     }
 
     /// The number of ticks observed so far.
@@ -2016,7 +1897,8 @@ impl RawNode {
     /// the same #94 duplicate-suppression decisions as everyone else.
     #[must_use]
     pub fn session_ledger(&self) -> Vec<SessionEntry> {
-        self.applied_seq
+        self.replica
+            .session_ledger()
             .iter()
             .flat_map(|(client, seqs)| seqs.iter().map(|(&seq, &slot)| (*client, seq, slot)))
             .collect()
@@ -2028,7 +1910,7 @@ impl RawNode {
     /// retained prefix with the identical suppression decisions.
     #[must_use]
     pub fn duplicate_slots(&self) -> &BTreeSet<Slot> {
-        &self.duplicate_slots
+        self.replica.duplicate_slots()
     }
 
     /// Monotone count of #94 duplicate suppressions the contiguous walk
@@ -2036,7 +1918,7 @@ impl RawNode {
     /// reports it through its audit port.
     #[must_use]
     pub fn duplicates_suppressed(&self) -> u64 {
-        self.duplicates_suppressed
+        self.replica.duplicates_suppressed()
     }
 
     /// Monotone count of `CheckQuorum` step-downs (#95) this incarnation: the
@@ -2053,7 +1935,7 @@ impl RawNode {
     /// place. A read view for drivers/oracles.
     #[must_use]
     pub fn faulty_entries(&self) -> &BTreeMap<Slot, Ballot> {
-        &self.faulty
+        self.acceptor.faulty()
     }
 
     /// How this node came to hold its current leadership: won by ordinary
@@ -2085,7 +1967,7 @@ impl RawNode {
     /// [`RawNode::open_app_repair`]).
     #[must_use]
     pub fn app_repair(&self) -> Option<Slot> {
-        self.app_repair
+        self.replica.app_repair()
     }
 
     /// How many blocked slots the leader's open repair probe still holds (0
@@ -2094,7 +1976,7 @@ impl RawNode {
     /// stragglers.
     #[must_use]
     pub fn blocked_repairs(&self) -> usize {
-        self.repair_probe.as_ref().map_or(0, |p| p.blocked.len())
+        self.proposer.probe().map_or(0, |p| p.blocked().len())
     }
 
     /// Monotone repair counters this incarnation, for the driver's audit
@@ -2103,12 +1985,13 @@ impl RawNode {
     /// step-downs, repair payload bytes)`.
     #[must_use]
     pub fn repair_counters(&self) -> (u64, u64, u64, u64, u64) {
+        let (faulty_repaired, repair_bytes) = self.acceptor.repair_counters();
         (
-            self.faulty_repaired,
+            faulty_repaired,
             self.repair_case1,
             self.repair_case2,
             self.repair_step_downs,
-            self.repair_bytes,
+            repair_bytes,
         )
     }
 
@@ -2125,24 +2008,7 @@ impl RawNode {
     /// frozen at `hole - 1` cluster-wide while higher slots keep being chosen.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
-        // An open application repair is the same shape of stall, routed through
-        // the same seam (Stage 8): decided slots sit above a prefix the
-        // application cannot advance past. `hole` is the repair cursor; the
-        // highest decided slot above it is at least the chosen index.
-        if let Some(hole) = self.app_repair {
-            let highest = self
-                .chosen
-                .range(hole..)
-                .next_back()
-                .map_or(hole, |(s, _)| *s)
-                .max(self.hard_state.chosen_index.unwrap_or(hole));
-            return Some((hole, highest));
-        }
-        let hole = self.first_unchosen();
-        // `hole` may itself be chosen while the bounded prefix walk is pending;
-        // the driver drains that continuation before quiescence.
-        let highest = *self.chosen.range(hole..).next_back()?.0;
-        Some((hole, highest))
+        self.replica.chosen_gap()
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----
@@ -2156,7 +2022,7 @@ impl RawNode {
     }
 
     pub(crate) fn pending_committed(&self) -> &[(Slot, Command)] {
-        &self.pending_committed
+        self.replica.committed()
     }
 
     pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
@@ -2171,6 +2037,10 @@ impl RawNode {
         &self.pending_match_requests
     }
 
+    pub(crate) fn pending_gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
+        &self.pending_gc_requests
+    }
+
     pub(crate) fn pending_recovery_batch(&self) -> Option<(usize, usize, usize)> {
         self.pending_recovery_batch
     }
@@ -2178,10 +2048,11 @@ impl RawNode {
     pub(crate) fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
-        self.pending_committed.clear();
+        self.replica.clear_committed();
         self.pending_snapshot_offers.clear();
         self.pending_read_states.clear();
         self.pending_match_requests.clear();
+        self.pending_gc_requests.clear();
         self.pending_recovery_batch = None;
     }
 }
