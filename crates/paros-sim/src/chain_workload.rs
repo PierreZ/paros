@@ -149,6 +149,16 @@ struct ChainConfig {
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
     /// back to the first enabled op).
     weights: [u64; OP_COUNT as usize],
+    /// Per-shape weights of the acceptor reconfiguration composer, one knob
+    /// each (the operation-weight family's floor and ceiling): a seed can be
+    /// a cluster that mostly grows and never shrinks, or the reverse. Floor
+    /// 0 for any single weight — an all-zero draw, and any shape the set in
+    /// force cannot take, walks the shape ring, so no draw makes the step a
+    /// no-op.
+    reconfigure_shape_weights: [u64; RECONFIGURE_SHAPES.len()],
+    /// The same, per matchmaker shape (a matchmaker set has no leader to
+    /// remove, so it is the four-entry [`MATCHMAKER_SHAPES`] ring).
+    matchmaker_shape_weights: [u64; MATCHMAKER_SHAPES.len()],
 }
 
 impl ChainConfig {
@@ -205,12 +215,47 @@ impl ChainConfig {
                 // the dead-node budget bounds how many may go.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
+            // grow, shrink, replace, remove-leader, rotate
+            reconfigure_shape_weights: [
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+            ],
+            // grow, shrink, replace, rotate
+            matchmaker_shape_weights: [
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+            ],
         }
     }
 
     fn weight(&self, operation: u8) -> u64 {
         self.weights[usize::from(operation)]
     }
+}
+
+/// Pick an index of `weights` from one draw, weighted. An all-zero draw (or a
+/// weight family a seed zeroed out entirely) falls back to the plain modulo:
+/// every shape stays reachable, and the shape ring in the caller covers the
+/// ones the set in force cannot take.
+fn weighted_index(weights: &[u64], draw: u64) -> usize {
+    let total: u64 = weights.iter().sum();
+    if total == 0 {
+        let len = u64::try_from(weights.len()).unwrap_or(1).max(1);
+        return usize::try_from(draw % len).unwrap_or(0);
+    }
+    let mut ticket = draw % total;
+    for (i, weight) in weights.iter().enumerate() {
+        if ticket < *weight {
+            return i;
+        }
+        ticket -= *weight;
+    }
+    0
 }
 
 /// Where a client sends its next attempt after a redirect, a transport error,
@@ -1730,7 +1775,7 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let drawn = usize::try_from(raw_class % 5).unwrap_or(0);
+                    let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
                     let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
@@ -1817,7 +1862,7 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let drawn_slot = usize::try_from(raw_class % 4).unwrap_or(0);
+                    let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
                         &crate::world::parked_matchmakers(ctx.state()),
