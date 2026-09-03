@@ -144,7 +144,8 @@ pub use self::message::{
     ReconfigureRequest,
 };
 pub use self::reconfigurer::{
-    MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, StartRefusal,
+    MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
+    StartRefusal,
 };
 pub use self::state::{
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration,

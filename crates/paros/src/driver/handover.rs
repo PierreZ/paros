@@ -4,7 +4,7 @@
 
 use paros_core::{
     MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, MatchmakerSet, NodeId,
-    PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerStep, StartRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Reconstruction, StartRefusal,
 };
 
 /// The node driver's handover state: the sans-IO
@@ -87,16 +87,16 @@ impl HandoverDriver {
     /// successor set itself. Returns the generation replaced and the
     /// reconstruction, for the report; `None` when there is nothing to
     /// close.
-    pub(crate) fn close_stop(&mut self) -> Option<(MatchmakerGeneration, PendingBootstrap)> {
+    pub(crate) fn close_stop(&mut self) -> Option<(MatchmakerGeneration, Reconstruction)> {
         if !self.reconfigurer.stop_quorum_reached() {
             return None;
         }
-        let bootstrap = self.reconfigurer.close_stop()?;
+        let reconstruction = self.reconfigurer.close_stop()?;
         let old = self
             .reconfigurer
             .old()
             .map_or(MatchmakerGeneration(0), |set| set.generation);
-        Some((old, bootstrap))
+        Some((old, reconstruction))
     }
 
     /// Fold one matchmaker's answer into the running phase.

@@ -58,8 +58,8 @@ pub use matchmaker::{
     GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
     MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Registration,
-    RegistrationKind, RegistryStorage, StartRefusal,
+    ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
+    Registration, RegistrationKind, RegistryStorage, StartRefusal,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,

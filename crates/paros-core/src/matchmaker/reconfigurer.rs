@@ -244,6 +244,23 @@ impl ReconfigurerReady<'_> {
     }
 }
 
+/// What [`MatchmakerReconfigurer::close_stop`] produced: the successor's
+/// initial state, and how many ballots the frozen registries disagreed on
+/// while it was unioned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reconstruction {
+    /// The reconstruction handed to every proposed member.
+    pub bootstrap: PendingBootstrap,
+    /// Distinct ballots two frozen registries reported with *different*
+    /// registrations. One ballot has one proposer and every matchmaker
+    /// writes it once, so this is zero on a correct registry; the union
+    /// keeps the first seen either way (it must pick one — the successor
+    /// generation holds one record per ballot), and this counts what was
+    /// dropped so the audit can judge the claim instead of the union
+    /// silently narrowing the ledger, durably, forever.
+    pub disagreements: u64,
+}
+
 /// The reconfigurer handle: one running handover at most, its outbound
 /// requests drained by the driver through [`Self::ready`].
 #[derive(Debug)]
@@ -459,7 +476,7 @@ impl MatchmakerReconfigurer {
     /// If the reconstruction breaks its own contract (a registration below
     /// the watermark it computed, a proposed successor that does not admit
     /// the matchmaker quorum system).
-    pub fn close_stop(&mut self) -> Option<PendingBootstrap> {
+    pub fn close_stop(&mut self) -> Option<Reconstruction> {
         let ReconfigurerPhase::Stopping {
             old,
             target,
@@ -479,12 +496,27 @@ impl MatchmakerReconfigurer {
         // is kept.
         let gc_watermark = acks.values().map(|(w, _)| *w).max().unwrap_or_default();
         let mut history: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        let mut disagreements: u64 = 0;
         for (_, registry) in acks.values() {
             for (ballot, registration) in registry {
                 if *ballot >= gc_watermark {
-                    history
-                        .entry(*ballot)
-                        .or_insert_with(|| registration.clone());
+                    match history.entry(*ballot) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(registration.clone());
+                        }
+                        std::collections::btree_map::Entry::Occupied(slot) => {
+                            if slot.get() != registration {
+                                // Two frozen registries hold one ballot with
+                                // different bytes. The successor generation
+                                // can only carry one, so the first seen
+                                // stays — but that *durably* narrows the
+                                // ledger, and the leader's own union keeps
+                                // both, so the count is reported rather than
+                                // dropped (review finding S2c).
+                                disagreements = disagreements.saturating_add(1);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -520,7 +552,10 @@ impl MatchmakerReconfigurer {
         };
         self.elapsed = 0;
         self.resend();
-        Some(bootstrap)
+        Some(Reconstruction {
+            bootstrap,
+            disagreements,
+        })
     }
 
     /// Re-queue the running phase's requests to every matchmaker that has not
@@ -902,8 +937,10 @@ impl MatchmakerReconfigurer {
 mod tests {
     use super::*;
     use crate::matchmaker::MatchmakerPhase;
-    use crate::matchmaker::{Matchmaker, MatchmakerConfig, MatchmakerHardState, RegistryStorage};
-    use crate::membership::MatchmakerGeneration;
+    use crate::matchmaker::{
+        MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, RegistryStorage,
+    };
+    use crate::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
 
     struct Empty;
     impl RegistryStorage for Empty {
@@ -969,9 +1006,22 @@ mod tests {
             .collect()
     }
 
-    /// Deliver every queued request of `r` to the pool and fold the replies,
-    /// returning the steps. `drop` names matchmakers that never answer.
+    /// One driver beat: deliver every queued request, fold the replies, then
+    /// close a freeze whose quorum answered — the shape the driver has.
     fn exchange(
+        r: &mut MatchmakerReconfigurer,
+        pool: &mut [Matchmaker],
+        drop: &[u64],
+    ) -> Vec<ReconfigurerStep> {
+        let steps = deliver(r, pool, drop);
+        r.close_stop();
+        steps
+    }
+
+    /// Deliver every queued request of `r` to the pool and fold the replies,
+    /// returning the steps, *without* the driver's closing beat. `drop`
+    /// names matchmakers that never answer.
+    fn deliver(
         r: &mut MatchmakerReconfigurer,
         pool: &mut [Matchmaker],
         drop: &[u64],
@@ -993,10 +1043,6 @@ mod tests {
                 steps.push(r.on_reply(reply));
             }
         }
-        // The driver's own cadence closes a completed freeze
-        // ([`MatchmakerReconfigurer::close_stop`]); doing it here keeps
-        // these tests the shape the driver has, one beat per call.
-        r.close_stop();
         steps
     }
 
@@ -1147,6 +1193,56 @@ mod tests {
                 new_remaining: 1
             }]
         );
+    }
+
+    /// Review finding S2c: the reconstruction counts the ballots two frozen
+    /// registries disagreed on. The union must pick one and the successor
+    /// generation then holds it durably, so a silent pick would narrow the
+    /// ledger forever — the count is what makes the "one registration per
+    /// ballot" claim checkable at the boundary that cannot keep both.
+    #[test]
+    fn a_reconstruction_counts_same_ballot_disagreements() {
+        let mut disagreeing = pool(3, &[0, 1, 2]);
+        // Two matchmakers register the *same* ballot with different
+        // configurations — impossible with one proposer per ballot, which
+        // is exactly why the audit wants to hear about it.
+        let cfg =
+            |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
+        let b = Ballot {
+            round: 1,
+            node: NodeId(9),
+        };
+        for (i, members) in [0_u64, 5].into_iter().enumerate() {
+            disagreeing[i].step(MatchRequest::new(
+                NodeId(9),
+                b,
+                cfg(members),
+                MatchmakerGeneration(0),
+            ));
+            disagreeing[i].ready().advance();
+        }
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.finish(&set(0, &[0, 1, 2])).expect("finish");
+        // Freeze both disagreeing members before the beat closes the stop.
+        deliver(&mut r, &mut disagreeing, &[2]);
+        let reconstruction = r.close_stop().expect("the quorum closes");
+        assert_eq!(reconstruction.disagreements, 1);
+        assert_eq!(reconstruction.bootstrap.history.len(), 1);
+        // A quorum that agrees counts nothing.
+        let mut agreeing = pool(3, &[0, 1, 2]);
+        for mm in &mut agreeing[..2] {
+            mm.step(MatchRequest::new(
+                NodeId(9),
+                b,
+                cfg(0),
+                MatchmakerGeneration(0),
+            ));
+            mm.ready().advance();
+        }
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.finish(&set(0, &[0, 1, 2])).expect("finish");
+        deliver(&mut r, &mut agreeing, &[2]);
+        assert_eq!(r.close_stop().expect("closes").disagreements, 0);
     }
 
     /// Review finding P7b: a member of the *successor* that only recorded

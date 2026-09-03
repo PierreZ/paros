@@ -652,11 +652,17 @@ pub trait Audit {
     /// every proposed member of the successor. Reported on the driver beat
     /// that closes the freeze, never on the ack that completed the quorum
     /// (#125, review finding P5).
+    ///
+    /// `disagreements` counts the ballots two frozen registries reported
+    /// with different registrations: the union keeps one, *durably*, so the
+    /// count is what makes "a reconstruction sees one registration per
+    /// ballot" a checkable claim rather than a silent narrowing.
     fn reconfigurer_reconstructed(
         &self,
         node: NodeId,
         generation: u64,
         bootstrap: &PendingBootstrap,
+        disagreements: u64,
     ) {
     }
 

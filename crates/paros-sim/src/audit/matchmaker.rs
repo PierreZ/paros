@@ -2094,7 +2094,24 @@ impl MatchmakerAudit {
     /// the ack that completed its quorum (review finding P5), so the acks
     /// folded here are every one that arrived, not only the quorum's first.
     #[allow(clippy::too_many_lines)]
-    pub(super) fn reconstructed(&mut self, node: NodeId, old: u64, bootstrap: &PendingBootstrap) {
+    pub(super) fn reconstructed(
+        &mut self,
+        node: NodeId,
+        old: u64,
+        bootstrap: &PendingBootstrap,
+        disagreements: u64,
+    ) {
+        // The write-once ledger says no two matchmakers ever register one
+        // ballot with different bytes, so a union over frozen registries
+        // must never have to *choose* — and if it did, the choice would
+        // narrow the successor generation's ledger durably and forever.
+        // The leader's own union keeps both configurations and lets Phase 1
+        // cover each; a reconstruction cannot, so the count is the claim.
+        assert_always!(
+            disagreements == 0,
+            "generation: a reconstruction sees one registration per ballot",
+            { "node" => node.0, "generation" => old, "disagreements" => disagreements }
+        );
         // Invariant 3: the reconstruction is the union of the frozen
         // quorum's durable registries above their maximum watermark
         // — and every completed registration of the replaced

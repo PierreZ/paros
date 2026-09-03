@@ -943,11 +943,13 @@ impl World {
             // reconstruction — and a finish's proposal.
             let n = self.node(node);
             let was = n.reconfigurer.old().map(|s| s.members.len());
-            let shrank = n
-                .reconfigurer
-                .close_stop()
-                .zip(was)
-                .is_some_and(|(bootstrap, len)| bootstrap.set.members.len() < len);
+            let shrank =
+                n.reconfigurer
+                    .close_stop()
+                    .zip(was)
+                    .is_some_and(|(reconstruction, len)| {
+                        reconstruction.bootstrap.set.members.len() < len
+                    });
             if shrank {
                 self.reach.finish_shrank_the_set += 1;
             }
@@ -1337,14 +1339,18 @@ fn a_straggler_that_answers_before_the_close_widens_the_finish() {
         ReconfigurerPhase::Stopping { .. }
     ));
     assert!(world.node(node).reconfigurer.stop_quorum_reached());
-    let bootstrap = world
+    let reconstruction = world
         .node(node)
         .reconfigurer
         .close_stop()
         .expect("the quorum closes on the beat");
     assert_eq!(
-        bootstrap.set.members, believed.members,
+        reconstruction.bootstrap.set.members, believed.members,
         "every member that answered the freeze is in the finish's proposal"
+    );
+    assert_eq!(
+        reconstruction.disagreements, 0,
+        "no two frozen registries disagreed on a ballot"
     );
 }
 

@@ -2191,10 +2191,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         generation: u64,
         bootstrap: &PendingBootstrap,
+        disagreements: u64,
     ) {
         self.state()
             .matchmaker
-            .reconstructed(node, generation, bootstrap);
+            .reconstructed(node, generation, bootstrap, disagreements);
     }
 
     fn matchmaker_activated(
