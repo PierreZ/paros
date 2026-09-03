@@ -542,7 +542,19 @@ impl RawNode {
         // The replica's and the proposer's own maps against the acceptor's
         // floor.
         self.replica.assert_invariants(self.acceptor.first_slot());
-        self.proposer.assert_invariants(self.acceptor.first_slot());
+        self.proposer.assert_invariants();
+        // The cross-role couplings against the acceptor's floor: a compaction
+        // and a snapshot install both retain the rounds above the floor they
+        // raise, so an in-flight Phase-2 round below it would address a slot
+        // whose record is gone.
+        assert!(
+            self.proposer
+                .rounds()
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.acceptor.first_slot()),
+            "no in-flight round survives below the compaction floor"
+        );
         // Role couplings. Note "leader ballot >= own promise" is deliberately
         // NOT a global invariant: a still-Leader node can learn a higher-ballot
         // `Commit` (raising its promise via `mark_chosen`) before any deposing
@@ -1336,7 +1348,7 @@ impl RawNode {
             return;
         }
         let me = self.config.id;
-        let pending = self.proposer.resend_page(self.acceptor.first_slot());
+        let pending = self.proposer.resend_page();
         for (slot, ballot, command) in pending {
             self.broadcast_acceptors(&Message::Accept {
                 config_id: self.config_id,

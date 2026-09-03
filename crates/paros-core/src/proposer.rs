@@ -486,18 +486,16 @@ impl Proposer {
         Self::default()
     }
 
-    /// The component's own cross-field invariants against the retention
-    /// floor `floor` (the acceptor's compaction floor, handed in as data).
+    /// The component's own cross-field invariants. The proposer holds no
+    /// durable state and no floor of its own: "no in-flight round survives
+    /// below the compaction floor" couples two roles, so it is asserted by
+    /// the wiring that owns both ([`crate::RawNode::assert_invariants`]).
     ///
     /// # Panics
     ///
     /// Panics when a proposer invariant is broken: a programmer error, never
     /// an operating condition.
-    pub fn assert_invariants(&self, floor: Slot) {
-        assert!(
-            self.rounds.keys().next().is_none_or(|s| *s >= floor),
-            "no in-flight round survives below the compaction floor"
-        );
+    pub fn assert_invariants(&self) {
         // A probe is opened only by a won election and closes with its last
         // blocked slot, so an open one always has work.
         assert!(
@@ -945,9 +943,13 @@ impl Proposer {
 
     /// The next fair page of rounds whose `Accept`s are to be re-sent: at
     /// most [`LEADER_RECOVERY_BATCH`] rounds from the cursor up, wrapping
-    /// around from `floor`, and the cursor advances past the page.
-    pub fn resend_page(&mut self, floor: Slot) -> Vec<(Slot, Ballot, Command)> {
-        let start = self.resend_cursor.unwrap_or(floor);
+    /// around from the lowest round held, and the cursor advances past the
+    /// page.
+    pub fn resend_page(&mut self) -> Vec<(Slot, Ballot, Command)> {
+        // No round survives below the compaction floor (the cross-role
+        // invariant `RawNode::assert_invariants` pins), so a fresh cursor
+        // starts at the bottom of the map and needs no floor handed in.
+        let start = self.resend_cursor.unwrap_or(Slot(0));
         let mut pending: Vec<(Slot, Ballot, Command)> = self
             .rounds
             .range(start..)
