@@ -154,6 +154,13 @@ pub(super) struct MatchmakerAudit {
     ever: BTreeMap<(u64, Ballot), Registration>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
+    /// Per matchmaker generation, the configuration each **completed**
+    /// campaign registered, by ballot — the reconstruction-completeness check
+    /// reads exactly this, and reading it here keeps that check proportional
+    /// to the generation's own campaigns instead of every campaign the run
+    /// ever opened (campaigns are never pruned: the write-once ledger is what
+    /// a reused ballot would trip).
+    completed_by_generation: BTreeMap<u64, BTreeMap<Ballot, Option<AcceptorConfig>>>,
     /// The bootstrap matchmaker set (generation 0), from the boot reports.
     bootstrap_set: Option<Vec<u64>>,
     /// The authoritative members of every generation seen (#125,
@@ -1219,7 +1226,19 @@ impl MatchmakerAudit {
             );
         }
         campaign.completed = true;
-        if let Some(config) = campaign.config.clone() {
+        let registered = campaign.config.clone();
+        // The per-matchmaker reply copies are scratch for the fold above and
+        // nothing reads them once the campaign closed; the keys stay (a
+        // late re-answer still has to be one this matchmaker sent).
+        for copies in campaign.replies.values_mut() {
+            copies.clear();
+            copies.shrink_to_fit();
+        }
+        self.completed_by_generation
+            .entry(generation)
+            .or_default()
+            .insert(ballot, registered.clone());
+        if let Some(config) = registered {
             // From here the configuration rides this campaign's `Prepare`s
             // (and its heartbeats, if it wins): a belief others may learn.
             self.wire_configs.insert(config);
@@ -1297,6 +1316,11 @@ impl MatchmakerAudit {
             { "node" => node.0, "round" => ballot.round }
         );
         campaign.refused = true;
+        // Dead campaign: the reply copies are scratch nothing reads again.
+        for copies in campaign.replies.values_mut() {
+            copies.clear();
+            copies.shrink_to_fit();
+        }
         if let MatchRefusal::Stale { highest } = refusal {
             let floor = self.refused_floor.entry(node.0).or_default();
             *floor = (*floor).max(highest.round);
@@ -1665,7 +1689,14 @@ impl MatchmakerAudit {
                 // quorum's durable registries above their maximum watermark
                 // — and every completed registration of the replaced
                 // generation above that watermark is in it.
-                let old = bootstrap.set.generation.0.saturating_sub(1);
+                // The generation being replaced is the one the frozen
+                // matchmaker named in the very reply this step folded — not
+                // the successor's number minus one, which only happens to
+                // agree while generations are contiguous.
+                let old = match reply {
+                    ReconfigureReply::Stopped { generation, .. } => generation.0,
+                    _ => bootstrap.set.generation.0.saturating_sub(1),
+                };
                 let folded = self
                     .stop_acks
                     .get(&(node.0, old))
@@ -1701,15 +1732,16 @@ impl MatchmakerAudit {
                     }
                 );
                 let missing = self
-                    .campaigns
-                    .iter()
-                    .filter(|((_, b), c)| {
-                        c.completed && c.generation == old && *b >= bootstrap.gc_watermark
-                    })
-                    .find(|((_, b), c)| {
-                        bootstrap.history.get(b).map(|r| &r.config) != c.config.as_ref()
-                    })
-                    .map(|((_, b), _)| b.round);
+                    .completed_by_generation
+                    .get(&old)
+                    .and_then(|completed| {
+                        completed
+                            .range(bootstrap.gc_watermark..)
+                            .find(|(b, config)| {
+                                bootstrap.history.get(b).map(|r| &r.config) != config.as_ref()
+                            })
+                            .map(|(b, _)| b.round)
+                    });
                 assert_always!(
                     missing.is_none(),
                     "generation: a reconstruction carries every completed registration above its watermark",
