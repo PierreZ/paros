@@ -14,7 +14,7 @@ use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::grpc::{ParosInternalClient, internal, message_to_proto, wire_checksum};
+use crate::grpc::{ParosInternalClient, internal, message_to_proto};
 use crate::hooks::DriverHooks;
 
 use super::config::{DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES};
@@ -427,7 +427,7 @@ fn delivery_batch<A: Audit>(
     }
     let mut batch = Vec::with_capacity(batch_limit);
     let mut batch_bytes = first.encoded_len();
-    batch.push(wire_message(first));
+    batch.push(first);
     let mut carried = None;
     while batch.len() < batch_limit {
         let Some(message) = messages.try_pop() else {
@@ -438,7 +438,7 @@ fn delivery_batch<A: Audit>(
             break;
         }
         batch_bytes += message.encoded_len();
-        batch.push(wire_message(message));
+        batch.push(message);
     }
     // The drain-side reorder: the peer transport never promised ordering, and
     // reversing a whole batch is the shape a retried RPC or a re-established
@@ -448,14 +448,6 @@ fn delivery_batch<A: Audit>(
         batch.reverse();
     }
     (internal::Deliver { messages: batch }, carried)
-}
-
-fn wire_message(message: internal::ConsensusMessage) -> internal::WireMessage {
-    let checksum = wire_checksum(&message.encode_to_vec());
-    internal::WireMessage {
-        message: Some(message),
-        checksum,
-    }
 }
 
 /// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names

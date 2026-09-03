@@ -9,7 +9,6 @@ use paros_core::{
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, Registration, SessionEntry, Slot, Value,
 };
-use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -60,37 +59,6 @@ pub use public::{
 
 pub(crate) type ReplySender<T> = oneshot::Sender<T>;
 type Call<T, U> = (T, ReplySender<U>);
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-fn checksum_extend(mut hash: u64, bytes: &[u8]) -> u64 {
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-/// Stable FNV-1a integrity checksum for one encoded protobuf consensus message.
-pub(crate) fn wire_checksum(bytes: &[u8]) -> u64 {
-    checksum_extend(FNV_OFFSET, bytes)
-}
-
-/// Stable integrity checksum for one client proposal.
-///
-/// The identity, explicit command length, and opaque bytes are all covered so a
-/// changed request is rejected before it can enter the consensus log. This is
-/// an integrity check for transport damage, not an authentication primitive.
-#[must_use]
-pub fn proposal_checksum(client: u64, seq: u64, command: &[u8]) -> u64 {
-    let command_len = u64::try_from(command.len()).unwrap_or(u64::MAX);
-    let hash = checksum_extend(FNV_OFFSET, b"paros-propose-v1");
-    let hash = checksum_extend(hash, &client.to_le_bytes());
-    let hash = checksum_extend(hash, &seq.to_le_bytes());
-    let hash = checksum_extend(hash, &command_len.to_le_bytes());
-    checksum_extend(hash, command)
-}
 
 fn ballot_to_proto(ballot: Ballot) -> common::Ballot {
     common::Ballot {
@@ -656,10 +624,6 @@ pub(crate) struct RpcInbox {
 /// Why the gRPC edge refused an inbound request before the node loop saw it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeRejection {
-    /// A client proposal whose `(client, seq, command)` checksum did not match.
-    ProposalChecksum,
-    /// A peer batch envelope whose per-message checksum did not match.
-    MessageChecksum,
     /// A peer message that decoded from the wire but not into a `Message`.
     MessageDecode,
 }
@@ -742,17 +706,9 @@ async fn dispatch<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U
 impl public::paros_server::Paros for RpcService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn propose(&self, request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
-        let request = request.into_inner();
-        if proposal_checksum(request.client, request.seq, &request.command) != request.checksum {
-            tracing::warn!(
-                client = request.client,
-                seq = request.seq,
-                "proposal_checksum_rejected"
-            );
-            (self.on_reject)(EdgeRejection::ProposalChecksum);
-            return Err(Status::data_loss("invalid proposal checksum"));
-        }
-        dispatch(&self.propose, request).await.map(Response::new)
+        dispatch(&self.propose, request.into_inner())
+            .await
+            .map(Response::new)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -797,15 +753,7 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         &self,
         request: Request<internal::Deliver>,
     ) -> Result<Response<internal::DeliverAck>, Status> {
-        for envelope in request.into_inner().messages {
-            let message = envelope
-                .message
-                .ok_or_else(|| Status::invalid_argument("missing Paxos message"))?;
-            if wire_checksum(&message.encode_to_vec()) != envelope.checksum {
-                tracing::warn!("message_corruption_rejected");
-                (self.on_reject)(EdgeRejection::MessageChecksum);
-                return Err(Status::data_loss("invalid Paxos message checksum"));
-            }
+        for message in request.into_inner().messages {
             let message = message_from_proto(message).map_err(|error| {
                 (self.on_reject)(EdgeRejection::MessageDecode);
                 Status::invalid_argument(format!("invalid Paxos message: {error}"))
@@ -1406,18 +1354,7 @@ impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService 
 
 #[cfg(test)]
 mod tests {
-    use super::{common, internal, message_from_proto, proposal_checksum};
-
-    #[test]
-    fn proposal_checksum_covers_identity_length_and_command() {
-        let command = [1_u8, 2, 3, 4];
-        let checksum = proposal_checksum(7, 11, &command);
-
-        assert_ne!(checksum, proposal_checksum(8, 11, &command));
-        assert_ne!(checksum, proposal_checksum(7, 12, &command));
-        assert_ne!(checksum, proposal_checksum(7, 11, &[1, 2, 3]));
-        assert_ne!(checksum, proposal_checksum(7, 11, &[1, 2, 3, 5]));
-    }
+    use super::{common, internal, message_from_proto};
 
     #[test]
     fn protobuf_rejects_a_missing_message_kind() {

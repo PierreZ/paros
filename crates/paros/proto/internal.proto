@@ -26,18 +26,10 @@ message RetireAck {
 }
 
 message Deliver {
-  repeated WireMessage messages = 1;
+  repeated ConsensusMessage messages = 1;
 }
 
 message DeliverAck {}
-
-// Integrity envelope for one typed protobuf Paxos message. The checksum covers
-// the encoded ConsensusMessage so accidental corruption is fail-stop, never
-// converted into a different command.
-message WireMessage {
-  ConsensusMessage message = 1;
-  fixed64 checksum = 2;
-}
 
 message ConsensusMessage {
   oneof kind {

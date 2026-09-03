@@ -50,8 +50,7 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, proposal_checksum,
-    snap_chunk_count,
+    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, snap_chunk_count,
 };
 
 use crate::audit::audit_world;
@@ -293,7 +292,6 @@ impl CorpusClients {
                 response = client.propose(Propose {
                     client: client_id,
                     seq,
-                    checksum: proposal_checksum(client_id, seq, bytes),
                     command: bytes.to_vec(),
                 }) => response.ok().map(tonic::Response::into_inner),
                 _ = time.sleep(RPC_TIMEOUT) => None,

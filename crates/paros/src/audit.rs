@@ -378,9 +378,9 @@ pub trait Audit {
     fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
 
     /// The gRPC edge refused an inbound request before it reached the node
-    /// loop — a checksum or decode failure on a client proposal or a peer
-    /// batch. The refusal is the transport's own integrity gate; nothing
-    /// inside the node changed.
+    /// loop — a peer message that decoded from the wire but not into a
+    /// `Message`. The refusal happens at the edge; nothing inside the node
+    /// changed.
     fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----

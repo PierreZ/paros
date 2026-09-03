@@ -44,7 +44,7 @@ pub use grpc::{
     ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
     WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
     WireReconfigureReply, WireReconfigureRequest, garbage_collect_ack_from_wire,
-    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire, proposal_checksum,
+    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire,
     reconfigure_reply_from_wire, reconfigure_request_from_wire, wire_garbage_collect,
     wire_garbage_collect_ack, wire_match_reply, wire_match_request, wire_reconfigure_reply,
     wire_reconfigure_request,

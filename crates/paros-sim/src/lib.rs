@@ -233,9 +233,11 @@ fn chaos_surfaces() -> [Chaos; 4] {
 /// Fresh main-campaign builder. Keeping all state behind process/workload
 /// factories is what makes fork-free exploration and recipe replay trustworthy.
 ///
-/// `BitFlip` is masked off: the un-checksummed public replies carry no
-/// per-message integrity protection, so a provider-level flip fabricates a
-/// *client observation* rather than cluster state (moonpool#183 terrain).
+/// `BitFlip` is masked off: wire integrity is the transport's job — TCP's own
+/// checks today, a TLS layer later — not paros's. A provider-level flip below
+/// an intact transport models damage no deployed link delivers, and would
+/// fabricate a *client observation* rather than cluster state (moonpool#183
+/// terrain).
 fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))

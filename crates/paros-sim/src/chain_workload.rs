@@ -14,7 +14,7 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
-    Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, parse_addr, proposal_checksum,
+    Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, parse_addr,
 };
 
 use crate::audit::{ClientHistory, audit_world, check_run};
@@ -791,7 +791,6 @@ impl Workload for ChainWorkload {
                 let call = client.propose(Propose {
                     client: client_id,
                     seq,
-                    checksum: proposal_checksum(client_id, seq, &payload),
                     command: payload,
                 });
                 if abandon {
