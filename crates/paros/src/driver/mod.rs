@@ -52,6 +52,7 @@ pub use events::{
     EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED,
     EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, command_hash,
+    registration_history_hash,
 };
 
 use std::collections::BTreeMap;
@@ -669,8 +670,9 @@ where
                     registered = matches!(reply.outcome, paros_core::MatchOutcome::Registered { .. }),
                     "match_reply_received"
                 );
+                let folded = crate::driver::matchmaking::folded_answer(&reply);
                 let step = node.on_match_reply(reply);
-                report_match_step(&node, audit, self_id, matchmaker, ballot, &step);
+                report_match_step(&node, audit, self_id, matchmaker, ballot, folded, &step);
                 // The two straggler paths of a handover (#125), taken by
                 // whichever node meets them: a registry frozen with no
                 // successor is finished by this node (the reconfigurer's

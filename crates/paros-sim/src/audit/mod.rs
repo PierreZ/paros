@@ -2482,10 +2482,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         ballot: Ballot,
         remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
     ) {
-        self.state()
-            .matchmaker
-            .registered_by(node, matchmaker, ballot, remaining);
+        self.state().matchmaker.registered_by(
+            node,
+            matchmaker,
+            ballot,
+            remaining,
+            watermark,
+            history_hash,
+        );
     }
 
     fn matchmaking_completed(

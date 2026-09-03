@@ -144,6 +144,11 @@ struct Campaign {
     floor_at_start: Ballot,
     /// The matchmakers whose replies the candidate reported folding.
     registered_by: BTreeSet<u64>,
+    /// Per matchmaker, the copy the candidate *actually* folded — the one it
+    /// named by watermark and history digest. The union and the maximum
+    /// watermark a completion claims are re-derived from exactly these,
+    /// never from a search over the copies the matchmakers sent.
+    folded: BTreeMap<u64, ReplyCopy>,
     /// A refusal was folded: the campaign is dead.
     refused: bool,
     /// The matchmaking closed with a quorum; Phase 1 is licensed.
@@ -322,85 +327,60 @@ pub(super) struct MatchmakerAudit {
 /// at or above `watermark` (invariant 3's expectation), and the set of
 /// distinct ballot sequences the histories had (to see whether they
 /// differed at all).
-/// Every way to pick one reply per registering matchmaker (the cartesian
-/// product of the copies each one sent): the candidate folded exactly one
-/// of them.
-fn reply_combinations<'a, T>(lists: &[&'a Vec<T>]) -> Vec<Vec<&'a T>> {
-    let mut combos: Vec<Vec<&'a T>> = vec![Vec::new()];
-    for list in lists {
-        combos = combos
-            .iter()
-            .flat_map(|prefix| {
-                list.iter().map(move |item| {
-                    let mut next = prefix.clone();
-                    next.push(item);
-                    next
-                })
-            })
-            .collect();
-    }
-    combos
-}
-
-/// Invariants 2 and 3 of a completed campaign, re-derived from the replies
-/// the registering matchmakers sent. A matchmaker may have answered a
-/// re-sent request a second time from a registry a floor was raised on in
-/// between; the candidate folds whichever copy reached it first, so the
-/// claim is existential: *some* choice of one reply per registering
-/// matchmaker yields exactly the watermark and the union reported. Returns
-/// that choice (empty when none matches, after the violations recorded).
-fn folded_replies<'a>(
-    campaign: &'a Campaign,
+/// Invariants 2 and 3 of a completed campaign, re-derived from the copies
+/// the candidate reported folding: the watermark it filtered by is the
+/// maximum of those, and the prior set is exactly their union above it.
+///
+/// This is a *point* check. It used to be existential — some choice of one
+/// copy per registering matchmaker had to explain the reported union — a
+/// cartesian product over every copy each matchmaker sent (five matchmakers
+/// answering ten times each is 100,000 combinations) and strictly weaker
+/// than what the candidate itself knows: which copy it folded. It now says
+/// so ([`paros::Audit::match_registered_by`]).
+///
+/// Returns the distinct ballot sequences the folded histories had, for the
+/// "histories differ between matchmakers" gate.
+fn check_folded_union(
+    campaign: &Campaign,
     node: NodeId,
     ballot: Ballot,
     prior: &[AcceptorConfig],
     watermark: Ballot,
-) -> Vec<&'a ReplyCopy> {
-    let per_matchmaker: Vec<&Vec<ReplyCopy>> = campaign
-        .registered_by
-        .iter()
-        .filter_map(|m| campaign.replies.get(m))
-        .collect();
-    let mut max_seen = Ballot::default();
-    let mut watermark_matches = false;
-    let mut chosen: Option<Vec<&ReplyCopy>> = None;
-    for combo in reply_combinations(&per_matchmaker) {
-        let max = combo.iter().map(|(_, w)| *w).max().unwrap_or_default();
-        max_seen = max_seen.max(max);
-        if max != watermark {
-            continue;
-        }
-        watermark_matches = true;
-        let (expected, _) = union_above(&combo, max);
-        let union_matches = prior.len() == expected.len()
-            && expected.iter().all(|c| prior.contains(c))
-            && prior.iter().all(|c| expected.contains(&c));
-        if union_matches {
-            chosen = Some(combo);
-            break;
-        }
-    }
+) -> BTreeSet<Vec<Ballot>> {
+    let replies: Vec<&ReplyCopy> = campaign.folded.values().collect();
+    let max_watermark = replies.iter().map(|(_, w)| *w).max().unwrap_or_default();
     assert_always!(
-        watermark_matches,
+        watermark == max_watermark,
         "matchmaking: the watermark used is the maximum reported",
         {
             "node" => node.0,
             "round" => ballot.round,
             "used_round" => watermark.round,
-            "max_round" => max_seen.round
+            "max_round" => max_watermark.round
         }
     );
+    let (expected, histories) = union_above(&replies, watermark);
+    let union_matches = prior.len() == expected.len()
+        && expected.iter().all(|c| prior.contains(c))
+        && prior.iter().all(|c| expected.contains(&c));
     assert_always!(
-        chosen.is_some(),
+        union_matches,
         "matchmaking: the prior set is the union of every registering reply above the watermark",
         {
             "node" => node.0,
             "round" => ballot.round,
             "reported" => prior.len(),
-            "registering" => per_matchmaker.len()
+            "expected" => expected.len()
         }
     );
-    chosen.unwrap_or_default()
+    histories
+}
+
+/// The digest of one history copy, computed exactly as the driver computes
+/// the one it reports ([`paros::registration_history_hash`]) — the two must
+/// agree or the point check below could never match.
+fn history_digest(history: &[(Ballot, Registration)]) -> u64 {
+    paros::registration_history_hash(history.iter().map(|(ballot, r)| (ballot, r)))
 }
 
 /// Whether a matchmaker whose folded generation scalars are `folded` serves
@@ -1296,6 +1276,8 @@ impl MatchmakerAudit {
         matchmaker: MatchmakerId,
         ballot: Ballot,
         remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
     ) {
         let generation = self
             .campaigns
@@ -1303,12 +1285,26 @@ impl MatchmakerAudit {
             .map_or(0, |c| c.generation);
         let quorum = self.quorum(generation);
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
-        // The reply it folded is one the matchmaker actually sent it.
+        // The reply it folded is one the matchmaker actually sent it — and,
+        // now that the candidate names *which* copy it folded, exactly one
+        // of them. A matchmaker answers a re-sent request again from a
+        // registry a floor may have been raised on in between, so the copies
+        // differ; matching the point is both cheaper than the cartesian
+        // search it replaces and strictly stronger.
+        let sent = campaign.replies.get(&matchmaker.0).and_then(|copies| {
+            copies
+                .iter()
+                .find(|(history, w)| *w == watermark && history_digest(history) == history_hash)
+                .cloned()
+        });
         assert_always!(
-            campaign.replies.contains_key(&matchmaker.0),
+            sent.is_some(),
             "matchmaking: a folded registration was sent by that matchmaker",
             { "node" => node.0, "matchmaker" => matchmaker.0, "round" => ballot.round }
         );
+        if let Some(copy) = sent {
+            campaign.folded.insert(matchmaker.0, copy);
+        }
         campaign.registered_by.insert(matchmaker.0);
         assert_always!(
             remaining == quorum.saturating_sub(campaign.registered_by.len()),
@@ -1382,16 +1378,16 @@ impl MatchmakerAudit {
             "matchmaking: no two matchmakers disagree on a ballot's configuration",
             { "node" => node.0, "round" => ballot.round, "disagreements" => disagreements }
         );
-        let replies = folded_replies(campaign, node, ballot, prior, watermark);
-        let (_, histories) = union_above(&replies, watermark);
+        let histories = check_folded_union(campaign, node, ballot, prior, watermark);
         // The effective configuration (review of #132): the highest-ballot
         // *reconfiguration* registration the folded replies name. An
         // ordinary campaign completes only if it registered exactly that —
         // a stale belief must have aborted instead (`campaign_stale`), so a
         // superseded configuration is never reinstated by an election. A
         // reconfiguration campaign is exempt: it is the next one.
-        let effective = replies
-            .iter()
+        let effective = campaign
+            .folded
+            .values()
             .flat_map(|(history, _)| history.iter())
             .filter(|(_, r)| r.kind.is_reconfiguration())
             .max_by_key(|(b, _)| *b)
@@ -1418,6 +1414,7 @@ impl MatchmakerAudit {
             copies.clear();
             copies.shrink_to_fit();
         }
+        campaign.folded.clear();
         self.completed_by_generation
             .entry(generation)
             .or_default()
@@ -1505,6 +1502,7 @@ impl MatchmakerAudit {
             copies.clear();
             copies.shrink_to_fit();
         }
+        campaign.folded.clear();
         if let MatchRefusal::Stale { highest } = refusal {
             let floor = self.refused_floor.entry(node.0).or_default();
             *floor = (*floor).max(highest.round);

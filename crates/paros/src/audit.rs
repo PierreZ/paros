@@ -431,12 +431,22 @@ pub trait Audit {
 
     /// This candidate folded a `Registered` reply from `matchmaker` for
     /// `ballot`; `remaining` registrations are still needed for the quorum.
+    ///
+    /// `watermark` and `history_hash` name **which** answer was folded (a
+    /// matchmaker answers a re-sent request again, from a registry a floor
+    /// may have been raised on in between, so the copies differ). Without
+    /// them an oracle can only ask whether *some* choice of one copy per
+    /// matchmaker explains the campaign's union — a cartesian product over
+    /// the copies, superlinear and strictly weaker than the point check the
+    /// candidate itself can report.
     fn match_registered_by(
         &self,
         node: NodeId,
         matchmaker: MatchmakerId,
         ballot: Ballot,
         remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
     ) {
     }
 

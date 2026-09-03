@@ -3,7 +3,7 @@
 //! the stable field a trace carries (value/command hashes, message labels, the
 //! ballot-carrying route triple).
 
-use paros_core::{Ballot, Command, ConfigId, Control, Message, NodeId, Slot};
+use paros_core::{Ballot, Command, ConfigId, Control, Message, NodeId, Registration, Slot};
 
 use crate::grpc::internal;
 
@@ -265,6 +265,30 @@ pub fn command_hash(command: &Command) -> u64 {
             value_hash(&bytes)
         }
     }
+}
+
+/// A stable `u64` digest of a matchmaking history page (FNV-1a over each
+/// registration's ballot, kind and membership), so the audit can name *which*
+/// answer a candidate folded without the reply's bytes travelling through the
+/// port. Order-sensitive, which is what the page contract wants: two pages
+/// with the same registrations in a different order are different answers.
+pub fn registration_history_hash<'a, I>(history: I) -> u64
+where
+    I: IntoIterator<Item = (&'a Ballot, &'a Registration)>,
+{
+    let mut bytes: Vec<u8> = Vec::new();
+    for (ballot, registration) in history {
+        bytes.extend_from_slice(&ballot.round.to_le_bytes());
+        bytes.extend_from_slice(&ballot.node.0.to_le_bytes());
+        bytes.push(u8::from(registration.kind.is_reconfiguration()));
+        for member in registration.config.members() {
+            bytes.extend_from_slice(&member.0.to_le_bytes());
+        }
+        // A separator, so two adjacent memberships cannot be re-cut into
+        // the same byte string.
+        bytes.push(0xff);
+    }
+    value_hash(&bytes)
 }
 
 /// A short, stable label for a [`Message`] variant, for observability: the `kind`

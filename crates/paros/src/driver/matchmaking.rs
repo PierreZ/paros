@@ -10,13 +10,14 @@ use std::time::Duration;
 use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
 use moonpool_hyper::ReconnectingChannel;
 use paros_core::{
-    Ballot, GcAck, GcRequest, MatchReply, MatchRequest, MatchStep, MatchmakerId, NodeId, RawNode,
-    ReconfigureReply, ReconfigureRequest, Slot,
+    Ballot, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep, MatchmakerId,
+    NodeId, RawNode, ReconfigureReply, ReconfigureRequest, Slot,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
+use crate::driver::events::registration_history_hash;
 use crate::grpc::{
     ParosMatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,
@@ -287,7 +288,23 @@ fn send_match_requests<P: Providers, A: Audit>(
     }
 }
 
-/// Report what one matchmaker reply did to the open campaign.
+/// Which `Registered` answer a candidate folded: the watermark it reported
+/// and a digest of the history it carried. Taken from the reply *before* it
+/// is folded — the point the audit's registering check needs, in place of a
+/// search over every copy the matchmaker ever sent. `None` for a refusal.
+pub(crate) fn folded_answer(reply: &MatchReply) -> Option<(Ballot, u64)> {
+    match &reply.outcome {
+        MatchOutcome::Registered {
+            history,
+            gc_watermark,
+            ..
+        } => Some((*gc_watermark, registration_history_hash(history))),
+        MatchOutcome::Refused(_) => None,
+    }
+}
+
+/// Report what one matchmaker reply did to the open campaign. `folded` is
+/// [`folded_answer`] for that reply.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn report_match_step<A: Audit>(
     node: &RawNode,
@@ -295,17 +312,27 @@ pub(crate) fn report_match_step<A: Audit>(
     self_id: u64,
     matchmaker: MatchmakerId,
     ballot: Ballot,
+    folded: Option<(Ballot, u64)>,
     step: &MatchStep,
 ) {
+    let (folded_watermark, folded_hash) = folded.unwrap_or_default();
     match step {
         MatchStep::Ignored => {}
         MatchStep::Registered { remaining } => {
-            audit.match_registered_by(NodeId(self_id), matchmaker, ballot, *remaining);
+            audit.match_registered_by(
+                NodeId(self_id),
+                matchmaker,
+                ballot,
+                *remaining,
+                folded_watermark,
+                folded_hash,
+            );
             tracing::info!(
                 node = self_id,
                 matchmaker = matchmaker.0,
                 round = ballot.round,
                 remaining = *remaining as u64,
+                watermark_round = folded_watermark.round,
                 "match_registered_by"
             );
         }
@@ -316,7 +343,14 @@ pub(crate) fn report_match_step<A: Audit>(
         } => {
             // The closing reply is a registration too: fold it before the
             // completion so the audit's registering set is the full quorum.
-            audit.match_registered_by(NodeId(self_id), matchmaker, ballot, 0);
+            audit.match_registered_by(
+                NodeId(self_id),
+                matchmaker,
+                ballot,
+                0,
+                folded_watermark,
+                folded_hash,
+            );
             audit.matchmaking_completed(
                 NodeId(self_id),
                 ballot,
