@@ -594,7 +594,7 @@ where
                             && node.is_leader()
                             && node.acceptors().contains(*from)
                         {
-                            snap.acks.entry(at_index.0).or_default().insert(from.0);
+                            snap.acks.entry(*at_index).or_default().insert(*from);
                         }
                         true
                     }
@@ -887,11 +887,13 @@ where
                 // the quorum's custody advertisements land. Proposal-side
                 // policy only — the acceptor paths stay fully opaque.
                 let ack = if node.is_leader() {
-                    let quorum = node.acceptors().quorum_size();
+                    // The quorum question goes through the configuration in
+                    // force, never a raw count: an ack from a node the current
+                    // acceptor set no longer names does not witness custody.
                     let covered = snap
                         .acks
                         .iter()
-                        .filter(|(_, holders)| holders.len() >= quorum)
+                        .filter(|(_, holders)| node.acceptors().has_quorum(holders))
                         .map(|(&point, _)| point)
                         .max();
                     let propose_marker = |node: &mut RawNode, snap: &mut SnapRepair| {
@@ -903,7 +905,7 @@ where
                         }
                     };
                     if let Some(point) = covered {
-                        let up_to = Slot(req.up_to.min(point));
+                        let up_to = Slot(req.up_to.min(point.0));
                         // Honest ack: `accepted: true` only when the Truncate
                         // proposal was actually admitted. `propose_control`
                         // can refuse (a step-down raced this request), and the
@@ -917,11 +919,11 @@ where
                             node = self_id,
                             requested = req.up_to,
                             up_to = up_to.0,
-                            point,
+                            point = point.0,
                             accepted = proposed,
                             "truncate_coupled_to_snap_point"
                         );
-                        if req.up_to > point {
+                        if req.up_to > point.0 {
                             // The request outruns the covered prefix: seed the
                             // next point so a later compact can go further.
                             propose_marker(&mut node, &mut snap);

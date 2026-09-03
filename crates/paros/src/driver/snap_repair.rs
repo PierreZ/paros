@@ -33,8 +33,11 @@ pub(crate) struct SnapRepair {
     /// Leader tally: decided snapshot point → nodes advertising custody of
     /// it. Points only ever advance, so a stale entry is still a sound
     /// coupling witness (any retained point at or past `up_to` covers a
-    /// `Truncate{up_to}`); the map grows one entry per decided marker.
-    pub(crate) acks: BTreeMap<u64, BTreeSet<u64>>,
+    /// `Truncate{up_to}`). Pruned below the compaction floor each tick: a
+    /// point the floor already passed can license no further truncation, and
+    /// without the prune the map grew one entry per decided marker for the
+    /// life of the incarnation.
+    pub(crate) acks: BTreeMap<Slot, BTreeSet<NodeId>>,
     /// This node's rotted chunks of its retained point, awaiting peer repair.
     pub(crate) pending: BTreeMap<u64, BTreeSet<u32>>,
     /// A `Snap` marker this leadership proposed and is still waiting to see
@@ -297,18 +300,23 @@ pub(crate) fn snap_repair_tick<S, H, A>(
 {
     let me = NodeId(out.self_id);
     let latest = storage.latest_snap_point();
+    // A point the compaction floor already passed can license no further
+    // truncation, so it is no longer a witness worth keeping.
+    snap.acks.retain(|point, _| *point >= node.first_slot());
     if node.is_leader() {
         // The leader is its own first custodian, and a marker stops being
         // outstanding once a quorum advertises the point it created.
         if let Some(point) = latest {
-            snap.acks.entry(point.0).or_default().insert(out.self_id);
+            snap.acks.entry(point).or_default().insert(me);
         }
-        let quorum = node.acceptors().quorum_size();
+        // The one boundary every quorum question crosses: the configuration
+        // in force decides, so an ack from a node it no longer names stops
+        // counting the moment a reconfiguration takes effect.
         if let Some(marker) = snap.marker_pending
             && snap
                 .acks
-                .get(&marker.0)
-                .is_some_and(|holders| holders.len() >= quorum)
+                .get(&marker)
+                .is_some_and(|holders| node.acceptors().has_quorum(holders))
         {
             snap.marker_pending = None;
         }
