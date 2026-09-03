@@ -233,9 +233,12 @@ registered with `C_new`, stalls command issuance for one matchmaking round trip 
 resigns afterwards if the change removed it. A joining node promises the new ballot before Phase 2
 reaches it and heals as a replica; a removed node keeps answering Phase 1 for the ballots it took
 part in ("removed" is not "shut down"; acceptor guards are pool-based, never configuration-based).
-The harness treats membership as protocol data: the bootstrap size is the **floor** of every
-configuration a run puts in force, because the storage world's copy budget is sized by it. Module
-docs: `crates/paros-core/src/node/matchmaking.rs`, `crates/paros-core/src/node/reconfigure.rs`.
+The harness treats membership as protocol data, with one floor under every configuration a run
+puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
+bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
+whole pool on a plain one. That floor, not the bootstrap size, is what the storage world's copy
+budget is computed over: a budget keeping a clean quorum of the smallest configuration keeps one
+of every larger configuration too. Module docs: `crates/paros-core/src/node/matchmaking.rs`, `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
@@ -375,7 +378,7 @@ separation; #81 removed the message-class nemesis, which mixed them):
   one-message delivery batch caps per-peer throughput below the protocol's own rate. Both are
   permanent partitions wearing a knob's clothes, which is not a configuration but a defeat of
   eventual synchrony. Two things are **never** buggified: **oracle thresholds**
-  (`CONVERGENCE_GRACE_MS`, `GAP_WEDGE_TICKS`, `DEPOSED_BEAT_STREAK`, `PLATEAU_SEEDS`, `SETTLE_MS`),
+  (`CONVERGENCE_GRACE_MS`, `GAP_WEDGE_TICKS`, `DEPOSED_TICK_SLACK`, `PLATEAU_SEEDS`, `SETTLE_MS`),
   because they are the judgement the run is measured against — moving them does not explore a new
   state, it changes the verdict on the old one — and **schedule ceilings** (`*_ITERATIONS`), which
   feed the guided seed schedule rather than the run. Constants that a correctness argument depends
