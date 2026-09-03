@@ -359,6 +359,13 @@ pub enum ReconfigureReply {
         /// Whether this matchmaker activated the successor (it is a member
         /// holding the pending bootstrap) rather than only recording it.
         activated: bool,
+        /// The generation this matchmaker now serves or is frozen for. A
+        /// publisher counts a successor's member toward the successor's own
+        /// quorum only once this reaches it: recording the chain link is
+        /// not serving the new generation, and a publication that finished
+        /// on the recordings alone left a cluster whose new set had no
+        /// quorum answering for it.
+        at: MatchmakerGeneration,
     },
     /// The request addressed a generation this matchmaker is not at, or
     /// asked something its phase cannot do: what it knows instead.

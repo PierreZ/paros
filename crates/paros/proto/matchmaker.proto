@@ -197,6 +197,10 @@ message DecreeNack {
 message Learned {
   uint64 generation = 1;
   bool activated = 2;
+  // The generation the answering matchmaker now serves or is frozen for: a
+  // publisher counts it toward the successor's own quorum only once this
+  // reaches the successor's generation.
+  uint64 at = 3;
 }
 
 enum MatchmakerPhase {

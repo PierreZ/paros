@@ -278,6 +278,7 @@ impl Matchmaker {
                     matchmaker: me,
                     generation,
                     activated,
+                    at: self.set().generation,
                 }
             }
         } else if successor.generation > current.generation
@@ -294,6 +295,7 @@ impl Matchmaker {
                     matchmaker: me,
                     generation,
                     activated,
+                    at: self.set().generation,
                 }
             } else {
                 if pruned {

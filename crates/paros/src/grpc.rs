@@ -1218,10 +1218,12 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
         ReconfigureReply::Learned {
             generation,
             activated,
+            at,
             ..
         } => Kind::Learned(matchmaker::Learned {
             generation: generation.0,
             activated: *activated,
+            at: at.0,
         }),
         ReconfigureReply::Refused {
             current,
@@ -1295,6 +1297,7 @@ pub fn reconfigure_reply_from_wire(
             matchmaker,
             generation: MatchmakerGeneration(learned.generation),
             activated: learned.activated,
+            at: MatchmakerGeneration(learned.at),
         },
         Kind::Refused(refused) => ReconfigureReply::Refused {
             matchmaker,

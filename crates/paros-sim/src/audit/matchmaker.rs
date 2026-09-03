@@ -2312,6 +2312,7 @@ impl MatchmakerAudit {
             ReconfigureReply::Learned {
                 activated,
                 generation,
+                at,
                 ..
             } => {
                 if *activated {
@@ -2326,6 +2327,19 @@ impl MatchmakerAudit {
                         "generation: a departed matchmaker records its successor and stays frozen"
                     );
                 }
+                // The generation a publisher counts by (review finding
+                // P7b): what the matchmaker reports is the generation its
+                // durable scalars name, so a recording that is not yet
+                // serving the successor cannot be mistaken for one that is.
+                assert_always!(
+                    entry.generation.is_none_or(|(g, _)| g == at.0),
+                    "generation: a learner reports the generation it durably holds",
+                    {
+                        "matchmaker" => matchmaker.0,
+                        "reported" => at.0,
+                        "folded" => entry.generation.map_or(0, |(g, _)| g)
+                    }
+                );
             }
             ReconfigureReply::Refused { .. } => {
                 reach_once!(

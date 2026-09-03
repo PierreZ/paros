@@ -818,14 +818,23 @@ impl MatchmakerReconfigurer {
                 old_acks,
                 new_acks,
             } => {
-                let ReconfigureReply::Learned { generation, .. } = reply else {
+                let ReconfigureReply::Learned { generation, at, .. } = reply else {
                     return ReconfigurerStep::Ignored;
                 };
                 if generation != old.generation {
                     return ReconfigurerStep::Ignored;
                 }
+                // A member of the *successor* counts toward the successor's
+                // quorum only once it is actually at that generation.
+                // Recording the chain link is what a departing member does;
+                // counting it let a publication finish while no quorum of
+                // the new set was serving it yet (review finding P7b). The
+                // generation test is also what keeps the count idempotent
+                // under a re-sent `Chosen` a member answers after
+                // activating.
                 let counted_old = old.contains(from) && old_acks.insert(from);
-                let counted_new = successor.contains(from) && new_acks.insert(from);
+                let counted_new =
+                    successor.contains(from) && at >= successor.generation && new_acks.insert(from);
                 if !counted_old && !counted_new {
                     return ReconfigurerStep::Ignored;
                 }
@@ -1096,6 +1105,59 @@ mod tests {
                 old_remaining: 2,
                 new_remaining: 1
             }]
+        );
+    }
+
+    /// Review finding P7b: a member of the *successor* that only recorded
+    /// the chain link is not serving the new generation, and counting it
+    /// let a publication finish while no quorum of the new set answered for
+    /// it. The generation the learner reports is what decides — which also
+    /// makes the count idempotent under a re-sent `Chosen`.
+    #[test]
+    fn a_learner_that_only_recorded_does_not_count_for_the_successor() {
+        let mut pool = pool(4, &[0, 1, 2]);
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        while !matches!(r.phase(), ReconfigurerPhase::Publishing { .. }) {
+            let steps = exchange(&mut r, &mut pool, &[]);
+            assert!(!steps.is_empty(), "the handover stalled: {:?}", r.phase());
+            r.resend();
+        }
+        let learned = |m: u64, at: u64| ReconfigureReply::Learned {
+            matchmaker: MatchmakerId(m),
+            generation: MatchmakerGeneration(0),
+            activated: at > 0,
+            at: MatchmakerGeneration(at),
+        };
+        // Matchmaker 0 is in both sets but still at generation 0: it counts
+        // for the generation it is leaving, never for the one it has not
+        // joined.
+        assert_eq!(
+            r.on_reply(learned(0, 0)),
+            ReconfigurerStep::Published {
+                old_remaining: 1,
+                new_remaining: 2
+            }
+        );
+        assert_eq!(
+            r.on_reply(learned(1, 1)),
+            ReconfigurerStep::Published {
+                old_remaining: 0,
+                new_remaining: 1
+            }
+        );
+        assert_eq!(
+            r.on_reply(learned(1, 1)),
+            ReconfigurerStep::Ignored,
+            "a re-sent Chosen a member answers again changes nothing"
+        );
+        // Matchmaker 0 activates and answers again: now it counts.
+        assert_eq!(
+            r.on_reply(learned(0, 1)),
+            ReconfigurerStep::Done {
+                successor: set(1, &[0, 1, 3])
+            }
         );
     }
 

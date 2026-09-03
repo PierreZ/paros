@@ -531,6 +531,7 @@ mod tests {
                 matchmaker: MatchmakerId(1),
                 generation: g(0),
                 activated: true,
+                at: g(1),
             },
             ReconfigureReply::Refused {
                 matchmaker: MatchmakerId(1),
