@@ -161,12 +161,6 @@ impl AcceptorConfig {
     pub fn contains(&self, node: NodeId) -> bool {
         self.members.binary_search(&node).is_ok()
     }
-
-    /// How many of `nodes` are members of this configuration.
-    #[must_use]
-    pub fn count_members<'a>(&self, nodes: impl IntoIterator<Item = &'a NodeId>) -> usize {
-        nodes.into_iter().filter(|n| self.contains(**n)).count()
-    }
 }
 
 /// Stable identity of a matchmaker within the matchmaker pool. A distinct

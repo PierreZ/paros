@@ -31,8 +31,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::acceptor::PROMISE_BATCH;
 use crate::matchmaker::AcceptorConfig;
-use crate::node::{LEADER_RECOVERY_BATCH, PROMISE_BATCH};
 use crate::single_decree::select_highest;
 use crate::types::{Ballot, Command, Control, NodeId, Slot, command_fingerprint};
 
@@ -109,12 +109,6 @@ impl Election {
     #[must_use]
     pub fn from_slot(&self) -> Slot {
         self.from_slot
-    }
-
-    /// The acceptors (incl. self) whose complete promise has been merged.
-    #[must_use]
-    pub fn promised_by(&self) -> &BTreeSet<NodeId> {
-        &self.promised_by
     }
 
     /// Whether every prior configuration holds a Phase-1 quorum of promises —
@@ -234,12 +228,6 @@ impl Round {
     #[must_use]
     pub fn command(&self) -> &Command {
         &self.command
-    }
-
-    /// Acceptors (incl. self) that accepted this round.
-    #[must_use]
-    pub fn accepted_by(&self) -> &BTreeSet<NodeId> {
-        &self.accepted_by
     }
 }
 
@@ -463,6 +451,14 @@ fn merge_report(
         best.expect("the selection fold always holds a report"),
     );
 }
+
+/// Maximum recovered or gap-fill Phase-2 rounds one leader-recovery pump
+/// starts — the bound the bounded recovery this role holds is drained by.
+pub const RECOVERY_BATCH: usize = 64;
+
+/// Maximum in-flight rounds one fair re-send page carries — the bound this
+/// role enforces in [`Proposer::resend_page`].
+pub const RESEND_BATCH: usize = 64;
 
 /// The proposer component (see the module doc).
 #[derive(Clone, Debug, Default)]
@@ -942,7 +938,7 @@ impl Proposer {
     }
 
     /// The next fair page of rounds whose `Accept`s are to be re-sent: at
-    /// most [`LEADER_RECOVERY_BATCH`] rounds from the cursor up, wrapping
+    /// most [`RESEND_BATCH`] rounds from the cursor up, wrapping
     /// around from the lowest round held, and the cursor advances past the
     /// page.
     pub fn resend_page(&mut self) -> Vec<(Slot, Ballot, Command)> {
@@ -953,11 +949,11 @@ impl Proposer {
         let mut pending: Vec<(Slot, Ballot, Command)> = self
             .rounds
             .range(start..)
-            .take(LEADER_RECOVERY_BATCH)
+            .take(RESEND_BATCH)
             .map(|(s, r)| (*s, r.ballot, r.command.clone()))
             .collect();
-        if pending.len() < LEADER_RECOVERY_BATCH {
-            let remaining = LEADER_RECOVERY_BATCH - pending.len();
+        if pending.len() < RESEND_BATCH {
+            let remaining = RESEND_BATCH - pending.len();
             pending.extend(
                 self.rounds
                     .range(..start)

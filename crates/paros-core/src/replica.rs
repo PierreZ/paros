@@ -29,9 +29,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::node::LEADER_RECOVERY_BATCH;
 use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, SessionEntry, Slot};
 use crate::write::WriteOp;
+
+/// Maximum slots the contiguous apply walk releases in one batch — the
+/// bound this role enforces in [`Replica::advance`], so one `Ready` never
+/// hands the application an unbounded run.
+pub const APPLY_BATCH: usize = 64;
+
+/// Maximum decided commands one application-repair pump re-emits — the bound
+/// this role enforces in [`Replica::pump_app_repair`].
+pub const APP_REPAIR_BATCH: usize = 64;
 
 /// The replica: chosen log, applied prefix, dedup ledger. See the module doc.
 #[derive(Clone, Debug)]
@@ -206,13 +214,6 @@ impl Replica {
     #[must_use]
     pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
         self.chosen.get(&slot)
-    }
-
-    /// Whether the walk left a deferred continuation (see
-    /// [`Replica::advance`]).
-    #[must_use]
-    pub fn advance_pending(&self) -> bool {
-        self.advance_pending
     }
 
     /// The slot `(client, seq)` applied at, if it did.
@@ -392,7 +393,7 @@ impl Replica {
         let mut next = self.first_unchosen();
         let mut advanced = 0_usize;
         let mut truncate_up_to: Option<Slot> = None;
-        while advanced < LEADER_RECOVERY_BATCH
+        while advanced < APPLY_BATCH
             && let Some(mut command) = self.chosen.get(&next).cloned()
         {
             // The walk is the *only* writer of `chosen_index`, and it
@@ -443,7 +444,7 @@ impl Replica {
         // Postcondition: either the walk consumed the entire contiguous
         // chosen prefix, or exactly one bounded chunk was released.
         assert!(
-            advanced == LEADER_RECOVERY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
+            advanced == APPLY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
             "the walk consumes or bounds the contiguous chosen prefix"
         );
         truncate_up_to
@@ -477,7 +478,7 @@ impl Replica {
         };
         let end = self.first_unchosen();
         let mut emitted = 0_usize;
-        while cursor < end && emitted < LEADER_RECOVERY_BATCH {
+        while cursor < end && emitted < APP_REPAIR_BATCH {
             if cursor < floor {
                 break;
             }

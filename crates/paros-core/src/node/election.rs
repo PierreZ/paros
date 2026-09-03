@@ -8,11 +8,10 @@
 
 use super::matchmaking::Matchmaking;
 use super::{
-    BTreeMap, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message, NodeId,
-    NodeRole, RawNode, Slot,
+    BTreeMap, Ballot, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot,
 };
 use crate::matchmaker::{AcceptorConfig, MatchRequest};
-use crate::proposer::{Campaign, PromiseFold, RecoveryPolicy, RecoveryStep};
+use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 
 impl RawNode {
     // ---- election / leadership --------------------------------------------
@@ -154,10 +153,7 @@ impl RawNode {
         // (see the prefix-heal step in `try_become_leader`).
         let from_slot = self
             .acceptor
-            .faulty()
-            .keys()
-            .next()
-            .copied()
+            .first_faulty()
             .map_or(self.first_unchosen(), |first_faulty| {
                 first_faulty.min(self.first_unchosen())
             });
@@ -521,7 +517,7 @@ impl RawNode {
         let mut processed = 0_usize;
         let mut started = 0_usize;
         let mut gap_fills = 0_usize;
-        while processed < LEADER_RECOVERY_BATCH {
+        while processed < RECOVERY_BATCH {
             let Some((slot, step)) = self.proposer.recovery_next() else {
                 break;
             };

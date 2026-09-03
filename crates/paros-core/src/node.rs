@@ -42,11 +42,12 @@ use crate::types::{
 };
 use crate::write::WriteOp;
 
-/// Maximum accepted records carried by one [`Message::Promise`] page.
-pub const PROMISE_BATCH: usize = 64;
-
-/// Maximum recovered or gap-fill Phase-2 rounds started in one recovery pump.
-pub const LEADER_RECOVERY_BATCH: usize = 64;
+/// Maximum accepted records carried by one [`Message::Promise`] page — the
+/// acceptor's own bound, re-exported for the driver.
+pub use crate::acceptor::PROMISE_BATCH;
+/// Maximum recovered or gap-fill Phase-2 rounds started in one recovery pump —
+/// the proposer's own bound, re-exported for the driver.
+pub use crate::proposer::RECOVERY_BATCH as LEADER_RECOVERY_BATCH;
 
 /// Election timeouts a leader's blocked repair probe may stay open before the
 /// leader resigns (CTRL §4.2): a leader that cannot finish recovery — e.g.
@@ -1296,10 +1297,7 @@ impl RawNode {
             });
         } else if let Some(first_faulty) = self
             .acceptor
-            .faulty()
-            .keys()
-            .next()
-            .copied()
+            .first_faulty()
             .filter(|slot| *slot < self.first_unchosen())
         {
             // A faulty **chosen** record whose effect the application already

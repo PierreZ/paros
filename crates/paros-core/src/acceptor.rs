@@ -29,9 +29,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::node::PROMISE_BATCH;
 use crate::types::{Ballot, Command, Control, SessionEntry, Slot, Value};
 use crate::write::WriteOp;
+
+/// Maximum accepted records and faulty entries carried by one promise page —
+/// the bound this role enforces in [`Acceptor::promise_page`], and the reason
+/// a `Promise` carries a continuation cursor.
+pub const PROMISE_BATCH: usize = 64;
 
 /// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost metric:
 /// a protocol-aware repair moves one entry, not the log).
@@ -200,13 +204,6 @@ impl Acceptor {
     #[must_use]
     pub fn first_faulty(&self) -> Option<Slot> {
         self.faulty.keys().next().copied()
-    }
-
-    /// One past the highest slot this acceptor holds a record or a faulty
-    /// entry for — the allocator's lower bound.
-    #[must_use]
-    pub fn highest_slot(&self) -> Option<Slot> {
-        self.records.keys().chain(self.faulty.keys()).max().copied()
     }
 
     /// `(faulty entries repaired in place, payload bytes those repairs
