@@ -28,6 +28,38 @@
 //! (AGENTS.md, *Plain Multi-Paxos is first-class*). Only a configuration that
 //! names matchmakers ever constructs a [`Matchmaking`].
 //!
+//! # The effective configuration is a registration fact, not a chosen value
+//!
+//! This is the one place the protocol's notion of "the configuration in
+//! force" is decided, and it is **not** a value chosen by Paxos. A
+//! configuration becomes authoritative the moment a leader's
+//! *reconfiguration* registration ([`crate::Registration::reconfiguration`])
+//! has landed at a **matchmaker quorum** — before, and independently of,
+//! any Phase 1 or Phase 2 the new acceptor set ever completes. From then on,
+//! quorum intersection puts that record in every later campaign's histories,
+//! and the effective configuration every ordinary campaign must register is
+//! the **highest-ballot reconfiguration registration** those histories name
+//! (`Matchmaking::effective`, `Matchmaking::stale_belief`). Three
+//! consequences a reader must not miss:
+//!
+//! - **Durability is the matchmaker quorum's**, not the acceptors'. A
+//!   `Reconfigure` acked `accepted: true` has *started*; it is guaranteed to
+//!   be honored once its matchmaking completed at a quorum, and may be lost
+//!   before that like any proposal short of a quorum.
+//! - **Two reconfigurations may overlap.** With `R1 -> C1` and `R2 -> C2`
+//!   both registered, `R1` may still finish its Phase 1 and lead briefly
+//!   under `C1` while `C2` is already the highest registration; `R2`'s
+//!   Phase 1 covers `C1` (it is in `H_b`), so nothing chosen under `C1` is
+//!   lost, and every later ordinary campaign registers `C2`. Paxos safety is
+//!   the acceptors' quorums; configuration monotonicity is the matchmakers'.
+//! - **Beliefs never count.** An ordinary campaign's registration is what
+//!   the candidate believed, possibly stale, possibly abandoned; only the
+//!   flagged records decide, which is what keeps two stale candidates from
+//!   re-adopting each other's beliefs forever.
+//!
+//! GC (#123) must therefore never retire the highest reconfiguration
+//! registration: it is the effective configuration's only durable record.
+//!
 //! # Where the promise sits
 //!
 //! The candidate promises its own ballot **before** matchmaking, exactly where

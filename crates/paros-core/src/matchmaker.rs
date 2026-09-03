@@ -251,6 +251,15 @@ pub trait RegistryStorage {
 /// moving the cluster to a new acceptor set, `RawNode::reconfigure`) rather
 /// than a candidate restating the configuration it believed in force.
 ///
+/// **The effective configuration is a registration fact, not a Paxos-chosen
+/// value.** A reconfiguration is in force once its flagged record reached a
+/// matchmaker quorum — before any Phase 1 or Phase 2 under the new set
+/// completes — and stays in force until a higher-ballot flagged record
+/// lands. The full contract, with its consequences (what `accepted: true`
+/// promises, overlapping reconfigurations, why beliefs never count), is the
+/// *effective configuration* section of the leader-side matchmaking module
+/// (`node/matchmaking.rs`).
+///
 /// The flag is what makes the ledger answer "which configuration is in
 /// force?" without treating every registration as a fact: an ordinary
 /// campaign registers a *belief* (possibly stale, possibly abandoned), and a
