@@ -152,11 +152,12 @@ pub struct Campaign {
 pub struct ProbeDecision {
     /// The slot.
     pub slot: Slot,
-    /// The command to re-propose: the best `have` (Case 1) or a `Noop`
-    /// (Case 2).
-    pub command: Command,
-    /// Whether the command came from a reported `have` (Case 1).
-    pub from_have: bool,
+    /// The value to re-propose: the best reported `have` (Case 1), or `None`
+    /// when a full Q1 of qualifying answers reported nothing (Case 2) and the
+    /// caller fills the slot itself. The proposer never *invents* a value —
+    /// what a "nothing here" filler is belongs to the deployment, exactly as
+    /// it does for [`RecoveryStep::Fill`].
+    pub command: Option<Command>,
 }
 
 /// What a closed, won Phase 1 hands the leadership
@@ -619,8 +620,7 @@ mod tests {
             p.resolve_probe(),
             vec![ProbeDecision {
                 slot: Slot(0),
-                command: cmd(0),
-                from_have: true
+                command: Some(cmd(0)),
             }]
         );
         assert!(p.probe().is_none());
@@ -666,8 +666,7 @@ mod tests {
             decisions,
             vec![ProbeDecision {
                 slot: Slot(0),
-                command: cmd(7),
-                from_have: true
+                command: Some(cmd(7)),
             }]
         );
         assert!(

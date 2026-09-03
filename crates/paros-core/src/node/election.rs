@@ -304,7 +304,7 @@ impl RawNode {
             if self.replica.is_chosen(slot) || slot < self.acceptor.first_slot() {
                 continue;
             }
-            if decision.from_have {
+            if decision.command.is_some() {
                 self.repair_case1 += 1;
             } else {
                 // Case 2 invents a `Noop` from a full Q1 of qualifying `none`.
@@ -318,12 +318,17 @@ impl RawNode {
                 );
                 self.repair_case2 += 1;
             }
-            if let Command::User(entry) = &decision.command
+            // Case 2's filler is the deployment's to choose: the probe
+            // reports "a quorum knows of no value here", and this wiring —
+            // the same one that fills an election's undescribed slot — spends
+            // a `Control::Noop` on it.
+            let command = decision.command.unwrap_or(Command::Control(Control::Noop));
+            if let Command::User(entry) = &command
                 && !self.replica.applied_elsewhere(entry, slot)
             {
                 self.replica.track_inflight(entry.client, entry.seq, slot);
             }
-            self.start_accept_round(slot, decision.command);
+            self.start_accept_round(slot, command);
         }
     }
 

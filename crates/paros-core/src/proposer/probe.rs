@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ProbeDecision, PromiseFold, PromiseTally, Proposer, merge_report, slot_decidable};
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, Control, NodeId, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot};
 
 /// The leader's open **distributed commitment determination** (Stage 8): the
 /// faulty slots its winning promise quorum resolved neither as Case 1 (some
@@ -153,8 +153,9 @@ impl Proposer {
 
     /// Decide every blocked slot the current probe tally allows: Case 1
     /// (re-propose the best `have`) or Case 2 (a full Q1 of qualifying
-    /// answers with no `have`: decide `Noop`). Closes the probe when nothing
-    /// stays blocked. Empty when no probe is open.
+    /// answers with no `have`, reported as no value for the caller to fill).
+    /// Closes the probe when nothing stays blocked. Empty when no probe is
+    /// open.
     pub fn resolve_probe(&mut self) -> Vec<ProbeDecision> {
         let mut decisions = Vec::new();
         let Some(probe) = self.probe.as_mut() else {
@@ -171,18 +172,11 @@ impl Proposer {
             ) {
                 continue;
             }
-            let (command, from_have) = have.map_or_else(
-                || (Command::Control(Control::Noop), false),
-                |(_b, command)| (command.clone(), true),
-            );
+            let command = have.map(|(_b, command)| command.clone());
             probe.blocked.remove(&slot);
             probe.best_have.remove(&slot);
             probe.faulty_reports.remove(&slot);
-            decisions.push(ProbeDecision {
-                slot,
-                command,
-                from_have,
-            });
+            decisions.push(ProbeDecision { slot, command });
         }
         if probe.blocked.is_empty() {
             self.probe = None;
