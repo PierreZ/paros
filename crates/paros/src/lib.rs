@@ -63,8 +63,8 @@ pub use paros_core::acceptor::Acceptor;
 pub use paros_core::proposer::Proposer;
 pub use paros_core::replica::Replica;
 pub use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config,
-    ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
+    AcceptorConfig, AcceptorWrite, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command,
+    Config, ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
     MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,

@@ -6,7 +6,8 @@
 //! the reply and keeps the node's volatile leadership consistent with it.
 
 use super::{
-    Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, WriteOp, command_fingerprint,
+    Audience, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, WriteOp,
+    command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
 use crate::membership::AcceptorConfig;
@@ -122,7 +123,7 @@ impl ColocatedNode {
                     );
                 }
                 self.pending_messages.push((
-                    reply_to,
+                    Audience::Node(reply_to),
                     Message::Promise {
                         config_id: self.config_id,
                         from: me,
@@ -226,7 +227,7 @@ impl ColocatedNode {
                     "an accepted reply ships with its durable append in the batch"
                 );
                 self.pending_messages.push((
-                    reply_to,
+                    Audience::Node(reply_to),
                     Message::Accepted {
                         config_id: self.config_id,
                         from: me,
@@ -261,7 +262,7 @@ impl ColocatedNode {
     /// that won.
     fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
         self.pending_messages.push((
-            to,
+            Audience::Node(to),
             Message::Nack {
                 config_id: self.config_id,
                 from: self.config.id,

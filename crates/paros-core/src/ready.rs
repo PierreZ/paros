@@ -3,7 +3,7 @@
 
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
-use crate::message::Message;
+use crate::message::{Audience, Message};
 use crate::node::{ColocatedNode, ReadState};
 use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
@@ -66,12 +66,16 @@ impl<'a> Ready<'a> {
     }
 
     /// Outbound messages to send **after** [`Ready::hard_state`] is durable
-    /// (step 2). Each entry is `(destination, message)`: the core decides where
-    /// every message goes (`Promise`/`Accepted`/`Nack` reply to the proposer;
-    /// `Prepare`/`Accept`/`Commit` fan out to peers), so the driver only maps the
-    /// `NodeId` to an address and sends — it makes no routing decision.
+    /// (step 2). Each entry is `(audience, message)`: the core decides *who*
+    /// every message is for in protocol terms (`Promise`/`Accepted`/`Nack`
+    /// answer the address the request named; an `Accept` is for the acceptors
+    /// of a configuration; a `Commit` or a beat is for the learners), and the
+    /// driver's deployment map turns an [`Audience`] into node ids
+    /// ([`Audience::resolve`]) and those into addresses. It still makes no
+    /// routing *decision* — and a fan-out costs one entry, not one clone of
+    /// the bytes per addressee.
     #[must_use]
-    pub fn messages(&self) -> &[(NodeId, Message)] {
+    pub fn messages(&self) -> &[(Audience, Message)] {
         self.node.pending_messages()
     }
 

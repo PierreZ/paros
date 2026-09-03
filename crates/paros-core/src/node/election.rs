@@ -8,8 +8,8 @@
 
 use super::matchmaking::Matchmaking;
 use super::{
-    BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole,
-    Slot,
+    Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId,
+    NodeRole, Slot,
 };
 use crate::matchmaker::{MatchRequest, RegistrationKind};
 use crate::membership::AcceptorConfig;
@@ -185,7 +185,8 @@ impl ColocatedNode {
             config: wire_config,
         };
         for to in targets {
-            self.pending_messages.push((to, prepare.clone()));
+            self.pending_messages
+                .push((Audience::Node(to), prepare.clone()));
         }
         // Proactive catch-up probe. The election clock fires precisely when we have
         // *not* heard a satisfactory leader — the same condition under which we may
@@ -251,7 +252,7 @@ impl ColocatedNode {
     fn request_promise_page(&mut self, from: NodeId, ballot: Ballot, next: Slot) {
         let config = self.phase1_wire_config();
         self.pending_messages.push((
-            from,
+            Audience::Node(from),
             Message::Prepare {
                 config_id: self.config_id,
                 reply_to: self.config.id,

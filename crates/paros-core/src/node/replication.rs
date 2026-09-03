@@ -1,4 +1,4 @@
-use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
+use super::{Audience, Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
@@ -103,7 +103,7 @@ impl ColocatedNode {
                 .then_some(self.replica.chosen_index())
                 .flatten();
             self.pending_messages.push((
-                from,
+                Audience::Node(from),
                 Message::HeartbeatAck {
                     config_id: self.config_id,
                     from: me,
@@ -134,7 +134,7 @@ impl ColocatedNode {
             // our first unchosen slot.
             let from_slot = self.first_unchosen();
             self.pending_messages.push((
-                from,
+                Audience::Node(from),
                 Message::CatchUpRequest {
                     from: me,
                     from_slot,

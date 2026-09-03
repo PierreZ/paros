@@ -90,7 +90,9 @@
 //! the departed leader knew about is unreachable — resigns, and ordinary
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
-use super::{BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot};
+use super::{
+    Audience, BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot,
+};
 use crate::membership::AcceptorConfig;
 use crate::proposer::RecoveryPolicy;
 
@@ -408,7 +410,7 @@ impl ColocatedNode {
             .has_matchmakers()
             .then(|| self.acceptors.clone());
         self.pending_messages.push((
-            target,
+            Audience::Node(target),
             Message::Relinquish {
                 config_id: self.config_id,
                 from: self.config.id,

@@ -1,4 +1,6 @@
-use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, SessionEntry, Slot, Value};
+use super::{
+    Audience, BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, SessionEntry, Slot, Value,
+};
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
 /// lagging peer that needs more re-requests on the next heartbeat, so a large
@@ -93,8 +95,10 @@ impl ColocatedNode {
         if entries.is_empty() {
             return;
         }
-        self.pending_messages
-            .push((to, Message::CatchUpResponse { from: me, entries }));
+        self.pending_messages.push((
+            Audience::Node(to),
+            Message::CatchUpResponse { from: me, entries },
+        ));
     }
 
     /// Learn every decided entry a peer replayed to us. Each is chosen (durable,

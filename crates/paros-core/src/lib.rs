@@ -64,7 +64,7 @@ pub use matchmaker::{
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
 };
-pub use message::Message;
+pub use message::{Audience, Message};
 pub use node::{
     ColocatedNode, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff,
     HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH,

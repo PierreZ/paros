@@ -229,6 +229,9 @@ where
     A: Audit,
 {
     let self_id = out.self_id;
+    // The deployment map an `Audience` is resolved against, read before the
+    // batch takes the node's borrow.
+    let pool: Vec<NodeId> = node.config().pool().to_vec();
     // Copy the batch out of the borrow guard, advance to release the gate, then
     // perform I/O — persist → send → apply. Advancing before the I/O is the
     // documented async pattern; persist-before-send still holds because the
@@ -253,7 +256,20 @@ where
     } else {
         paros_core::MustSync::Relaxed
     };
-    let messages: Vec<(NodeId, Message)> = ready.messages().to_vec();
+    // The deployment map, applied: the core hands out audiences (one entry
+    // per fan-out), the driver turns each into the node ids its own pool
+    // names, in order, and sends. The bytes and their order are exactly what
+    // an enumerated batch carried.
+    let messages: Vec<(NodeId, Message)> = ready
+        .messages()
+        .iter()
+        .flat_map(|(audience, msg)| {
+            audience
+                .resolve(&pool, NodeId(self_id))
+                .into_iter()
+                .map(move |to| (to, msg.clone()))
+        })
+        .collect();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
     let snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();

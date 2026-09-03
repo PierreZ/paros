@@ -30,7 +30,7 @@ use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
-use crate::message::Message;
+use crate::message::{Audience, Message};
 use crate::proposer::Proposer;
 use crate::ready::Ready;
 use crate::replica::Replica;
@@ -205,7 +205,7 @@ pub struct ColocatedNode {
     // ---- `ready`, cleared by `advance`.
     /// Semantic durable write deltas produced this batch, in apply order.
     pending_writes: Vec<WriteOp>,
-    pending_messages: Vec<(NodeId, Message)>,
+    pending_messages: Vec<(Audience, Message)>,
     /// Snapshot offers to serve this batch:
     /// `(to, chosen_index, ballot, config_id)`. The core decides *who* needs a
     /// snapshot and *up to where* (a below-floor catch-up request), but holds no
@@ -842,7 +842,7 @@ impl ColocatedNode {
                 let config = self.phase1_wire_config();
                 for to in unanswered {
                     self.pending_messages.push((
-                        to,
+                        Audience::Node(to),
                         Message::Prepare {
                             config_id: self.config_id,
                             reply_to: self.config.id,
@@ -1256,7 +1256,7 @@ impl ColocatedNode {
         &self.pending_writes
     }
 
-    pub(crate) fn pending_messages(&self) -> &[(NodeId, Message)] {
+    pub(crate) fn pending_messages(&self) -> &[(Audience, Message)] {
         &self.pending_messages
     }
 

@@ -1,4 +1,6 @@
-use super::{Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Slot};
+use super::{
+    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Slot,
+};
 use crate::membership::AcceptorConfig;
 use crate::types::Control;
 
@@ -95,17 +97,8 @@ impl ColocatedNode {
     /// fan-out (commits, beats, catch-up), which reaches spares and removed
     /// members so every replica keeps the chosen log.
     pub(super) fn broadcast(&mut self, msg: &Message) {
-        let me = self.config.id;
-        let targets: Vec<NodeId> = self
-            .config
-            .pool()
-            .iter()
-            .copied()
-            .filter(|&p| p != me)
-            .collect();
-        for to in targets {
-            self.pending_messages.push((to, msg.clone()));
-        }
+        self.pending_messages
+            .push((Audience::Learners, msg.clone()));
     }
 
     /// Queue `msg` to every Phase-2 addressee of the active configuration
@@ -116,17 +109,8 @@ impl ColocatedNode {
     /// deployment addresses a column without touching this fan-out. Under
     /// the majority system that is the whole membership, as before.
     pub(super) fn broadcast_acceptors(&mut self, msg: &Message) {
-        let me = self.config.id;
-        let targets: Vec<NodeId> = self
-            .acceptors
-            .phase2_addressees()
-            .iter()
-            .copied()
-            .filter(|&p| p != me)
-            .collect();
-        for to in targets {
-            self.pending_messages.push((to, msg.clone()));
-        }
+        self.pending_messages
+            .push((Audience::AcceptorsOf(self.acceptors.clone()), msg.clone()));
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign

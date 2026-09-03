@@ -8,6 +8,58 @@ use std::collections::BTreeMap;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
+/// **Who a message is addressed to**, in the protocol's own terms rather
+/// than in addresses.
+///
+/// The core decides *audiences*; the driver holds the deployment map that
+/// turns one into a list of nodes ([`Audience::resolve`]). That split is what
+/// keeps the batch small — a heartbeat to a six-node pool is one entry, not
+/// six clones of the same bytes — and it is what a compartmentalized
+/// deployment needs, where "the acceptors of this configuration" is a column
+/// of a grid rather than a membership the sender enumerates.
+///
+/// There is no "the proposer of ballot `b`" audience: since `Prepare` and
+/// `Accept` carry an explicit `reply_to`, a reply is addressed to the address
+/// the request named ([`Audience::Node`]), which is exactly what lets a
+/// proxied request be answered without the acceptor knowing who the leader
+/// is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Audience {
+    /// One node, by id: every reply, every targeted request, the single
+    /// successor of a handoff.
+    Node(NodeId),
+    /// The Phase-2 addressees of `config`
+    /// ([`AcceptorConfig::phase2_addressees`]) — an `Accept`'s fan-out. A
+    /// removed node is never contacted for a new ballot's accepts, and a
+    /// grid or compartmentalized deployment addresses one column here.
+    AcceptorsOf(AcceptorConfig),
+    /// Every node of the pool — the learner fan-out (commits, beats,
+    /// catch-up), which reaches spares and removed members too so every
+    /// replica keeps the chosen log.
+    Learners,
+}
+
+impl Audience {
+    /// The nodes this audience names, given the deployment's `pool` and the
+    /// sender's own id (which is never addressed: a node does not send to
+    /// itself). In pool / membership order, so a batch's sends keep the order
+    /// the core queued them in.
+    #[must_use]
+    pub fn resolve(&self, pool: &[NodeId], me: NodeId) -> Vec<NodeId> {
+        match self {
+            Audience::Node(to) => vec![*to],
+            Audience::AcceptorsOf(config) => config
+                .phase2_addressees()
+                .iter()
+                .copied()
+                .filter(|p| *p != me)
+                .collect(),
+            Audience::Learners => pool.iter().copied().filter(|p| *p != me).collect(),
+        }
+    }
+}
+
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::ColocatedNode::step`] router.
 ///

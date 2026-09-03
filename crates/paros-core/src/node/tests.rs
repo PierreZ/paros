@@ -193,10 +193,22 @@ fn ballot(round: u64, node: u64) -> Ballot {
     }
 }
 
-/// Drain a node's pending messages and clear the batch.
+/// Drain a node's pending messages and clear the batch, resolving each
+/// audience against this node's own pool exactly as the driver does.
 fn drain(n: &mut ColocatedNode) -> Vec<(NodeId, Message)> {
+    let pool: Vec<NodeId> = n.config().pool().to_vec();
+    let me = n.config().id;
     let ready = n.ready();
-    let msgs = ready.messages().to_vec();
+    let msgs: Vec<(NodeId, Message)> = ready
+        .messages()
+        .iter()
+        .flat_map(|(audience, msg)| {
+            audience
+                .resolve(&pool, me)
+                .into_iter()
+                .map(move |to| (to, msg.clone()))
+        })
+        .collect();
     ready.advance();
     msgs
 }

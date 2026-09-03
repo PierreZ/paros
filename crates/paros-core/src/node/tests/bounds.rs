@@ -25,8 +25,19 @@ fn command(slot: u64) -> Command {
 type ReadyOutput = (Vec<(NodeId, Message)>, Option<(usize, usize, usize)>);
 
 fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
+    let pool: Vec<NodeId> = node.config().pool().to_vec();
+    let me = node.config().id;
     let ready = node.ready();
-    let messages = ready.messages().to_vec();
+    let messages: Vec<(NodeId, Message)> = ready
+        .messages()
+        .iter()
+        .flat_map(|(audience, msg)| {
+            audience
+                .resolve(&pool, me)
+                .into_iter()
+                .map(move |to| (to, msg.clone()))
+        })
+        .collect();
     let recovery = ready.recovery_batch();
     ready.advance();
     (messages, recovery)
