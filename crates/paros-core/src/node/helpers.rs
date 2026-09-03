@@ -96,7 +96,6 @@ impl RawNode {
         self.proposer.abandon();
         self.matchmaking = None;
         self.gc = None;
-        self.repair_elapsed = 0;
         // Unconfirmed read rounds die with the leadership; already-confirmed
         // `pending_read_states` stay — they were valid at their linearization
         // point and the driver drains them this same batch.

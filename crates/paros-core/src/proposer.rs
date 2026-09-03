@@ -168,6 +168,12 @@ pub struct RepairProbe {
     blocked: BTreeSet<Slot>,
     /// Next suffix-page cursor expected from each non-terminal straggler.
     promise_next: BTreeMap<NodeId, Slot>,
+    /// Driver ticks this probe has been open (the caller's resign clock).
+    /// It lives here, with the probe it times, so that closing a probe —
+    /// by a decision, a commit, a snapshot install or an abandoned
+    /// leadership — takes the clock with it and no caller has to remember
+    /// to reset one.
+    elapsed: u64,
 }
 
 impl RepairProbe {
@@ -585,6 +591,14 @@ impl Proposer {
     /// the faulty reports join the tri-state tally. A page is counted only
     /// at the exact cursor expected from its sender; a sender whose complete
     /// suffix is already merged is ignored.
+    ///
+    /// # Panics
+    ///
+    /// If two acceptors report different commands for one `(slot, ballot)`
+    /// (the P2c merge's own rule — one ballot has one proposer, so that is a
+    /// protocol violation, never an operating condition). Malformed *shape*
+    /// is not asserted: a page whose cursor, bounds or ordering are wrong is
+    /// refused as wire input ([`PromiseFold::Ignored`]).
     pub fn fold_promise(
         &mut self,
         from: NodeId,
@@ -697,6 +711,7 @@ impl Proposer {
                 from_slot: e.from_slot,
                 answered: e.promised_by.clone(),
                 faulty_reports: probe_faulty,
+                elapsed: 0,
                 best_have: probe_have,
                 blocked: blocked.clone(),
                 promise_next: BTreeMap::new(),
@@ -722,10 +737,31 @@ impl Proposer {
         self.probe.as_ref()
     }
 
+    /// Advance the open probe's clock by one driver tick and report its new
+    /// age; `None` when no probe is open. The caller owns the *policy* (how
+    /// many ticks are too many); the probe only counts.
+    pub fn tick_probe(&mut self) -> Option<u64> {
+        let probe = self.probe.as_mut()?;
+        probe.elapsed = probe.elapsed.saturating_add(1);
+        Some(probe.elapsed)
+    }
+
+    /// The open probe's age in driver ticks, `None` when none is open.
+    #[must_use]
+    pub fn probe_elapsed(&self) -> Option<u64> {
+        self.probe.as_ref().map(|probe| probe.elapsed)
+    }
+
     /// Fold one straggler `Promise` page into the open repair probe. Only the
     /// still-blocked slots matter: everything else was decided or
     /// re-proposed when the election closed. Same P2c/P2b rule as the
     /// election merge, over the probe's `have` tally.
+    ///
+    /// # Panics
+    ///
+    /// If two acceptors report different commands for one `(slot, ballot)`,
+    /// exactly as in [`Proposer::fold_promise`]. A malformed page is refused,
+    /// never asserted.
     pub fn fold_probe_promise(
         &mut self,
         from: NodeId,
@@ -814,21 +850,20 @@ impl Proposer {
 
     /// A decision for `slot` arrived elsewhere (Case 1 through the commit
     /// path rather than a straggler's `Promise`): drop it from the probe,
-    /// closing the probe when nothing stays blocked. Whether the slot was
+    /// closing the probe — and with it its clock — when nothing stays
     /// blocked.
-    pub fn probe_resolved_elsewhere(&mut self, slot: Slot) -> bool {
+    pub fn probe_resolved_elsewhere(&mut self, slot: Slot) {
         let Some(probe) = self.probe.as_mut() else {
-            return false;
+            return;
         };
         if !probe.blocked.remove(&slot) {
-            return false;
+            return;
         }
         probe.best_have.remove(&slot);
         probe.faulty_reports.remove(&slot);
         if probe.blocked.is_empty() {
             self.probe = None;
         }
-        true
     }
 
     /// A snapshot install folded everything below `first`: a probe blocked

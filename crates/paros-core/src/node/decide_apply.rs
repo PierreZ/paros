@@ -201,9 +201,7 @@ impl RawNode {
         self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
-        if self.proposer.probe_resolved_elsewhere(slot) && self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
+        self.proposer.probe_resolved_elsewhere(slot);
         // The chosen/accepted coupling: a chosen slot always holds its
         // authoritative accepted record, at the same command (`serve_catchup`
         // and election recovery both read one map and trust the other).

@@ -287,9 +287,6 @@ pub struct RawNode {
     /// re-sent its requests instead of abandoning the campaign (see
     /// [`RawNode::tick`]). Observability only.
     matchmaking_timeouts: u64,
-    /// Ticks the proposer's current repair probe has been open. Reset when the probe
-    /// closes; drives the recovery-timeout resignation.
-    repair_elapsed: u64,
     /// Monotone count of recovery-timeout step-downs this incarnation (a leader
     /// resigning because it could not finish repairing its blocked slots).
     repair_step_downs: u64,
@@ -514,7 +511,6 @@ impl RawNode {
             non_member_step_downs: 0,
             round_floor: 0,
             matchmaking_timeouts: 0,
-            repair_elapsed: 0,
             repair_step_downs: 0,
             repair_case1: 0,
             repair_case2: 0,
@@ -528,10 +524,13 @@ impl RawNode {
         node
     }
 
-    /// Assert every cross-field invariant of the node's volatile state. All
-    /// checks are O(1) or O(log n) (min-key probes), so this runs
+    /// Assert every cross-field invariant of the node's volatile state, plus
+    /// each role's own. Most checks are O(1) or O(log n) (min-key probes);
+    /// the role checkers add bounded structural scans over the retained log,
+    /// the faulty set and the configuration in force. All of it runs
     /// unconditionally — TigerBeetle-style — at boot and at the exit of every
-    /// public mutating entry point.
+    /// public mutating entry point: the maps are small, and crash beats
+    /// corruption.
     #[allow(clippy::too_many_lines)]
     fn assert_invariants(&self) {
         // Ordering chain: only chosen slots are ever dropped, so the compaction
@@ -542,8 +541,19 @@ impl RawNode {
         );
         // The replica's and the proposer's own maps against the acceptor's
         // floor.
+        self.acceptor.assert_invariants();
         self.replica.assert_invariants(self.acceptor.first_slot());
         self.proposer.assert_invariants();
+        // The repair clock lives inside the probe it times, so closing a
+        // probe — by a decision, a commit, a snapshot install or an
+        // abandoned leadership — takes the clock with it and no path has to
+        // remember to reset one. What the wiring owns is who advances it.
+        assert!(
+            self.proposer
+                .probe_elapsed()
+                .is_none_or(|elapsed| elapsed == 0 || self.role == NodeRole::Leader),
+            "only a leader's repair probe ages"
+        );
         // The cross-role couplings against the acceptor's floor: a compaction
         // and a snapshot install both retain the rounds above the floor they
         // raise, so an in-flight Phase-2 round below it would address a slot
@@ -1250,12 +1260,13 @@ impl RawNode {
         // when the campaign's Prepare went out only ever answers a re-send). A
         // probe that stays blocked for a full recovery timeout resigns: another
         // node — possibly one holding the missing copy — gets to try.
-        if self.role == NodeRole::Leader && self.proposer.probe().is_some() {
-            self.repair_elapsed += 1;
+        if self.role == NodeRole::Leader
+            && let Some(elapsed) = self.proposer.tick_probe()
+        {
             let timeout = self
                 .election_timeout
                 .saturating_mul(REPAIR_TIMEOUT_ELECTIONS);
-            if self.election_timeout != 0 && self.repair_elapsed >= timeout {
+            if self.election_timeout != 0 && elapsed >= timeout {
                 self.repair_step_downs += 1;
                 self.become_follower(None);
             } else {

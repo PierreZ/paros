@@ -185,9 +185,6 @@ impl RawNode {
         );
         // A probe blocked below the boundary is resolved by the fold as well.
         self.proposer.probe_retain_from(first);
-        if self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
         self.proposer.retain_rounds_from(first);
         self.next_slot = self.next_slot.max(first);
         // Install postconditions: the floor lands exactly one past the new

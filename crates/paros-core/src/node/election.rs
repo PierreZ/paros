@@ -297,9 +297,6 @@ impl RawNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
         let decisions = self.proposer.resolve_probe();
-        if self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
         for decision in decisions {
             let slot = decision.slot;
             if self.replica.is_chosen(slot) || slot < self.acceptor.first_slot() {
@@ -447,7 +444,6 @@ impl RawNode {
         for (slot, ballot, command) in prefix_heals {
             self.mark_chosen(slot, &command, ballot);
         }
-        self.repair_elapsed = 0;
 
         let recovery_start = self.first_unchosen();
         let recovered: BTreeMap<Slot, Command> = outcome

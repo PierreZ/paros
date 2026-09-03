@@ -550,7 +550,6 @@ impl RawNode {
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();
-        self.repair_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;

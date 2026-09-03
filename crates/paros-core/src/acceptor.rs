@@ -138,13 +138,16 @@ impl Acceptor {
         acceptor
     }
 
-    /// The acceptor's own cross-field invariants (O(N) over the faulty set,
-    /// always-on by choice — crash beats corruption).
+    /// The acceptor's own cross-field invariants: min-key probes against the
+    /// floor, and bounded structural scans over the retained log and the
+    /// faulty set (always-on by choice — the maps are small and crash beats
+    /// corruption).
     ///
     /// # Panics
     ///
-    /// If a record or faulty entry sits below the floor, or a slot is both
-    /// readable and faulty.
+    /// If a record or faulty entry sits below the floor, a slot is both
+    /// readable and faulty, or a record or faulty entry stands above the
+    /// promise.
     pub fn assert_invariants(&self) {
         assert!(
             self.records
@@ -165,6 +168,21 @@ impl Acceptor {
         assert!(
             self.faulty.keys().all(|s| !self.records.contains_key(s)),
             "the faulty set stays disjoint from the accepted log"
+        );
+        // The write-side ordering, read back: a record is admitted only at or
+        // below the promise, and the promise is flushed ahead of the record it
+        // covers — so nothing this acceptor holds may stand above it. The
+        // faulty half says the same about a record whose value was lost: its
+        // identity survived, and so did the promise that covered it.
+        assert!(
+            self.records
+                .values()
+                .all(|(ballot, _)| *ballot <= self.promised),
+            "the promise dominates every accepted record"
+        );
+        assert!(
+            self.faulty.values().all(|ballot| *ballot <= self.promised),
+            "the promise dominates every faulty record"
         );
     }
 
