@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package paros.common.v1;
+
+// Types both paros contracts speak. A ballot and an acceptor configuration
+// mean the same thing on the consensus wire (`internal.proto`) and on the
+// matchmaker wire (`matchmaker.proto`) — a matchmaker registers exactly the
+// configuration a `Prepare` later carries — so they are declared once here
+// rather than twice, where the two copies could drift (in particular the
+// quorum system, whose variants must stay identical on both wires).
+//
+// Declaring them in one package changes no bytes: protobuf encodes field
+// numbers and wire types, never type names.
+
+// A Paxos ballot: a round, disambiguated by the node that minted it.
+message Ballot {
+  uint64 round = 1;
+  uint64 node = 2;
+}
+
+// How a quorum is derived from a membership. Majorities are the only system
+// paros implements today; flexible and grid quorums land here as new
+// variants, on both wires at once.
+enum QuorumSystem {
+  QUORUM_SYSTEM_MAJORITY = 0;
+}
+
+// An acceptor configuration: a membership plus the quorum system over it.
+message AcceptorConfig {
+  repeated uint64 members = 1;
+  QuorumSystem quorum_system = 2;
+}

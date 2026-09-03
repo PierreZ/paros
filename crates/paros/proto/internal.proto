@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package paros.internal.v1;
 
+import "common.proto";
+
 // Cluster-internal consensus traffic. This surface is not part of the public
 // journal API and may evolve with the replication protocol.
 service ParosInternal {
@@ -58,11 +60,6 @@ message ConsensusMessage {
   }
 }
 
-message Ballot {
-  uint64 round = 1;
-  uint64 node = 2;
-}
-
 message UserEntry {
   uint64 client = 1;
   uint64 seq = 2;
@@ -99,7 +96,7 @@ message Command {
 
 message SlotCommand {
   uint64 slot = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   Command command = 3;
 }
 
@@ -107,28 +104,19 @@ message SlotCommand {
 // membership plus the quorum system over it. Carried by the messages that
 // let acceptors learn the configuration a ballot was registered with; absent
 // on plain Multi-Paxos, whose messages are unchanged.
-message AcceptorConfig {
-  repeated uint64 members = 1;
-  QuorumSystem quorum_system = 2;
-}
-
-enum QuorumSystem {
-  QUORUM_SYSTEM_MAJORITY = 0;
-}
-
 message Prepare {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 from_slot = 3;
   uint64 config_id = 4;
   // The configuration the candidate registered for `ballot` (absent on plain
   // Multi-Paxos).
-  optional AcceptorConfig config = 5;
+  optional .paros.common.v1.AcceptorConfig config = 5;
 }
 
 message Promise {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 from_slot = 3;
   repeated SlotCommand accepted = 4;
   optional uint64 next_from_slot = 5;
@@ -141,12 +129,12 @@ message Promise {
 // One faulty-entry report inside a Promise page (Stage 8, CTRL).
 message FaultySlot {
   uint64 slot = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
 }
 
 message Accept {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
   uint64 config_id = 5;
@@ -154,7 +142,7 @@ message Accept {
 
 message Accepted {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   uint64 vhash = 4;
   uint64 config_id = 5;
@@ -162,15 +150,15 @@ message Accepted {
 
 message Nack {
   uint64 from = 1;
-  Ballot ballot = 2;
-  Ballot promised = 3;
+  .paros.common.v1.Ballot ballot = 2;
+  .paros.common.v1.Ballot promised = 3;
   uint64 slot = 4;
   uint64 config_id = 5;
 }
 
 message Commit {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
   uint64 config_id = 5;
@@ -188,7 +176,7 @@ message CatchUpResponse {
 
 message InstallSnapshot {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 chosen_index = 3;
   bytes snapshot = 4;
   // The serving peer's at-most-once session ledger for the folded prefix —
@@ -211,17 +199,17 @@ message CheckLeader {
 
 message Heartbeat {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   optional uint64 commit = 3;
   uint64 seq = 4;
   uint64 config_id = 5;
   // The leader's registered configuration (absent on plain Multi-Paxos).
-  optional AcceptorConfig config = 6;
+  optional .paros.common.v1.AcceptorConfig config = 6;
 }
 
 message HeartbeatAck {
   uint64 from = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   uint64 seq = 3;
   uint64 config_id = 4;
   // The follower's chosen index (absent on plain Multi-Paxos).
@@ -264,7 +252,7 @@ message Relinquish {
   // The single intended successor. Carried inside the payload so a duplicate,
   // a misroute, or a replay can never hand the authority to a second node.
   uint64 to = 2;
-  Ballot ballot = 3;
+  .paros.common.v1.Ballot ballot = 3;
   uint64 from_slot = 4;
   // The allocator frontier the successor inherits.
   uint64 next_slot = 5;
@@ -275,7 +263,7 @@ message Relinquish {
   uint64 config_id = 8;
   // The authority's registered configuration, transferred verbatim (absent on
   // plain Multi-Paxos).
-  optional AcceptorConfig config = 9;
+  optional .paros.common.v1.AcceptorConfig config = 9;
 }
 
 message InspectRequest {}
@@ -288,7 +276,7 @@ message InspectReply {
   // bootstrap membership on plain Multi-Paxos), and the ballot it was
   // registered under.
   repeated uint64 members = 4;
-  Ballot config_ballot = 5;
+  .paros.common.v1.Ballot config_ballot = 5;
   // Whether this node currently leads.
   bool leader = 6;
   // The matchmaker set this node believes authoritative (#125): its
@@ -300,5 +288,5 @@ message InspectReply {
   // matchmaker quorum acked the floor. Empty on a non-leader.
   repeated uint64 retirable = 9;
   // The floor that leadership made effective, when any.
-  Ballot gc_watermark = 10;
+  .paros.common.v1.Ballot gc_watermark = 10;
 }

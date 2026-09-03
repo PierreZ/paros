@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package paros.matchmaker.v1;
 
+import "common.proto";
+
 // The matchmaker contract (Matchmaker Paxos §3.2): a per-ballot registry of
 // acceptor configurations, consulted only on a round change, never on the
 // command path. Separate from the consensus contract on purpose — a cluster
@@ -27,25 +29,10 @@ message MatchmakerSet {
   repeated uint64 members = 2;
 }
 
-message Ballot {
-  uint64 round = 1;
-  uint64 node = 2;
-}
-
-enum QuorumSystem {
-  QUORUM_SYSTEM_MAJORITY = 0;
-}
-
-// An acceptor configuration: a membership plus the quorum system over it.
-message AcceptorConfig {
-  repeated uint64 members = 1;
-  QuorumSystem quorum_system = 2;
-}
-
 message MatchRequest {
   uint64 from = 1;
-  Ballot ballot = 2;
-  AcceptorConfig config = 3;
+  .paros.common.v1.Ballot ballot = 2;
+  .paros.common.v1.AcceptorConfig config = 3;
   // Whether this registers a reconfiguration (a leader's explicit change)
   // rather than a candidate's belief about the configuration in force.
   bool reconfiguration = 4;
@@ -55,8 +42,8 @@ message MatchRequest {
 }
 
 message Registration {
-  Ballot ballot = 1;
-  AcceptorConfig config = 2;
+  .paros.common.v1.Ballot ballot = 1;
+  .paros.common.v1.AcceptorConfig config = 2;
   bool reconfiguration = 3;
 }
 
@@ -64,7 +51,7 @@ message Registration {
 // ballot and at or above the watermark, plus the watermark itself.
 message Registered {
   repeated Registration history = 1;
-  Ballot gc_watermark = 2;
+  .paros.common.v1.Ballot gc_watermark = 2;
 }
 
 // A refusal, carrying what the requester needs to make progress. Diagnostics
@@ -78,8 +65,8 @@ message RefusedInactive {}
 
 message Refused {
   oneof reason {
-    Ballot stale_highest = 1;
-    Ballot below_watermark = 2;
+    .paros.common.v1.Ballot stale_highest = 1;
+    .paros.common.v1.Ballot below_watermark = 2;
     RefusedStopped stopped = 3;
     // Active for another generation: the set this matchmaker serves.
     MatchmakerSet generation = 4;
@@ -90,7 +77,7 @@ message Refused {
 message MatchReply {
   uint64 matchmaker = 1;
   uint64 to = 2;
-  Ballot ballot = 3;
+  .paros.common.v1.Ballot ballot = 3;
   oneof outcome {
     Registered registered = 4;
     Refused refused = 5;
@@ -101,7 +88,7 @@ message MatchReply {
 
 message GarbageCollect {
   uint64 from = 1;
-  Ballot watermark = 2;
+  .paros.common.v1.Ballot watermark = 2;
   uint64 generation = 3;
 }
 
@@ -109,7 +96,7 @@ message GarbageCollectAck {
   uint64 matchmaker = 1;
   // The durable watermark after the request (at least the requested one, or
   // the higher floor already in force).
-  Ballot watermark = 2;
+  .paros.common.v1.Ballot watermark = 2;
   uint64 generation = 3;
   // Whether the request was applied at that generation.
   bool applied = 4;
@@ -123,18 +110,18 @@ message Stop {
 
 message Bootstrap {
   MatchmakerSet set = 1;
-  Ballot gc_watermark = 2;
+  .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
 }
 
 message DecreePrepare {
   uint64 generation = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
 }
 
 message DecreeAccept {
   uint64 generation = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   repeated uint64 members = 3;
 }
 
@@ -156,14 +143,14 @@ message ReconfigureRequest {
 
 message StopAck {
   uint64 generation = 1;
-  Ballot gc_watermark = 2;
+  .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
   optional MatchmakerSet successor = 4;
   // The highest decree ballot promised for the frozen generation: the
   // reconfigurer opens its decree strictly above the maximum over its stop
   // quorum, so a rebooted node never reuses a ballot of its earlier
   // incarnation.
-  Ballot decree_promised = 5;
+  .paros.common.v1.Ballot decree_promised = 5;
 }
 
 message BootstrapAck {
@@ -171,25 +158,25 @@ message BootstrapAck {
 }
 
 message DecreeVote {
-  Ballot ballot = 1;
+  .paros.common.v1.Ballot ballot = 1;
   repeated uint64 members = 2;
 }
 
 message DecreePromise {
   uint64 generation = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
   optional DecreeVote vote = 3;
 }
 
 message DecreeAccepted {
   uint64 generation = 1;
-  Ballot ballot = 2;
+  .paros.common.v1.Ballot ballot = 2;
 }
 
 message DecreeNack {
   uint64 generation = 1;
-  Ballot ballot = 2;
-  Ballot promised = 3;
+  .paros.common.v1.Ballot ballot = 2;
+  .paros.common.v1.Ballot promised = 3;
 }
 
 message Learned {

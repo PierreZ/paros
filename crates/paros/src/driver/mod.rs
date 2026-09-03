@@ -76,7 +76,7 @@ use crate::audit::Audit;
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
     ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck,
-    RpcInbox, internal, rpc_channel,
+    RpcInbox, common, rpc_channel,
 };
 use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
@@ -966,7 +966,7 @@ where
                 let set = node.matchmaker_set();
                 let (gc_watermark, retirable) = node.gc_effective().map_or((None, Vec::new()), |(w, retired)| {
                     (
-                        Some(internal::Ballot { round: w.round, node: w.node.0 }),
+                        Some(common::Ballot { round: w.round, node: w.node.0 }),
                         retired.iter().map(|n| n.0).collect(),
                     )
                 });
@@ -975,7 +975,7 @@ where
                     first_slot: node.first_slot().0,
                     snapshot: storage.snapshot(),
                     members: node.acceptors().members.iter().map(|n| n.0).collect(),
-                    config_ballot: Some(internal::Ballot { round: since.round, node: since.node.0 }),
+                    config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
                     matchmaker_generation: set.generation.0,
                     matchmakers: set.members.iter().map(|m| m.0).collect(),
