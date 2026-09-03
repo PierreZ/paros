@@ -119,6 +119,14 @@
 //! told, without re-deriving the decision, on the precondition that only a
 //! proposer holding the decree's Phase-2 quorum (or a node relaying such a
 //! publication) emits it. See [`ReconfigureRequest::Chosen`].
+//!
+//! Trusting is not the same as staying silent. The one contradiction a
+//! learner *can* see, it refuses: a `Chosen` for a generation whose
+//! successor this matchmaker already recorded, naming a different set, is
+//! answered with the ordinary refusal (which carries the recorded
+//! successor) and applied to nothing. A wrong relay is precisely what
+//! produces that message, and an `activated: false` `Learned` would have
+//! made it indistinguishable from a duplicate.
 
 #[cfg(test)]
 mod handover_model;
@@ -556,8 +564,10 @@ pub enum ReconfigureRequest {
     /// happens; a driver that fabricates a `Chosen` is outside the fault
     /// model, and the core does not defend against it. Every *other* wire
     /// check a learner can make is made: the generation chain
-    /// (`successor.generation == generation + 1`) and a set that admits the
-    /// quorum system.
+    /// (`successor.generation == generation + 1`), a set that admits the
+    /// quorum system, and agreement with the successor already recorded for
+    /// that generation — a `Chosen` naming a different one is refused, never
+    /// applied and never answered as if it had been learned.
     Chosen {
         /// The requesting node.
         from: NodeId,
@@ -1279,27 +1289,43 @@ impl Matchmaker {
                 } else if current.generation == generation
                     && matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
                 {
-                    // A member of the succeeded generation: record the chain
-                    // link (freezing if it had not — once a successor is
-                    // chosen the generation is over), then activate if it is
-                    // also a member of the successor holding its bootstrap.
-                    let mut changed = false;
-                    if self.hard_state.successor.is_none() {
-                        if phase == MatchmakerPhase::Active {
-                            self.freeze();
+                    if self
+                        .hard_state
+                        .successor
+                        .as_ref()
+                        .is_some_and(|recorded| *recorded != successor)
+                    {
+                        // Two different successors for one generation: one of
+                        // the two publications is wrong. A learner cannot tell
+                        // which, but it can refuse to apply the second — the
+                        // refusal names the successor recorded, so the
+                        // contradiction reaches the sender (and any audit)
+                        // instead of disappearing into an ordinary `Learned`.
+                        refused(self)
+                    } else {
+                        // A member of the succeeded generation: record the
+                        // chain link (freezing if it had not — once a
+                        // successor is chosen the generation is over), then
+                        // activate if it is also a member of the successor
+                        // holding its bootstrap.
+                        let mut changed = false;
+                        if self.hard_state.successor.is_none() {
+                            if phase == MatchmakerPhase::Active {
+                                self.freeze();
+                            }
+                            self.hard_state.successor = Some(successor.clone());
+                            changed = true;
                         }
-                        self.hard_state.successor = Some(successor.clone());
-                        changed = true;
-                    }
-                    changed |= self.prune_settled_pending(&successor);
-                    if changed {
-                        self.stage_scalars();
-                    }
-                    let activated = self.activate(&successor);
-                    ReconfigureReply::Learned {
-                        matchmaker: me,
-                        generation,
-                        activated,
+                        changed |= self.prune_settled_pending(&successor);
+                        if changed {
+                            self.stage_scalars();
+                        }
+                        let activated = self.activate(&successor);
+                        ReconfigureReply::Learned {
+                            matchmaker: me,
+                            generation,
+                            activated,
+                        }
                     }
                 } else if successor.generation > current.generation
                     || matches!(phase, MatchmakerPhase::Inactive | MatchmakerPhase::Fresh)
@@ -1693,6 +1719,58 @@ mod tests {
             MatchmakerGeneration(generation),
             members.iter().copied().map(MatchmakerId).collect(),
         )
+    }
+
+    /// Review finding P7: a second `Chosen` for one generation naming a
+    /// *different* successor is the shape a wrong relay produces. It is
+    /// refused — nothing recorded, nothing activated — and the refusal names
+    /// the successor this matchmaker holds.
+    #[test]
+    fn a_chosen_contradicting_the_recorded_successor_is_refused() {
+        let mut mm = fresh(0);
+        let recorded = set(1, &[0, 1, 2]);
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: recorded.clone(),
+        });
+        drain_reconfigure(&mut mm);
+        assert_eq!(mm.successor(), Some(&recorded));
+        // The same publication again is idempotent.
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(5),
+            generation: G0,
+            successor: recorded.clone(),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(matches!(
+            &replies[0],
+            ReconfigureReply::Learned {
+                activated: false,
+                ..
+            }
+        ));
+        assert!(writes.is_empty(), "a duplicate publication writes nothing");
+        // A contradicting one is not.
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(6),
+            generation: G0,
+            successor: set(1, &[0, 3, 4]),
+        });
+        let (writes, replies) = drain_reconfigure(&mut mm);
+        assert!(
+            matches!(
+                &replies[0],
+                ReconfigureReply::Refused { successor: Some(s), .. } if *s == recorded
+            ),
+            "the refusal names the recorded successor, not the contradicting one"
+        );
+        assert!(
+            writes.is_empty(),
+            "a contradiction changes no durable state"
+        );
+        assert_eq!(mm.successor(), Some(&recorded));
+        assert_eq!(mm.set(), set(0, &[0, 1, 2]), "and activates nothing");
     }
 
     /// Review finding P6: a matchmaker bootstrapped into a proposal that
