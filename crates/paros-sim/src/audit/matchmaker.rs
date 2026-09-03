@@ -486,6 +486,26 @@ impl MatchmakerAudit {
             .is_some_and(|c| c.completed && !c.refused)
     }
 
+    /// Every acceptor a configuration registered **below** `watermark` names
+    /// — the members of the configurations a floor at `watermark` forgets, and
+    /// therefore the only acceptors it may ever call retirable. `None` when
+    /// the audit has folded no registration below the watermark at all (the
+    /// prior is unknown here and nothing is judged).
+    fn prior_members(&self, watermark: Ballot) -> Option<BTreeSet<u64>> {
+        let mut members: BTreeSet<u64> = BTreeSet::new();
+        let mut seen = false;
+        for ((_, ballot), registration) in &self.ever {
+            if *ballot >= watermark {
+                continue;
+            }
+            seen = true;
+            for member in &registration.config.members {
+                members.insert(member.0);
+            }
+        }
+        seen.then_some(members)
+    }
+
     /// The configuration some matchmaker durably registered under `ballot`,
     /// if any (they never disagree; the first fold wins the lookup).
     pub(super) fn registered_config(&self, ballot: Ballot) -> Option<&AcceptorConfig> {
@@ -1424,6 +1444,24 @@ impl MatchmakerAudit {
                 "quorum" => quorum
             }
         );
+        // GC invariant 3: a retirable acceptor is `members(H_b) \ C_b`, so it
+        // was a member of a configuration this floor forgets. Without this,
+        // a leader naming an arbitrary spare has its word taken for it: the
+        // operator parks a healthy node for the run and the convergence
+        // oracle excuses it *because the leader named it*.
+        if let Some(prior) = self.prior_members(*watermark) {
+            let outsider = retired.iter().find(|n| !prior.contains(&n.0)).map(|n| n.0);
+            assert_always!(
+                outsider.is_none(),
+                "gc: a retirable acceptor was a member of a prior configuration",
+                {
+                    "node" => node.0,
+                    "round" => watermark.round,
+                    "retired" => outsider.unwrap_or(u64::MAX),
+                    "prior" => prior.len()
+                }
+            );
+        }
         // GC invariant 4: nothing the configuration in force needs is retired.
         if let Some(config) = config {
             let inside = retired.iter().find(|n| config.contains(**n)).map(|n| n.0);
