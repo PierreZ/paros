@@ -72,7 +72,7 @@ pub use node::{
     ReconfigureResult,
 };
 pub use ready::Ready;
-pub use single_decree::{DecreeAcceptor, DecreePhase, DecreeProposer};
+pub use single_decree::{AcceptFold, DecreeAcceptor, DecreePhase, DecreeProposer, PromiseFold};
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{

@@ -121,6 +121,44 @@ impl<V: Clone + PartialEq> DecreeAcceptor<V> {
     }
 }
 
+/// What one Phase-1b promise did to a [`DecreeProposer`] — the shape
+/// `proposer::PromiseFold` has for the log's own Phase 1. A fold that
+/// *counted* is progress even when the quorum is still short, which is
+/// exactly what a caller's stall clock must be able to tell from a duplicate
+/// (review finding P4: counted-but-short promises reported as "nothing
+/// happened" let the driver abandon a decree that was progressing, while
+/// duplicates reported as progress kept resetting its clock).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PromiseFold<V> {
+    /// Not folded: no matching phase, a sender already counted, or one
+    /// outside the acceptor set.
+    Ignored,
+    /// Counted; `remaining` more promises before the Phase-1 quorum holds.
+    Counted {
+        /// Promises still missing.
+        remaining: usize,
+    },
+    /// The quorum holds: propose this value (P2c — the highest-ballot vote
+    /// reported, else the proposer's own).
+    Quorum(V),
+}
+
+/// What one Phase-2b accept did to a [`DecreeProposer`]. The twin of
+/// [`PromiseFold`], counted the same way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcceptFold<V> {
+    /// Not folded: not in Phase 2, a sender already counted, or one outside
+    /// the acceptor set.
+    Ignored,
+    /// Counted; `remaining` more accepts before the value is chosen.
+    Counted {
+        /// Accepts still missing.
+        remaining: usize,
+    },
+    /// The Phase-2 quorum holds: this value is chosen.
+    Chosen(V),
+}
+
 /// Where a [`DecreeProposer`] stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecreePhase<V> {
@@ -260,22 +298,24 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
             })
     }
 
-    /// Fold one Phase-1b promise. Returns the value to propose when this
-    /// promise completes the quorum (P2c: the highest-ballot vote reported,
-    /// else the own proposal); `None` otherwise, including duplicates and
-    /// promises arriving outside Phase 1.
+    /// Fold one Phase-1b promise: [`PromiseFold::Quorum`] with the value to
+    /// propose when this promise completes the quorum (P2c: the
+    /// highest-ballot vote reported, else the own proposal),
+    /// [`PromiseFold::Counted`] when it counted but the quorum is still
+    /// short, and [`PromiseFold::Ignored`] for a duplicate, a stranger, or a
+    /// promise arriving outside Phase 1.
     ///
     /// # Panics
     ///
     /// If two acceptors report different values at one ballot
     /// ([`select_highest`]): one ballot has one proposer, so that is a
     /// protocol violation, never an operating condition.
-    pub fn on_promise(&mut self, from: A, vote: Option<(Ballot, V)>) -> Option<V> {
+    pub fn on_promise(&mut self, from: A, vote: Option<(Ballot, V)>) -> PromiseFold<V> {
         if self.phase != DecreePhase::Phase1
             || self.acceptors.binary_search(&from).is_err()
             || !self.promised_by.insert(from)
         {
-            return None;
+            return PromiseFold::Ignored;
         }
         if let Some(report) = vote {
             select_highest(
@@ -284,32 +324,49 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
                 "two Phase-1 votes at one decree ballot agree on the value",
             );
         }
-        if !self.quorum.is_quorum(&self.acceptors, &self.promised_by) {
-            return None;
+        if !self
+            .quorum
+            .is_phase1_quorum(&self.acceptors, &self.promised_by)
+        {
+            return PromiseFold::Counted {
+                remaining: self
+                    .quorum
+                    .quorum_size(self.acceptors.len())
+                    .saturating_sub(self.promised_by.len()),
+            };
         }
         let value = self
             .best
             .as_ref()
             .map_or_else(|| self.proposal.clone(), |(_, v)| v.clone());
         self.phase = DecreePhase::Phase2(value.clone());
-        Some(value)
+        PromiseFold::Quorum(value)
     }
 
-    /// Fold one Phase-2b accept. Returns the chosen value when this accept
-    /// completes the quorum; `None` otherwise.
-    pub fn on_accepted(&mut self, from: A) -> Option<V> {
+    /// Fold one Phase-2b accept: [`AcceptFold::Chosen`] when it completes the
+    /// quorum, [`AcceptFold::Counted`] when it counted but the quorum is
+    /// still short, [`AcceptFold::Ignored`] otherwise.
+    pub fn on_accepted(&mut self, from: A) -> AcceptFold<V> {
         let DecreePhase::Phase2(value) = &self.phase else {
-            return None;
+            return AcceptFold::Ignored;
         };
         let value = value.clone();
-        if self.acceptors.binary_search(&from).is_err()
-            || !self.accepted_by.insert(from)
-            || !self.quorum.is_quorum(&self.acceptors, &self.accepted_by)
+        if self.acceptors.binary_search(&from).is_err() || !self.accepted_by.insert(from) {
+            return AcceptFold::Ignored;
+        }
+        if !self
+            .quorum
+            .is_phase2_quorum(&self.acceptors, &self.accepted_by)
         {
-            return None;
+            return AcceptFold::Counted {
+                remaining: self
+                    .quorum
+                    .quorum_size(self.acceptors.len())
+                    .saturating_sub(self.accepted_by.len()),
+            };
         }
         self.phase = DecreePhase::Chosen(value.clone());
-        Some(value)
+        AcceptFold::Chosen(value)
     }
 
     /// A refusal: some acceptor promised `promised` above this ballot. The
@@ -335,20 +392,46 @@ mod tests {
         }
     }
 
+    /// Review finding P4, both directions: a fold that counts toward a
+    /// quorum still short reports the progress it made and how much is
+    /// missing, while a duplicate or a stranger reports `Ignored`. The
+    /// caller's stall clock is driven by exactly that distinction.
     #[test]
     fn a_lone_proposal_is_chosen_by_a_quorum() {
         let mut p: DecreeProposer<u8, &str> = DecreeProposer::new(ballot(1, 0), [0, 1, 2], "mine");
         assert_eq!(p.quorum(), 2);
-        assert_eq!(p.on_promise(0, None), None);
-        assert_eq!(p.on_promise(0, None), None, "a duplicate never counts");
-        assert_eq!(p.on_promise(7, None), None, "a stranger never counts");
-        assert_eq!(p.on_promise(1, None), Some("mine"));
+        assert_eq!(p.on_promise(0, None), PromiseFold::Counted { remaining: 1 });
+        assert_eq!(
+            p.on_promise(0, None),
+            PromiseFold::Ignored,
+            "a duplicate never counts"
+        );
+        assert_eq!(
+            p.on_promise(7, None),
+            PromiseFold::Ignored,
+            "a stranger never counts"
+        );
+        assert_eq!(p.on_promise(1, None), PromiseFold::Quorum("mine"));
         assert_eq!(p.phase(), &DecreePhase::Phase2("mine"));
         assert!(!p.adopted_prior_vote());
-        assert_eq!(p.on_accepted(0), None);
-        assert_eq!(p.on_accepted(0), None, "a duplicate never counts");
-        assert_eq!(p.on_accepted(2), Some("mine"));
+        assert_eq!(p.on_accepted(0), AcceptFold::Counted { remaining: 1 });
+        assert_eq!(
+            p.on_accepted(0),
+            AcceptFold::Ignored,
+            "a duplicate never counts"
+        );
+        assert_eq!(
+            p.on_accepted(7),
+            AcceptFold::Ignored,
+            "a stranger never counts"
+        );
+        assert_eq!(p.on_accepted(2), AcceptFold::Chosen("mine"));
         assert_eq!(p.phase(), &DecreePhase::Chosen("mine"));
+        assert_eq!(
+            p.on_accepted(1),
+            AcceptFold::Ignored,
+            "a late accept on a chosen decree changes nothing"
+        );
         assert_eq!(p.unanswered().count(), 0);
     }
 
@@ -366,14 +449,18 @@ mod tests {
         let mut p: DecreeProposer<usize, &str> = DecreeProposer::new(ballot(2, 2), [0, 1, 2], "r2");
         let v0 = acceptors[0].prepare(ballot(2, 2)).expect("promise");
         let v1 = acceptors[1].prepare(ballot(2, 2)).expect("promise");
-        assert_eq!(p.on_promise(1, v1), None);
-        assert_eq!(p.on_promise(0, v0), Some("r1"), "the prior vote wins");
+        assert_eq!(p.on_promise(1, v1), PromiseFold::Counted { remaining: 1 });
+        assert_eq!(
+            p.on_promise(0, v0),
+            PromiseFold::Quorum("r1"),
+            "the prior vote wins"
+        );
         assert!(p.adopted_prior_vote());
         // R1's lower ballot is refused everywhere R2 reached.
         assert_eq!(acceptors[1].accept(ballot(1, 1), "r1"), Err(ballot(2, 2)));
         for (i, acceptor) in acceptors.iter_mut().enumerate().take(2) {
             assert_eq!(acceptor.accept(ballot(2, 2), "r1"), Ok(()));
-            p.on_accepted(i);
+            let _ = p.on_accepted(i);
         }
         assert_eq!(p.phase(), &DecreePhase::Chosen("r1"));
     }
@@ -387,7 +474,11 @@ mod tests {
         let mut p: DecreeProposer<u8, u8> = DecreeProposer::new(ballot(3, 2), [0], 9);
         p.on_nack(ballot(5, 1));
         assert_eq!(p.phase(), &DecreePhase::Preempted(ballot(5, 1)));
-        assert_eq!(p.on_promise(0, None), None, "a preempted proposal is dead");
+        assert_eq!(
+            p.on_promise(0, None),
+            PromiseFold::Ignored,
+            "a preempted proposal is dead"
+        );
         assert_eq!(p.unanswered().count(), 0);
     }
 
@@ -400,7 +491,10 @@ mod tests {
     #[should_panic(expected = "two Phase-1 votes at one decree ballot agree on the value")]
     fn two_votes_at_one_ballot_are_a_programmer_error() {
         let mut p: DecreeProposer<u8, &str> = DecreeProposer::new(ballot(2, 0), [0, 1, 2], "mine");
-        assert_eq!(p.on_promise(0, Some((ballot(1, 0), "voted"))), None);
+        assert_eq!(
+            p.on_promise(0, Some((ballot(1, 0), "voted"))),
+            PromiseFold::Counted { remaining: 1 }
+        );
         let _ = p.on_promise(1, Some((ballot(1, 0), "other")));
     }
 

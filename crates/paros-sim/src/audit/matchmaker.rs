@@ -1866,9 +1866,15 @@ impl MatchmakerAudit {
                 .insert(matchmaker.0, (*gc_watermark, snapshot));
         }
         match step {
+            // The counted-but-short folds: progress the driver's stall
+            // clock reads, with nothing new to judge (the quorum-closing
+            // fold of each phase carries the claim).
             ReconfigurerStep::Ignored
             | ReconfigurerStep::Stopped { .. }
-            | ReconfigurerStep::Bootstrapped { .. } => {}
+            | ReconfigurerStep::Bootstrapped { .. }
+            | ReconfigurerStep::Promised { .. }
+            | ReconfigurerStep::Accepted { .. }
+            | ReconfigurerStep::Published { .. } => {}
             ReconfigurerStep::Bootstrapping { bootstrap } => {
                 // Invariant 3: the reconstruction is the union of the frozen
                 // quorum's durable registries above their maximum watermark

@@ -54,7 +54,7 @@ use super::{
     Registration,
 };
 use crate::membership::AcceptorConfig;
-use crate::single_decree::{DecreePhase, DecreeProposer};
+use crate::single_decree::{AcceptFold, DecreePhase, DecreeProposer, PromiseFold};
 use crate::types::{Ballot, NodeId};
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
@@ -157,6 +157,24 @@ pub enum ReconfigurerStep {
     Deciding {
         /// The decree ballot.
         ballot: Ballot,
+    },
+    /// One more decree promise; `remaining` more before the Phase-1 quorum.
+    Promised {
+        /// Promises still missing.
+        remaining: usize,
+    },
+    /// One more decree vote; `remaining` more before the successor is chosen.
+    Accepted {
+        /// Accepts still missing.
+        remaining: usize,
+    },
+    /// One more member learned the chosen successor; `old_remaining` and
+    /// `new_remaining` more before each set's quorum has.
+    Published {
+        /// Learners still missing in the replaced generation.
+        old_remaining: usize,
+        /// Learners still missing in the successor.
+        new_remaining: usize,
     },
     /// A Phase-1 quorum holds: proposing `members` (P2c adopted a prior vote
     /// when `adopted`).
@@ -346,6 +364,17 @@ impl MatchmakerReconfigurer {
 
     /// Driver ticks since the running phase last folded a reply that moved
     /// it (zero while idle).
+    ///
+    /// "Moved it" is exactly "the fold did not answer
+    /// [`ReconfigurerStep::Ignored`]", and every phase counts the same way:
+    /// an ack from a member that had already answered is a duplicate and
+    /// changes nothing, while an ack that counts toward a quorum still
+    /// short *is* progress and says how much is missing
+    /// (`Stopped`/`Bootstrapped`/`Promised`/`Accepted`/`Published`). Both
+    /// halves matter — a duplicate resetting the clock kept a dead phase
+    /// alive forever, and a counted-but-short fold reported as `Ignored`
+    /// had the driver abandon a decree that was progressing (review
+    /// finding P4).
     #[must_use]
     pub fn stalled_for(&self) -> u64 {
         self.elapsed
@@ -537,7 +566,15 @@ impl MatchmakerReconfigurer {
                     self.abort();
                     return ReconfigurerStep::Superseded { successor };
                 }
-                acks.insert(from, (gc_watermark, history));
+                if acks.insert(from, (gc_watermark, history)).is_some() {
+                    // A member that already answered: the freeze is
+                    // idempotent, so a re-sent `Stop` is answered again and
+                    // the second copy moves nothing. Reporting it as
+                    // progress reset the stall clock, which is how a phase
+                    // whose remaining members were all dead stayed alive
+                    // for the rest of a run.
+                    return ReconfigurerStep::Ignored;
+                }
                 *decree_floor = (*decree_floor).max(decree_promised);
                 // The effective configuration is a monotone scalar, not a
                 // record: the maximum over the frozen members carries the
@@ -612,10 +649,9 @@ impl MatchmakerReconfigurer {
                 let ReconfigureReply::Bootstrapped { set, .. } = reply else {
                     return ReconfigurerStep::Ignored;
                 };
-                if set != bootstrap.set || !set.contains(from) {
+                if set != bootstrap.set || !set.contains(from) || !acks.insert(from) {
                     return ReconfigurerStep::Ignored;
                 }
-                acks.insert(from);
                 let remaining = bootstrap.set.members.len() - acks.len();
                 if remaining > 0 {
                     return ReconfigurerStep::Bootstrapped { remaining };
@@ -658,8 +694,12 @@ impl MatchmakerReconfigurer {
                         if generation != old.generation || ballot != proposer.ballot() {
                             return ReconfigurerStep::Ignored;
                         }
-                        let Some(members) = proposer.on_promise(from, vote) else {
-                            return ReconfigurerStep::Ignored;
+                        let members = match proposer.on_promise(from, vote) {
+                            PromiseFold::Ignored => return ReconfigurerStep::Ignored,
+                            PromiseFold::Counted { remaining } => {
+                                return ReconfigurerStep::Promised { remaining };
+                            }
+                            PromiseFold::Quorum(members) => members,
                         };
                         let adopted = proposer.adopted_prior_vote();
                         self.resend();
@@ -675,8 +715,12 @@ impl MatchmakerReconfigurer {
                         if generation != old.generation || ballot != proposer.ballot() {
                             return ReconfigurerStep::Ignored;
                         }
-                        let Some(members) = proposer.on_accepted(from) else {
-                            return ReconfigurerStep::Ignored;
+                        let members = match proposer.on_accepted(from) {
+                            AcceptFold::Ignored => return ReconfigurerStep::Ignored,
+                            AcceptFold::Counted { remaining } => {
+                                return ReconfigurerStep::Accepted { remaining };
+                            }
+                            AcceptFold::Chosen(members) => members,
                         };
                         let successor = MatchmakerSet::new(old.generation.next(), members);
                         // The decree chose what some reconfigurer bootstrapped,
@@ -731,11 +775,10 @@ impl MatchmakerReconfigurer {
                 if generation != old.generation {
                     return ReconfigurerStep::Ignored;
                 }
-                if old.contains(from) {
-                    old_acks.insert(from);
-                }
-                if successor.contains(from) {
-                    new_acks.insert(from);
+                let counted_old = old.contains(from) && old_acks.insert(from);
+                let counted_new = successor.contains(from) && new_acks.insert(from);
+                if !counted_old && !counted_new {
+                    return ReconfigurerStep::Ignored;
                 }
                 if old.has_quorum(old_acks) && successor.has_quorum(new_acks) {
                     let successor = successor.clone();
@@ -743,7 +786,10 @@ impl MatchmakerReconfigurer {
                     self.pending.clear();
                     return ReconfigurerStep::Done { successor };
                 }
-                ReconfigurerStep::Ignored
+                ReconfigurerStep::Published {
+                    old_remaining: old.quorum_size().saturating_sub(old_acks.len()),
+                    new_remaining: successor.quorum_size().saturating_sub(new_acks.len()),
+                }
             }
         }
     }
@@ -898,6 +944,101 @@ mod tests {
         }
         assert_eq!(pool[2].phase(), MatchmakerPhase::Stopped);
         assert_eq!(pool[2].successor(), Some(&set(1, &[0, 1, 3])));
+    }
+
+    /// Review finding P4, at the reconfigurer: the stall clock moves on
+    /// progress and only on progress. A re-sent `Stop` is answered again by
+    /// a matchmaker that already froze — the freeze is idempotent — and that
+    /// duplicate must be `Ignored`, or a phase whose remaining members are
+    /// all dead resets its clock forever and is never abandoned. The
+    /// counted-but-short direction is the same fold's other half: it reports
+    /// how many acks are still missing.
+    #[test]
+    fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
+        let mut pool = pool(5, &[0, 1, 2, 3, 4]);
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 2]))
+            .expect("start");
+        // One freeze: counted, three short of the quorum of five.
+        let steps = exchange(&mut r, &mut pool, &[1, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Stopped { remaining: 2 }]);
+        assert_eq!(r.stalled_for(), 0);
+        r.tick();
+        r.tick();
+        assert_eq!(r.stalled_for(), 2);
+        // The same matchmaker answers a re-sent `Stop`: idempotent at the
+        // registry, and nothing at all here.
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[1, 2, 3, 4]);
+        assert!(
+            steps.is_empty(),
+            "a frozen member is not re-asked: {steps:?}"
+        );
+        r.on_reply(ReconfigureReply::Stopped {
+            matchmaker: MatchmakerId(0),
+            generation: MatchmakerGeneration(0),
+            gc_watermark: Ballot::zero(),
+            history: BTreeMap::new(),
+            effective: None,
+            successor: None,
+            decree_promised: Ballot::zero(),
+        });
+        assert_eq!(r.stalled_for(), 2, "a duplicate freeze ack is not progress");
+        // A second, different member is: the clock restarts.
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[0, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Stopped { remaining: 1 }]);
+        assert_eq!(r.stalled_for(), 0);
+    }
+
+    /// The decree's own folds, through the reconfigurer: a promise and a
+    /// vote that count toward a quorum still short are `Promised` /
+    /// `Accepted` with what is missing, and the publication reports the
+    /// learners each set still needs.
+    #[test]
+    fn a_short_decree_quorum_reports_what_is_missing() {
+        let mut pool = pool(6, &[0, 1, 2, 3, 4]);
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.start(&set(0, &[0, 1, 2, 3, 4]), ids(&[0, 1, 5]))
+            .expect("start");
+        // Freeze a quorum, bootstrap every proposed member, open the decree.
+        while !matches!(r.phase(), ReconfigurerPhase::Deciding { .. }) {
+            let steps = exchange(&mut r, &mut pool, &[]);
+            assert!(!steps.is_empty(), "the handover stalled: {:?}", r.phase());
+        }
+        // Phase 1 over five acceptors: the first two promises are short.
+        let steps = exchange(&mut r, &mut pool, &[1, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Promised { remaining: 2 }]);
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[0, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Promised { remaining: 1 }]);
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[0, 1, 3, 4]);
+        assert!(matches!(
+            steps.as_slice(),
+            [ReconfigurerStep::Proposing { .. }]
+        ));
+        // Phase 2, the same shape.
+        let steps = exchange(&mut r, &mut pool, &[1, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Accepted { remaining: 2 }]);
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[0, 2, 3, 4]);
+        assert_eq!(steps, vec![ReconfigurerStep::Accepted { remaining: 1 }]);
+        r.resend();
+        let steps = exchange(&mut r, &mut pool, &[0, 1, 3, 4]);
+        assert!(matches!(
+            steps.as_slice(),
+            [ReconfigurerStep::Chosen { .. }]
+        ));
+        // Publishing: one learner of each set at a time.
+        let steps = exchange(&mut r, &mut pool, &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            steps,
+            vec![ReconfigurerStep::Published {
+                old_remaining: 2,
+                new_remaining: 1
+            }]
+        );
     }
 
     /// The replacement story: one old matchmaker never answers (lost for
