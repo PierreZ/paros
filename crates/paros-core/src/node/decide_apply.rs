@@ -88,7 +88,8 @@ impl RawNode {
         // never contacted for a new ballot's Phase 2.
         self.broadcast_acceptors(&Message::Accept {
             config_id: self.config_id,
-            from: me,
+            reply_to: me,
+            leader: me,
             ballot,
             slot,
             command,

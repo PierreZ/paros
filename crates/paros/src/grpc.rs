@@ -276,13 +276,17 @@ pub(crate) fn message_to_proto(
     let kind = match message {
         Message::Prepare {
             config_id,
-            from,
+            reply_to,
+            leader,
             ballot,
             from_slot,
             config,
         } => Kind::Prepare(internal::Prepare {
             config_id: config_id.0,
-            from: from.0,
+            reply_to: reply_to.0,
+            // Absent when it would merely repeat the reply address, which is
+            // every message paros sends today: the plain wire is unchanged.
+            leader: (leader != reply_to).then_some(leader.0),
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
             config: config.as_ref().map(config_to_proto),
@@ -306,13 +310,17 @@ pub(crate) fn message_to_proto(
         }),
         Message::Accept {
             config_id,
-            from,
+            reply_to,
+            leader,
             ballot,
             slot,
             command,
         } => Kind::Accept(internal::Accept {
             config_id: config_id.0,
-            from: from.0,
+            reply_to: reply_to.0,
+            // Absent when it would merely repeat the reply address, which is
+            // every message paros sends today: the plain wire is unchanged.
+            leader: (leader != reply_to).then_some(leader.0),
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
             command: Some(command_to_proto(command)),
@@ -487,7 +495,8 @@ pub(crate) fn message_from_proto(
     match message.kind.ok_or("missing Paxos message kind")? {
         Kind::Prepare(message) => Ok(Message::Prepare {
             config_id: ConfigId(message.config_id),
-            from: NodeId(message.from),
+            reply_to: NodeId(message.reply_to),
+            leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
             config: config_from_proto(message.config)?,
@@ -503,7 +512,8 @@ pub(crate) fn message_from_proto(
         }),
         Kind::Accept(message) => Ok(Message::Accept {
             config_id: ConfigId(message.config_id),
-            from: NodeId(message.from),
+            reply_to: NodeId(message.reply_to),
+            leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             command: command_from_proto(message.command)?,

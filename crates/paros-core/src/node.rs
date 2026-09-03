@@ -352,12 +352,13 @@ impl RawNode {
         }
         match msg {
             Message::Prepare {
-                from,
+                reply_to,
+                leader,
                 ballot,
                 from_slot,
                 config,
                 ..
-            } => self.on_prepare(from, ballot, from_slot, config),
+            } => self.on_prepare(reply_to, leader, ballot, from_slot, config),
             Message::Promise {
                 from,
                 ballot,
@@ -368,12 +369,13 @@ impl RawNode {
                 ..
             } => self.on_promise(from, ballot, from_slot, accepted, faulty, next_from_slot),
             Message::Accept {
-                from,
+                reply_to,
+                leader,
                 ballot,
                 slot,
                 command,
                 ..
-            } => self.on_accept(from, ballot, slot, command),
+            } => self.on_accept(reply_to, leader, ballot, slot, command),
             Message::Accepted {
                 from,
                 ballot,
@@ -864,7 +866,8 @@ impl RawNode {
                         to,
                         Message::Prepare {
                             config_id: self.config_id,
-                            from: self.config.id,
+                            reply_to: self.config.id,
+                            leader: self.config.id,
                             ballot,
                             from_slot,
                             config: config.clone(),
@@ -937,7 +940,8 @@ impl RawNode {
         for (slot, ballot, command) in pending {
             self.broadcast_acceptors(&Message::Accept {
                 config_id: self.config_id,
-                from: me,
+                reply_to: me,
+                leader: me,
                 ballot,
                 slot,
                 command,

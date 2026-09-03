@@ -66,7 +66,8 @@ fn promise_suffix_and_leader_recovery_are_paged() {
     loop {
         acceptor.step(Message::Prepare {
             config_id: ConfigId::default(),
-            from: NodeId(1),
+            reply_to: NodeId(1),
+            leader: NodeId(1),
             ballot,
             from_slot: cursor,
             config: None,
@@ -106,7 +107,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
         let (candidate_messages, recovery) = take_ready(&mut candidate);
         if let Some(next) = next_from_slot {
             let Some(Message::Prepare {
-                from,
+                reply_to: from,
                 ballot: continuation_ballot,
                 from_slot,
                 ..
@@ -263,7 +264,8 @@ fn nack_hints_and_stale_campaigns_are_isolated() {
     let _ = take_ready(&mut stale);
     stale.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
         config: None,

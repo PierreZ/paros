@@ -110,13 +110,18 @@ message SlotCommand {
 // let acceptors learn the configuration a ballot was registered with; absent
 // on plain Multi-Paxos, whose messages are unchanged.
 message Prepare {
-  uint64 from = 1;
+  // Where the Promise/Nack is addressed.
+  uint64 reply_to = 1;
   .paros.common.v1.Ballot ballot = 2;
   uint64 from_slot = 3;
   uint64 config_id = 4;
   // The configuration the candidate registered for `ballot` (absent on plain
   // Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 5;
+  // The node running the campaign — the owner of `ballot`. Absent means "the
+  // reply address is the campaigner", which is every deployment paros ships
+  // today, so this field is never on the wire and the encoding is unchanged.
+  optional uint64 leader = 6;
 }
 
 message Promise {
@@ -138,11 +143,17 @@ message FaultySlot {
 }
 
 message Accept {
-  uint64 from = 1;
+  // Where the Accepted/Nack is addressed.
+  uint64 reply_to = 1;
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
   uint64 config_id = 5;
+  // The node exercising the ballot's Phase-2 authority (the leader hint an
+  // acceptor adopts). Absent means "the reply address is the leader", which
+  // is every deployment paros ships today, so this field is never on the wire
+  // and the encoding is unchanged.
+  optional uint64 leader = 6;
 }
 
 message Accepted {

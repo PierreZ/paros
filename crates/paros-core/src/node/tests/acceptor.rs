@@ -9,7 +9,8 @@ fn matching_configuration_message_is_processed_and_reply_is_tagged() {
 
     n.step(Message::Prepare {
         config_id: ConfigId(7),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
         config: None,
@@ -40,7 +41,8 @@ fn mismatching_configuration_message_is_ignored_before_dispatch() {
     // whole — no reply, no promise movement.
     n.step(Message::Prepare {
         config_id: ConfigId(8),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
         config: None,
@@ -67,7 +69,8 @@ fn promise_and_accept_batches_require_fsync() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(3, 1),
         from_slot: Slot(0),
         config: None,
@@ -85,7 +88,8 @@ fn promise_and_accept_batches_require_fsync() {
     // An acceptor accepting a value must fsync before it replies Accepted.
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(3, 1),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
@@ -106,7 +110,8 @@ fn acceptor_rejects_below_promised_ballot() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,
@@ -114,7 +119,8 @@ fn acceptor_rejects_below_promised_ballot() {
     let _ = drain(&mut n);
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
@@ -142,7 +148,8 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     // before reaching a quorum); this node was the only acceptor.
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         slot: Slot(0),
         command: ucmd(9, 9, 1),
@@ -186,7 +193,8 @@ fn prepare_below_floor_is_nacked_not_promised() {
     // below our floor: those slots are chosen and we truncated them.
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(9, 1),
         from_slot: Slot(0),
         config: None,
@@ -212,7 +220,8 @@ fn accept_below_floor_is_ignored() {
 
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(9, 1),
         slot: Slot(1),
         command: ucmd(1, 1, 99),

@@ -111,7 +111,8 @@ mod tests {
         vec![
             Message::Prepare {
                 config_id,
-                from: NodeId(1),
+                reply_to: NodeId(1),
+                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: None,
@@ -120,7 +121,8 @@ mod tests {
             // configuration; the plain one above carries none.
             Message::Prepare {
                 config_id,
-                from: NodeId(1),
+                reply_to: NodeId(1),
+                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: Some(paros_core::AcceptorConfig::new(
@@ -139,7 +141,19 @@ mod tests {
             },
             Message::Accept {
                 config_id,
-                from: NodeId(2),
+                reply_to: NodeId(2),
+                leader: NodeId(2),
+                ballot,
+                slot: Slot(6),
+                command: command.clone(),
+            },
+            // A reply address that is not the leader: the shape a proxied
+            // Phase 2 would put on the wire, and the only case that encodes
+            // the optional `leader` field at all.
+            Message::Accept {
+                config_id,
+                reply_to: NodeId(5),
+                leader: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 command: command.clone(),
@@ -552,6 +566,39 @@ mod tests {
                 crate::grpc::reconfigure_reply_from_wire(decoded).expect("reply"),
                 reply
             );
+        }
+    }
+
+    /// The `leader` field of a `Prepare`/`Accept` is absent from the wire
+    /// whenever it would merely repeat the reply address — which is every
+    /// message paros sends today, on a plain deployment and on a matchmaker
+    /// one alike. This pins the encoding against the day a proxied Phase 2
+    /// starts populating it.
+    #[test]
+    fn a_leader_that_is_the_reply_address_stays_off_the_wire() {
+        use crate::grpc::internal::consensus_message::Kind;
+
+        for msg in every_variant() {
+            let wire = crate::grpc::message_to_proto(&msg).expect("encode protobuf DTO");
+            match (msg, wire.kind) {
+                (
+                    Message::Prepare {
+                        reply_to, leader, ..
+                    },
+                    Some(Kind::Prepare(wire)),
+                ) => {
+                    assert_eq!(wire.leader.is_none(), reply_to == leader);
+                }
+                (
+                    Message::Accept {
+                        reply_to, leader, ..
+                    },
+                    Some(Kind::Accept(wire)),
+                ) => {
+                    assert_eq!(wire.leader.is_none(), reply_to == leader);
+                }
+                _ => {}
+            }
         }
     }
 

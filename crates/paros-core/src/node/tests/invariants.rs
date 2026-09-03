@@ -14,7 +14,8 @@ use super::*;
 fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(from),
+        reply_to: NodeId(from),
+        leader: NodeId(from),
         ballot: b,
         slot: Slot(slot),
         command,
@@ -101,7 +102,8 @@ fn a_nacked_accept_leaves_the_accepted_log_and_the_batch_untouched() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,

@@ -272,7 +272,8 @@ fn step_down_drops_pending_read_rounds() {
     // A higher-ballot Prepare deposes the leader mid-round.
     nodes[0].step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: ballot(b.round + 1, 2),
         from_slot: Slot(3),
         config: None,

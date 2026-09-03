@@ -161,7 +161,8 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: old,
         slot: Slot(0),
         command: recovered.clone(),
@@ -335,7 +336,8 @@ fn promise_suffix_is_served_in_bounded_pages() {
     loop {
         n.step(Message::Prepare {
             config_id: ConfigId::default(),
-            from: NodeId(1),
+            reply_to: NodeId(1),
+            leader: NodeId(1),
             ballot: prepared,
             from_slot: cursor,
             config: None,
@@ -429,7 +431,8 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
 
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
         config: None,
@@ -511,7 +514,8 @@ fn leader_never_lowers_its_promise_on_self_accept() {
     let higher = ballot(99, 2);
     nodes[0].step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: higher,
         from_slot: Slot(0),
         config: None,
@@ -746,7 +750,8 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     let mut p = node(1, &[0, 1, 2]);
     p.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: b_prime,
         from_slot: Slot(0),
         config: None,
@@ -757,7 +762,8 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     // It rejects the stale leader's `Accept` …
     p.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: b,
         slot: Slot(3),
         command: ucmd(1, 2, 3),

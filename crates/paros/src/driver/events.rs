@@ -326,7 +326,7 @@ pub(crate) fn message_route(m: &Message) -> Option<(NodeId, ConfigId, Ballot, Op
         // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {
             config_id,
-            from,
+            reply_to: from,
             ballot,
             from_slot,
             ..
@@ -340,7 +340,7 @@ pub(crate) fn message_route(m: &Message) -> Option<(NodeId, ConfigId, Ballot, Op
         } => Some((*from, *config_id, *ballot, Some(*from_slot))),
         Message::Accept {
             config_id,
-            from,
+            reply_to: from,
             ballot,
             slot,
             ..

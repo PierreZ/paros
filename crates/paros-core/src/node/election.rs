@@ -177,7 +177,8 @@ impl RawNode {
         );
         let prepare = Message::Prepare {
             config_id: self.config_id,
-            from: me,
+            reply_to: me,
+            leader: me,
             ballot: self.ballot,
             from_slot,
             config: wire_config,
@@ -252,7 +253,8 @@ impl RawNode {
             from,
             Message::Prepare {
                 config_id: self.config_id,
-                from: self.config.id,
+                reply_to: self.config.id,
+                leader: self.config.id,
                 ballot,
                 from_slot: next,
                 config,

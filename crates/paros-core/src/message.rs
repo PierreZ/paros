@@ -25,8 +25,16 @@ pub enum Message {
         /// Durable cluster configuration identity.
         #[cfg_attr(feature = "serde", serde(default))]
         config_id: ConfigId,
-        /// Sender.
-        from: NodeId,
+        /// Where the `Promise` (or `Nack`) is addressed. The **reply address**
+        /// alone: it says nothing about who owns the ballot.
+        reply_to: NodeId,
+        /// The node running this campaign — the owner of `ballot`, which an
+        /// acceptor checks against [`Ballot::node`](crate::Ballot::node) before
+        /// promising. Equal to `reply_to` on every deployment paros ships
+        /// today; the two are separate fields so a later compartmentalized
+        /// deployment can put a proxy on the reply path without the acceptor's
+        /// ballot-ownership guard reading the proxy's id.
+        leader: NodeId,
         /// The ballot being prepared.
         ballot: Ballot,
         /// First slot this prepare covers (the candidate's `chosen_index + 1`).
@@ -83,8 +91,18 @@ pub enum Message {
         /// Durable cluster configuration identity.
         #[cfg_attr(feature = "serde", serde(default))]
         config_id: ConfigId,
-        /// Sender.
-        from: NodeId,
+        /// Where the `Accepted` (or `Nack`) is addressed. The **reply address**
+        /// alone.
+        reply_to: NodeId,
+        /// The node exercising `ballot`'s Phase-2 authority — the **leader
+        /// hint** an acceptor adopts and a client is redirected to. It is
+        /// deliberately not [`Ballot::node`](crate::Ballot::node): after a
+        /// cooperative handoff the ballot keeps naming the node that won it
+        /// while a different node drives Phase 2. Equal to `reply_to` on every
+        /// deployment paros ships today; the two are separate fields so a
+        /// later compartmentalized deployment can interpose a proxy leader
+        /// without an acceptor adopting the proxy as its leader.
+        leader: NodeId,
         /// The ballot under which the command is proposed.
         ballot: Ballot,
         /// The target slot.

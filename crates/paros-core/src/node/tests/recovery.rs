@@ -49,7 +49,8 @@ fn promise_reports_faulty_tristate_never_none() {
     // prepare from slot 0 to cover the whole log instead.
     n.step(Message::Prepare {
         config_id: ConfigId(0),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: ballot(9, 2),
         from_slot: Slot(0),
         config: None,
@@ -96,7 +97,8 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // lost one.
     let accept = Message::Accept {
         config_id: ConfigId(0),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: nodes[0].ballot(),
         slot: Slot(3),
         command: ucmd(1, 4, 40),
