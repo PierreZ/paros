@@ -91,7 +91,7 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
     AcceptorConfig, Ballot, GcAck, GcStep, MatchRefusal, MatchmakerHardState, MatchmakerId,
     MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, ReconfigureReply, ReconfigurerStep,
-    Registration, Seam, Slot,
+    Registration, RegistrationKind, Seam, Slot,
 };
 
 /// One matchmaker's folded registry.
@@ -148,9 +148,10 @@ struct Campaign {
     refused: bool,
     /// The matchmaking closed with a quorum; Phase 1 is licensed.
     completed: bool,
-    /// Opened by `RawNode::reconfigure`: its registration *is* the next
-    /// effective configuration, so the stale-belief rule does not apply.
-    reconfiguration: bool,
+    /// What the campaign registers. A `RegistrationKind::Reconfiguration`
+    /// campaign's registration *is* the next effective configuration, so the
+    /// stale-belief rule does not apply to it.
+    kind: RegistrationKind,
     /// The matchmaker generation the campaign addressed.
     generation: u64,
     /// The effective configuration when the campaign opened, from the
@@ -542,7 +543,7 @@ impl MatchmakerAudit {
         ballot: Ballot,
         registration: &Registration,
     ) {
-        if !registration.reconfiguration {
+        if !registration.kind.is_reconfiguration() {
             return;
         }
         self.reconfigurations
@@ -669,7 +670,7 @@ impl MatchmakerAudit {
         let Some(campaign) = self.campaigns.get(&(node.0, ballot)) else {
             return;
         };
-        if campaign.reconfiguration {
+        if campaign.kind.is_reconfiguration() {
             return;
         }
         let (Some((newest, effective)), Some(config)) = (
@@ -857,7 +858,7 @@ impl MatchmakerAudit {
             }
         );
         entry.registered.insert(ballot, config.clone());
-        if config.reconfiguration {
+        if config.kind.is_reconfiguration() {
             entry.highest_reconfiguration = entry.highest_reconfiguration.max(Some(ballot));
         }
         self.note_reconfiguration(matchmaker.0, ballot, config);
@@ -1175,9 +1176,10 @@ impl MatchmakerAudit {
         node: NodeId,
         ballot: Ballot,
         config: &AcceptorConfig,
-        reconfiguration: bool,
+        kind: RegistrationKind,
         generation: u64,
     ) {
+        let reconfiguration = kind.is_reconfiguration();
         // A refused candidate re-campaigns strictly above the round that
         // refused it — never one round up from its own, which the same
         // registration would refuse again (the leapfrog livelock).
@@ -1227,7 +1229,7 @@ impl MatchmakerAudit {
             { "node" => node.0, "bnode" => ballot.node.0 }
         );
         campaign.config = Some(config.clone());
-        campaign.reconfiguration = reconfiguration;
+        campaign.kind = kind;
         campaign.generation = generation;
         reach_once!(
             self.campaign_opened,
@@ -1391,10 +1393,10 @@ impl MatchmakerAudit {
         let effective = replies
             .iter()
             .flat_map(|(history, _)| history.iter())
-            .filter(|(_, r)| r.reconfiguration)
+            .filter(|(_, r)| r.kind.is_reconfiguration())
             .max_by_key(|(b, _)| *b)
             .map(|(b, r)| (*b, &r.config));
-        if !campaign.reconfiguration
+        if !campaign.kind.is_reconfiguration()
             && let Some((newest, config)) = effective
         {
             assert_always!(
@@ -1460,7 +1462,7 @@ impl MatchmakerAudit {
             .ever
             .range((0, newest)..=(u64::MAX, newest))
             .find(|((_, b), _)| *b == newest)
-            .map(|(_, r)| r.reconfiguration);
+            .map(|(_, r)| r.kind.is_reconfiguration());
         assert_always!(
             named == Some(true),
             "matchmaking: a stale-belief abort adopts a reconfiguration registration",
@@ -1473,7 +1475,7 @@ impl MatchmakerAudit {
         );
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         assert_always!(
-            !campaign.completed && !campaign.reconfiguration,
+            !campaign.completed && !campaign.kind.is_reconfiguration(),
             "matchmaking: a stale-configuration abort never follows Phase 1 and never hits a reconfiguration",
             { "node" => node.0, "round" => ballot.round }
         );

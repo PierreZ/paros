@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{MatchmakerPhase, PendingBootstrap, Registration};
+use super::{MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId};
 
@@ -27,8 +27,9 @@ pub struct MatchRequest {
     pub ballot: Ballot,
     /// The acceptor configuration the proposer intends to run `ballot` with.
     pub config: AcceptorConfig,
-    /// Whether this is a reconfiguration request (see [`Registration`]).
-    pub reconfiguration: bool,
+    /// Whether this registers a belief or an operator's reconfiguration
+    /// (see [`Registration`]).
+    pub kind: RegistrationKind,
     /// The matchmaker generation the proposer addresses. A matchmaker not
     /// active for exactly this generation refuses with what it knows.
     pub generation: MatchmakerGeneration,
@@ -48,7 +49,7 @@ impl MatchRequest {
             from,
             ballot,
             config,
-            reconfiguration: false,
+            kind: RegistrationKind::Belief,
             generation,
         }
     }
@@ -66,7 +67,7 @@ impl MatchRequest {
             from,
             ballot,
             config,
-            reconfiguration: true,
+            kind: RegistrationKind::Reconfiguration,
             generation,
         }
     }
@@ -76,7 +77,7 @@ impl MatchRequest {
     pub fn registration(&self) -> Registration {
         Registration {
             config: self.config.clone(),
-            reconfiguration: self.reconfiguration,
+            kind: self.kind,
         }
     }
 }

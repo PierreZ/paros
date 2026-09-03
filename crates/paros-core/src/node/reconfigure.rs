@@ -59,6 +59,7 @@
 //! is a permanent configuration, not a transitional one.
 
 use super::{NodeId, NodeRole, RawNode};
+use crate::matchmaker::RegistrationKind;
 use crate::membership::AcceptorConfig;
 use crate::types::Ballot;
 
@@ -153,7 +154,7 @@ impl RawNode {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);
         }
         let previous = self.ballot;
-        self.campaign(Some(config.clone()));
+        self.campaign(RegistrationKind::Reconfiguration, config.clone());
         // Postconditions: a fresh ballot above the one this leadership held,
         // matchmaking open for it with `C_new`, and no Phase-1 or Phase-2
         // state left over from the old ballot (the stall is real).
@@ -168,7 +169,7 @@ impl RawNode {
         assert!(
             self.matchmaking
                 .as_ref()
-                .is_some_and(|m| m.config == *config && m.reconfiguration),
+                .is_some_and(|m| m.config == *config && m.kind.is_reconfiguration()),
             "a reconfiguration registers the requested configuration"
         );
         assert!(

@@ -230,17 +230,17 @@ pub(crate) fn surface_matchmaking<A: Audit>(
     audit: &A,
     self_id: u64,
 ) {
-    if let Some((ballot, config, reconfiguration)) = node.matchmaking()
+    if let Some((ballot, config, kind)) = node.matchmaking()
         && *last_matchmaking != Some(ballot)
     {
         *last_matchmaking = Some(ballot);
         let generation = node.matchmaker_set().generation.0;
-        audit.matchmaking_started(NodeId(self_id), ballot, config, reconfiguration, generation);
+        audit.matchmaking_started(NodeId(self_id), ballot, config, kind, generation);
         tracing::info!(
             node = self_id,
             round = ballot.round,
             members = config.members().len() as u64,
-            reconfiguration,
+            reconfiguration = kind.is_reconfiguration(),
             "matchmaking_started"
         );
     }

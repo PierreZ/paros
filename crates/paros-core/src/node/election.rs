@@ -10,7 +10,7 @@ use super::matchmaking::Matchmaking;
 use super::{
     BTreeMap, Ballot, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot,
 };
-use crate::matchmaker::MatchRequest;
+use crate::matchmaker::{MatchRequest, RegistrationKind};
 use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 
@@ -36,7 +36,7 @@ impl RawNode {
             self.non_member_campaigns_skipped = self.non_member_campaigns_skipped.saturating_add(1);
             return;
         }
-        self.campaign(None);
+        self.campaign(RegistrationKind::Belief, self.acceptors.clone());
     }
 
     /// Open a campaign at a fresh ballot: bump the round, promise it durably,
@@ -44,10 +44,14 @@ impl RawNode {
     /// matchmakers (a deployment that names them) or go straight to Phase 1
     /// against the one static configuration (plain Multi-Paxos).
     ///
-    /// `target` is `Some` for a reconfiguration ([`RawNode::reconfigure`]):
-    /// the configuration to register instead of this node's current belief.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = target.is_some())))]
-    pub(super) fn campaign(&mut self, target: Option<AcceptorConfig>) {
+    /// `kind` says what the registration *is* — this node's belief about the
+    /// configuration in force (the election clock), or an operator's
+    /// reconfiguration ([`RawNode::reconfigure`]) — and `config` is what to
+    /// register either way. The two were one `Option<AcceptorConfig>` doing
+    /// double duty, where `None` silently meant both "the belief" and "not a
+    /// reconfiguration".
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = kind.is_reconfiguration())))]
+    pub(super) fn campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
         let me = self.config.id;
         let base_round = self
             .acceptor
@@ -84,21 +88,16 @@ impl RawNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        let reconfiguration = target.is_some();
-        let config = target.unwrap_or_else(|| self.acceptors.clone());
         if self.config.has_matchmakers() {
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`).
-            self.matchmaking = Some(Matchmaking::new(
-                self.ballot,
-                config.clone(),
-                reconfiguration,
-            ));
+            self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
             let generation = self.matchmakers.generation;
-            let request = if reconfiguration {
-                MatchRequest::reconfigure(me, self.ballot, config, generation)
-            } else {
-                MatchRequest::new(me, self.ballot, config, generation)
+            let request = match kind {
+                RegistrationKind::Reconfiguration => {
+                    MatchRequest::reconfigure(me, self.ballot, config, generation)
+                }
+                RegistrationKind::Belief => MatchRequest::new(me, self.ballot, config, generation),
             };
             for matchmaker in self.matchmakers.members.clone() {
                 self.pending_match_requests

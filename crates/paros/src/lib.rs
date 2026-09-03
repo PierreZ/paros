@@ -69,8 +69,8 @@ pub use paros_core::{
     MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
     ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, ReconfigureRefusal,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase, ReconfigurerStep,
-    Registration, RegistryStorage, SessionEntry, Slot, StartRefusal, Storage, Value, WriteOp,
-    command_fingerprint,
+    Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot, StartRefusal, Storage,
+    Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;

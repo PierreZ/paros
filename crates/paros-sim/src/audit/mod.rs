@@ -69,7 +69,8 @@ use paros::{
     HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState, MatchmakerId,
     MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
-    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
+    StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -2265,12 +2266,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         ballot: Ballot,
         config: &AcceptorConfig,
-        reconfiguration: bool,
+        kind: RegistrationKind,
         generation: u64,
     ) {
         self.state()
             .matchmaker
-            .campaign_started(node, ballot, config, reconfiguration, generation);
+            .campaign_started(node, ballot, config, kind, generation);
     }
 
     // ---- garbage collection (#123) ------------------------------------------

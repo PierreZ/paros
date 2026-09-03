@@ -20,7 +20,8 @@
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, Slot,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
+    RegistrationKind, Slot,
 };
 
 use crate::grpc::EdgeRejection;
@@ -393,8 +394,8 @@ pub trait Audit {
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
 
     /// This candidate opened a matchmaking phase for `ballot`, registering
-    /// `config` (`C_b`) with every matchmaker; `reconfiguration` marks a
-    /// campaign opened by a reconfiguration request rather than the election
+    /// `config` (`C_b`) with every matchmaker; `kind` says whether the
+    /// campaign was opened by a reconfiguration request or by the election
     /// clock. Reported at the instant the phase opens, before any request is
     /// sent. Never fires on plain Multi-Paxos.
     fn matchmaking_started(
@@ -402,7 +403,7 @@ pub trait Audit {
         node: NodeId,
         ballot: Ballot,
         config: &AcceptorConfig,
-        reconfiguration: bool,
+        kind: RegistrationKind,
         generation: u64,
     ) {
     }

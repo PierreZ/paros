@@ -59,7 +59,7 @@ pub use matchmaker::{
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
     MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, ReconfigureReply,
     ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Registration,
-    RegistryStorage, StartRefusal,
+    RegistrationKind, RegistryStorage, StartRefusal,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,

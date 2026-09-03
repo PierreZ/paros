@@ -148,6 +148,7 @@ pub use self::reconfigurer::{
 };
 pub use self::state::{
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration,
+    RegistrationKind,
 };
 pub use self::storage::RegistryStorage;
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
@@ -332,13 +333,10 @@ impl Matchmaker {
             from,
             ballot,
             config,
-            reconfiguration,
+            kind,
             generation,
         } = request;
-        let registration = Registration {
-            config,
-            reconfiguration,
-        };
+        let registration = Registration { config, kind };
         let outcome = if !registration.config.is_well_formed() {
             // Wire hygiene, before anything is touched: a configuration
             // that does not admit its own quorum system is refused whole. A
@@ -383,7 +381,7 @@ impl Matchmaker {
             // `MatchmakerHardState::effective`). Staged in the same batch as
             // the record, so the reply that reports it never escapes a
             // non-durable scalar.
-            if registration.reconfiguration
+            if registration.kind.is_reconfiguration()
                 && self
                     .hard_state
                     .effective
@@ -621,7 +619,7 @@ impl Matchmaker {
             assert!(
                 self.registry
                     .get(ballot)
-                    .is_none_or(|r| r.reconfiguration && r.config == *config),
+                    .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
                 "the effective configuration agrees with its own retained record"
             );
         }

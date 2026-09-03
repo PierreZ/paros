@@ -113,7 +113,9 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{BTreeMap, BTreeSet, Ballot, NodeId, NodeRole, RawNode};
-use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Registration};
+use crate::matchmaker::{
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Registration, RegistrationKind,
+};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 
 /// Volatile per-ballot matchmaking state while a Candidate registers its
@@ -123,12 +125,12 @@ pub(super) struct Matchmaking {
     pub(super) ballot: Ballot,
     /// `C_b`: the configuration this ballot will run with once registered.
     pub(super) config: AcceptorConfig,
-    /// Whether this campaign was opened by
-    /// [`super::RawNode::reconfigure`] (the configuration is a deliberate
-    /// change) rather than by the election clock (the configuration is this
-    /// node's belief about the latest one). Only an ordinary campaign is
-    /// subject to the stale-configuration abort.
-    pub(super) reconfiguration: bool,
+    /// What this campaign registers: an operator's deliberate change
+    /// ([`super::RawNode::reconfigure`]) or this node's belief about the
+    /// configuration in force (the election clock). Only a
+    /// [`RegistrationKind::Belief`] campaign is subject to the
+    /// stale-configuration abort.
+    pub(super) kind: RegistrationKind,
     /// Matchmakers whose `Registered` reply has been folded.
     pub(super) registered_by: BTreeSet<MatchmakerId>,
     /// The union of every reported history so far, ballot by ballot. A ballot
@@ -197,11 +199,11 @@ pub enum MatchStep {
 
 impl Matchmaking {
     /// Open the phase for `ballot` with `config` as `C_b`.
-    pub(super) fn new(ballot: Ballot, config: AcceptorConfig, reconfiguration: bool) -> Self {
+    pub(super) fn new(ballot: Ballot, config: AcceptorConfig, kind: RegistrationKind) -> Self {
         Self {
             ballot,
             config,
-            reconfiguration,
+            kind,
             registered_by: BTreeSet::new(),
             history: BTreeMap::new(),
             effective: None,
@@ -224,11 +226,8 @@ impl Matchmaking {
             return false;
         }
         for (ballot, registration) in history {
-            let Registration {
-                config,
-                reconfiguration,
-            } = registration;
-            if reconfiguration {
+            let Registration { config, kind } = registration;
+            if kind.is_reconfiguration() {
                 self.raise_effective(ballot, &config);
             }
             let entry = self.history.entry(ballot).or_default();
@@ -285,7 +284,7 @@ impl Matchmaking {
     /// next effective configuration. `None` when no reconfiguration was ever
     /// registered below this ballot, or the belief already matches it.
     pub(super) fn stale_belief(&self) -> Option<(Ballot, AcceptorConfig)> {
-        if self.reconfiguration {
+        if self.kind.is_reconfiguration() {
             return None;
         }
         let (newest, config) = self.effective.as_ref()?;
@@ -354,10 +353,13 @@ impl RawNode {
             return;
         };
         let generation = self.matchmakers.generation;
-        let request = if m.reconfiguration {
-            MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone(), generation)
-        } else {
-            MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
+        let request = match m.kind {
+            RegistrationKind::Reconfiguration => {
+                MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone(), generation)
+            }
+            RegistrationKind::Belief => {
+                MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
+            }
         };
         let unanswered: Vec<MatchmakerId> = self
             .matchmakers
@@ -382,13 +384,13 @@ impl RawNode {
     }
 
     /// The open matchmaking phase, if any: its ballot, the configuration it
-    /// registers, and whether it was opened by a reconfiguration. A read view
-    /// for the driver's audit report.
+    /// registers, and what kind of registration that is. A read view for the
+    /// driver's audit report.
     #[must_use]
-    pub fn matchmaking(&self) -> Option<(Ballot, &AcceptorConfig, bool)> {
+    pub fn matchmaking(&self) -> Option<(Ballot, &AcceptorConfig, RegistrationKind)> {
         self.matchmaking
             .as_ref()
-            .map(|m| (m.ballot, &m.config, m.reconfiguration))
+            .map(|m| (m.ballot, &m.config, m.kind))
     }
 
     /// Fold one matchmaker's answer into the open matchmaking phase — the

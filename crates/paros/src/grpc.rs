@@ -7,7 +7,8 @@ use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, GcAck,
     GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, Registration, SessionEntry, Slot, Value,
+    ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind, SessionEntry, Slot,
+    Value,
 };
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -826,7 +827,7 @@ fn registrations_to_proto(
         .map(|(ballot, registration)| matchmaker::Registration {
             ballot: Some(ballot_to_proto(*ballot)),
             config: Some(config_to_proto(&registration.config)),
-            reconfiguration: registration.reconfiguration,
+            reconfiguration: registration.kind.is_reconfiguration(),
         })
         .collect()
 }
@@ -837,9 +838,15 @@ fn registrations_from_proto(
     let mut history = BTreeMap::new();
     for entry in entries {
         let ballot = ballot_from_proto(entry.ballot)?;
+        // The wire keeps the flag a bool; the kind is the core's word for
+        // it, mapped at the boundary.
         let registration = Registration {
             config: acceptor_config_from_proto(entry.config)?,
-            reconfiguration: entry.reconfiguration,
+            kind: if entry.reconfiguration {
+                RegistrationKind::Reconfiguration
+            } else {
+                RegistrationKind::Belief
+            },
         };
         if history.insert(ballot, registration).is_some() {
             return Err("duplicate ballot in history");
@@ -855,7 +862,7 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
         from: request.from.0,
         ballot: Some(ballot_to_proto(request.ballot)),
         config: Some(config_to_proto(&request.config)),
-        reconfiguration: request.reconfiguration,
+        reconfiguration: request.kind.is_reconfiguration(),
         generation: request.generation.0,
     }
 }

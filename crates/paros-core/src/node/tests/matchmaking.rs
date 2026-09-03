@@ -615,7 +615,7 @@ fn a_stale_candidate_adopts_the_highest_reconfiguration_and_re_campaigns() {
     assert!(
         requests
             .iter()
-            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.reconfiguration)
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.kind.is_reconfiguration())
     );
 }
 
@@ -682,7 +682,7 @@ fn a_reconfiguration_campaign_is_never_stale() {
     let mut mms = registries(1);
     campaign(&mut n);
     let requests = drain_match_requests(&mut n);
-    assert!(requests.iter().all(|(_, r)| !r.reconfiguration));
+    assert!(requests.iter().all(|(_, r)| !r.kind.is_reconfiguration()));
     for reply in matchmake(&mut mms, requests) {
         n.on_match_reply(reply);
     }
@@ -696,7 +696,7 @@ fn a_reconfiguration_campaign_is_never_stale() {
     assert!(
         requests
             .iter()
-            .all(|(_, r)| r.reconfiguration && r.config == new)
+            .all(|(_, r)| r.kind.is_reconfiguration() && r.config == new)
     );
     // The ledger names an unrelated older reconfiguration: irrelevant to a
     // reconfiguration campaign, which completes and prepares its own target.
@@ -746,7 +746,7 @@ fn a_stale_candidate_adopts_the_effective_configuration_after_gc() {
     assert!(
         requests
             .iter()
-            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.reconfiguration)
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.kind.is_reconfiguration())
     );
 }
 

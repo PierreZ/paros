@@ -167,7 +167,7 @@ where
                         round = ballot.round,
                         bnode = ballot.node.0,
                         members = registration.config.members().len() as u64,
-                        reconfiguration = registration.reconfiguration,
+                        reconfiguration = registration.kind.is_reconfiguration(),
                         config = config_hash(&registration.config),
                         "match_registered"
                     );

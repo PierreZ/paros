@@ -93,7 +93,7 @@ pub struct MatchmakerHardState {
     pub pending: Vec<PendingBootstrap>,
     /// The **effective configuration** and the ballot its reconfiguration
     /// registration was made under: the highest-ballot flagged registration
-    /// ([`Registration::reconfiguration`]) this matchmaker has ever
+    /// ([`RegistrationKind::Reconfiguration`]) this matchmaker has ever
     /// accepted. Monotone in the ballot, durable before the reply that
     /// reports it, carried into every successor generation — and, unlike the
     /// record it is derived from, **never collected**.
@@ -126,12 +126,13 @@ pub struct MatchmakerConfig {
 }
 
 /// One ledger record: the configuration registered under a ballot, and
-/// whether registering it was an **operator's reconfiguration** (a leader
-/// moving the cluster to a new acceptor set, `RawNode::reconfigure`) rather
-/// than a candidate restating the configuration it believed in force.
+/// what [kind](RegistrationKind) it was: an **operator's reconfiguration**
+/// (a leader moving the cluster to a new acceptor set,
+/// `RawNode::reconfigure`) or a candidate restating the configuration it
+/// believed in force.
 ///
 /// **The effective configuration is a registration fact, not a Paxos-chosen
-/// value.** A reconfiguration is in force once its flagged record reached a
+/// value.** A reconfiguration is in force once its record reached a
 /// matchmaker quorum — before any Phase 1 or Phase 2 under the new set
 /// completes — and stays in force until a higher-ballot flagged record
 /// lands. The full contract, with its consequences (what `accepted: true`
@@ -139,7 +140,7 @@ pub struct MatchmakerConfig {
 /// *effective configuration* section of the leader-side matchmaking module
 /// (`node/matchmaking.rs`).
 ///
-/// The flag is what makes the ledger answer "which configuration is in
+/// The kind is what makes the ledger answer "which configuration is in
 /// force?" without treating every registration as a fact: an ordinary
 /// campaign registers a *belief* (possibly stale, possibly abandoned), and a
 /// ledger full of beliefs made "adopt the newest registration" flip-flop
@@ -157,8 +158,37 @@ pub struct MatchmakerConfig {
 pub struct Registration {
     /// The acceptor configuration registered.
     pub config: AcceptorConfig,
-    /// Whether this registration is a reconfiguration request.
-    pub reconfiguration: bool,
+    /// What kind of registration this is.
+    pub kind: RegistrationKind,
+}
+
+/// Why a configuration was registered — the ledger's distinction between a
+/// *belief* and a *fact*, and the one thing that decides whether a record
+/// can move the effective configuration.
+///
+/// It is an enum rather than a `bool` because both values are meaningful and
+/// neither is the "off" state: a campaign is always one or the other, and
+/// `reconfiguration: false` read at a call site says nothing about which
+/// (review finding F7 of the core-roles report).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RegistrationKind {
+    /// A candidate restating the configuration it *believes* is in force —
+    /// possibly stale, possibly abandoned. Never a fact.
+    #[default]
+    Belief,
+    /// An operator's explicit change, through
+    /// [`RawNode::reconfigure`](crate::RawNode::reconfigure). Monotone by
+    /// ballot, and the only kind the effective configuration is read from.
+    Reconfiguration,
+}
+
+impl RegistrationKind {
+    /// Whether this is an operator's explicit change.
+    #[must_use]
+    pub fn is_reconfiguration(self) -> bool {
+        matches!(self, Self::Reconfiguration)
+    }
 }
 
 impl Registration {
@@ -167,7 +197,7 @@ impl Registration {
     pub fn belief(config: AcceptorConfig) -> Self {
         Self {
             config,
-            reconfiguration: false,
+            kind: RegistrationKind::Belief,
         }
     }
 
@@ -176,7 +206,7 @@ impl Registration {
     pub fn reconfiguration(config: AcceptorConfig) -> Self {
         Self {
             config,
-            reconfiguration: true,
+            kind: RegistrationKind::Reconfiguration,
         }
     }
 }
