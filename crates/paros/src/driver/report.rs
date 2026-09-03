@@ -19,13 +19,13 @@ use super::ready::ClientWaiters;
 /// biased toward the interesting shapes instead of firing uniformly.
 pub(crate) fn handoff_context(node: &RawNode, candidates: usize) -> HandoffContext {
     let first_unchosen = node.hard_state().chosen_index.map_or(0, |ci| ci.0 + 1);
-    let tail =
-        usize::try_from(node.next_slot().0.saturating_sub(first_unchosen)).unwrap_or(usize::MAX);
+    let tail = usize::try_from(node.proposer().next_slot().0.saturating_sub(first_unchosen))
+        .unwrap_or(usize::MAX);
     HandoffContext {
         tail,
-        next_slot: node.next_slot(),
+        next_slot: node.proposer().next_slot(),
         settled: tail == 0,
-        healing: node.chosen_gap().is_some(),
+        healing: node.replica().chosen_gap().is_some(),
         candidates,
     }
 }
@@ -111,7 +111,7 @@ fn report_handoff<A: Audit>(
     // can also replace a leadership this node already held at a lower ballot.
     if installed_now && let LeadershipOrigin::Handoff { from } = node.leadership_origin() {
         let ballot = node.ballot();
-        let next_slot = node.next_slot();
+        let next_slot = node.proposer().next_slot();
         let tail = u64::try_from(handoff_context(node, 0).tail).unwrap_or(u64::MAX);
         audit.authority_installed(NodeId(self_id), from, ballot, next_slot, tail);
         tracing::info!(
@@ -209,7 +209,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     }
     // Surface any #94 duplicate suppressions the batch's contiguous walk
     // performed (the counter is monotone per incarnation).
-    let duplicates = node.duplicates_suppressed();
+    let duplicates = node.replica().duplicates_suppressed();
     if duplicates > *last_duplicates {
         let count = duplicates - *last_duplicates;
         *last_duplicates = duplicates;

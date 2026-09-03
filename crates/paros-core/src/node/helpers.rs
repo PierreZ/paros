@@ -134,6 +134,11 @@ impl RawNode {
     /// inherited origin. Shared by [`RawNode::become_follower`] and a fresh
     /// campaign, so a leader that reconfigures abandons exactly what a
     /// deposed one does.
+    ///
+    /// Unconfirmed read rounds die with the leadership (inside
+    /// [`Proposer::abandon`], with the fence and the ack window they belong
+    /// to); already-confirmed `pending_read_states` stay — they were valid at
+    /// their linearization point and the driver drains them this same batch.
     pub(super) fn clear_leadership_state(&mut self) {
         // Leadership state dies whole, the inherited origin included: a
         // demoted node holds no authority, so it can neither be a handoff
@@ -143,10 +148,6 @@ impl RawNode {
         self.proposer.abandon();
         self.matchmaking = None;
         self.gc = None;
-        // Unconfirmed read rounds die with the leadership; already-confirmed
-        // `pending_read_states` stay — they were valid at their linearization
-        // point and the driver drains them this same batch.
-        self.read_rounds.clear();
     }
 
     /// Step down to Follower, abandoning any campaign or in-flight rounds, and

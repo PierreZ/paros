@@ -134,7 +134,7 @@ pub(super) struct Matchmaking {
     pub(super) kind: RegistrationKind,
     /// Matchmakers whose **complete** answer has been folded — a paged one
     /// counts only once its last page arrived.
-    pub(super) registered_by: BTreeSet<MatchmakerId>,
+    registered_by: BTreeSet<MatchmakerId>,
     /// Next history-page cursor expected from each matchmaker still
     /// mid-answer, exactly as the log's Phase 1 tracks its promise pages.
     pub(super) page_next: BTreeMap<MatchmakerId, Ballot>,
@@ -327,6 +327,42 @@ impl Matchmaking {
 
     /// `H_b`: every distinct configuration reported at a ballot at or above
     /// the maximum watermark, in ballot order.
+    /// Whether a matchmaker quorum of `matchmakers` has answered completely
+    /// — the phase's own completion predicate, asked at the membership
+    /// boundary and never as a count.
+    pub(super) fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
+        matchmakers.has_quorum(&self.registered_by)
+    }
+
+    /// How many more complete answers the phase still waits for. The one
+    /// thing a predicate cannot report, and the only place a matchmaker
+    /// quorum is ever spelled as a number.
+    pub(super) fn remaining(&self, matchmakers: &MatchmakerSet) -> usize {
+        matchmakers
+            .quorum_size()
+            .saturating_sub(self.registered_by.len())
+    }
+
+    /// The matchmakers that have not answered completely, with the page
+    /// cursor each owes next — whom a re-send addresses, and from where.
+    pub(super) fn unanswered(
+        &self,
+        matchmakers: &MatchmakerSet,
+    ) -> Vec<(MatchmakerId, Option<Ballot>)> {
+        matchmakers
+            .members
+            .iter()
+            .copied()
+            .filter(|mm| !self.registered_by.contains(mm))
+            .map(|mm| (mm, self.page_next.get(&mm).copied()))
+            .collect()
+    }
+
+    /// How many matchmakers have answered completely.
+    pub(super) fn registered(&self) -> usize {
+        self.registered_by.len()
+    }
+
     pub(super) fn prior(&self) -> Vec<AcceptorConfig> {
         let mut prior: Vec<AcceptorConfig> = Vec::new();
         for configs in self.history.range(self.watermark..).map(|(_, c)| c) {
@@ -432,14 +468,7 @@ impl RawNode {
                 MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
             }
         };
-        let unanswered: Vec<(MatchmakerId, Option<Ballot>)> = self
-            .matchmakers
-            .members
-            .iter()
-            .copied()
-            .filter(|mm| !m.registered_by.contains(mm))
-            .map(|mm| (mm, m.page_next.get(&mm).copied()))
-            .collect();
+        let unanswered = m.unanswered(&self.matchmakers);
         for (matchmaker, cursor) in unanswered {
             // A matchmaker mid-answer is re-asked from where its last page
             // stopped, never from the start: the pages already folded stay
@@ -598,11 +627,10 @@ impl RawNode {
             return MatchStep::Paged { next };
         }
         let m = self.matchmaking.as_mut().expect("the phase is still open");
-        let registered = m.registered_by.len();
-        let quorum_held = matchmakers.has_quorum(&m.registered_by);
-        if !quorum_held {
+        let registered = m.registered();
+        if !m.quorum_held(matchmakers) {
             MatchStep::Registered {
-                remaining: self.matchmakers.quorum_size().saturating_sub(registered),
+                remaining: m.remaining(matchmakers),
             }
         } else if let Some((newest, config)) = m.stale_belief() {
             // Stale belief: the quorum's histories name a
@@ -648,7 +676,7 @@ impl RawNode {
             // quorum is restated here, at the one place Phase 1
             // can open on a matchmaker deployment.
             assert!(
-                quorum_held,
+                m.quorum_held(matchmakers),
                 "Phase 1 opens only once a matchmaker quorum registered the ballot"
             );
             assert!(

@@ -495,7 +495,7 @@ fn an_empty_history_completes_phase_one_at_once() {
     let targets = open_phase1(&mut n, &[]);
     assert!(n.is_leader(), "nothing to intersect with");
     assert_eq!(targets, vec![NodeId(1), NodeId(2)], "C_b is still prepared");
-    assert_eq!(n.next_slot(), Slot(0));
+    assert_eq!(n.proposer().next_slot(), Slot(0));
 }
 
 /// Safe-value selection sees every response: a value held only by an old

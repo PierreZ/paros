@@ -136,7 +136,7 @@ fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() 
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(1)));
     assert!(
-        nodes[3].accepted().contains_key(&Slot(1)),
+        nodes[3].acceptor().records().contains_key(&Slot(1)),
         "a joining node accepted"
     );
     // A leader mid-change is refused a second change; once done, the no-op
@@ -171,7 +171,7 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
     assert_eq!(accept_targets(&q), vec![NodeId(1), NodeId(2), NodeId(3)]);
     // The removed leader recorded nothing of its own for the slot: it is a
     // proposer and learner, not an acceptor.
-    assert!(!nodes[0].accepted().contains_key(&Slot(0)));
+    assert!(!nodes[0].acceptor().records().contains_key(&Slot(0)));
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
     // Settled: the next tick resigns.

@@ -111,11 +111,12 @@ pub(crate) fn handle_snap_chunk_request<S, H, A>(
             let Some(ci) = node.hard_state().chosen_index else {
                 return;
             };
-            if node.app_repair().is_some() || storage.applied_slot() != Some(ci) {
+            if node.replica().app_repair().is_some() || storage.applied_slot() != Some(ci) {
                 return;
             }
             let ballot = node
-                .accepted()
+                .acceptor()
+                .records()
                 .get(&ci)
                 .map_or(node.hard_state().max_promised_ballot, |(b, _)| *b);
             audit.snap_advanced_fallback(me, to);
@@ -275,8 +276,8 @@ where
         // The application jumped to the point (= floor - 1); re-point the
         // core's repair pump at the floor so the retained decided suffix
         // re-emits in order through the ordinary committed seam.
-        if node.app_repair().is_some() {
-            node.open_app_repair(node.first_slot());
+        if node.replica().app_repair().is_some() {
+            node.open_app_repair(node.acceptor().first_slot());
         }
     }
     Ok(())
@@ -302,7 +303,8 @@ pub(crate) fn snap_repair_tick<S, H, A>(
     let latest = storage.latest_snap_point();
     // A point the compaction floor already passed can license no further
     // truncation, so it is no longer a witness worth keeping.
-    snap.acks.retain(|point, _| *point >= node.first_slot());
+    snap.acks
+        .retain(|point, _| *point >= node.acceptor().first_slot());
     if node.is_leader() {
         // The leader is its own first custodian, and a marker stops being
         // outstanding once a quorum advertises the point it created.

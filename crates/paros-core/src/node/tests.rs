@@ -56,9 +56,9 @@ impl TestStorage {
     fn from_node(n: &RawNode) -> Self {
         Self {
             hard_state: n.hard_state(),
-            accepted: n.accepted().clone(),
+            accepted: n.acceptor().records().clone(),
             config: n.config().clone(),
-            first_slot: n.first_slot(),
+            first_slot: n.acceptor().first_slot(),
             faulty: Vec::new(),
         }
     }

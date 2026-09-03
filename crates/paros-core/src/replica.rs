@@ -279,6 +279,14 @@ impl Replica {
     /// `highest` the highest slot above it already known chosen. `None` when
     /// the chosen set is contiguous. An open application repair's cursor is
     /// the hole while it is open.
+    ///
+    /// A read-only observability accessor: the core cannot trace, and the gap
+    /// is invisible from outside because [`Ready::committed`](crate::Ready::committed)
+    /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
+    /// (pipelining, a follower that missed one `Commit`); a gap that
+    /// **survives quiescence** is the wedge this exists to make observable —
+    /// the chosen index frozen at `hole - 1` cluster-wide while higher slots
+    /// keep being chosen.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
         if let Some(hole) = self.app_repair {

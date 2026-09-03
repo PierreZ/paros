@@ -171,7 +171,7 @@ impl RawNode {
                 // prefix.
                 if self.ballot >= self.acceptor.promised() {
                     assert!(
-                        self.next_slot >= self.first_unchosen(),
+                        self.proposer.next_slot() >= self.first_unchosen(),
                         "a leader's next slot never falls inside the chosen prefix"
                     );
                 }
@@ -180,7 +180,7 @@ impl RawNode {
                         .rounds()
                         .keys()
                         .next_back()
-                        .is_none_or(|s| *s < self.next_slot),
+                        .is_none_or(|s| *s < self.proposer.next_slot()),
                     "a leader never allocates at or below an in-flight round"
                 );
                 // Every in-flight round runs at the leadership ballot: rounds
@@ -251,7 +251,7 @@ impl RawNode {
                 "only a leader holds in-flight accept rounds"
             );
         }
-        if !self.read_rounds.is_empty() {
+        if !self.proposer.read_rounds().is_empty() {
             assert!(
                 self.role == NodeRole::Leader,
                 "only a leader holds pending read rounds"

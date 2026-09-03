@@ -28,7 +28,7 @@ impl RawNode {
         // exactly like a beat ack — a busy leader must not need idle beats to
         // keep its window full.
         if self.role == NodeRole::Leader && ballot == self.ballot {
-            self.quorum_acked_by.insert(from);
+            self.proposer.credit_authority(from);
         }
         self.try_decide(slot);
     }

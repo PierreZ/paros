@@ -9,7 +9,7 @@
 //! read back rather than persisted beside it.
 
 use super::{
-    Acceptor, BTreeMap, BTreeSet, Ballot, Command, Config, HEARTBEAT_TICKS, HandoffCounters,
+    Acceptor, BTreeMap, Ballot, Command, Config, HEARTBEAT_TICKS, HandoffCounters,
     LeadershipOrigin, NodeRole, Proposer, RawNode, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
@@ -114,12 +114,14 @@ impl RawNode {
             heartbeat_elapsed: 0,
             heartbeat_timeout: HEARTBEAT_TICKS,
             heartbeat_seq: 0,
-            quorum_elapsed: 0,
-            quorum_acked_by: BTreeSet::new(),
             quorum_lost_step_downs: 0,
-            read_floor: None,
-            read_rounds: Vec::new(),
-            proposer: Proposer::new(),
+            proposer: {
+                let mut proposer = Proposer::new();
+                // The allocator frontier the durable log implies: one past the
+                // highest record read back (see the local binding above).
+                proposer.set_next_slot(next_slot);
+                proposer
+            },
             matchmaking: None,
             pending_match_requests: Vec::new(),
             pending_gc_requests: Vec::new(),
@@ -136,7 +138,6 @@ impl RawNode {
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),
-            next_slot,
             election_gap_fills: 0,
         };
         node.assert_invariants();

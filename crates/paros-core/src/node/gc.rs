@@ -116,7 +116,7 @@ impl RawNode {
         );
         self.gc = Some(Collector::new(
             self.matchmakers.generation,
-            self.read_floor,
+            self.proposer.read_floor(),
             prior,
         ));
         self.try_gc();

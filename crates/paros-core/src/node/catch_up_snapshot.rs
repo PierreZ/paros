@@ -186,7 +186,7 @@ impl RawNode {
         // A probe blocked below the boundary is resolved by the fold as well.
         self.proposer.probe_retain_from(first);
         self.proposer.retain_rounds_from(first);
-        self.next_slot = self.next_slot.max(first);
+        self.proposer.raise_next_slot(first);
         // Install postconditions: the floor lands exactly one past the new
         // chosen boundary, and the durable promise absorbed the snapshot's
         // ballot without ever regressing.
@@ -213,7 +213,7 @@ impl RawNode {
             "a snapshot install never rewinds the chosen index"
         );
         assert!(
-            self.next_slot >= self.acceptor.first_slot(),
+            self.proposer.next_slot() >= self.acceptor.first_slot(),
             "a snapshot install carries the allocator past the folded prefix"
         );
         // Every open recovery structure now refers only to retained slots:

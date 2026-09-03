@@ -418,7 +418,7 @@ where
     audit.election_timeout_set(NodeId(self_id), first_timeout);
     let mut last = Deltas {
         role: node.role(),
-        duplicates: node.duplicates_suppressed(),
+        duplicates: node.replica().duplicates_suppressed(),
         quorum_lost: node.quorum_lost_step_downs(),
         repair: node.repair_counters(),
         handoff: node.handoff_counters(),
@@ -566,13 +566,13 @@ where
                 // so the sweep can assert the interleaving stays reachable once the
                 // acceptor floor guard is in place.
                 if let Message::Prepare { from_slot, .. } = &msg
-                    && *from_slot < node.first_slot()
+                    && *from_slot < node.acceptor().first_slot()
                 {
-                    audit.prepare_below_floor(NodeId(self_id), *from_slot, node.first_slot());
+                    audit.prepare_below_floor(NodeId(self_id), *from_slot, node.acceptor().first_slot());
                     tracing::info!(
                         node = self_id,
                         from_slot = from_slot.0,
-                        floor = node.first_slot().0,
+                        floor = node.acceptor().first_slot().0,
                         "prepare_below_floor"
                     );
                 }
@@ -971,21 +971,21 @@ where
                         CompactAck {
                             leader: Some(self_id),
                             accepted: proposed,
-                            first_slot: node.first_slot().0,
+                            first_slot: node.acceptor().first_slot().0,
                         }
                     } else {
                         propose_marker(&mut node, &mut snap);
                         CompactAck {
                             leader: Some(self_id),
                             accepted: false,
-                            first_slot: node.first_slot().0,
+                            first_slot: node.acceptor().first_slot().0,
                         }
                     }
                 } else {
                     CompactAck {
                         leader: node.leader().map(|n| n.0),
                         accepted: false,
-                        first_slot: node.first_slot().0,
+                        first_slot: node.acceptor().first_slot().0,
                     }
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
@@ -1012,7 +1012,7 @@ where
                 });
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
-                    first_slot: node.first_slot().0,
+                    first_slot: node.acceptor().first_slot().0,
                     snapshot: storage.snapshot(),
                     members: node.acceptors().members().iter().map(|n| n.0).collect(),
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
@@ -1229,7 +1229,7 @@ where
                 // a hole below a chosen slot is otherwise invisible from outside the
                 // core. Re-emitted every tick while it lasts: the oracle reads its
                 // persistence past quiescence, not a single instant.
-                if let Some((hole, above)) = node.chosen_gap() {
+                if let Some((hole, above)) = node.replica().chosen_gap() {
                     audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
                 }

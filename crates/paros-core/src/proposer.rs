@@ -36,6 +36,7 @@
 //! folds, turns the outcomes into messages and role transitions, and pumps
 //! the recovery one bounded page at a time.
 
+mod authority;
 mod election;
 mod probe;
 mod recovery;
@@ -43,6 +44,7 @@ mod rounds;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use self::authority::ReadRound;
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
@@ -304,6 +306,22 @@ pub struct Proposer<Id, V> {
     recovery: Option<Recovery<V>>,
     /// Fair cursor for bounded pending-Accept re-sends.
     resend_cursor: Option<Slot>,
+    /// Next slot a fresh proposal is allocated at. The **one** piece of this
+    /// component that outlives a leadership: it is derived from the durable
+    /// accepted log (at boot, at a snapshot install, at a won Phase 1), not
+    /// from a Phase-1 tally, and a node that holds no leadership still
+    /// refuses to let a replayed handoff rewind it.
+    next_slot: Slot,
+    /// The fresh-leader read fence (see [`Proposer::read_floor`]).
+    read_floor: Option<Slot>,
+    /// In-flight read-index rounds, in creation order.
+    read_rounds: Vec<ReadRound<Id>>,
+    /// `CheckQuorum` (#95): the distinct acceptors (incl. self) whose
+    /// ballot-matching `HeartbeatAck` or `Accepted` arrived inside the
+    /// current window.
+    quorum_acked_by: BTreeSet<Id>,
+    /// `CheckQuorum`: ticks since the window last closed with a quorum.
+    quorum_elapsed: u64,
 }
 
 impl<Id, V> Default for Proposer<Id, V> {
@@ -314,6 +332,11 @@ impl<Id, V> Default for Proposer<Id, V> {
             rounds: BTreeMap::new(),
             recovery: None,
             resend_cursor: None,
+            next_slot: Slot(0),
+            read_floor: None,
+            read_rounds: Vec::new(),
+            quorum_acked_by: BTreeSet::new(),
+            quorum_elapsed: 0,
         }
     }
 }
@@ -351,13 +374,23 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Drop every open tally: the campaign, the probe, the rounds, the
-    /// recovery and the re-send cursor. Leadership state dies whole.
+    /// recovery, the re-send cursor, the read fence with its pending rounds
+    /// and the `CheckQuorum` window. Leadership state dies whole.
+    ///
+    /// The allocator frontier is the deliberate exception: it is not a
+    /// Phase-1 tally but a fact about the log this node holds, and a node
+    /// with no leadership still uses it to refuse a handoff that would rewind
+    /// it (see [`Proposer::next_slot`]).
     pub fn abandon(&mut self) {
         self.election = None;
         self.probe = None;
         self.rounds.clear();
         self.recovery = None;
         self.resend_cursor = None;
+        self.read_floor = None;
+        self.read_rounds.clear();
+        self.quorum_acked_by.clear();
+        self.quorum_elapsed = 0;
     }
 }
 

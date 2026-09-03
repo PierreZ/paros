@@ -32,6 +32,39 @@ impl<Id, V> Round<Id, V> {
     }
 }
 
+impl<Id: Copy + Ord, V> Proposer<Id, V> {
+    // ---- the slot allocator -------------------------------------------------
+
+    /// The next slot a fresh proposal is allocated at — the **allocator
+    /// frontier**. Two nodes can only ever propose different commands at one
+    /// `(slot, ballot)` if a successor rewinds it, which is why a handoff
+    /// carries it explicitly and a receiver refuses one that moves it back.
+    #[must_use]
+    pub fn next_slot(&self) -> Slot {
+        self.next_slot
+    }
+
+    /// Take the next slot and advance the frontier past it.
+    pub fn allocate(&mut self) -> Slot {
+        let slot = self.next_slot;
+        self.next_slot = Slot(slot.0 + 1);
+        slot
+    }
+
+    /// Install the frontier a fresh leadership starts allocating from: what a
+    /// won Phase 1 derived from its quorum report, or what a handoff carried.
+    pub fn set_next_slot(&mut self, slot: Slot) {
+        self.next_slot = slot;
+    }
+
+    /// Raise the frontier to `slot` if it sits below — the monotone form an
+    /// installed snapshot uses, whose boundary may sit above everything this
+    /// node had.
+    pub fn raise_next_slot(&mut self, slot: Slot) {
+        self.next_slot = self.next_slot.max(slot);
+    }
+}
+
 impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     // ---- Phase 2 ------------------------------------------------------------
 

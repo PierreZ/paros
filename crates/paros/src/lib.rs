@@ -59,6 +59,9 @@ pub use storage::{
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
+pub use paros_core::acceptor::Acceptor;
+pub use paros_core::proposer::Proposer;
+pub use paros_core::replica::Replica;
 pub use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control,
     DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome, GcRequest, GcStep,

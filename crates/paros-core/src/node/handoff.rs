@@ -280,7 +280,12 @@ impl RawNode {
             && self.replica.app_repair().is_none()
             && self.acceptor.faulty().is_empty()
             && self.ballot >= self.acceptor.promised()
-            && self.next_slot.0.saturating_sub(self.first_unchosen().0) <= HANDOFF_BATCH as u64
+            && self
+                .proposer
+                .next_slot()
+                .0
+                .saturating_sub(self.first_unchosen().0)
+                <= HANDOFF_BATCH as u64
     }
 
     /// The peers a handoff may be addressed to: every member of the active
@@ -355,7 +360,7 @@ impl RawNode {
             "only the node that minted a ballot relinquishes it"
         );
         let from_slot = self.first_unchosen();
-        let next_slot = self.next_slot;
+        let next_slot = self.proposer.next_slot();
         let mut decided: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut pending: BTreeMap<Slot, Command> = BTreeMap::new();
         for s in from_slot.0..next_slot.0 {
@@ -485,7 +490,7 @@ impl RawNode {
             // allocator under an authority this node is actively exercising.
             || (self.role == NodeRole::Leader && self.ballot == ballot)
             // The allocator never moves backwards, whoever holds the ballot.
-            || next_slot < self.next_slot
+            || next_slot < self.proposer.next_slot()
             || next_slot < self.first_unchosen()
         {
             self.handoff.rejected_stale = self.handoff.rejected_stale.saturating_add(1);
@@ -557,17 +562,18 @@ impl RawNode {
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;
         self.election_gap_fills = 0;
-        self.next_slot = next_slot;
+        self.proposer.set_next_slot(next_slot);
         // A fresh leadership's beat sequence and read rounds, exactly as
         // `try_become_leader` resets them: acks must echo the current ballot,
-        // and no read captured under the predecessor may confirm here.
+        // and no read captured under the predecessor may confirm here. The
+        // inherited read fence: nothing the predecessor acked can sit above
+        // `next_slot - 1`, so no read confirms here until the chosen prefix
+        // covers it. Identical in meaning to a fresh leader's fence, and it is
+        // also what the fence deadline below watches.
         self.heartbeat_seq = 0;
-        self.read_rounds.clear();
-        self.quorum_elapsed = 0;
-        self.quorum_acked_by.clear();
-        if self.is_acceptor() {
-            self.quorum_acked_by.insert(me);
-        }
+        let fence = next_slot.0.checked_sub(1).map(Slot);
+        self.proposer
+            .open_authority(fence, self.is_acceptor().then_some(me));
         self.handoff.installed = self.handoff.installed.saturating_add(1);
 
         // Learn the decided part of the tail. Trusting the predecessor here is
@@ -591,11 +597,6 @@ impl RawNode {
             next_slot,
             RecoveryPolicy::Inherited,
         );
-        // The inherited read fence: nothing the predecessor acked can sit above
-        // `next_slot - 1`, so no read confirms here until the chosen prefix
-        // covers it. Identical in meaning to a fresh leader's fence, and it is
-        // also what the fence deadline below watches.
-        self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
         self.pump_leader_recovery();
 
         // Install postconditions, mirroring `try_become_leader`'s.
@@ -608,7 +609,7 @@ impl RawNode {
             "installing closes any campaign"
         );
         assert!(
-            self.next_slot >= self.first_unchosen(),
+            self.proposer.next_slot() >= self.first_unchosen(),
             "an inherited frontier sits at or past the chosen prefix"
         );
         // The durable half landed exactly on the inherited authority: the
@@ -619,7 +620,7 @@ impl RawNode {
             "an installed authority sits exactly at this node's promise"
         );
         assert!(
-            self.next_slot == next_slot,
+            self.proposer.next_slot() == next_slot,
             "an installed authority adopts the transferred frontier verbatim"
         );
     }
@@ -643,7 +644,8 @@ impl RawNode {
             return;
         }
         let covered = self
-            .read_floor
+            .proposer
+            .read_floor()
             .is_none_or(|fence| self.replica.chosen_index().is_some_and(|ci| ci >= fence));
         if covered {
             self.handoff_fence_elapsed = 0;

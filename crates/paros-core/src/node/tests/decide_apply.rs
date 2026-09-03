@@ -131,7 +131,11 @@ fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
         "the idempotent ack names the slot the command applied at"
     );
     // And no second slot was ever allocated for it.
-    assert_eq!(nodes[0].next_slot, Slot(1), "exactly one slot consumed");
+    assert_eq!(
+        nodes[0].proposer().next_slot(),
+        Slot(1),
+        "exactly one slot consumed"
+    );
 }
 
 #[test]
@@ -181,7 +185,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
         "chosen-but-unapplied dedups to its slot, it is not acked as applied"
     );
     assert_eq!(
-        nodes[0].next_slot,
+        nodes[0].proposer().next_slot(),
         Slot(2),
         "and no second slot was allocated for a command already chosen"
     );
@@ -389,7 +393,7 @@ fn restart_rebuilds_state_from_hard_state() {
     let n = RawNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
     assert_eq!(
-        n.next_slot,
+        n.proposer().next_slot(),
         Slot(3),
         "next_slot is past the highest accepted slot"
     );
@@ -418,7 +422,7 @@ fn propose_control_is_leader_only() {
         "a non-leader redirects the truncate to the leader"
     );
     assert_eq!(
-        nodes[1].first_slot(),
+        nodes[1].acceptor().first_slot(),
         Slot(0),
         "no truncation on a redirect"
     );
@@ -443,7 +447,7 @@ fn commit_below_floor_is_not_relearned() {
         "a below-floor commit is not relearned"
     );
     assert!(
-        !n.accepted().contains_key(&Slot(1)),
+        !n.acceptor().records().contains_key(&Slot(1)),
         "a below-floor commit records nothing below the floor"
     );
 }

@@ -409,9 +409,11 @@ impl RawNode {
         // The campaign range can reach below the contiguous prefix (a faulty
         // chosen slot extends it), so the allocator clamps at the prefix: a
         // below-prefix report never pulls `next_slot` into chosen territory.
-        self.next_slot = highest
-            .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
-            .max(self.first_unchosen());
+        self.proposer.set_next_slot(
+            highest
+                .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
+                .max(self.first_unchosen()),
+        );
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -466,7 +468,7 @@ impl RawNode {
             recovered,
             outcome.blocked,
             recovery_start,
-            self.next_slot,
+            self.proposer.next_slot(),
             RecoveryPolicy::Phase1Backed,
         );
         self.pump_leader_recovery();
@@ -475,16 +477,12 @@ impl RawNode {
         // reads wait until the chosen prefix covers that slot. Beat seqs are
         // per-ballot; cross-ballot ack confusion is impossible because an ack
         // must echo the current ballot to count.
-        self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
-        self.heartbeat_seq = 0;
-        self.read_rounds.clear();
         // CheckQuorum: a fresh leadership starts a fresh ack window (self is
         // always reachable — when it is an acceptor at all).
-        self.quorum_elapsed = 0;
-        self.quorum_acked_by.clear();
-        if self.is_acceptor() {
-            self.quorum_acked_by.insert(me);
-        }
+        let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
+        self.proposer
+            .open_authority(fence, self.is_acceptor().then_some(me));
+        self.heartbeat_seq = 0;
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.
@@ -499,7 +497,7 @@ impl RawNode {
         // Every slot below `next_slot` is chosen, re-proposed, or gap-filled,
         // so the allocator never hands out a slot inside the chosen prefix.
         assert!(
-            self.next_slot >= self.first_unchosen(),
+            self.proposer.next_slot() >= self.first_unchosen(),
             "a fresh leader's next slot sits at or past the chosen prefix"
         );
         // The leadership's garbage-collection campaign (#123): decide, once

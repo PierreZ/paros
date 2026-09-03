@@ -183,12 +183,8 @@ impl RawNode {
         }
         // CheckQuorum: an ack at our ballot is proof this peer can still reach
         // us and has not promised past us — credit the current window.
-        self.quorum_acked_by.insert(from);
-        for round in &mut self.read_rounds {
-            if seq >= round.required_seq {
-                round.acked_by.insert(from);
-            }
-        }
+        self.proposer.credit_authority(from);
+        self.proposer.credit_read_ack(from, seq);
         self.try_confirm_reads();
         // The GC fence tally (#123): a configured member's chosen index.
         self.note_peer_chosen(from, chosen);

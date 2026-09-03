@@ -22,7 +22,7 @@ pub use self::handoff::{
 };
 pub use self::matchmaking::MatchStep;
 use self::matchmaking::Matchmaking;
-use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
+use self::reads::READ_ROUND_TTL_TICKS;
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
@@ -226,32 +226,16 @@ pub struct RawNode {
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
-    /// `CheckQuorum` (#95): ticks since the leader last proved it can reach an
-    /// ack quorum. Leader-only, reset when the window closes with a quorum.
-    quorum_elapsed: u64,
-    /// `CheckQuorum`: the distinct peers (incl. self) whose ballot-matching
-    /// `HeartbeatAck` or `Accepted` arrived inside the current window.
-    quorum_acked_by: BTreeSet<NodeId>,
     /// Monotone count of `CheckQuorum` step-downs this incarnation, for the
     /// driver's audit report (mirrors `duplicates_suppressed`).
     quorum_lost_step_downs: u64,
 
-    // ---- linearizable reads (all volatile: a read round carries no durable
-    // ---- obligation — losing one merely fails an RPC whose reply promise dies
-    // ---- with the process, and the client retries) ----
-    /// The fresh-leader read fence: the highest slot the winning prepare quorum
-    /// reported (`next_slot - 1` at election). Everything a previous leader may
-    /// have acked sits at or below it (quorum intersection + the Prepare floor
-    /// guard), so no read round confirms until the chosen prefix covers it —
-    /// Raft's "no-op at term start" problem, solved by waiting instead.
-    read_floor: Option<Slot>,
-    /// In-flight read-index rounds, in creation order (leader only).
-    read_rounds: Vec<ReadRound>,
-
     // ---- proposer (multi-decree) ----
     /// The proposer component: the open Phase 1, the CTRL repair probe, the
-    /// in-flight Phase-2 rounds and the bounded recovery of the current
-    /// leadership ([`crate::proposer`]). Volatile; dies whole with the
+    /// in-flight Phase-2 rounds, the bounded recovery, the allocator frontier
+    /// and the leadership's standing authority — its read fence, its pending
+    /// read-index rounds and its `CheckQuorum` window
+    /// ([`crate::proposer`]). Volatile; dies whole with the
     /// leadership.
     proposer: Proposer<NodeId, Command>,
     /// The **matchmaking phase** while a Candidate registers its ballot's
@@ -321,8 +305,6 @@ pub struct RawNode {
     /// Monotone cooperative-handoff counters this incarnation, for the
     /// driver's audit report.
     handoff: HandoffCounters,
-    /// Next slot the leader allocates to a fresh client proposal.
-    next_slot: Slot,
     /// How many undecided holes this node filled with a [`Control::Noop`] when it
     /// won its *current* leadership (0 until it wins one, and re-set at each
     /// election). Purely observational: the driver reads it on the transition to
@@ -501,8 +483,7 @@ impl RawNode {
         if let Some(slot) = self.replica.inflight_at(client, seq) {
             return ProposeResult::Duplicate(slot);
         }
-        let slot = self.next_slot;
-        self.next_slot = Slot(slot.0 + 1);
+        let slot = self.proposer.allocate();
         let entry = Entry { client, seq, value };
         self.replica.track_inflight(client, seq, slot);
         self.start_accept_round(slot, Command::User(entry));
@@ -530,8 +511,7 @@ impl RawNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        let slot = self.next_slot;
-        self.next_slot = Slot(slot.0 + 1);
+        let slot = self.proposer.allocate();
         self.start_accept_round(slot, Command::Control(control));
         self.assert_invariants();
         ProposeResult::Accepted(slot)
@@ -552,8 +532,7 @@ impl RawNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        let slot = self.next_slot;
-        self.next_slot = Slot(slot.0 + 1);
+        let slot = self.proposer.allocate();
         self.start_accept_round(slot, Command::Control(Control::Snap { at_index: slot }));
         self.assert_invariants();
         ProposeResult::Accepted(slot)
@@ -580,40 +559,19 @@ impl RawNode {
         // The fence dominates: a fresh leader must not serve below the highest
         // slot its prepare quorum reported, even while its own chosen prefix
         // still lags the recovered suffix.
-        let index = self.replica.chosen_index().max(self.read_floor);
+        let index = self.replica.chosen_index().max(self.proposer.read_floor());
         // Beat immediately (rather than waiting for the next tick) so the
         // round's confirmation costs one network round trip, not a tick.
         self.broadcast_heartbeat();
-        let mut acked_by = BTreeSet::new();
         // `QuorumSystem::Majority` is the load-bearing reason the leader may
         // count its own real acceptor vote unconditionally: a stale leader can
         // collect at most `q - 1` peer acks once an intersecting majority has
         // promised higher. A future asymmetric quorum system must replace this
         // cardinality check and explicit own vote with read-quorum membership.
         // A leader outside its own configuration has no acceptor vote to cast.
-        if self.is_acceptor() {
-            acked_by.insert(self.config.id);
-        }
-        self.read_rounds.push(ReadRound {
-            ctx,
-            index,
-            required_seq: self.heartbeat_seq,
-            acked_by,
-            created_tick: self.tick_count,
-        });
-        // `try_confirm_reads` front-scans on the premise that creation order is
-        // monotone in both the index and the required beat; pin it at the only
-        // place a round is created (O(1): the last two entries).
-        if let [.., prev, last] = self.read_rounds.as_slice() {
-            assert!(
-                prev.index <= last.index,
-                "read rounds are created with monotone indexes"
-            );
-            assert!(
-                prev.required_seq <= last.required_seq,
-                "read rounds are created with monotone required beats"
-            );
-        }
+        let own_vote = self.is_acceptor().then_some(self.config.id);
+        self.proposer
+            .open_read(ctx, index, self.heartbeat_seq, self.tick_count, own_vote);
         // A single-node cluster is its own quorum: confirm in this same batch.
         self.try_confirm_reads();
         self.assert_invariants();
@@ -737,8 +695,7 @@ impl RawNode {
             // leader tick already broadcasts a fresh, higher-seq beat whose acks
             // confirm all older pending rounds.
             let now = self.tick_count;
-            self.read_rounds
-                .retain(|r| now.saturating_sub(r.created_tick) <= READ_ROUND_TTL_TICKS);
+            self.proposer.expire_reads(now, READ_ROUND_TTL_TICKS);
             // CheckQuorum (#95): a leader must re-prove, once per election
             // timeout, that an ack quorum can still reach it. Without this, an
             // idle leader cut off from its quorum stays Leader forever — its
@@ -756,19 +713,14 @@ impl RawNode {
             // fence (`node/reads.rs`): a leader's authority is the claim that
             // no later ballot has decided behind it, which every future
             // Phase-1 quorum's intersection with this ack set rules out.
-            if self.election_timeout != 0 {
-                self.quorum_elapsed += 1;
-                if self.quorum_elapsed >= self.election_timeout {
-                    if self.acceptors.has_phase2_quorum(&self.quorum_acked_by) {
-                        self.quorum_elapsed = 0;
-                        self.quorum_acked_by.clear();
-                        if self.is_acceptor() {
-                            self.quorum_acked_by.insert(me);
-                        }
-                    } else {
-                        self.quorum_lost_step_downs += 1;
-                        self.become_follower(None);
-                    }
+            if self.election_timeout != 0 && self.proposer.tick_authority() >= self.election_timeout
+            {
+                if self.proposer.authority_holds(&self.acceptors) {
+                    self.proposer
+                        .renew_authority(self.is_acceptor().then_some(me));
+                } else {
+                    self.quorum_lost_step_downs += 1;
+                    self.become_follower(None);
                 }
             }
             // A leader its own reconfiguration removed from the acceptor set
@@ -1139,18 +1091,30 @@ impl RawNode {
         }
     }
 
-    /// The working per-slot accepted log (rebuilt from durable storage on boot).
-    /// A read view for drivers/oracles; writes go through [`Ready`] deltas.
+    /// The node's **acceptor** role: the durable promise, the per-slot
+    /// accepted log, the compaction floor and the CTRL tri-state. A read
+    /// view for drivers and oracles; every write goes through the [`Ready`]
+    /// batch this node emits.
     #[must_use]
-    pub fn accepted(&self) -> &BTreeMap<Slot, (Ballot, Command)> {
-        self.acceptor.records()
+    pub fn acceptor(&self) -> &Acceptor<Command> {
+        &self.acceptor
     }
 
-    /// The compaction floor: the first slot still retained. Slots below it have
-    /// been truncated away (see [`RawNode::compact`]).
+    /// The node's **replica** role: the chosen log, the contiguous apply
+    /// walk, the at-most-once ledger and the application repair cursor. A
+    /// read view, like [`RawNode::acceptor`].
     #[must_use]
-    pub fn first_slot(&self) -> Slot {
-        self.acceptor.first_slot()
+    pub fn replica(&self) -> &Replica {
+        &self.replica
+    }
+
+    /// The node's **proposer** role: the open Phase 1, the CTRL repair
+    /// probe, the in-flight Phase-2 rounds, the allocator frontier and the
+    /// leadership's standing authority. A read view, like
+    /// [`RawNode::acceptor`].
+    #[must_use]
+    pub fn proposer(&self) -> &Proposer<NodeId, Command> {
+        &self.proposer
     }
 
     /// The number of ticks observed so far.
@@ -1214,23 +1178,6 @@ impl RawNode {
             .collect()
     }
 
-    /// Chosen slots the apply seam executes as a no-op because their
-    /// `Command::User` identity already applied at a lower slot (see the field
-    /// doc). The driver's boot replay consults this so a restart re-applies the
-    /// retained prefix with the identical suppression decisions.
-    #[must_use]
-    pub fn duplicate_slots(&self) -> &BTreeSet<Slot> {
-        self.replica.duplicate_slots()
-    }
-
-    /// Monotone count of #94 duplicate suppressions the contiguous walk
-    /// performed this incarnation. The driver reads the delta per batch and
-    /// reports it through its audit port.
-    #[must_use]
-    pub fn duplicates_suppressed(&self) -> u64 {
-        self.replica.duplicates_suppressed()
-    }
-
     /// Monotone count of `CheckQuorum` step-downs (#95) this incarnation: the
     /// times this node, as Leader, spent a full election-timeout window without
     /// hearing an ack quorum and demoted itself. The driver reads the delta per
@@ -1238,14 +1185,6 @@ impl RawNode {
     #[must_use]
     pub fn quorum_lost_step_downs(&self) -> u64 {
         self.quorum_lost_step_downs
-    }
-
-    /// The recoverable faulty entries this node still holds (Stage 8): value
-    /// lost, identity known, reported in the Promise tri-state and repaired in
-    /// place. A read view for drivers/oracles.
-    #[must_use]
-    pub fn faulty_entries(&self) -> &BTreeMap<Slot, Ballot> {
-        self.acceptor.faulty()
     }
 
     /// How this node came to hold its current leadership: won by ordinary
@@ -1256,14 +1195,6 @@ impl RawNode {
         self.leadership_origin
     }
 
-    /// The next slot this leader would allocate to a fresh proposal — the
-    /// **allocator frontier** a cooperative handoff transfers. A read view for
-    /// drivers/oracles.
-    #[must_use]
-    pub fn next_slot(&self) -> Slot {
-        self.next_slot
-    }
-
     /// Monotone cooperative-handoff counters this incarnation (see
     /// [`HandoffCounters`]). The driver reports the delta through its audit
     /// port, so a simulation can prove each handoff and refusal path is
@@ -1271,13 +1202,6 @@ impl RawNode {
     #[must_use]
     pub fn handoff_counters(&self) -> HandoffCounters {
         self.handoff
-    }
-
-    /// The open application repair cursor, if any (see
-    /// [`RawNode::open_app_repair`]).
-    #[must_use]
-    pub fn app_repair(&self) -> Option<Slot> {
-        self.replica.app_repair()
     }
 
     /// How many blocked slots the leader's open repair probe still holds (0
@@ -1302,22 +1226,6 @@ impl RawNode {
             self.repair_step_downs,
             self.repair_bytes,
         )
-    }
-
-    /// The **chosen gap**, if this node holds one: `(hole, highest)` where `hole`
-    /// is the first slot missing from the contiguous chosen prefix and `highest`
-    /// is the highest slot above it this node already knows is chosen. `None` when
-    /// nothing is chosen past the prefix — the healthy steady state.
-    ///
-    /// A read-only observability accessor: the core cannot trace, and the gap is
-    /// invisible from outside because [`Ready::committed`](crate::Ready::committed)
-    /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
-    /// (pipelining, a follower that missed one `Commit`); a gap that **survives
-    /// quiescence** is the wedge this exists to make observable — the chosen index
-    /// frozen at `hole - 1` cluster-wide while higher slots keep being chosen.
-    #[must_use]
-    pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
-        self.replica.chosen_gap()
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

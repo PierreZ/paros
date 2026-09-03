@@ -50,8 +50,8 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     // One typed report of the whole recovered belief: the promise plus every
     // durable accepted record read back. Built once so the audit sees the boot
     // as a single transition, matching the `recovered` trace stream.
-    let mut records: Vec<(Slot, Ballot, u64)> = Vec::with_capacity(node.accepted().len());
-    for (slot, (ballot, command)) in node.accepted() {
+    let mut records: Vec<(Slot, Ballot, u64)> = Vec::with_capacity(node.acceptor().records().len());
+    for (slot, (ballot, command)) in node.acceptor().records() {
         let vhash = command_hash(command);
         records.push((*slot, *ballot, vhash));
         tracing::info!(
@@ -68,7 +68,8 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     // it (a recovered log may omit a persisted record only after a detected
     // corruption crash or a reported-faulty event).
     let faulty: Vec<(Slot, Ballot)> = node
-        .faulty_entries()
+        .acceptor()
+        .faulty()
         .iter()
         .map(|(slot, ballot)| (*slot, *ballot))
         .collect();
@@ -106,7 +107,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     let mut repair_from: Option<Slot> = None;
     if let Some(ci) = node.hard_state().chosen_index {
         let applied_slot = storage.applied_slot();
-        let floor = node.first_slot();
+        let floor = node.acceptor().first_slot();
         let resume = applied_slot.map_or(Slot(0), |a| Slot(a.0.saturating_add(1)));
         if resume < floor {
             // The application prefix stops below the compaction floor (the
@@ -117,7 +118,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         } else {
             for s in floor.0..=ci.0 {
                 let slot = Slot(s);
-                let record = node.accepted().get(&slot);
+                let record = node.acceptor().records().get(&slot);
                 let Some((_b, stored)) = record else {
                     if applied_slot.is_some_and(|applied| slot <= applied) {
                         // The record rotted but its effect is already durable
@@ -137,7 +138,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
                 // sealed sessions + the retained log in `RawNode::new`, so the
                 // substitution is deterministic across the restart.
                 let noop = Command::Control(Control::Noop);
-                let command = if node.duplicate_slots().contains(&slot) {
+                let command = if node.replica().duplicate_slots().contains(&slot) {
                     &noop
                 } else {
                     stored
@@ -203,7 +204,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         tracing::info!(node = self_id, at = at.0, "snap_recorded");
     }
     if let Some(from) = repair_from {
-        let below_floor = from < node.first_slot();
+        let below_floor = from < node.acceptor().first_slot();
         node.open_app_repair(from);
         audit.app_repair_started(NodeId(self_id), from, below_floor);
         tracing::info!(

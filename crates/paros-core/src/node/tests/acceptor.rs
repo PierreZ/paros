@@ -126,7 +126,7 @@ fn acceptor_rejects_below_promised_ballot() {
         command: ucmd(1, 1, 9),
     });
     assert!(
-        !n.accepted().contains_key(&Slot(0)),
+        !n.acceptor().records().contains_key(&Slot(0)),
         "must not accept below the promised ballot"
     );
     let out = drain(&mut n);
@@ -232,7 +232,7 @@ fn accept_below_floor_is_ignored() {
         "a below-floor accept is ignored: no Accepted and no Nack"
     );
     assert!(
-        !n.accepted().contains_key(&Slot(1)),
+        !n.acceptor().records().contains_key(&Slot(1)),
         "a below-floor accept records nothing"
     );
 }

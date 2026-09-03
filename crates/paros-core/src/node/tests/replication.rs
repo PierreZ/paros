@@ -106,12 +106,16 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
     let _ = drain(&mut nodes[0]);
     // Snapshot the log *after* the proposal self-accepted into slot 3: that
     // accept is durable and must survive the resignation too.
-    let log_before = nodes[0].accepted().clone();
+    let log_before = nodes[0].acceptor().records().clone();
     assert!(
         !nodes[0].proposer.rounds().is_empty(),
         "a Phase-2 round is in flight"
     );
-    assert_eq!(nodes[0].read_rounds.len(), 1, "a read round is pending");
+    assert_eq!(
+        nodes[0].proposer().read_rounds().len(),
+        1,
+        "a read round is pending"
+    );
 
     nodes[0].step_down();
 
@@ -128,7 +132,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
          a hole below a decided slot permanent"
     );
     assert!(
-        nodes[0].read_rounds.is_empty(),
+        nodes[0].proposer().read_rounds().is_empty(),
         "unconfirmed read rounds die with the leadership"
     );
     assert!(
@@ -146,7 +150,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
         "and its operating ballot is unchanged"
     );
     assert_eq!(
-        *nodes[0].accepted(),
+        *nodes[0].acceptor().records(),
         log_before,
         "the accepted log is durable state, untouched"
     );
@@ -289,5 +293,9 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
         Some(Slot(2)),
         "the frozen prefix walks past the filled hole"
     );
-    assert_eq!(nodes[1].chosen_gap(), None, "nothing is stranded any more");
+    assert_eq!(
+        nodes[1].replica().chosen_gap(),
+        None,
+        "nothing is stranded any more"
+    );
 }

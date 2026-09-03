@@ -31,10 +31,15 @@ fn rebooted_with_rot(rotted: &[u64]) -> RawNode {
 #[test]
 fn boot_loads_faulty_entries_disjoint_from_the_log() {
     let n = rebooted_with_rot(&[1]);
-    assert_eq!(n.faulty_entries().len(), 1);
-    let (&slot, _ballot) = n.faulty_entries().iter().next().expect("one faulty entry");
+    assert_eq!(n.acceptor().faulty().len(), 1);
+    let (&slot, _ballot) = n
+        .acceptor()
+        .faulty()
+        .iter()
+        .next()
+        .expect("one faulty entry");
     assert_eq!(slot, Slot(1));
-    assert!(!n.accepted().contains_key(&Slot(1)));
+    assert!(!n.acceptor().records().contains_key(&Slot(1)));
     // The rotted slot was chosen: the durable prefix is untouched.
     assert_eq!(n.hard_state().chosen_index, Some(Slot(2)));
 }
@@ -87,11 +92,11 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // Deliver the Accept to node 1 but drop its ack and the commit, so node 1
     // holds an accepted-but-unchosen record at slot 3.
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, false));
-    assert!(nodes[1].accepted().contains_key(&Slot(3)));
+    assert!(nodes[1].acceptor().records().contains_key(&Slot(3)));
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(3));
     let mut n = RawNode::new(&storage);
-    assert_eq!(n.faulty_entries().len(), 1);
+    assert_eq!(n.acceptor().faulty().len(), 1);
 
     // The leader re-sends its pending Accept: the fresh record replaces the
     // lost one.
@@ -105,10 +110,10 @@ fn accept_repairs_a_faulty_slot_in_place() {
     };
     n.step(accept);
     assert!(
-        n.faulty_entries().is_empty(),
+        n.acceptor().faulty().is_empty(),
         "the faulty entry was repaired"
     );
-    assert!(n.accepted().contains_key(&Slot(3)));
+    assert!(n.acceptor().records().contains_key(&Slot(3)));
     let (repaired, _c1, _c2, _sd, bytes) = n.repair_counters();
     assert_eq!(repaired, 1);
     assert!(bytes > 0, "the repair-cost metric counted the payload");
@@ -147,7 +152,7 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
         "the faulty-but-uncommitted slot was decided as a no-op"
     );
     // The repaired follower's copy was overwritten by the decided Noop.
-    assert!(nodes[1].faulty_entries().is_empty());
+    assert!(nodes[1].acceptor().faulty().is_empty());
 }
 
 /// R3 Case 3 → Case 1: a slot whose only clean copy sits on a node outside the
@@ -245,9 +250,9 @@ fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
     // The driver's boot replay stops at the unreadable slot 1 and opens the
     // repair there.
     n.open_app_repair(Slot(1));
-    assert_eq!(n.app_repair(), Some(Slot(1)));
+    assert_eq!(n.replica().app_repair(), Some(Slot(1)));
     assert_eq!(
-        n.chosen_gap(),
+        n.replica().chosen_gap(),
         Some((Slot(1), Slot(2))),
         "the stall is visible through the chosen-gap seam"
     );
@@ -271,16 +276,21 @@ fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
     // order and closes the repair.
     let mut entries = BTreeMap::new();
     for s in 1..=2u64 {
-        let (b, c) = nodes[0].accepted().get(&Slot(s)).cloned().expect("chosen");
+        let (b, c) = nodes[0]
+            .acceptor()
+            .records()
+            .get(&Slot(s))
+            .cloned()
+            .expect("chosen");
         entries.insert(Slot(s), (b, c));
     }
     n.step(Message::CatchUpResponse {
         from: NodeId(0),
         entries,
     });
-    assert_eq!(n.app_repair(), None, "the repair closed");
+    assert_eq!(n.replica().app_repair(), None, "the repair closed");
     assert!(
-        n.faulty_entries().is_empty(),
+        n.acceptor().faulty().is_empty(),
         "the faulty record was healed"
     );
     let ready = n.ready();
@@ -330,7 +340,7 @@ fn install_snapshot_at_equal_index_closes_a_below_floor_repair() {
     storage.accepted.retain(|s, _| *s >= Slot(2));
     let mut n = RawNode::new(&storage);
     n.open_app_repair(Slot(0));
-    assert_eq!(n.app_repair(), Some(Slot(0)));
+    assert_eq!(n.replica().app_repair(), Some(Slot(0)));
 
     // A snapshot at chosen_index == our own chosen index is normally a no-op;
     // with the repair open it is the heal.
@@ -342,8 +352,12 @@ fn install_snapshot_at_equal_index_closes_a_below_floor_repair() {
         snapshot: val(9),
         sessions: Vec::new(),
     });
-    assert_eq!(n.app_repair(), None, "the install closed the repair");
-    assert_eq!(n.first_slot(), Slot(3));
+    assert_eq!(
+        n.replica().app_repair(),
+        None,
+        "the install closed the repair"
+    );
+    assert_eq!(n.acceptor().first_slot(), Slot(3));
 }
 
 /// The CTRL §5.1.1 mixed-epoch state, restated for Multi-Paxos: three
@@ -396,7 +410,7 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
     // Decision 3: S1's rotted `a` was overwritten by the decided `b`.
     for n in &nodes {
         assert_eq!(chosen_at(n, 0), Some(val(0xb)), "slot 0 decided b");
-        assert!(n.faulty_entries().is_empty(), "every rotted copy healed");
+        assert!(n.acceptor().faulty().is_empty(), "every rotted copy healed");
     }
     // Decision 2: S2's own uncommitted `c` was discarded by deciding Noop —
     // S1 and S3 form a full Q1 of none at slot 1.

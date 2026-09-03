@@ -79,7 +79,7 @@ fn a_lower_ballot_decision_with_the_same_command_is_learned() {
     drain(&mut n);
     n.step(commit(2, ballot(1, 2), 0, ucmd(1, 1, 10)));
     assert_eq!(chosen_at(&n, 0), Some(val(10)));
-    assert_eq!(n.accepted()[&Slot(0)].0, ballot(1, 2));
+    assert_eq!(n.acceptor().records()[&Slot(0)].0, ballot(1, 2));
 }
 
 /// A higher ballot may replace the command outright: the earlier accept was a
@@ -91,7 +91,7 @@ fn a_higher_ballot_accept_replaces_a_stale_command() {
     drain(&mut n);
     n.step(accept(2, ballot(2, 2), 0, Command::Control(Control::Noop)));
     assert_eq!(
-        n.accepted()[&Slot(0)],
+        n.acceptor().records()[&Slot(0)],
         (ballot(2, 2), Command::Control(Control::Noop))
     );
 }
@@ -110,7 +110,10 @@ fn a_nacked_accept_leaves_the_accepted_log_and_the_batch_untouched() {
     });
     drain(&mut n);
     n.step(accept(2, ballot(3, 2), 0, ucmd(1, 1, 10)));
-    assert!(n.accepted().is_empty(), "a nacked accept records nothing");
+    assert!(
+        n.acceptor().records().is_empty(),
+        "a nacked accept records nothing"
+    );
     assert!(
         n.pending_writes.is_empty(),
         "a nacked accept stages no durable write"
@@ -221,14 +224,14 @@ fn compaction_stops_below_an_open_application_repair() {
     let mut n = RawNode::new(&storage);
     n.open_app_repair(Slot(1));
     assert_eq!(
-        n.app_repair(),
+        n.replica().app_repair(),
         Some(Slot(1)),
         "the rotted slot keeps the repair open"
     );
     let floor = n.compact(Slot(2));
     assert_eq!(floor, Slot(1), "the floor stops at the repair cursor");
-    assert_eq!(n.first_slot(), Slot(1));
-    assert_eq!(n.app_repair(), Some(Slot(1)));
+    assert_eq!(n.acceptor().first_slot(), Slot(1));
+    assert_eq!(n.replica().app_repair(), Some(Slot(1)));
 }
 
 /// A snapshot behind the prefix is an operating condition (a stale offer):
@@ -237,7 +240,7 @@ fn compaction_stops_below_an_open_application_repair() {
 fn a_stale_snapshot_never_rewinds_a_frontier() {
     let mut nodes = cluster_with_three_chosen();
     let before = nodes[1].hard_state();
-    let floor = nodes[1].first_slot();
+    let floor = nodes[1].acceptor().first_slot();
     nodes[1].step(Message::InstallSnapshot {
         config_id: ConfigId::default(),
         from: NodeId(0),
@@ -247,7 +250,7 @@ fn a_stale_snapshot_never_rewinds_a_frontier() {
         sessions: Vec::new(),
     });
     assert_eq!(nodes[1].hard_state(), before);
-    assert_eq!(nodes[1].first_slot(), floor);
+    assert_eq!(nodes[1].acceptor().first_slot(), floor);
     assert!(nodes[1].pending_writes.is_empty());
 }
 
