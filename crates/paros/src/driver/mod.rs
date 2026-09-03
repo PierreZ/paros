@@ -65,9 +65,9 @@ use moonpool_core::{
 use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
     AcceptorConfig, ClientId, ClientSeq, Control, GcAck, MatchRefusal, MatchReply, MatchStep,
-    MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, NodeRole,
-    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, ProposeResult, QuorumSystem,
+    RawNode, ReadIndexResult, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest,
+    ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,7 @@ use crate::storage::NodeStorage;
 use boot::replay_boot_state;
 use config::{OnDrop, grpc_channel_config};
 use events::{message_kind, message_route};
+use handover::HandoverDriver;
 use matchmaking::{
     MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
 };
@@ -357,9 +358,10 @@ where
         timeout: tunables.delivery_timeout,
         shutdown: incarnation_shutdown.clone(),
     };
-    // The matchmaker-set reconfigurer (#125): idle until a client asks, or
-    // until this node meets a frozen registry nobody finished replacing.
-    let mut reconfigurer = MatchmakerReconfigurer::new(NodeId(self_id));
+    // The matchmaker-set handover (#125): the reconfigurer plus the two
+    // clocks that pace it, idle until a client asks or until this node meets a
+    // frozen registry nobody finished replacing.
+    let mut handover = HandoverDriver::new(NodeId(self_id));
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
     let mut retiring = false;
@@ -427,14 +429,9 @@ where
     };
     // Ticks since the open matchmaking request was last (re-)sent.
     let mut match_resend_elapsed: u64 = 0;
-    // Ticks since the open GC request / the running handover were last (re-)sent.
+    // Ticks since the open GC request was last (re-)sent. The running
+    // handover's own clocks live in `handover`.
     let mut gc_resend_elapsed: u64 = 0;
-    let mut reconfigure_resend_elapsed: u64 = 0;
-    // Ticks this node's preempted successor decree waits before reopening at
-    // a higher ballot: a jittered draw, so dueling reconfigurers (every node
-    // that met the same frozen generation finishes it) fall out of lockstep
-    // — the same symmetry break the election timeout's jitter provides.
-    let mut reconfigure_backoff: u64 = 0;
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -670,9 +667,16 @@ where
                 // members under a fresh generation); a member left inactive
                 // or behind is told the chosen set this node already knows.
                 match &step {
-                    MatchStep::Refused(MatchRefusal::Stopped { successor: None }) if !reconfigurer.is_busy() => {
+                    // Sound to finish *this* node's believed set: a
+                    // matchmaker answers `Stopped { successor: None }` only
+                    // when the generation it froze is the one the request
+                    // named (`Matchmaker::generation_refusal` answers a
+                    // mismatch with `Generation { current }` or `Inactive`
+                    // instead), so the generation this node is finishing is
+                    // exactly the one it believes in force.
+                    MatchStep::Refused(MatchRefusal::Stopped { successor: None }) if !handover.is_busy() => {
                         let current = node.matchmaker_set().clone();
-                        if reconfigurer.finish(&current).is_ok() {
+                        if handover.finish(&current).is_ok() {
                             audit.reconfigurer_started(NodeId(self_id), &current, &current.members);
                             tracing::info!(
                                 node = self_id,
@@ -681,7 +685,7 @@ where
                                 finishing = true,
                                 "reconfigurer_started"
                             );
-                            send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                            send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
                         }
                     }
                     MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
@@ -725,7 +729,7 @@ where
             Some(reply) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step (#125).
                 let matchmaker = reply.matchmaker();
-                let step = reconfigurer.on_reply(reply.clone());
+                let step = handover.on_reply(reply.clone());
                 audit.reconfigurer_step(NodeId(self_id), matchmaker, &reply, &step);
                 tracing::info!(
                     node = self_id,
@@ -744,11 +748,12 @@ where
                 }
                 if let ReconfigurerStep::Preempted { .. } = &step {
                     let base = tunables.election_timeout_base.max(1);
-                    reconfigure_backoff = providers.random().random_range(1..base * 2 + 1);
-                    audit.reconfigurer_backoff(NodeId(self_id), reconfigure_backoff);
-                    tracing::info!(node = self_id, ticks = reconfigure_backoff, "reconfigurer_backoff");
+                    let ticks = providers.random().random_range(1..base * 2 + 1);
+                    handover.back_off(ticks);
+                    audit.reconfigurer_backoff(NodeId(self_id), ticks);
+                    tracing::info!(node = self_id, ticks, "reconfigurer_backoff");
                 }
-                send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
@@ -765,7 +770,7 @@ where
                 } else if !target.iter().all(|m| links.clients.contains_key(m)) {
                     "unknown_matchmaker"
                 } else {
-                    match reconfigurer.start(node.matchmaker_set(), target.clone()) {
+                    match handover.start(node.matchmaker_set(), target.clone()) {
                         Ok(()) => "",
                         Err(StartRefusal::Busy) => "busy",
                         Err(StartRefusal::Empty) => "empty",
@@ -782,7 +787,7 @@ where
                         finishing = false,
                         "reconfigurer_started"
                     );
-                    send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
+                    send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
                 }
                 audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
                 tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
@@ -1040,12 +1045,12 @@ where
                 // The running handover's re-send (#125): the same cadence,
                 // its own location; a preempted decree reopens only here, so
                 // two dueling reconfigurers are paced by their drivers.
-                reconfigurer.tick();
+                handover.tick();
                 let stall_budget = node.election_timeout().saturating_mul(RECONFIGURE_TIMEOUT_ELECTIONS);
-                if reconfigurer.is_busy()
+                if handover.is_busy()
                     && stall_budget != 0
-                    && reconfigurer.stalled_for() >= stall_budget
-                    && reconfigurer.abandon()
+                    && handover.stalled_for() >= stall_budget
+                    && handover.abandon()
                 {
                     // A phase that no member answers any more (a lost
                     // registry, a machine gone) is abandoned: the frozen
@@ -1054,23 +1059,14 @@ where
                     audit.reconfigurer_aborted(NodeId(self_id));
                     tracing::info!(node = self_id, "reconfigurer_aborted");
                 }
-                if reconfigurer.is_busy() && reconfigure_backoff > 0 {
-                    // Backing off after a preemption: no re-send, no reopen.
-                    reconfigure_backoff -= 1;
-                } else if reconfigurer.is_busy() {
-                    reconfigure_resend_elapsed += 1;
-                    if reconfigure_resend_elapsed >= tunables.match_resend_ticks.max(1) {
-                        reconfigure_resend_elapsed = 0;
-                        if hooks.skip_reconfigurer_resend() {
-                            audit.reconfigurer_resend_skipped(NodeId(self_id));
-                            tracing::info!(node = self_id, "reconfigurer_resend_skipped");
-                        } else {
-                            reconfigurer.resend();
-                            send_reconfigure_requests(&providers, &links, audit, self_id, reconfigurer.take_requests());
-                        }
+                if handover.resend_due(tunables.match_resend_ticks) {
+                    if hooks.skip_reconfigurer_resend() {
+                        audit.reconfigurer_resend_skipped(NodeId(self_id));
+                        tracing::info!(node = self_id, "reconfigurer_resend_skipped");
+                    } else {
+                        handover.resend();
+                        send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
                     }
-                } else {
-                    reconfigure_resend_elapsed = 0;
                 }
                 // Cooperative leader handoff (`DPaxos`): move the existing
                 // Phase-2 authority to another physical node instead of letting
