@@ -242,7 +242,7 @@ impl AuditWorld {
     pub(crate) fn diagnostics(&self) -> String {
         let st = self.lock();
         format!(
-            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} matchmakers=[{}]",
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} snap_chunks_rejected={}@{:?} matchmakers=[{}]",
             st.applied_max,
             st.cluster_applied_max,
             st.booted,
@@ -253,6 +253,8 @@ impl AuditWorld {
             st.sent_kinds,
             st.delivery_failures,
             st.edge_rejections,
+            st.snap_chunks_rejected,
+            st.snap_chunk_rejected_at,
             st.matchmaker.diagnostics()
         )
     }
@@ -1852,6 +1854,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn dropped_at_mailbox(&self, _node: NodeId, _to: NodeId, _kind: &'static str) {
         let mut st = self.state();
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
+    }
+
+    fn snap_chunk_rejected(&self, _node: NodeId, at: Slot) {
+        let mut st = self.state();
+        // The store took every repaired chunk of the point and still refuses
+        // to call it whole: a `write_snap_chunk` that returned `Ok` and a
+        // verdict that says otherwise. The repair plane keeps pulling, so
+        // this costs liveness on that point, never safety — a *cause* that
+        // fired, hence a reachable rather than a `sometimes`.
+        st.snap_chunks_rejected += 1;
+        st.snap_chunk_rejected_at = Some(at.0);
+        reach_once!(
+            st.snap_chunk_rejected,
+            "snapshot: the store refused a repaired chunk after a successful write"
+        );
     }
 
     fn snap_chunk_withheld(&self, _node: NodeId, to: NodeId) {

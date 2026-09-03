@@ -430,6 +430,12 @@ pub(super) struct AuditState {
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
     pub(super) edge_rejected: bool,
+    /// Chunk repairs the store refused after every write returned `Ok`, and
+    /// the last point one was refused at — the dynamic context the reachable
+    /// gate itself cannot carry (`assert_reachable!` takes only a message).
+    pub(super) snap_chunks_rejected: u64,
+    pub(super) snap_chunk_rejected_at: Option<u64>,
+    pub(super) snap_chunk_rejected: bool,
     /// A matchmaker-plane reply the node loop folded twice, per kind
     /// (`Match`, `GcAck`, `MatchmakerReconfigure`).
     pub(super) reply_duplicated: [bool; 3],
