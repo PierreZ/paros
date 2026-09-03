@@ -39,6 +39,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::retained::RetainedWindow;
 use crate::types::{Ballot, SessionEntry, Slot, Value};
 use crate::write::{AcceptorWrite, WriteOp};
 
@@ -98,13 +99,12 @@ pub struct Acceptor<V> {
     promised: Ballot,
     /// The working per-slot accepted log (rebuilt from durable storage on
     /// boot): the highest-ballot record per slot, or the chosen value once
-    /// learned.
-    records: BTreeMap<Slot, (Ballot, V)>,
-    /// The compaction floor: the first slot still retained.
-    first_slot: Slot,
+    /// learned — retained above the compaction floor.
+    records: RetainedWindow<Slot, (Ballot, V)>,
     /// Slots this acceptor accepted but can no longer read, at the ballot
-    /// the lost record carried — the tri-state's `faulty` answer.
-    faulty: BTreeMap<Slot, Ballot>,
+    /// the lost record carried — the tri-state's `faulty` answer. Retained
+    /// above the same floor, which the two windows keep in step (asserted).
+    faulty: RetainedWindow<Slot, Ballot>,
     /// Faulty entries healed in place by a fresh record, this incarnation.
     faulty_repaired: u64,
 }
@@ -125,11 +125,21 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         first_slot: Slot,
         faulty: BTreeMap<Slot, Ballot>,
     ) -> Self {
+        // The windows enforce their own floor, so these say the same thing
+        // in the *acceptor's* words, at the boot seam where a corrupt store
+        // is what breaks it.
+        assert!(
+            records.keys().next().is_none_or(|s| *s >= first_slot),
+            "no accepted record survives below the compaction floor"
+        );
+        assert!(
+            faulty.keys().next().is_none_or(|s| *s >= first_slot),
+            "no faulty entry survives below the compaction floor"
+        );
         let acceptor = Self {
             promised,
-            records,
-            first_slot,
-            faulty,
+            records: RetainedWindow::new(records, first_slot),
+            faulty: RetainedWindow::new(faulty, first_slot),
             faulty_repaired: 0,
         };
         acceptor.assert_invariants();
@@ -149,22 +159,27 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     pub fn assert_invariants(&self) {
         assert!(
             self.records
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
+                .first_key()
+                .is_none_or(|s| s >= self.first_slot()),
             "no accepted record survives below the compaction floor"
         );
         assert!(
             self.faulty
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= self.first_slot),
+                .first_key()
+                .is_none_or(|s| s >= self.first_slot()),
             "no faulty entry survives below the compaction floor"
+        );
+        assert!(
+            self.records.floor() == self.faulty.floor(),
+            "the tri-state's two windows share one compaction floor"
         );
         // The tri-state is a partition: a slot is readable, faulty, or absent —
         // never two at once.
         assert!(
-            self.faulty.keys().all(|s| !self.records.contains_key(s)),
+            self.faulty
+                .entries()
+                .keys()
+                .all(|s| !self.records.contains_key(*s)),
             "the faulty set stays disjoint from the accepted log"
         );
         // The write-side ordering, read back: a record is admitted only at or
@@ -174,12 +189,16 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         // identity survived, and so did the promise that covered it.
         assert!(
             self.records
+                .entries()
                 .values()
                 .all(|(ballot, _)| *ballot <= self.promised),
             "the promise dominates every accepted record"
         );
         assert!(
-            self.faulty.values().all(|ballot| *ballot <= self.promised),
+            self.faulty
+                .entries()
+                .values()
+                .all(|ballot| *ballot <= self.promised),
             "the promise dominates every faulty record"
         );
     }
@@ -195,31 +214,31 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// The working accepted log.
     #[must_use]
     pub fn records(&self) -> &BTreeMap<Slot, (Ballot, V)> {
-        &self.records
+        self.records.entries()
     }
 
     /// The record at `slot`, if readable.
     #[must_use]
     pub fn record(&self, slot: Slot) -> Option<&(Ballot, V)> {
-        self.records.get(&slot)
+        self.records.get(slot)
     }
 
     /// The compaction floor: the first slot still retained.
     #[must_use]
     pub fn first_slot(&self) -> Slot {
-        self.first_slot
+        self.records.floor()
     }
 
     /// The faulty entries: identity known, value lost.
     #[must_use]
     pub fn faulty(&self) -> &BTreeMap<Slot, Ballot> {
-        &self.faulty
+        self.faulty.entries()
     }
 
     /// The lowest faulty slot, if any.
     #[must_use]
     pub fn first_faulty(&self) -> Option<Slot> {
-        self.faulty.keys().next().copied()
+        self.faulty.first_key()
     }
 
     /// Faulty entries repaired in place this incarnation — half of the CTRL
@@ -251,7 +270,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         from_slot: Slot,
         writes: &mut Vec<W>,
     ) -> PrepareOutcome {
-        if from_slot < self.first_slot {
+        if self.records.below_floor(from_slot) {
             return PrepareOutcome::BelowFloor;
         }
         if ballot < self.promised {
@@ -317,7 +336,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// promise.
     #[must_use]
     pub fn admit(&self, ballot: Ballot, slot: Slot) -> AcceptOutcome {
-        if slot < self.first_slot {
+        if self.records.below_floor(slot) {
             return AcceptOutcome::BelowFloor;
         }
         if ballot < self.promised {
@@ -373,18 +392,18 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         writes: &mut Vec<W>,
     ) -> bool {
         assert!(
-            slot >= self.first_slot,
+            !self.records.below_floor(slot),
             "never record an accept below the compaction floor"
         );
         assert!(
             ballot <= self.promised,
             "a record is never accepted above the promise"
         );
-        let repaired = self.faulty.remove(&slot).is_some();
+        let repaired = self.faulty.remove(slot).is_some();
         if repaired {
             self.faulty_repaired += 1;
         }
-        if let Some((recorded_ballot, recorded)) = self.records.get(&slot)
+        if let Some((recorded_ballot, recorded)) = self.records.get(slot)
             && ballot <= *recorded_ballot
         {
             assert!(
@@ -460,12 +479,11 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// the durable op they emit beside it.
     fn drop_prefix(&mut self, first: Slot) {
         assert!(
-            first >= self.first_slot,
+            first >= self.first_slot(),
             "the compaction floor never moves backward"
         );
-        self.records = self.records.split_off(&first);
-        self.faulty = self.faulty.split_off(&first);
-        self.first_slot = first;
+        self.records.raise_floor(first);
+        self.faulty.raise_floor(first);
         self.assert_invariants();
     }
 }

@@ -157,6 +157,7 @@ pub(crate) use self::state::{resolved_phase, resolved_set};
 pub use self::storage::RegistryStorage;
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::retained::RetainedWindow;
 use crate::types::Ballot;
 
 /// The most registrations one `MatchB` page carries
@@ -196,10 +197,12 @@ pub struct Matchmaker {
     /// port that changes the shipped program. Kept in step by
     /// `refresh_set`, and `assert_invariants` says so.
     set: MatchmakerSet,
-    /// Every registered `ballot -> registration`, strictly increasing in
-    /// ballot order (a [`BTreeMap`] keeps the order; the state machine keeps
-    /// the "only ever appended above the highest" discipline).
-    registry: BTreeMap<Ballot, Registration>,
+    /// Every registered `ballot -> registration` retained above the GC
+    /// watermark, strictly increasing in ballot order (the window keeps the
+    /// order and the floor; the state machine keeps the "only ever appended
+    /// above the highest" discipline). The floor is a copy of the durable
+    /// `gc_watermark`, and `assert_invariants` says so.
+    registry: RetainedWindow<Ballot, Registration>,
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
     pending_reconfigure_replies: Vec<ReconfigureReply>,
@@ -225,6 +228,7 @@ impl Matchmaker {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0)))]
     pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S) -> Self {
         let hard_state = storage.initial_state();
+        let hard_state_watermark = hard_state.gc_watermark;
         let mut registry = BTreeMap::new();
         for ballot in storage.registered_ballots() {
             let registration = storage
@@ -236,6 +240,16 @@ impl Matchmaker {
                 "the registry walk names each ballot once"
             );
         }
+        // The window the registry lives in enforces its own floor, so this
+        // says the same thing in the *registry's* words, at the boot seam
+        // where a corrupt store is what breaks it.
+        assert!(
+            registry
+                .keys()
+                .next()
+                .is_none_or(|lowest| *lowest >= hard_state_watermark),
+            "no registration survives below the gc watermark"
+        );
         let mut bootstrap = config.bootstrap.clone();
         bootstrap.sort_unstable();
         bootstrap.dedup();
@@ -246,7 +260,7 @@ impl Matchmaker {
             },
             hard_state,
             set: MatchmakerSet::new(MatchmakerGeneration(0), Vec::new()),
-            registry,
+            registry: RetainedWindow::new(registry, hard_state_watermark),
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
@@ -274,13 +288,13 @@ impl Matchmaker {
     /// [`Self::hard_state`]).
     #[must_use]
     pub fn registry(&self) -> &BTreeMap<Ballot, Registration> {
-        &self.registry
+        self.registry.entries()
     }
 
     /// The highest registered ballot, or `None` on an empty registry.
     #[must_use]
     pub fn highest(&self) -> Option<Ballot> {
-        self.registry.keys().next_back().copied()
+        self.registry.last_key()
     }
 
     /// Where this matchmaker stands, with a fresh store resolved against the
@@ -366,12 +380,12 @@ impl Matchmaker {
             MatchOutcome::Refused(MatchRefusal::Malformed)
         } else if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
-        } else if ballot < self.hard_state.gc_watermark {
+        } else if self.registry.below_floor(ballot) {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                 watermark: self.hard_state.gc_watermark,
             })
         } else if let Some(highest) = self.highest().filter(|highest| ballot <= *highest) {
-            match self.registry.get(&ballot) {
+            match self.registry.get(ballot) {
                 // The same request again: answered from the retained history
                 // (which GC may have shrunk since the first answer),
                 // registered once.
@@ -423,7 +437,7 @@ impl Matchmaker {
             // the history is exactly the window below it, and only an active
             // matchmaker of the addressed generation ever registers.
             assert!(
-                self.registry.contains_key(&ballot),
+                self.registry.contains_key(ballot),
                 "a Registered reply names a registered ballot"
             );
             assert!(
@@ -543,7 +557,7 @@ impl Matchmaker {
             return GcOutcome::Unchanged;
         }
         self.hard_state.gc_watermark = watermark;
-        self.registry = self.registry.split_off(&watermark);
+        self.registry.raise_floor(watermark);
         self.pending_writes
             .push(MatchmakerWriteOp::SetGcWatermark(watermark));
         self.assert_invariants();
@@ -566,15 +580,10 @@ impl Matchmaker {
         let from_ballot = cursor
             .unwrap_or(self.hard_state.gc_watermark)
             .max(self.hard_state.gc_watermark);
-        let mut window = self.registry.range(from_ballot..ballot);
-        let history: BTreeMap<Ballot, Registration> = window
-            .by_ref()
-            .take(REGISTRY_PAGE)
-            .map(|(b, c)| (*b, c.clone()))
-            .collect();
-        // The next key the window would have yielded: the cursor the
-        // candidate re-asks with. `None` means the answer is complete.
-        let next_from_ballot = window.next().map(|(b, _)| *b);
+        // The window's own bounded page: at most `REGISTRY_PAGE` records
+        // below `ballot`, and the cursor the candidate re-asks with (`None`
+        // means the answer is complete).
+        let (history, next_from_ballot) = self.registry.page(from_ballot, ballot, REGISTRY_PAGE);
         MatchOutcome::Registered {
             from_ballot,
             history,
@@ -591,10 +600,7 @@ impl Matchmaker {
     /// "everything below `b`", and a sentinel ballot said so only by
     /// arithmetic accident.
     pub(super) fn history_from_watermark(&self) -> BTreeMap<Ballot, Registration> {
-        self.registry
-            .range(self.hard_state.gc_watermark..)
-            .map(|(b, c)| (*b, c.clone()))
-            .collect()
+        self.registry.entries().clone()
     }
 
     /// The cross-field checker, called at boot and at every public mutating
@@ -605,12 +611,15 @@ impl Matchmaker {
     fn assert_invariants(&self) {
         assert!(
             self.registry
-                .keys()
-                .next()
-                .is_none_or(|lowest| *lowest >= self.hard_state.gc_watermark),
+                .first_key()
+                .is_none_or(|lowest| lowest >= self.hard_state.gc_watermark),
             "no registration survives below the gc watermark"
         );
-        for registration in self.registry.values() {
+        assert!(
+            self.registry.floor() == self.hard_state.gc_watermark,
+            "the registry's floor is the durable gc watermark"
+        );
+        for registration in self.registry.entries().values() {
             assert!(
                 !registration.config.members().is_empty(),
                 "a registered configuration names at least one acceptor"
@@ -669,7 +678,7 @@ impl Matchmaker {
         if let Some((ballot, config)) = &self.hard_state.effective {
             assert!(
                 self.registry
-                    .get(ballot)
+                    .get(*ballot)
                     .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
                 "the effective configuration agrees with its own retained record"
             );

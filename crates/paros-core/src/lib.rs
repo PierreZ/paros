@@ -48,6 +48,7 @@ mod node;
 pub mod proposer;
 mod ready;
 pub mod replica;
+pub mod retained;
 mod state;
 mod storage;
 mod types;
@@ -71,6 +72,7 @@ pub use node::{
     ReconfigureResult,
 };
 pub use ready::Ready;
+pub use retained::RetainedWindow;
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{

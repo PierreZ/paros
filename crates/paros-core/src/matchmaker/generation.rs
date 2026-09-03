@@ -21,6 +21,7 @@ use super::{
 };
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::retained::RetainedWindow;
 use crate::types::{Ballot, Slot};
 use crate::write::AcceptorWrite;
 
@@ -454,7 +455,7 @@ impl Matchmaker {
             .pending
             .retain(|p| p.set.generation > successor.generation);
         self.refresh_set();
-        self.registry = registry.clone();
+        self.registry = RetainedWindow::new(registry.clone(), watermark);
         // One write for the whole activation: a crash between "registry
         // replaced" and "scalars advanced" would boot a matchmaker answering
         // the wrong generation from the wrong registry.
