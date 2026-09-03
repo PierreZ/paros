@@ -229,9 +229,11 @@ impl RawNode {
     /// fresh-leader fence).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
-        let truncate_up_to = self
-            .replica
-            .advance(self.acceptor.records(), &mut self.pending_writes);
+        let acceptor = &self.acceptor;
+        let truncate_up_to = self.replica.advance(
+            |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
+            &mut self.pending_writes,
+        );
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }

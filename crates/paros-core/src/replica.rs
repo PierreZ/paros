@@ -373,16 +373,20 @@ impl Replica {
     /// Returns the highest `up_to` of any [`Control::Truncate`] the walk
     /// applied, for the caller to compact *after* the walk.
     ///
-    /// `records` is the accepted log, consulted only for the coupling
-    /// assertion that what the application is handed is what the
-    /// authoritative record holds.
+    /// `records_agree(slot, command)` answers "does the authoritative
+    /// accepted record for `slot` hold exactly this command?" — the coupling
+    /// assertion, and the only thing the walk needs to know about the
+    /// acceptor. A predicate, not the acceptor's map: the replica consumes
+    /// "slot chosen, value" and must not acquire the accepted log merely
+    /// because one deployment colocates the two roles (the same shape as
+    /// `close_phase1(is_chosen)`).
     ///
     /// # Panics
     ///
     /// If the walk's contiguity or the chosen/accepted coupling is broken.
     pub fn advance(
         &mut self,
-        records: &BTreeMap<Slot, (Ballot, Command)>,
+        records_agree: impl Fn(Slot, &Command) -> bool,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
         let mut next = self.first_unchosen();
@@ -400,7 +404,7 @@ impl Replica {
             );
             // The chosen/accepted coupling, per applied slot.
             assert!(
-                records.get(&next).map(|(_, c)| c) == Some(&command),
+                records_agree(next, &command),
                 "an applied slot's accepted record carries the applied command"
             );
             self.chosen_index = Some(next);
