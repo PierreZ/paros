@@ -143,10 +143,22 @@ own**. The roles:
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
   ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else.
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
-  every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum` and
-  the GC fence all ask `AcceptorConfig::has_quorum`, which asks `QuorumSystem::is_quorum`, and
-  no tally compares a count against a threshold on its own. Flexible and grid quorums are new
-  variants there, never a rewrite of a tally.
+  every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum`, the
+  GC fence, the matchmaker-side tallies and the decree kernel all ask
+  `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum` (or `MatchmakerSet::has_quorum`),
+  which ask `QuorumSystem`, and **no tally compares a count against a threshold on its own** —
+  a `quorum_size` survives only where a caller reports how many acks are still missing.
+  The predicates are **phase-split** because Paxos safety needs every Phase-1 quorum to
+  intersect every Phase-2 quorum (`QuorumSystem::cross_intersects`, `q1 + q2 > n`), not each
+  phase's quorums to intersect each other; under `Majority` the two coincide. Which phase a
+  site is tagged with is a claim: Phase 1 wherever a tally concludes what an *earlier* ballot
+  could have chosen (`Election::covered`, the CTRL R2/R3 rule), Phase 2 wherever it claims no
+  *later* ballot decided behind it (a decision, the GC fence, a read's confirmation,
+  `CheckQuorum`). Addressing goes through the same boundary
+  (`QuorumSystem::phase2_addressees`), so flexible, grid and compartmentalized quorums are new
+  variants there — never a rewrite of a tally or of a fan-out. `AcceptorConfig`'s fields are
+  private and `new` is its only constructor (deserialisation included): the membership is
+  binary-searched, so an unsorted one would silently miscount rather than fail.
 - `matchmaker.rs` — `Matchmaker`: the registry and its generations; `matchmaker/reconfigurer.rs`
   orchestrates the generation handover and *decides* it with a decree — a matchmaker is not an
   acceptor and never becomes one.
@@ -284,8 +296,8 @@ composable core, see *The core is composable* above and the design note) → **p
 `M_{g+1}` activates its pending bootstrap). Invariant 1 — at most one set is authoritative per
 generation — rests on the decree (the loser adopts the winner's vote); reconstruction
 completeness is asserted in the audit. **Matchmaker quorums are majorities only**
-(`MatchmakerSet::quorum_size`; the decree kernel derives the same majority from the acceptor
-set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
+(`MatchmakerSet::has_quorum`; the decree kernel holds a `QuorumSystem::Majority` derived from
+the acceptor set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
 quorums are deliberately unsupported, and the handover's safety argument is made under the
 majority model alone. The handover is proven by a sans-IO **model checker**
 (`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
@@ -517,7 +529,12 @@ application state. The application owns compaction of its own state. What paros 
 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
 rejoins** (#124): a snapshot restores the log, not the promise, so a naive rejoin could regress a
-promise it once made. A wiped identity is parked for the run exactly like a retired one and the
+promise it once made. **Today that rule is enforced by the harness, not by the library**: the
+storage world parks a wiped identity for the run, and an empty-but-openable store is
+indistinguishable from a first boot to `RawNode::new`, so `run_node` would happily bring a wiped
+node back as a fresh member. Closing it needs a durable format marker on the store
+(`NodeStorage`) that `run_node` refuses to boot an existing member without. That is an open
+item, not a claim the library makes. A wiped identity is parked for the run exactly like a retired one and the
 acceptor set heals around it by reconfiguration — the client's composer draws successors from the
 live pool and moves a dead member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's
 storage layer, which paros does not use); the storage world draws its own wipe coin at a chaotic
