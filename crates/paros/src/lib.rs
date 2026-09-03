@@ -2,7 +2,7 @@
 //!
 //! This is the user-facing entry point. It re-exports the sans-IO
 //! [`paros_core`] state machine and adds the **driver** that owns it and
-//! performs I/O — the etcd-raft `Node` layer to `paros_core`'s `RawNode`.
+//! performs I/O — the etcd-raft `Node` layer to `paros_core`'s `ColocatedNode`.
 //!
 //! [`run_node`] is written once over moonpool's `P: Providers` abstraction, so
 //! the *same* code runs in production (`TokioProviders`) and deterministic
@@ -23,7 +23,7 @@ mod hooks;
 mod matchmaker;
 mod storage;
 
-pub use audit::{Audit, Deployment, NoAudit, StorageFaultDecision};
+pub use audit::{Audit, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
 pub use corruption::{
     CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
     classify_log, decide,
@@ -36,7 +36,7 @@ pub use driver::{
     EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST,
     EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError,
-    command_hash, parse_addr, run_node,
+    command_hash, parse_addr, registration_history_hash, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
@@ -44,7 +44,7 @@ pub use grpc::{
     ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
     WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
     WireReconfigureReply, WireReconfigureRequest, garbage_collect_ack_from_wire,
-    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire, proposal_checksum,
+    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire,
     reconfigure_reply_from_wire, reconfigure_request_from_wire, wire_garbage_collect,
     wire_garbage_collect_ack, wire_match_reply, wire_match_request, wire_reconfigure_reply,
     wire_reconfigure_request,
@@ -59,18 +59,21 @@ pub use storage::{
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
+pub use paros_core::acceptor::Acceptor;
+pub use paros_core::proposer::Proposer;
+pub use paros_core::replica::Replica;
 pub use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control,
-    DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome, GcRequest, GcStep,
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
+    AcceptorConfig, AcceptorWrite, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command,
+    Config, ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
     MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
     MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
-    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, Ready, ReconfigureRefusal,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase, ReconfigurerStep,
-    Registration, RegistryStorage, SessionEntry, Slot, StartRefusal, Storage, Value, WriteOp,
-    command_fingerprint,
+    ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult, ReadState, Ready,
+    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
+    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
@@ -111,7 +114,8 @@ mod tests {
         vec![
             Message::Prepare {
                 config_id,
-                from: NodeId(1),
+                reply_to: NodeId(1),
+                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: None,
@@ -120,7 +124,8 @@ mod tests {
             // configuration; the plain one above carries none.
             Message::Prepare {
                 config_id,
-                from: NodeId(1),
+                reply_to: NodeId(1),
+                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: Some(paros_core::AcceptorConfig::new(
@@ -139,7 +144,19 @@ mod tests {
             },
             Message::Accept {
                 config_id,
-                from: NodeId(2),
+                reply_to: NodeId(2),
+                leader: NodeId(2),
+                ballot,
+                slot: Slot(6),
+                command: command.clone(),
+            },
+            // A reply address that is not the leader: the shape a proxied
+            // Phase 2 would put on the wire, and the only case that encodes
+            // the optional `leader` field at all.
+            Message::Accept {
+                config_id,
+                reply_to: NodeId(5),
+                leader: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 command: command.clone(),
@@ -360,6 +377,9 @@ mod tests {
                         ),
                     ]),
                     gc_watermark: ballot(2, 1),
+                    effective: Some((ballot(5, 3), config(&[1, 2, 3, 4]))),
+                    from_ballot: ballot(2, 1),
+                    next_from_ballot: Some(ballot(6, 1)),
                 },
             ),
             reply(
@@ -368,6 +388,9 @@ mod tests {
                 MatchOutcome::Registered {
                     history: BTreeMap::new(),
                     gc_watermark: Ballot::zero(),
+                    effective: None,
+                    from_ballot: Ballot::zero(),
+                    next_from_ballot: None,
                 },
             ),
             reply(
@@ -451,6 +474,7 @@ mod tests {
             set: set(1, &[0, 1, 3]),
             gc_watermark: ballot(2, 1),
             history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
+            effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
         };
         for request in [
             ReconfigureRequest::Stop {
@@ -493,6 +517,7 @@ mod tests {
                 generation: g(0),
                 gc_watermark: ballot(2, 1),
                 history: bootstrap.history.clone(),
+                effective: bootstrap.effective.clone(),
                 successor: Some(set(1, &[0, 1, 3])),
                 decree_promised: ballot(3, 2),
             },
@@ -527,6 +552,7 @@ mod tests {
                 matchmaker: MatchmakerId(1),
                 generation: g(0),
                 activated: true,
+                at: g(1),
             },
             ReconfigureReply::Refused {
                 matchmaker: MatchmakerId(1),
@@ -543,6 +569,39 @@ mod tests {
                 crate::grpc::reconfigure_reply_from_wire(decoded).expect("reply"),
                 reply
             );
+        }
+    }
+
+    /// The `leader` field of a `Prepare`/`Accept` is absent from the wire
+    /// whenever it would merely repeat the reply address — which is every
+    /// message paros sends today, on a plain deployment and on a matchmaker
+    /// one alike. This pins the encoding against the day a proxied Phase 2
+    /// starts populating it.
+    #[test]
+    fn a_leader_that_is_the_reply_address_stays_off_the_wire() {
+        use crate::grpc::internal::consensus_message::Kind;
+
+        for msg in every_variant() {
+            let wire = crate::grpc::message_to_proto(&msg).expect("encode protobuf DTO");
+            match (msg, wire.kind) {
+                (
+                    Message::Prepare {
+                        reply_to, leader, ..
+                    },
+                    Some(Kind::Prepare(wire)),
+                ) => {
+                    assert_eq!(wire.leader.is_none(), reply_to == leader);
+                }
+                (
+                    Message::Accept {
+                        reply_to, leader, ..
+                    },
+                    Some(Kind::Accept(wire)),
+                ) => {
+                    assert_eq!(wire.leader.is_none(), reply_to == leader);
+                }
+                _ => {}
+            }
         }
     }
 

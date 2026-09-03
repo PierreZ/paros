@@ -29,9 +29,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::node::LEADER_RECOVERY_BATCH;
 use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, SessionEntry, Slot};
 use crate::write::WriteOp;
+
+/// Maximum slots the contiguous apply walk releases in one batch — the
+/// bound this role enforces in [`Replica::advance`], so one `Ready` never
+/// hands the application an unbounded run.
+pub const APPLY_BATCH: usize = 64;
+
+/// Maximum decided commands one application-repair pump re-emits — the bound
+/// this role enforces in [`Replica::pump_app_repair`].
+pub const APP_REPAIR_BATCH: usize = 64;
 
 /// The replica: chosen log, applied prefix, dedup ledger. See the module doc.
 #[derive(Clone, Debug)]
@@ -208,13 +216,6 @@ impl Replica {
         self.chosen.get(&slot)
     }
 
-    /// Whether the walk left a deferred continuation (see
-    /// [`Replica::advance`]).
-    #[must_use]
-    pub fn advance_pending(&self) -> bool {
-        self.advance_pending
-    }
-
     /// The slot `(client, seq)` applied at, if it did.
     #[must_use]
     pub fn applied_at(&self, client: ClientId, seq: ClientSeq) -> Option<Slot> {
@@ -278,6 +279,14 @@ impl Replica {
     /// `highest` the highest slot above it already known chosen. `None` when
     /// the chosen set is contiguous. An open application repair's cursor is
     /// the hole while it is open.
+    ///
+    /// A read-only observability accessor: the core cannot trace, and the gap
+    /// is invisible from outside because [`Ready::committed`](crate::Ready::committed)
+    /// only ever surfaces the *contiguous* prefix. A gap is a normal transient
+    /// (pipelining, a follower that missed one `Commit`); a gap that
+    /// **survives quiescence** is the wedge this exists to make observable —
+    /// the chosen index frozen at `hole - 1` cluster-wide while higher slots
+    /// keep being chosen.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
         if let Some(hole) = self.app_repair {
@@ -373,22 +382,26 @@ impl Replica {
     /// Returns the highest `up_to` of any [`Control::Truncate`] the walk
     /// applied, for the caller to compact *after* the walk.
     ///
-    /// `records` is the accepted log, consulted only for the coupling
-    /// assertion that what the application is handed is what the
-    /// authoritative record holds.
+    /// `records_agree(slot, command)` answers "does the authoritative
+    /// accepted record for `slot` hold exactly this command?" — the coupling
+    /// assertion, and the only thing the walk needs to know about the
+    /// acceptor. A predicate, not the acceptor's map: the replica consumes
+    /// "slot chosen, value" and must not acquire the accepted log merely
+    /// because one deployment colocates the two roles (the same shape as
+    /// `close_phase1(is_chosen)`).
     ///
     /// # Panics
     ///
     /// If the walk's contiguity or the chosen/accepted coupling is broken.
     pub fn advance(
         &mut self,
-        records: &BTreeMap<Slot, (Ballot, Command)>,
+        records_agree: impl Fn(Slot, &Command) -> bool,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
         let mut next = self.first_unchosen();
         let mut advanced = 0_usize;
         let mut truncate_up_to: Option<Slot> = None;
-        while advanced < LEADER_RECOVERY_BATCH
+        while advanced < APPLY_BATCH
             && let Some(mut command) = self.chosen.get(&next).cloned()
         {
             // The walk is the *only* writer of `chosen_index`, and it
@@ -400,7 +413,7 @@ impl Replica {
             );
             // The chosen/accepted coupling, per applied slot.
             assert!(
-                records.get(&next).map(|(_, c)| c) == Some(&command),
+                records_agree(next, &command),
                 "an applied slot's accepted record carries the applied command"
             );
             self.chosen_index = Some(next);
@@ -439,7 +452,7 @@ impl Replica {
         // Postcondition: either the walk consumed the entire contiguous
         // chosen prefix, or exactly one bounded chunk was released.
         assert!(
-            advanced == LEADER_RECOVERY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
+            advanced == APPLY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
             "the walk consumes or bounds the contiguous chosen prefix"
         );
         truncate_up_to
@@ -473,7 +486,7 @@ impl Replica {
         };
         let end = self.first_unchosen();
         let mut emitted = 0_usize;
-        while cursor < end && emitted < LEADER_RECOVERY_BATCH {
+        while cursor < end && emitted < APP_REPAIR_BATCH {
             if cursor < floor {
                 break;
             }

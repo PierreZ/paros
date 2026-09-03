@@ -80,7 +80,7 @@ fn fresh_leader_read_waits_for_the_read_floor() {
         )
     });
     assert!(nodes[1].is_leader(), "node 1 wins the election");
-    assert_eq!(nodes[1].read_floor, Some(Slot(3)));
+    assert_eq!(nodes[1].proposer().read_floor(), Some(Slot(3)));
     assert_eq!(
         nodes[1].hard_state().chosen_index,
         Some(Slot(2)),
@@ -186,7 +186,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
     let _ = nodes[0].read_index(1);
     let _ = drain(&mut nodes[0]);
     let b = nodes[0].ballot();
-    let required = nodes[0].read_rounds[0].required_seq;
+    let required = nodes[0].proposer().read_rounds()[0].required_seq();
 
     // An ack to a beat broadcast *before* the round began proves nothing: the
     // follower may have answered before a higher ballot promised elsewhere.
@@ -229,7 +229,7 @@ fn duplicate_acks_from_one_peer_are_not_a_quorum() {
     let _ = nodes[0].read_index(5);
     let _ = drain(&mut nodes[0]);
     let b = nodes[0].ballot();
-    let seq = nodes[0].read_rounds[0].required_seq;
+    let seq = nodes[0].proposer().read_rounds()[0].required_seq();
 
     // The same peer acking three times is still one voice (quorum of 5 is 3).
     for _ in 0..3 {
@@ -267,19 +267,20 @@ fn step_down_drops_pending_read_rounds() {
     let _ = nodes[0].read_index(1);
     let _ = drain(&mut nodes[0]);
     let b = nodes[0].ballot();
-    let seq = nodes[0].read_rounds[0].required_seq;
+    let seq = nodes[0].proposer().read_rounds()[0].required_seq();
 
     // A higher-ballot Prepare deposes the leader mid-round.
     nodes[0].step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: ballot(b.round + 1, 2),
         from_slot: Slot(3),
         config: None,
     });
     assert!(!nodes[0].is_leader());
     assert!(
-        nodes[0].read_rounds.is_empty(),
+        nodes[0].proposer().read_rounds().is_empty(),
         "unconfirmed rounds die with the leadership"
     );
 
@@ -298,14 +299,14 @@ fn step_down_drops_pending_read_rounds() {
 fn read_round_expires_after_its_ttl() {
     let mut nodes = cluster_with_three_chosen();
     let _ = nodes[0].read_index(1);
-    assert_eq!(nodes[0].read_rounds.len(), 1);
+    assert_eq!(nodes[0].proposer().read_rounds().len(), 1);
 
     // No ack ever arrives; the leader garbage-collects the round silently (the
     // driver owns the client-facing retry).
     for _ in 0..=READ_ROUND_TTL_TICKS {
         nodes[0].tick();
     }
-    assert!(nodes[0].read_rounds.is_empty());
+    assert!(nodes[0].proposer().read_rounds().is_empty());
     assert!(nodes[0].pending_read_states.is_empty());
 }
 
@@ -313,7 +314,7 @@ fn read_round_expires_after_its_ttl() {
 fn read_after_compaction_confirms_normally() {
     let mut nodes = cluster_with_three_chosen();
     nodes[0].compact(Slot(1));
-    assert_eq!(nodes[0].first_slot(), Slot(2));
+    assert_eq!(nodes[0].acceptor().first_slot(), Slot(2));
     let _ = drain(&mut nodes[0]);
 
     assert_eq!(nodes[0].read_index(4), ReadIndexResult::Pending);

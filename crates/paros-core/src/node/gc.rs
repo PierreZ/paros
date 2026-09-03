@@ -47,7 +47,7 @@
 //! chose: a `Noop` gap fill over a chosen value, two values for one slot.
 //!
 //! The two floors relate as follows. The **compaction floor**
-//! (`RawNode::first_slot`, `Control::Truncate`) is per node and says "these
+//! (`ColocatedNode::first_slot`, `Control::Truncate`) is per node and says "these
 //! slots are chosen and their records are gone here; recover them from a
 //! snapshot" — the acceptor's below-floor `Nack` is the paper's acceptor-side
 //! persisted watermark, already in place. The **GC watermark** is per
@@ -58,9 +58,14 @@
 //!
 //! # The protocol, and where retirement is judged
 //!
+//! The tally itself — which acceptors hold the prefix, which matchmakers
+//! acked the floor, and what the floor retires — is the
+//! [`Collector`](crate::collector::Collector) role; this module is the
+//! wiring that decides *when* to ask it and what to do with its answer.
+//!
 //! Once covered, the leader asks every matchmaker of the current generation
 //! to raise the watermark to `b` (`GcRequest`, re-sent on the driver's
-//! cadence — [`RawNode::resend_gc`] — because a lost request or ack only
+//! cadence — [`ColocatedNode::resend_gc`] — because a lost request or ack only
 //! stalls it) and treats the floor as **effective only once a quorum acked
 //! it**: every future matchmaking quorum intersects that set, and the
 //! **maximum** reported watermark filters `H` (#120's invariant 3), so every
@@ -70,58 +75,33 @@
 //! runs ahead of the acks: nothing here reports a retirable node before the
 //! quorum holds, and a leader deposed in between simply never reports.
 //!
-//! GC never retires the highest reconfiguration registration: the watermark
-//! is the leader's own ballot, registered above every configuration in
-//! `H_b`, and the leader's own registration (a reconfiguration or the
-//! effective configuration's restatement) is what every later campaign
-//! finds at or above the floor.
+//! # GC never forgets the configuration in force
+//!
+//! The floor is the leader's own ballot, so it routinely rises **over** the
+//! last reconfiguration's record: an ordinary leader registers a *belief*
+//! (`Registration::reconfiguration == false`), and the flagged record that
+//! says which acceptor set is in force may be many rounds below. Collecting
+//! it would leave every later campaign's histories naming no reconfiguration
+//! at all, so `Matchmaking::stale_belief` could never fire again and a node
+//! that rebooted to its bootstrap belief would be elected under the
+//! superseded configuration (review finding P1).
+//!
+//! What survives is therefore not the *record* but a **durable monotone
+//! scalar** the watermark never touches:
+//! [`MatchmakerHardState::effective`](crate::MatchmakerHardState::effective).
+//! Each matchmaker raises it when it registers a flagged request, reports it
+//! in every `Registered` reply beside the history, and carries it into every
+//! successor generation; the candidate folds the maximum of what the
+//! histories *show* and what the matchmakers *hold*. GC stays unconditional
+//! — it never has to be bounded by a registration it must keep — and the
+//! cost is one configuration per matchmaker.
 
-use super::{BTreeMap, BTreeSet, Ballot, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::{AcceptorConfig, GcAck, GcRequest, MatchmakerGeneration, MatchmakerId};
+use super::{Ballot, ColocatedNode, NodeId, NodeRole, Slot};
+use crate::collector::{Collector, GcStep};
+use crate::matchmaker::{GcAck, GcRequest};
+use crate::membership::{AcceptorConfig, MatchmakerId};
 
-/// The leader's open GC campaign (leader-only, volatile).
-pub(super) struct GcState {
-    /// The matchmaker generation the requests address; the ack tally resets
-    /// when the leader learns a newer generation.
-    generation: MatchmakerGeneration,
-    /// The election fence: every slot at or below it was chosen below this
-    /// ballot or re-proposed at it. `None` when nothing was ever proposed.
-    fence: Option<Slot>,
-    /// The members of every configuration in `H_b`.
-    prior_members: BTreeSet<NodeId>,
-    /// Per configured peer: the chosen index it last acked at this ballot.
-    peer_chosen: BTreeMap<NodeId, Slot>,
-    /// Whether the requests have been queued (the preconditions held).
-    requested: bool,
-    /// Matchmakers that acked a watermark at or above this ballot.
-    acked_by: BTreeSet<MatchmakerId>,
-    /// The floor in force at a matchmaker quorum, and the acceptors it
-    /// retires.
-    effective: Option<(Ballot, Vec<NodeId>)>,
-}
-
-/// What one GC ack did, returned by [`RawNode::on_gc_ack`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GcStep {
-    /// Not for the open campaign: nothing changed.
-    Ignored,
-    /// One more matchmaker holds the floor; `remaining` more before the
-    /// quorum.
-    Acked {
-        /// Acks still needed.
-        remaining: usize,
-    },
-    /// A matchmaker quorum holds the floor: `watermark` is effective and the
-    /// acceptors in `retired` are no longer needed by any future leader.
-    Effective {
-        /// The floor in force.
-        watermark: Ballot,
-        /// Members of the prior configurations outside the current one.
-        retired: Vec<NodeId>,
-    },
-}
-
-impl RawNode {
+impl ColocatedNode {
     /// Open the GC campaign of a freshly won leadership over `prior` (`H_b`).
     /// Called once per election on a matchmaker deployment; the fence is
     /// the read fence (`next_slot - 1`).
@@ -134,19 +114,11 @@ impl RawNode {
             self.config.has_matchmakers(),
             "only a matchmaker deployment collects configurations"
         );
-        let prior_members: BTreeSet<NodeId> = prior
-            .iter()
-            .flat_map(|c| c.members.iter().copied())
-            .collect();
-        self.gc = Some(GcState {
-            generation: self.matchmakers.generation,
-            fence: self.read_floor,
-            prior_members,
-            peer_chosen: BTreeMap::new(),
-            requested: false,
-            acked_by: BTreeSet::new(),
-            effective: None,
-        });
+        self.gc = Some(Collector::new(
+            self.matchmakers.generation,
+            self.proposer.read_floor(),
+            prior,
+        ));
         self.try_gc();
     }
 
@@ -155,10 +127,7 @@ impl RawNode {
         let Some(gc) = self.gc.as_mut() else {
             return;
         };
-        if let Some(chosen) = chosen {
-            let entry = gc.peer_chosen.entry(from).or_insert(chosen);
-            *entry = (*entry).max(chosen);
-        }
+        gc.note_chosen(from, chosen);
         self.try_gc();
     }
 
@@ -166,7 +135,7 @@ impl RawNode {
     /// leadership is settled (no inherited recovery, repair probe or
     /// application repair open — Region 2 is decided) and a Phase-2 quorum
     /// of the current configuration reports a chosen index at or past the
-    /// fence (Region 1 is held where every future Phase 1 must look).
+    /// fence (Region 1, the collector's own tally).
     fn gc_covered(&self) -> bool {
         let Some(gc) = self.gc.as_ref() else {
             return false;
@@ -177,23 +146,10 @@ impl RawNode {
         {
             return false;
         }
-        let covered = |chosen: Option<Slot>| match gc.fence {
-            None => true,
-            Some(fence) => chosen.is_some_and(|c| c >= fence),
-        };
-        let mut holders: BTreeSet<NodeId> = BTreeSet::new();
-        if self.is_acceptor() && covered(self.replica.chosen_index()) {
-            holders.insert(self.config.id);
-        }
-        holders.extend(
-            self.acceptors
-                .members
-                .iter()
-                .filter(|m| **m != self.config.id)
-                .filter(|m| covered(gc.peer_chosen.get(*m).copied()))
-                .copied(),
-        );
-        self.acceptors.has_quorum(&holders)
+        let own = self
+            .is_acceptor()
+            .then(|| (self.config.id, self.replica.chosen_index()));
+        gc.covered(&self.acceptors, own)
     }
 
     /// Queue the GC requests once the condition holds. Idempotent; a no-op
@@ -202,12 +158,12 @@ impl RawNode {
         if self.role != NodeRole::Leader || !self.config.has_matchmakers() {
             return;
         }
-        if self.gc.as_ref().is_none_or(|gc| gc.requested) || !self.gc_covered() {
+        if self.gc.as_ref().is_none_or(Collector::requested) || !self.gc_covered() {
             return;
         }
+        let generation = self.matchmakers.generation;
         if let Some(gc) = self.gc.as_mut() {
-            gc.requested = true;
-            gc.generation = self.matchmakers.generation;
+            gc.request(generation);
         }
         self.queue_gc_requests();
     }
@@ -228,7 +184,7 @@ impl RawNode {
             .members
             .iter()
             .copied()
-            .filter(|m| !gc.acked_by.contains(m))
+            .filter(|m| !gc.acked(*m))
             .collect();
         for matchmaker in targets {
             self.pending_gc_requests.push((matchmaker, request));
@@ -240,7 +196,7 @@ impl RawNode {
     /// effective.
     ///
     /// **The driver is expected to call this on a steady cadence** while
-    /// [`RawNode::gc_pending`] reports one, and **skipping a call is always
+    /// [`ColocatedNode::gc_pending`] reports one, and **skipping a call is always
     /// safe**: a floor that is never raised costs unbounded histories and
     /// un-retirable acceptors, never safety.
     ///
@@ -257,24 +213,57 @@ impl RawNode {
     }
 
     /// Whether a GC request is out and not yet acked by a quorum — the
-    /// driver's cue to pace [`RawNode::resend_gc`].
+    /// driver's cue to pace [`ColocatedNode::resend_gc`].
     #[must_use]
     pub fn gc_pending(&self) -> bool {
         self.role == NodeRole::Leader
             && self
                 .gc
                 .as_ref()
-                .is_some_and(|gc| gc.requested && gc.effective.is_none())
+                .is_some_and(|gc| gc.requested() && gc.effective().is_none())
+    }
+
+    /// Whether this node may honor an operator [`Retire`](crate::Message)
+    /// against the GC watermark the operator read from a leader's `Inspect`
+    /// **after** that floor became effective.
+    ///
+    /// Four conditions, and the fourth is the one that makes the other three
+    /// mean something:
+    ///
+    /// 1. the deployment names matchmakers — without them nothing is ever
+    ///    forgotten and no configuration can be retired;
+    /// 2. this node is not a member of the configuration it believes in force
+    ///    ("removed is not shut down" is only *begun* by a removal);
+    /// 3. it is not the leader — a sitting leader is needed whatever the
+    ///    floor says; and
+    /// 4. `watermark` is strictly above `last_member_ballot`: every
+    ///    configuration this node was ever a member of is bound to a ballot
+    ///    at or below that, so a floor above it means a matchmaker quorum
+    ///    durably refuses every campaign that could still name one. Only then
+    ///    is "no future leader can need this node's Phase-1 promise" a fact
+    ///    rather than an operator's belief.
+    ///
+    /// Condition 2 alone is a *belief* — `acceptors` is volatile and a
+    /// rebooted node regresses to its bootstrap configuration — so a node
+    /// that answered `Retire` on it could be shut down while a configuration
+    /// it is still needed for is alive. The watermark is the evidence that
+    /// turns the belief into a fact, and the operator can only obtain it from
+    /// a leader whose GC actually reached a matchmaker quorum
+    /// (`InspectReply::gc_watermark`, populated by
+    /// [`ColocatedNode::gc_effective`]).
+    #[must_use]
+    pub fn may_retire(&self, watermark: Ballot) -> bool {
+        self.config.has_matchmakers()
+            && !self.is_acceptor()
+            && self.role != NodeRole::Leader
+            && watermark > self.last_member_ballot
     }
 
     /// The floor this leadership made effective at a matchmaker quorum, and
     /// the acceptors it retired — `None` until then.
     #[must_use]
     pub fn gc_effective(&self) -> Option<(Ballot, &[NodeId])> {
-        self.gc
-            .as_ref()
-            .and_then(|gc| gc.effective.as_ref())
-            .map(|(w, retired)| (*w, retired.as_slice()))
+        self.gc.as_ref().and_then(Collector::effective)
     }
 
     /// Fold one matchmaker's GC ack. An ack for another generation, another
@@ -290,82 +279,41 @@ impl RawNode {
         if self.role != NodeRole::Leader || !self.matchmakers.contains(ack.matchmaker) {
             return GcStep::Ignored;
         }
-        let quorum = self.matchmakers.quorum_size();
-        let current = self.matchmakers.generation;
         let me = self.config.id;
         let acceptors = self.acceptors.clone();
         let ballot = self.ballot;
+        let matchmakers = &self.matchmakers;
         let Some(gc) = self.gc.as_mut() else {
             return GcStep::Ignored;
         };
-        if !gc.requested
-            || gc.effective.is_some()
-            || ack.generation != current
-            || gc.generation != current
-            || !ack.applied && ack.watermark < ballot
-        {
-            return GcStep::Ignored;
+        let step = gc.fold_ack(ack, matchmakers, ballot, &acceptors);
+        if let GcStep::Effective { retired, .. } = &step {
+            // The cross-role half of the retirement rule: this node's own
+            // retirement, if its reconfiguration removed it, is the
+            // operator's to act on after it resigns.
+            assert!(
+                !retired.contains(&me) || !acceptors.contains(me),
+                "a leader inside its configuration is never retired"
+            );
+            self.assert_invariants();
         }
-        // An applied ack, or a refusal whose own floor already sits at or
-        // above ours, both mean this matchmaker holds a floor >= ours.
-        if ack.watermark < ballot {
-            return GcStep::Ignored;
-        }
-        if !gc.acked_by.insert(ack.matchmaker) {
-            return GcStep::Ignored;
-        }
-        if gc.acked_by.len() < quorum {
-            return GcStep::Acked {
-                remaining: quorum - gc.acked_by.len(),
-            };
-        }
-        // Quorum intersection makes the floor effective for every future
-        // campaign; the prior configurations' members the current one does
-        // not need are retirable. This node's own retirement, if its
-        // reconfiguration removed it, is the operator's to act on after it
-        // resigns.
-        let retired: Vec<NodeId> = gc
-            .prior_members
-            .iter()
-            .copied()
-            .filter(|n| !acceptors.contains(*n))
-            .collect();
-        gc.effective = Some((ballot, retired.clone()));
-        assert!(
-            retired.iter().all(|n| !acceptors.contains(*n)),
-            "a retired acceptor is outside the configuration in force"
-        );
-        assert!(
-            !retired.contains(&me) || !acceptors.contains(me),
-            "a leader inside its configuration is never retired"
-        );
-        self.assert_invariants();
-        GcStep::Effective {
-            watermark: ballot,
-            retired,
-        }
+        step
     }
 
     /// The GC tally starts over at a newer matchmaker generation: acks from
     /// a replaced generation say nothing about the new one's quorum.
     pub(super) fn reset_gc_for_generation(&mut self) {
-        if let Some(gc) = self.gc.as_mut()
-            && gc.effective.is_none()
-            && gc.generation != self.matchmakers.generation
-        {
-            gc.requested = false;
-            gc.acked_by.clear();
-            gc.generation = self.matchmakers.generation;
+        let generation = self.matchmakers.generation;
+        if let Some(gc) = self.gc.as_mut() {
+            gc.reset_for_generation(generation);
         }
         self.try_gc();
     }
-}
 
-impl RawNode {
     /// The election fence the open GC campaign judges Region 1 by (`None`
     /// when no campaign is open, or nothing was ever proposed below it).
     #[must_use]
     pub fn gc_fence(&self) -> Option<Slot> {
-        self.gc.as_ref().and_then(|gc| gc.fence)
+        self.gc.as_ref().and_then(Collector::fence)
     }
 }

@@ -21,19 +21,17 @@
 
 mod storage;
 
-use moonpool_core::{
-    Detach, NetworkProvider, Providers, SimulationError, TaskProvider, TcpListenerTrait,
-};
-use moonpool_hyper::{H2Server, H2ServerConfig, KeepAlive};
+use moonpool_core::{NetworkProvider, Providers, SimulationError, TcpListenerTrait};
+use moonpool_hyper::{H2Server, H2ServerConfig};
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
-    MatchmakerConfig, MatchmakerId, MatchmakerWriteOp, ReconfigureReply, ReconfigureRequest,
-    Registration,
+    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
+    MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
+    ReconfigureRequest,
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::{Audit, StorageFaultDecision};
-use crate::driver::{DriverTunables, RunError};
+use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
+use crate::driver::{DriverTunables, RunError, accept_and_serve, grpc_keep_alive};
 use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::StorageError;
@@ -54,11 +52,11 @@ pub fn config_hash(config: &AcceptorConfig) -> u64 {
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    fold(&(config.members.len() as u64).to_le_bytes());
-    for member in &config.members {
+    fold(&(config.members().len() as u64).to_le_bytes());
+    for member in config.members() {
         fold(&member.0.to_le_bytes());
     }
-    fold(&[match config.quorum_system {
+    fold(&[match config.quorum_system() {
         paros_core::QuorumSystem::Majority => 0_u8,
     }]);
     h
@@ -168,8 +166,8 @@ where
                         matchmaker = id.0,
                         round = ballot.round,
                         bnode = ballot.node.0,
-                        members = registration.config.members.len() as u64,
-                        reconfiguration = registration.reconfiguration,
+                        members = registration.config.members().len() as u64,
+                        reconfiguration = registration.kind.is_reconfiguration(),
                         config = config_hash(&registration.config),
                         "match_registered"
                     );
@@ -198,16 +196,27 @@ where
                     scalars,
                     registrations,
                 } => {
-                    let set = matchmaker.set();
-                    let registry: Vec<(Ballot, Registration)> =
-                        registrations.iter().map(|(b, r)| (*b, r.clone())).collect();
-                    audit.matchmaker_activated(id, &set, scalars.gc_watermark, &registry);
+                    // The set the *op* installs, not whatever the live
+                    // handle happens to hold: the two agree today, and a
+                    // report that reads the handle would quietly start
+                    // describing a later generation the moment they do not.
+                    let set = MatchmakerSet {
+                        generation: scalars.generation,
+                        members: scalars.members.clone(),
+                    };
+                    audit.matchmaker_activated(
+                        id,
+                        &set,
+                        scalars.gc_watermark,
+                        scalars.effective.as_ref(),
+                        registrations,
+                    );
                     tracing::info!(
                         matchmaker = id.0,
                         generation = set.generation.0,
                         members = set.members.len() as u64,
                         watermark_round = scalars.gc_watermark.round,
-                        registrations = registry.len() as u64,
+                        registrations = registrations.len() as u64,
                         "matchmaker_activated"
                     );
                 }
@@ -238,20 +247,24 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
     let id = reply.matchmaker;
     match &reply.outcome {
         MatchOutcome::Registered {
+            from_ballot,
             history,
+            next_from_ballot,
             gc_watermark,
+            effective,
         } => {
-            let history: Vec<(Ballot, Registration)> = history
-                .iter()
-                .map(|(ballot, registration)| (*ballot, registration.clone()))
-                .collect();
             audit.match_replied(
                 id,
                 reply.to,
                 reply.ballot,
                 reply.generation.0,
-                &history,
-                *gc_watermark,
+                &HistoryPage {
+                    from_ballot: *from_ballot,
+                    history,
+                    next_from_ballot: *next_from_ballot,
+                    gc_watermark: *gc_watermark,
+                    effective: effective.as_ref(),
+                },
             );
             tracing::info!(
                 matchmaker = id.0,
@@ -259,7 +272,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                 round = reply.ballot.round,
                 bnode = reply.ballot.node.0,
                 generation = reply.generation.0,
+                from_round = from_ballot.round,
                 history = history.len() as u64,
+                next_round = next_from_ballot.map_or(0, |b| b.round),
                 watermark_round = gc_watermark.round,
                 "match_replied"
             );
@@ -344,20 +359,20 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(&config, &storage);
-    let recovered: Vec<(Ballot, Registration)> = matchmaker
-        .registry()
-        .iter()
-        .map(|(ballot, registration)| (*ballot, registration.clone()))
-        .collect();
     let watermark = matchmaker.hard_state().gc_watermark;
-    let set = matchmaker.set();
     let phase = matchmaker.phase();
-    audit.matchmaker_recovered(id, &set, phase, &recovered, watermark);
+    audit.matchmaker_recovered(
+        id,
+        matchmaker.set(),
+        phase,
+        matchmaker.registry(),
+        watermark,
+    );
     tracing::info!(
         matchmaker = id.0,
-        generation = set.generation.0,
+        generation = matchmaker.set().generation.0,
         phase = ?phase,
-        registrations = recovered.len() as u64,
+        registrations = matchmaker.registry().len() as u64,
         watermark_round = watermark.round,
         "matchmaker_booted"
     );
@@ -366,11 +381,7 @@ where
         matchmaker_channel(tunables.client_inbox_capacity);
     let grpc_service = tonic::service::Routes::new(ParosMatchmakerServer::new(service)).prepare();
     let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(KeepAlive {
-            interval: tunables.keep_alive_interval,
-            timeout: tunables.keep_alive_timeout,
-            while_idle: false,
-        }),
+        keep_alive: Some(grpc_keep_alive(&tunables)),
         vectored_writes: true,
     });
 
@@ -384,11 +395,7 @@ where
                     grpc_service.clone(),
                     incarnation_shutdown.clone().cancelled_owned(),
                 );
-                providers.task().spawn_task("paros-matchmaker-grpc-server", async move {
-                    if let Err(error) = connection.await {
-                        tracing::warn!(%addr, %error, "matchmaker gRPC connection ended");
-                    }
-                }).detach();
+                accept_and_serve(&providers, "paros-matchmaker-grpc-server", "matchmaker", addr, connection);
             }
             Some((request, reply)) = inbox.requests.recv() => {
                 // One request, one batch, one reply: the core answers every

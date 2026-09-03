@@ -274,8 +274,13 @@ pub(crate) struct StorageWorld {
     /// [`matchmaker::DurableMatchmakerStorage`]); empty on a plain seed.
     matchmakers: BTreeMap<String, matchmaker::MatchmakerDisk>,
     /// Full cluster membership size, for the quorum bound (set once at boot;
-    /// zero refuses every injection).
+    /// zero refuses every injection). This is the run's *configuration floor*
+    /// (`crate::shape::config_floor`), not the pool.
     cluster_size: usize,
+    /// The addressable node pool (set once at boot): every identity the
+    /// deployment names, members and spares alike. The retirement budget is
+    /// the difference between it and [`StorageWorld::cluster_size`].
+    pool_size: usize,
     /// The application's digest-lane count for this run (see
     /// [`ChainState::lane_count`]): every node's blob must slice identically,
     /// so it is one per-run value, published by the first node to boot.
@@ -310,6 +315,10 @@ pub(crate) struct StorageWorld {
     /// registry stays down, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
+    /// Matchmakers whose registry fsync has failed at least once this run.
+    /// The budget is what keeps the run winnable: at most `quorum - 1` of
+    /// the bootstrap set, so a matchmaking quorum always survives.
+    matchmaker_sync_failures: BTreeSet<String>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
@@ -363,11 +372,27 @@ impl StorageWorld {
         true
     }
 
-    /// Retire `ip` for good (#123), under the dead-node budget. Returns
+    /// Retire `ip` for good (#123). `in_force` is the configuration the
+    /// operator read from the same `Inspect` reply the retirable list came
+    /// from: a retirable node is outside it by construction, and this is the
+    /// one place the harness can hold the protocol to that. The retirement is
+    /// bounded by [`StorageWorld::retire_budget`] and by the copy claim, but
+    /// **not** by the dead-node budget: a node outside the configuration in
+    /// force costs it no quorum, and sharing one budget with the wipe coin
+    /// made retirement all but unreachable on a matchmaker seed. Returns
     /// whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
-    pub(crate) fn retire(&mut self, key: &str, node: u64) -> bool {
-        if self.parked.contains(key) || self.retired.contains(key) || !self.may_park(key) {
+    pub(crate) fn retire(&mut self, key: &str, node: u64, in_force: &[u64]) -> bool {
+        let member = in_force.contains(&node);
+        assert_always!(
+            !member,
+            "gc: a retired identity is never a member of the configuration in force",
+            { "node" => node, "members" => in_force.len() }
+        );
+        if member || self.parked.contains(key) || self.retired.contains(key) {
+            return false;
+        }
+        if self.retired.len() + 1 > self.retire_budget() || !self.may_park_for_copies(key) {
             return false;
         }
         self.park(key, node);
@@ -376,19 +401,60 @@ impl StorageWorld {
         true
     }
 
+    /// Release a retirement the node **refused** (#123): the RETIRE step parks
+    /// the identity before it asks, so a refusal — which by construction means
+    /// the node is still a member of the configuration in force, or is the
+    /// leader — must hand the budget slot back. Only ever called on an
+    /// explicit `accepted: false`: an ambiguous ack may have been honored, and
+    /// bringing such an identity back would resurrect a node the cluster has
+    /// already shut down. Returns whether the key was actually held.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
+    pub(crate) fn release_retirement(&mut self, key: &str, node: u64) -> bool {
+        if !self.retired.remove(key) {
+            return false;
+        }
+        self.parked.remove(key);
+        self.parked_ids.remove(&node);
+        tracing::info!(node, "node_retirement_released");
+        true
+    }
+
     /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
     /// run, and only where the deployment's bootstrap matchmaker set holds
-    /// three or more members — the smallest set that keeps a quorum without
-    /// the lost one (the workload never shrinks the set below that floor on
-    /// such a seed). Returns whether it fired.
+    /// [`crate::shape::MATCHMAKER_LOSS_FLOOR`] members or more — the smallest
+    /// set that keeps a quorum without the lost one, and the same constant
+    /// [`crate::shape::matchmaker_floor`] refuses to shrink below on such a
+    /// seed. Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
     pub(crate) fn park_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
-        if bootstrap < 3 || !self.parked_matchmakers.is_empty() {
+        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
             return false;
         }
         self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_lost");
+        true
+    }
+
+    /// Whether matchmaker `key` may fail its registry fsync now (#125).
+    ///
+    /// **The floor is structural.** A matchmaker whose fsync fails is a
+    /// matchmaker the driver fail-stops and the process restarts — and the
+    /// restart may lose its registry for good, which is only survivable
+    /// while a quorum of the bootstrap set is intact. So at most
+    /// `quorum - 1 = bootstrap / 2` distinct matchmakers may ever fail a
+    /// sync in one run; a matchmaker already in the set keeps failing (its
+    /// disk is the sick one), and a deployment too small to spare one
+    /// never fails at all.
+    pub(crate) fn permit_matchmaker_sync_failure(&mut self, key: &str, bootstrap: usize) -> bool {
+        if self.matchmaker_sync_failures.contains(key) {
+            return true;
+        }
+        if bootstrap == 0 || self.matchmaker_sync_failures.len() >= bootstrap / 2 {
+            return false;
+        }
+        self.matchmaker_sync_failures.insert(key.to_string());
+        tracing::info!(matchmaker = %key, "matchmaker_sync_failing");
         true
     }
 
@@ -444,6 +510,18 @@ impl StorageWorld {
         );
     }
 
+    /// The addressable node pool, set once at boot (first caller wins, like
+    /// the cluster size; every node derives the same number).
+    pub(crate) fn set_pool_size(&mut self, n: usize) {
+        if self.pool_size == 0 {
+            self.pool_size = n;
+        }
+        assert_always!(
+            self.pool_size == n,
+            "storage: every node derives the same node pool"
+        );
+    }
+
     fn quorum(&self) -> usize {
         self.cluster_size / 2 + 1
     }
@@ -476,11 +554,33 @@ impl StorageWorld {
         self.cluster_size.saturating_sub(self.quorum())
     }
 
+    /// Nodes lost to a *detected fault* — a corruption park or a wipe. These
+    /// are the losses the dead-node budget bounds; a retirement is not one of
+    /// them (see [`StorageWorld::retire_budget`]).
+    fn detected_parks(&self) -> usize {
+        self.parked
+            .iter()
+            .filter(|key| !self.retired.contains(*key))
+            .count()
+    }
+
+    /// How many identities the operator may retire. A retirable node is by
+    /// construction **outside** the configuration in force (`members(H_b) \
+    /// C_b`), so retiring it costs no configuration its live quorum and the
+    /// dead-node budget — which bounds losses *inside* the configuration —
+    /// does not apply. What does apply is the pool: every identity above the
+    /// configuration floor may go, and no more, so the floor-sized
+    /// configuration the copy budget is computed over always has members left
+    /// to run on. Zero on a plain seed, where no leader ever names a
+    /// retirable node.
+    fn retire_budget(&self) -> usize {
+        self.pool_size.saturating_sub(self.cluster_size)
+    }
+
     /// Whether terminally parking `node_key` (detect ⇒ crash, stays down) is
-    /// inside the dead-node budget AND leaves every accepted record the node
-    /// still holds with a clean quorum of live copies elsewhere. Checked
-    /// *before* a persistent-corruption injection, so the availability cost is
-    /// paid only where the cluster can absorb it.
+    /// inside the dead-node budget AND keeps the copy claim. Checked *before*
+    /// a persistent-corruption injection, so the availability cost is paid
+    /// only where the cluster can absorb it.
     fn may_park(&self, node_key: &str) -> bool {
         if self.cluster_size == 0 {
             return false;
@@ -488,8 +588,23 @@ impl StorageWorld {
         if self.parked.contains(node_key) {
             return true;
         }
-        if self.parked.len() + 1 > self.dead_budget() {
+        if self.detected_parks() + 1 > self.dead_budget() {
             return false;
+        }
+        self.may_park_for_copies(node_key)
+    }
+
+    /// The **copy claim** alone: losing `node_key` for good leaves every
+    /// accepted record it still holds with a clean quorum of live copies
+    /// elsewhere. Every terminal loss must satisfy it — a corruption park, a
+    /// wipe, and a retirement — while the live-quorum claim above bounds only
+    /// the losses *inside* the configuration in force.
+    fn may_park_for_copies(&self, node_key: &str) -> bool {
+        if self.cluster_size == 0 {
+            return false;
+        }
+        if self.parked.contains(node_key) {
+            return true;
         }
         let quorum = self.quorum();
         if let Some(disk) = self.disks.get(node_key) {
@@ -983,13 +1098,20 @@ pub(crate) struct CorpusDiskProbe {
 
 /// A matchmaker's durable GC watermark (`None` until it wrote anything): the
 /// corpus's world-truth probe for "no floor became effective yet".
-pub(crate) fn corpus_matchmaker_watermark(handle: &StateHandle, ip: &str) -> Option<Ballot> {
+/// Whether `ip`'s durable registry still holds a registration naming `node` —
+/// the departed-straggler case's real precondition (#124): the configuration
+/// the reconfiguration left behind must still be answerable, or the case is
+/// superseded by the garbage collection it is trying to outrun. The raw
+/// watermark is not that test: an ordinary leader raises it as soon as its
+/// leadership settles, long before it collects anything the case needs.
+pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: u64) -> bool {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .matchmakers
-        .get(ip)
-        .map(|disk| disk.hard_state.gc_watermark)
+    guard.matchmakers.get(ip).is_some_and(|disk| {
+        disk.registry
+            .values()
+            .any(|registration| registration.config.contains(paros::NodeId(node)))
+    })
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
@@ -1173,8 +1295,8 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
         injected: guard.corruptions.len(),
         crashed,
         accounted,
-        parked: guard.parked.len(),
-        parked_within_budget: guard.parked.len() <= guard.dead_budget(),
+        parked: guard.detected_parks(),
+        parked_within_budget: guard.detected_parks() <= guard.dead_budget(),
         flags: guard.s7,
     }
 }

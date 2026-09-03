@@ -8,13 +8,14 @@
 
 use super::matchmaking::Matchmaking;
 use super::{
-    BTreeMap, Ballot, Command, Control, LEADER_RECOVERY_BATCH, LeadershipOrigin, Message, NodeId,
-    NodeRole, RawNode, Slot,
+    Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId,
+    NodeRole, Slot,
 };
-use crate::matchmaker::{AcceptorConfig, MatchRequest};
-use crate::proposer::{Campaign, PromiseFold, RecoveryPolicy, RecoveryStep};
+use crate::matchmaker::{MatchRequest, RegistrationKind};
+use crate::membership::AcceptorConfig;
+use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 
-impl RawNode {
+impl ColocatedNode {
     // ---- election / leadership --------------------------------------------
 
     /// Election clock fired: campaign for leadership at a fresh ballot with
@@ -26,7 +27,7 @@ impl RawNode {
     /// is not part of, and a spare that campaigned would register a
     /// configuration nobody asked for). A reconfiguration that removes the
     /// sitting leader is the one deliberate exception, and it runs through
-    /// [`RawNode::reconfigure`], not here.
+    /// [`ColocatedNode::reconfigure`], not here.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
@@ -36,7 +37,7 @@ impl RawNode {
             self.non_member_campaigns_skipped = self.non_member_campaigns_skipped.saturating_add(1);
             return;
         }
-        self.campaign(None);
+        self.campaign(RegistrationKind::Belief, self.acceptors.clone());
     }
 
     /// Open a campaign at a fresh ballot: bump the round, promise it durably,
@@ -44,10 +45,14 @@ impl RawNode {
     /// matchmakers (a deployment that names them) or go straight to Phase 1
     /// against the one static configuration (plain Multi-Paxos).
     ///
-    /// `target` is `Some` for a reconfiguration ([`RawNode::reconfigure`]):
-    /// the configuration to register instead of this node's current belief.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = target.is_some())))]
-    pub(super) fn campaign(&mut self, target: Option<AcceptorConfig>) {
+    /// `kind` says what the registration *is* — this node's belief about the
+    /// configuration in force (the election clock), or an operator's
+    /// reconfiguration ([`ColocatedNode::reconfigure`]) — and `config` is what to
+    /// register either way. The two were one `Option<AcceptorConfig>` doing
+    /// double duty, where `None` silently meant both "the belief" and "not a
+    /// reconfiguration".
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = kind.is_reconfiguration())))]
+    pub(super) fn campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
         let me = self.config.id;
         let base_round = self
             .acceptor
@@ -84,21 +89,16 @@ impl RawNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        let reconfiguration = target.is_some();
-        let config = target.unwrap_or_else(|| self.acceptors.clone());
         if self.config.has_matchmakers() {
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`).
-            self.matchmaking = Some(Matchmaking::new(
-                self.ballot,
-                config.clone(),
-                reconfiguration,
-            ));
+            self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
             let generation = self.matchmakers.generation;
-            let request = if reconfiguration {
-                MatchRequest::reconfigure(me, self.ballot, config, generation)
-            } else {
-                MatchRequest::new(me, self.ballot, config, generation)
+            let request = match kind {
+                RegistrationKind::Reconfiguration => {
+                    MatchRequest::reconfigure(me, self.ballot, config, generation)
+                }
+                RegistrationKind::Belief => MatchRequest::new(me, self.ballot, config, generation),
             };
             for matchmaker in self.matchmakers.members.clone() {
                 self.pending_match_requests
@@ -154,10 +154,7 @@ impl RawNode {
         // (see the prefix-heal step in `try_become_leader`).
         let from_slot = self
             .acceptor
-            .faulty()
-            .keys()
-            .next()
-            .copied()
+            .first_faulty()
             .map_or(self.first_unchosen(), |first_faulty| {
                 first_faulty.min(self.first_unchosen())
             });
@@ -170,7 +167,7 @@ impl RawNode {
         // per-configuration tally decides).
         let targets = self.proposer.open_phase1(
             Campaign {
-                me,
+                me: Some(me),
                 ballot: self.ballot,
                 config,
                 prior,
@@ -181,13 +178,15 @@ impl RawNode {
         );
         let prepare = Message::Prepare {
             config_id: self.config_id,
-            from: me,
+            reply_to: me,
+            leader: me,
             ballot: self.ballot,
             from_slot,
             config: wire_config,
         };
         for to in targets {
-            self.pending_messages.push((to, prepare.clone()));
+            self.pending_messages
+                .push((Audience::Node(to), prepare.clone()));
         }
         // Proactive catch-up probe. The election clock fires precisely when we have
         // *not* heard a satisfactory leader — the same condition under which we may
@@ -253,10 +252,11 @@ impl RawNode {
     fn request_promise_page(&mut self, from: NodeId, ballot: Ballot, next: Slot) {
         let config = self.phase1_wire_config();
         self.pending_messages.push((
-            from,
+            Audience::Node(from),
             Message::Prepare {
                 config_id: self.config_id,
-                from: self.config.id,
+                reply_to: self.config.id,
+                leader: self.config.id,
                 ballot,
                 from_slot: next,
                 config,
@@ -301,15 +301,12 @@ impl RawNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
         let decisions = self.proposer.resolve_probe();
-        if self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
         for decision in decisions {
             let slot = decision.slot;
             if self.replica.is_chosen(slot) || slot < self.acceptor.first_slot() {
                 continue;
             }
-            if decision.from_have {
+            if decision.command.is_some() {
                 self.repair_case1 += 1;
             } else {
                 // Case 2 invents a `Noop` from a full Q1 of qualifying `none`.
@@ -323,12 +320,17 @@ impl RawNode {
                 );
                 self.repair_case2 += 1;
             }
-            if let Command::User(entry) = &decision.command
+            // Case 2's filler is the deployment's to choose: the probe
+            // reports "a quorum knows of no value here", and this wiring —
+            // the same one that fills an election's undescribed slot — spends
+            // a `Control::Noop` on it.
+            let command = decision.command.unwrap_or(Command::Control(Control::Noop));
+            if let Command::User(entry) = &command
                 && !self.replica.applied_elsewhere(entry, slot)
             {
                 self.replica.track_inflight(entry.client, entry.seq, slot);
             }
-            self.start_accept_round(slot, decision.command);
+            self.start_accept_round(slot, command);
         }
     }
 
@@ -385,6 +387,7 @@ impl RawNode {
         if self.config.has_matchmakers() {
             self.acceptors = outcome.config.clone();
             self.acceptors_since = outcome.ballot;
+            self.record_membership();
         } else {
             assert!(
                 self.acceptors == outcome.config,
@@ -408,9 +411,11 @@ impl RawNode {
         // The campaign range can reach below the contiguous prefix (a faulty
         // chosen slot extends it), so the allocator clamps at the prefix: a
         // below-prefix report never pulls `next_slot` into chosen territory.
-        self.next_slot = highest
-            .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
-            .max(self.first_unchosen());
+        self.proposer.set_next_slot(
+            highest
+                .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
+                .max(self.first_unchosen()),
+        );
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -451,7 +456,6 @@ impl RawNode {
         for (slot, ballot, command) in prefix_heals {
             self.mark_chosen(slot, &command, ballot);
         }
-        self.repair_elapsed = 0;
 
         let recovery_start = self.first_unchosen();
         let recovered: BTreeMap<Slot, Command> = outcome
@@ -466,7 +470,7 @@ impl RawNode {
             recovered,
             outcome.blocked,
             recovery_start,
-            self.next_slot,
+            self.proposer.next_slot(),
             RecoveryPolicy::Phase1Backed,
         );
         self.pump_leader_recovery();
@@ -475,16 +479,12 @@ impl RawNode {
         // reads wait until the chosen prefix covers that slot. Beat seqs are
         // per-ballot; cross-ballot ack confusion is impossible because an ack
         // must echo the current ballot to count.
-        self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
-        self.heartbeat_seq = 0;
-        self.read_rounds.clear();
         // CheckQuorum: a fresh leadership starts a fresh ack window (self is
         // always reachable — when it is an acceptor at all).
-        self.quorum_elapsed = 0;
-        self.quorum_acked_by.clear();
-        if self.is_acceptor() {
-            self.quorum_acked_by.insert(me);
-        }
+        let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
+        self.proposer
+            .open_authority(fence, self.is_acceptor().then_some(me));
+        self.heartbeat_seq = 0;
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.
@@ -499,7 +499,7 @@ impl RawNode {
         // Every slot below `next_slot` is chosen, re-proposed, or gap-filled,
         // so the allocator never hands out a slot inside the chosen prefix.
         assert!(
-            self.next_slot >= self.first_unchosen(),
+            self.proposer.next_slot() >= self.first_unchosen(),
             "a fresh leader's next slot sits at or past the chosen prefix"
         );
         // The leadership's garbage-collection campaign (#123): decide, once
@@ -511,7 +511,7 @@ impl RawNode {
     }
 
     /// Start one bounded page of inherited Phase-2 rounds. The first page is
-    /// created on election victory; [`RawNode::advance_recovery`] schedules at
+    /// created on election victory; [`ColocatedNode::advance_recovery`] schedules at
     /// most one more page after the driver finishes the batch just processed.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn pump_leader_recovery(&mut self) {
@@ -521,7 +521,7 @@ impl RawNode {
         let mut processed = 0_usize;
         let mut started = 0_usize;
         let mut gap_fills = 0_usize;
-        while processed < LEADER_RECOVERY_BATCH {
+        while processed < RECOVERY_BATCH {
             let Some((slot, step)) = self.proposer.recovery_next() else {
                 break;
             };

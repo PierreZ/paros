@@ -61,10 +61,13 @@ fn main() {
         std::process::exit(1);
     }
 
+    // AGENTS.md, *Raw hunt budget*: 2,000-3,000 ordinary seeds is the normal
+    // evidence target for this binary, so that is what it does with no
+    // argument. A larger hunt is an explicit request.
     let iterations = std::env::args()
         .nth(2)
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1000);
+        .unwrap_or(2000);
 
     println!("--- hunt: {axis} axis, {iterations} seeds ---");
     let report = match axis.as_str() {

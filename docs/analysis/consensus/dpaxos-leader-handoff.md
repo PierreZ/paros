@@ -35,7 +35,7 @@ chosen for one slot.
 
 ## What a paros leader's authority actually is
 
-Read off `RawNode`, a leadership consists of:
+Read off `ColocatedNode`, a leadership consists of:
 
 | state | transferred? | why |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ proposing under `B`, A crashes, A restarts believing it still owns `B`.
 
 **In paros that state is unreachable, and not by accident:**
 
-1. `RawNode::new` boots every node as a `Follower` with an empty `proposer`, whatever
+1. `ColocatedNode::new` boots every node as a `Follower` with an empty `proposer`, whatever
    the disk says. There is no durable "I am leader at `B`" record to resurrect.
 2. `role = Leader` is set in exactly one place (`try_become_leader`), only from
    `Candidate`, and `on_check_leader` campaigns at
@@ -95,7 +95,7 @@ proposing under `B`, A crashes, A restarts believing it still owns `B`.
 
 A crash is therefore itself an abdication, and the durable-fence question collapses to a
 smaller one: *A must stop exercising `B` before the `Relinquish` can be observed.*
-`RawNode::relinquish_to` answers it structurally — the same call that queues the message
+`ColocatedNode::relinquish_to` answers it structurally — the same call that queues the message
 demotes the node:
 
 ```
@@ -138,7 +138,7 @@ one on, so the fence would be a new `HardState` scalar with its own write op, st
 record, checksum and boot read-back: a large, fragile surface bought for one extra
 cooperative hop.
 
-**The rule chosen instead is one hop only** (`RawNode::can_relinquish` requires
+**The rule chosen instead is one hop only** (`ColocatedNode::can_relinquish` requires
 `LeadershipOrigin::Elected`): the node that mints a ballot by winning Phase 1 at it is
 the only node that may hand it on. Uniqueness is then structural again — only the minter
 ever relinquishes a ballot, its payload names one successor, and no node can ever be

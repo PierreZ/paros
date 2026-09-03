@@ -90,7 +90,7 @@ fn a_leader_hearing_acks_keeps_leadership_across_windows() {
 
 #[test]
 fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
-    // The public [`RawNode::step_down`] half of the same property: a leader that
+    // The public [`ColocatedNode::step_down`] half of the same property: a leader that
     // resigns of its own accord (no deposing Prepare, no crash) keeps every
     // durable commitment — the promised ballot and the accepted log — and drops
     // exactly the volatile leadership state: the in-flight Phase-2 rounds and any
@@ -106,12 +106,16 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
     let _ = drain(&mut nodes[0]);
     // Snapshot the log *after* the proposal self-accepted into slot 3: that
     // accept is durable and must survive the resignation too.
-    let log_before = nodes[0].accepted().clone();
+    let log_before = nodes[0].acceptor().records().clone();
     assert!(
         !nodes[0].proposer.rounds().is_empty(),
         "a Phase-2 round is in flight"
     );
-    assert_eq!(nodes[0].read_rounds.len(), 1, "a read round is pending");
+    assert_eq!(
+        nodes[0].proposer().read_rounds().len(),
+        1,
+        "a read round is pending"
+    );
 
     nodes[0].step_down();
 
@@ -128,7 +132,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
          a hole below a decided slot permanent"
     );
     assert!(
-        nodes[0].read_rounds.is_empty(),
+        nodes[0].proposer().read_rounds().is_empty(),
         "unconfirmed read rounds die with the leadership"
     );
     assert!(
@@ -146,7 +150,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
         "and its operating ballot is unchanged"
     );
     assert_eq!(
-        *nodes[0].accepted(),
+        *nodes[0].acceptor().records(),
         log_before,
         "the accepted log is durable state, untouched"
     );
@@ -163,7 +167,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
 
 #[test]
 fn a_round_the_driver_never_re_sends_stalls_until_one_call_heals_it() {
-    // The [`RawNode::resend_pending`] contract, both halves. A driver that beats
+    // The [`ColocatedNode::resend_pending`] contract, both halves. A driver that beats
     // but never calls it leaves a round whose first `Accept` was lost pending
     // forever — the cluster is *safe* (the slot is simply undecided) but the
     // contiguous chosen prefix is frozen below it. A single call decides it, which
@@ -289,5 +293,9 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
         Some(Slot(2)),
         "the frozen prefix walks past the filled hole"
     );
-    assert_eq!(nodes[1].chosen_gap(), None, "nothing is stranded any more");
+    assert_eq!(
+        nodes[1].replica().chosen_gap(),
+        None,
+        "nothing is stranded any more"
+    );
 }

@@ -39,7 +39,7 @@
 //!   slot through the prior configuration once it returns.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,9 +49,8 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    Ballot, Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, proposal_checksum,
-    snap_chunk_count,
+    Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient,
+    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, snap_chunk_count,
 };
 
 use crate::audit::audit_world;
@@ -59,7 +58,7 @@ use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
 use crate::lifecycle;
 use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
-    corpus_matchmaker_watermark, unrecoverable_slots,
+    corpus_matchmaker_remembers, unrecoverable_slots,
 };
 
 /// Fixed corpus cluster size. The mask grid and the analytic derivation both
@@ -107,10 +106,13 @@ fn invalid(message: impl Into<String>) -> SimulationError {
     SimulationError::InvalidState(message.into())
 }
 
-fn sorted_servers(ctx: &SimContext) -> SimulationResult<Vec<String>> {
-    let mut servers = ctx.topology().all_process_ips().to_vec();
-    servers.sort_by_key(|ip| ip.parse::<IpAddr>().ok());
-    servers.dedup();
+/// The corpus case's acceptors, read off the deployment map like every other
+/// workload's (`crate::roles`) — never off `all_process_ips`, which would
+/// silently include a matchmaker's IP on the one case that deploys one.
+fn corpus_servers(ctx: &SimContext) -> SimulationResult<Vec<String>> {
+    let servers = crate::roles::deployment(ctx.topology())
+        .acceptors()
+        .to_vec();
     let valid = servers.len() == CORPUS_NODES;
     assert_always!(
         valid,
@@ -290,7 +292,6 @@ impl CorpusClients {
                 response = client.propose(Propose {
                     client: client_id,
                     seq,
-                    checksum: proposal_checksum(client_id, seq, bytes),
                     command: bytes.to_vec(),
                 }) => response.ok().map(tonic::Response::into_inner),
                 _ = time.sleep(RPC_TIMEOUT) => None,
@@ -614,7 +615,7 @@ impl Workload for E1MaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case: prime → inject → derive → judge
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -825,7 +826,7 @@ impl Workload for BareQuorumWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -935,14 +936,31 @@ impl Workload for BareQuorumWorkload {
 pub(crate) struct DepartedStragglerWorkload {
     waited: bool,
     recovered: bool,
+    /// Why this run never reached its injection, if it did not: GC forgot the
+    /// prior configuration before the case could stage it, or a late write
+    /// healed the mask. Both are legitimate races with an outcome that is a
+    /// *different* corpus case, and both end the run early — so a run with a
+    /// reason set is judged vacuous rather than green.
+    vacuous: Option<&'static str>,
+    /// Where a vacuous verdict is published, so the nextest runner can require
+    /// at least one non-vacuous run across its seeds.
+    non_vacuous: Option<crate::NonVacuousSink>,
 }
 
 impl DepartedStragglerWorkload {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(non_vacuous: Option<crate::NonVacuousSink>) -> Self {
         Self {
             waited: false,
             recovered: false,
+            vacuous: None,
+            non_vacuous,
         }
+    }
+
+    /// This run is superseded before its injection: record why.
+    fn superseded(&mut self, reason: &'static str) {
+        self.vacuous = Some(reason);
+        assert_reachable!("corpus: the departed-straggler case is superseded before its injection");
     }
 }
 
@@ -1042,15 +1060,23 @@ impl Workload for DepartedStragglerWorkload {
 
         // The prior configuration must still be in the matchmaker's ledger
         // when the cluster dies: hold the matchmaker down from here so the
-        // new leader's GC floor (#123) can never become effective. A floor
-        // already raised makes the run vacuous — GC legitimately forgot the
-        // straggler's configuration, which is the *other* corpus outcome
-        // (a correctly unavailable slot), not this case's.
+        // new leader's GC floor (#123) can never become effective. A ledger
+        // that no longer names the straggler makes the run vacuous — GC
+        // legitimately forgot the straggler's configuration, which is the
+        // *other* corpus outcome (a correctly unavailable slot), not this
+        // case's. The raw watermark is the wrong test for that: an ordinary
+        // leader raises it as soon as its leadership settles, so it was
+        // non-zero on every seed and the case never once reached its
+        // injection.
         lifecycle::crash(ctx, &matchmakers[0]).await;
         time.sleep(POLL_INTERVAL).await.ok();
-        let floor_raised = corpus_matchmaker_watermark(ctx.state(), &matchmakers[0])
-            .is_some_and(|watermark| watermark != Ballot::zero());
-        if floor_raised {
+        let forgotten = !corpus_matchmaker_remembers(
+            ctx.state(),
+            &matchmakers[0],
+            u64::try_from(straggler).unwrap_or(u64::MAX),
+        );
+        if forgotten {
+            self.superseded("prior_configuration_collected");
             tracing::info!("corpus_departed_superseded_by_gc");
             lifecycle::restart(ctx, &matchmakers[0]).await;
             drop(clients);
@@ -1098,6 +1124,7 @@ impl Workload for DepartedStragglerWorkload {
         }
         lifecycle::restart(ctx, &matchmakers[0]).await;
         if !mask_held {
+            self.superseded("late_write");
             tracing::info!("corpus_departed_superseded_by_late_write");
             lifecycle::restart(ctx, &servers[straggler]).await;
             drop(clients);
@@ -1186,7 +1213,33 @@ impl Workload for DepartedStragglerWorkload {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        // The case is green two ways and no third: it either reached both of
+        // its analytic outcomes, or it says which race superseded it. Without
+        // this, both escape hatches returned `Ok(())` with neither outcome
+        // set and the run passed having observed nothing.
+        assert_always!(
+            self.vacuous.is_some() || (self.waited && self.recovered),
+            "corpus: the departed-straggler case reached its analytic outcome",
+            {
+                "reason" => self.vacuous.unwrap_or("none"),
+                "waited" => self.waited,
+                "recovered" => self.recovered
+            }
+        );
+        if self.vacuous.is_none() {
+            // The mechanism the case is named for: the straggler is outside
+            // every configuration in force, so its clean copy is reachable
+            // only because a removed member still answers Phase 1 for the
+            // ballots it took part in.
+            assert_always!(
+                audit_world(ctx.state()).removed_member_promised(),
+                "corpus: the departed straggler answers Phase 1 from outside the configuration"
+            );
+            if let Some(sink) = &self.non_vacuous {
+                *sink.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            }
+        }
         assert_sometimes!(
             self.waited,
             "corpus: a departed straggler's slot is correctly waited on"
@@ -1222,7 +1275,7 @@ impl Workload for SnapshotLifecycleWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted compound scenario
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -1473,7 +1526,7 @@ impl Workload for ChunkMaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);

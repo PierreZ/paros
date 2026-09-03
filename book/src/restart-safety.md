@@ -94,7 +94,7 @@ sequenceDiagram
 The node learned that slot 5 was chosen as `Y`, but it still had an old, never
 chosen `X` sitting in its durable `accepted` map from a failed earlier ballot. In
 memory that did not matter, because the volatile `chosen` map held `Y`. But on
-restart, `RawNode::new` rebuilds the volatile state from the durable `accepted`
+restart, `ColocatedNode::new` rebuilds the volatile state from the durable `accepted`
 map (`node.rs`), and there it found `X`. The node came back believing slot 5 was
 `X`. Two nodes, two different values for one slot: the exact thing
 [Why one value is safe](safety.md) promised could never happen.

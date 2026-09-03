@@ -13,18 +13,26 @@
 //! writes, checksums and rot are generic storage concerns already modelled on
 //! the node's records, the registry's crash seams live in the driver, and a
 //! matchmaker whose state is lost for good is *replaced* through a
-//! matchmaker-set reconfiguration (#125), never repaired in place.
+//! matchmaker-set reconfiguration (#125), never repaired in place. What the
+//! registry does draw is the **whole-batch fsync failure** of the node's own
+//! write path ([`StorageFaults::fsync_fail`], the same seed-drawn rate): the
+//! matchmaker driver's fail-stop arm and the replacement path that follows
+//! it were otherwise reachable only through a seam crash, which is a
+//! *clean* loss. Its floor is the world's budget — at most `quorum - 1` of
+//! the bootstrap set may ever fail a sync — so a matchmaking quorum always
+//! survives.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError, Weak};
 
-use moonpool_sim::assert_always;
+use moonpool_sim::{TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::{
     Ballot, MatchmakerHardState, MatchmakerStorage, Registration, RegistryStorage, StorageError,
     StorageRecord, WriteOutcome,
 };
 
 use super::StorageWorld;
+use super::storage::StorageFaults;
 
 /// One matchmaker's durable records, owned by the world (keyed by IP): the
 /// scalars and the per-ballot registration records, stored separately.
@@ -87,7 +95,7 @@ enum Staged {
 }
 
 /// A [`MatchmakerStorage`] onto one matchmaker's slice of the shared world.
-pub(crate) struct DurableMatchmakerStorage {
+pub(crate) struct DurableMatchmakerStorage<T> {
     /// Read view: the durable scalars and records as of this boot (the core
     /// reads the port once, at construction).
     boot_hard_state: MatchmakerHardState,
@@ -98,13 +106,24 @@ pub(crate) struct DurableMatchmakerStorage {
     /// Writes staged since the last flush, in order (lost if the incarnation
     /// is dropped before a sync).
     staged: Vec<Staged>,
+    /// The seed's write-path fault profile and its chaos window, shared with
+    /// the node disks.
+    faults: StorageFaults<T>,
+    /// The deployment's bootstrap matchmaker count — the world's budget for
+    /// how many registries may be failing at once.
+    bootstrap: usize,
 }
 
-impl DurableMatchmakerStorage {
+impl<T: TimeProvider> DurableMatchmakerStorage<T> {
     /// Build storage for the matchmaker at `key`, seeding the read view from
     /// any durable records a prior boot of the same IP left in the world.
     #[tracing::instrument(level = "debug", skip_all, fields(key = %key))]
-    pub(crate) fn restore(world: Weak<Mutex<StorageWorld>>, key: String) -> Self {
+    pub(crate) fn restore(
+        world: Weak<Mutex<StorageWorld>>,
+        key: String,
+        faults: StorageFaults<T>,
+        bootstrap: usize,
+    ) -> Self {
         let (boot_hard_state, boot_registry) = world
             .upgrade()
             .and_then(|strong| {
@@ -121,6 +140,8 @@ impl DurableMatchmakerStorage {
             world,
             key,
             staged: Vec::new(),
+            faults,
+            bootstrap,
         }
     }
 
@@ -139,7 +160,7 @@ impl DurableMatchmakerStorage {
     }
 }
 
-impl RegistryStorage for DurableMatchmakerStorage {
+impl<T: TimeProvider> RegistryStorage for DurableMatchmakerStorage<T> {
     fn initial_state(&self) -> MatchmakerHardState {
         self.boot_hard_state.clone()
     }
@@ -153,7 +174,7 @@ impl RegistryStorage for DurableMatchmakerStorage {
     }
 }
 
-impl MatchmakerStorage for DurableMatchmakerStorage {
+impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     fn register(
         &mut self,
@@ -196,6 +217,24 @@ impl MatchmakerStorage for DurableMatchmakerStorage {
         let staged = std::mem::take(&mut self.staged);
         if staged.is_empty() {
             return Ok(());
+        }
+        // The fsync fails: the stage dies with the incarnation (a clean
+        // whole-batch loss — the registry has no torn-write story of its
+        // own) and the driver fail-stops on the error. Budgeted by the
+        // world, so a quorum of the bootstrap set is never sick at once.
+        if self.faults.active() && buggify_with_prob!(self.faults.fsync_fail()) {
+            let key = self.key.clone();
+            let bootstrap = self.bootstrap;
+            let permitted =
+                self.with_world(|w| w.permit_matchmaker_sync_failure(&key, bootstrap))?;
+            if permitted {
+                // BUGGIFY pairing: the registry's fsync genuinely fails.
+                assert_reachable!("matchmaker: a registry fsync fails");
+                return Err(StorageError::FsyncFailed {
+                    record: StorageRecord::Batch,
+                    outcome: WriteOutcome::Lost,
+                });
+            }
         }
         let key = self.key.clone();
         self.with_world(|w| {

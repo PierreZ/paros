@@ -5,11 +5,12 @@ use super::*;
 fn matching_configuration_message_is_processed_and_reply_is_tagged() {
     let mut storage = TestStorage::new(0, &[0, 1]);
     storage.hard_state.config_id = ConfigId(7);
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
 
     n.step(Message::Prepare {
         config_id: ConfigId(7),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
         config: None,
@@ -32,7 +33,7 @@ fn matching_configuration_message_is_processed_and_reply_is_tagged() {
 fn mismatching_configuration_message_is_ignored_before_dispatch() {
     let mut storage = TestStorage::new(0, &[0, 1]);
     storage.hard_state.config_id = ConfigId(7);
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     let promise_before = n.hard_state().max_promised_ballot;
 
     // A foreign configuration id is an operating condition (a stale peer, a
@@ -40,7 +41,8 @@ fn mismatching_configuration_message_is_ignored_before_dispatch() {
     // whole — no reply, no promise movement.
     n.step(Message::Prepare {
         config_id: ConfigId(8),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         from_slot: Slot(0),
         config: None,
@@ -67,7 +69,8 @@ fn promise_and_accept_batches_require_fsync() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(3, 1),
         from_slot: Slot(0),
         config: None,
@@ -85,7 +88,8 @@ fn promise_and_accept_batches_require_fsync() {
     // An acceptor accepting a value must fsync before it replies Accepted.
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(3, 1),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
@@ -106,7 +110,8 @@ fn acceptor_rejects_below_promised_ballot() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,
@@ -114,13 +119,14 @@ fn acceptor_rejects_below_promised_ballot() {
     let _ = drain(&mut n);
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
     });
     assert!(
-        !n.accepted().contains_key(&Slot(0)),
+        !n.acceptor().records().contains_key(&Slot(0)),
         "must not accept below the promised ballot"
     );
     let out = drain(&mut n);
@@ -142,7 +148,8 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     // before reaching a quorum); this node was the only acceptor.
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(1, 1),
         slot: Slot(0),
         command: ucmd(9, 9, 1),
@@ -165,7 +172,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
 
     // Restart: rebuild from the durable state (scalars + accepted log).
     let storage = TestStorage::from_node(&n);
-    let restarted = RawNode::new(&storage);
+    let restarted = ColocatedNode::new(&storage);
 
     assert_eq!(
         chosen_at(&restarted, 0),
@@ -186,7 +193,8 @@ fn prepare_below_floor_is_nacked_not_promised() {
     // below our floor: those slots are chosen and we truncated them.
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(9, 1),
         from_slot: Slot(0),
         config: None,
@@ -212,7 +220,8 @@ fn accept_below_floor_is_ignored() {
 
     n.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: ballot(9, 1),
         slot: Slot(1),
         command: ucmd(1, 1, 99),
@@ -223,7 +232,7 @@ fn accept_below_floor_is_ignored() {
         "a below-floor accept is ignored: no Accepted and no Nack"
     );
     assert!(
-        !n.accepted().contains_key(&Slot(1)),
+        !n.acceptor().records().contains_key(&Slot(1)),
         "a below-floor accept records nothing"
     );
 }

@@ -49,7 +49,7 @@ fn promise_quorum_makes_leader() {
 /// the three nodes with node 1 freshly elected. The hole at slot 1 is what the
 /// promise quorum {1,2} never saw — and what `next_slot` (3, from the recovered
 /// slot 2) jumped clean over.
-fn wedge_after_election() -> [RawNode; 3] {
+fn wedge_after_election() -> [ColocatedNode; 3] {
     let mut nodes = [
         node(0, &[0, 1, 2]),
         node(1, &[0, 1, 2]),
@@ -114,7 +114,7 @@ fn election_fills_a_hole_the_promise_quorum_never_reported() {
     );
     assert!(
         matches!(
-            nodes[1].accepted().get(&Slot(1)),
+            nodes[1].acceptor().records().get(&Slot(1)),
             Some((_, Command::Control(Control::Noop)))
         ),
         "the hole was filled with a no-op, not a client value"
@@ -130,7 +130,7 @@ fn election_fills_a_hole_the_promise_quorum_never_reported() {
         "the chosen prefix advances over the filled hole to the recovered suffix"
     );
     assert_eq!(
-        nodes[1].chosen_gap(),
+        nodes[1].replica().chosen_gap(),
         None,
         "no chosen slot is stranded above the applied prefix any more"
     );
@@ -161,13 +161,14 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: old,
         slot: Slot(0),
         command: recovered.clone(),
     });
     let _ = drain(&mut nodes[1]); // Accepted reply, dropped (node 0 is gone)
-    assert!(nodes[1].accepted().contains_key(&Slot(0)));
+    assert!(nodes[1].acceptor().records().contains_key(&Slot(0)));
 
     // Node 2 campaigns. Deliver only to node 1 (node 0 is partitioned).
     nodes[2].set_election_timeout(1);
@@ -178,7 +179,8 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     assert!(nodes[2].is_leader(), "node 2 won with node 1's promise");
     // Node 2 re-proposed the recovered entry for slot 0 under its own ballot.
     let (b, e) = nodes[2]
-        .accepted()
+        .acceptor()
+        .records()
         .get(&Slot(0))
         .expect("slot 0 re-accepted");
     assert_eq!(
@@ -187,7 +189,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     );
     assert!(*b > old, "re-proposed under the new, higher ballot");
     assert_eq!(
-        nodes[2].next_slot,
+        nodes[2].proposer().next_slot(),
         Slot(1),
         "next_slot is past the recovered slot"
     );
@@ -230,7 +232,11 @@ fn recovery_picks_highest_ballot_value_per_slot() {
         next_from_slot: None,
     });
     assert!(n.is_leader(), "quorum reached");
-    let (_, e) = n.accepted().get(&Slot(0)).expect("slot 0 re-accepted");
+    let (_, e) = n
+        .acceptor()
+        .records()
+        .get(&Slot(0))
+        .expect("slot 0 re-accepted");
     assert_eq!(
         e, &high.1,
         "the highest-ballot accepted value is re-proposed"
@@ -327,7 +333,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
             ),
         );
     }
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     let prepared = ballot(1, 1);
     let mut cursor = Slot(0);
     let mut pages = Vec::new();
@@ -335,7 +341,8 @@ fn promise_suffix_is_served_in_bounded_pages() {
     loop {
         n.step(Message::Prepare {
             config_id: ConfigId::default(),
-            from: NodeId(1),
+            reply_to: NodeId(1),
+            leader: NodeId(1),
             ballot: prepared,
             from_slot: cursor,
             config: None,
@@ -429,7 +436,8 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
 
     n.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
         config: None,
@@ -511,7 +519,8 @@ fn leader_never_lowers_its_promise_on_self_accept() {
     let higher = ballot(99, 2);
     nodes[0].step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: higher,
         from_slot: Slot(0),
         config: None,
@@ -579,8 +588,8 @@ fn truncated_quorum_refuses_a_blind_candidate() {
     nodes[1].compact(Slot(2));
     let _ = drain(&mut nodes[0]);
     let _ = drain(&mut nodes[1]);
-    assert_eq!(nodes[0].first_slot(), Slot(3));
-    assert_eq!(nodes[1].first_slot(), Slot(3));
+    assert_eq!(nodes[0].acceptor().first_slot(), Slot(3));
+    assert_eq!(nodes[1].acceptor().first_slot(), Slot(3));
 
     // Node 2, blind to slot 2, campaigns: its Prepare's from_slot is 2, below the
     // quorum's floor (3).
@@ -708,11 +717,11 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
         "slot 3 is re-proposed (P2c)"
     );
     assert!(
-        x.accepted().contains_key(&Slot(3)),
+        x.acceptor().records().contains_key(&Slot(3)),
         "and its self-accept was recorded"
     );
     assert_eq!(
-        x.next_slot,
+        x.proposer().next_slot(),
         Slot(4),
         "the allocator sits above the recovered slot"
     );
@@ -726,7 +735,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
 /// both strictly *before* the commit reached the candidate, which is before it
 /// won. Promises never decrease, so every member of that Phase-1 quorum is
 /// pinned at `b'` from then on, and both gates that could give the stale leader a
-/// quorum reject it: [`RawNode::on_accept`] and [`RawNode::on_heartbeat`] each
+/// quorum reject it: [`ColocatedNode::on_accept`] and [`ColocatedNode::on_heartbeat`] each
 /// require `ballot >= max_promised_ballot`. The stale leader cannot even count
 /// itself towards an accept quorum — `start_accept_round` skips its own
 /// self-accept for the same reason.
@@ -746,7 +755,8 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     let mut p = node(1, &[0, 1, 2]);
     p.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(2),
+        reply_to: NodeId(2),
+        leader: NodeId(2),
         ballot: b_prime,
         from_slot: Slot(0),
         config: None,
@@ -757,7 +767,8 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
     // It rejects the stale leader's `Accept` …
     p.step(Message::Accept {
         config_id: ConfigId::default(),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: b,
         slot: Slot(3),
         command: ucmd(1, 2, 3),
@@ -810,7 +821,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     // is what makes a snapshot the only way it can be healed.
     let mut storage = TestStorage::new(0, &[0, 1, 2]);
     storage.hard_state.max_promised_ballot = ballot(4, 1);
-    let mut x = RawNode::new(&storage);
+    let mut x = ColocatedNode::new(&storage);
 
     let b = ballot(5, 0);
     let m = ballot(5, 2);
@@ -835,7 +846,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     assert_eq!(x.hard_state().max_promised_ballot, m, "promise raised to m");
     assert_eq!(x.hard_state().chosen_index, Some(Slot(5)));
     assert_eq!(
-        x.first_slot(),
+        x.acceptor().first_slot(),
         Slot(6),
         "the log below the snapshot is gone"
     );
@@ -863,7 +874,11 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         x.proposer.rounds().is_empty(),
         "no accept round opens at `b`"
     );
-    assert_eq!(x.read_floor, None, "no fresh-leader read fence is set");
+    assert_eq!(
+        x.proposer().read_floor(),
+        None,
+        "no fresh-leader read fence is set"
+    );
     let _ = drain(&mut x);
 
     // The next campaign covers `m`. Winning there records a real self-accept
@@ -880,7 +895,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,
-        from_slot: x.first_slot(),
+        from_slot: x.acceptor().first_slot(),
         accepted: reported,
         next_from_slot: None,
     });
@@ -890,12 +905,16 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         "a leader's ballot covers its own promise"
     );
     assert!(
-        x.accepted().contains_key(&Slot(8)),
+        x.acceptor().records().contains_key(&Slot(8)),
         "the recovered slot reached the log"
     );
-    assert_eq!(x.next_slot, Slot(9), "the allocator covers the suffix");
     assert_eq!(
-        x.read_floor,
+        x.proposer().next_slot(),
+        Slot(9),
+        "the allocator covers the suffix"
+    );
+    assert_eq!(
+        x.proposer().read_floor(),
         Some(Slot(8)),
         "the read fence sits on the recovered suffix"
     );

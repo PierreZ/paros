@@ -11,37 +11,68 @@
 
 use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
 
+/// The two durable writes an [`Acceptor`](crate::acceptor::Acceptor) makes,
+/// over whatever value that deployment's log carries.
+///
+/// They are the acceptor role's whole durable surface — a promise raise
+/// (Phase 1) and an accepted record (Phase 2, an upsert-by-slot: a chosen
+/// value overwrites any stale lower-ballot accept) — named once here so a
+/// second deployment over another value type reuses the *ops* along with the
+/// role, and its own batch type only has to say where they sit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AcceptorWrite<V> {
+    /// Persist a raised promised ballot (Phase 1). Monotonically
+    /// non-decreasing.
+    SetPromise(Ballot),
+    /// Persist the `(ballot, value)` accepted for `slot` (Phase 2).
+    AppendAccepted {
+        /// The slot this accept is for.
+        slot: Slot,
+        /// The ballot the value was accepted under.
+        ballot: Ballot,
+        /// The accepted value (opaque to the acceptor).
+        value: V,
+    },
+}
+
 /// A single semantic durable write the driver must apply to stable storage,
 /// **in order**, before sending the batch's messages.
 ///
 /// The variants map one-to-one onto the durable state:
-/// [`SetPromise`](WriteOp::SetPromise) raises the promised ballot (Phase 1),
-/// [`AppendAccepted`](WriteOp::AppendAccepted) records the `(ballot, entry)` a
-/// slot has accepted (Phase 2, an upsert-by-slot — a chosen value overwrites any
-/// stale lower-ballot accept), [`SetChosenIndex`](WriteOp::SetChosenIndex)
+/// [`Acceptor`](WriteOp::Acceptor) carries the acceptor role's own two ops
+/// over this deployment's value ([`AcceptorWrite`]),
+/// [`SetChosenIndex`](WriteOp::SetChosenIndex)
 /// advances the contiguous commit index, and [`Truncate`](WriteOp::Truncate)
 /// drops the compacted log prefix.
+///
+/// # Which role emits which op
+///
+/// The classification is role-shaped, and stays that way: **every op that
+/// [`needs_sync`](WriteOp::needs_sync) is emitted by
+/// [`Acceptor`](crate::acceptor::Acceptor)** — the promise, the accepted
+/// record, the truncation and the snapshot install are all mutations of the
+/// acceptor's own durable state, and each is emitted by the method that makes
+/// it, never pushed beside the call by the wiring.
+/// [`Replica`](crate::replica::Replica) emits exactly one op, the relaxed
+/// [`SetChosenIndex`](WriteOp::SetChosenIndex), from its apply walk;
+/// [`Proposer`](crate::proposer::Proposer) emits none at all — it holds no
+/// durable state. That is the answer to "is persist-before-send an acceptor
+/// property": it is, and a second deployment that reuses `Acceptor` gets the
+/// whole durable surface with the role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WriteOp {
-    /// Persist a raised promised ballot (Phase 1). Monotonically non-decreasing.
-    SetPromise(Ballot),
-    /// Persist the `(ballot, command)` accepted for `slot` (Phase 2). An
-    /// upsert-by-slot: overwriting a stale lower-ballot accept for a now-chosen
-    /// slot is load-bearing for restart safety (see [`crate::RawNode`]).
-    AppendAccepted {
-        /// The slot this accept is for.
-        slot: Slot,
-        /// The ballot the command was accepted under.
-        ballot: Ballot,
-        /// The accepted command (an opaque client entry or a control command).
-        command: Command,
-    },
+    /// A write of the node's acceptor role: the raised promise, or the
+    /// `(ballot, command)` accepted for a slot. Overwriting a stale
+    /// lower-ballot accept for a now-chosen slot is load-bearing for restart
+    /// safety (see [`crate::ColocatedNode`]).
+    Acceptor(AcceptorWrite<Command>),
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor. Application-driven (see
-    /// [`crate::RawNode::compact`]); `first` always sits within the chosen
+    /// [`crate::ColocatedNode::compact`]); `first` always sits within the chosen
     /// prefix, so nothing undecided is dropped.
     Truncate {
         /// The first slot still retained. Everything below it is dropped.
@@ -76,6 +107,12 @@ pub enum WriteOp {
     },
 }
 
+impl From<AcceptorWrite<Command>> for WriteOp {
+    fn from(write: AcceptorWrite<Command>) -> Self {
+        WriteOp::Acceptor(write)
+    }
+}
+
 /// Whether a [`crate::Ready`] batch must be flushed to stable storage (fsync'd)
 /// **before** its messages are sent.
 ///
@@ -104,10 +141,7 @@ impl WriteOp {
     pub fn needs_sync(&self) -> bool {
         matches!(
             self,
-            WriteOp::SetPromise(_)
-                | WriteOp::AppendAccepted { .. }
-                | WriteOp::Truncate { .. }
-                | WriteOp::InstallSnapshot { .. }
+            WriteOp::Acceptor(_) | WriteOp::Truncate { .. } | WriteOp::InstallSnapshot { .. }
         )
     }
 }
@@ -125,7 +159,7 @@ pub fn classify(writes: &[WriteOp]) -> MustSync {
 
 #[cfg(test)]
 mod tests {
-    use super::{MustSync, WriteOp, classify};
+    use super::{AcceptorWrite, MustSync, WriteOp, classify};
     use crate::types::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, Slot, Value};
 
     fn ballot() -> Ballot {
@@ -136,20 +170,24 @@ mod tests {
     }
 
     fn append(slot: u64) -> WriteOp {
-        WriteOp::AppendAccepted {
+        WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
             slot: Slot(slot),
             ballot: ballot(),
-            command: Command::User(Entry {
+            value: Command::User(Entry {
                 client: ClientId(1),
                 seq: ClientSeq(1),
                 value: Value(vec![7]),
             }),
-        }
+        })
+    }
+
+    fn promise() -> WriteOp {
+        WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot()))
     }
 
     #[test]
     fn promise_and_accept_need_fsync_chosen_index_does_not() {
-        assert!(WriteOp::SetPromise(ballot()).needs_sync());
+        assert!(promise().needs_sync());
         assert!(append(0).needs_sync());
         assert!(!WriteOp::SetChosenIndex(Slot(0)).needs_sync());
         assert!(
@@ -164,7 +202,7 @@ mod tests {
     #[test]
     fn a_batch_is_sync_iff_it_raises_a_promise_or_appends_an_accept() {
         // Promise-raise or accepted-append ⇒ fsync required.
-        assert_eq!(classify(&[WriteOp::SetPromise(ballot())]), MustSync::Sync);
+        assert_eq!(classify(&[promise()]), MustSync::Sync);
         assert_eq!(classify(&[append(0)]), MustSync::Sync);
         // Even mixed with a chosen-index advance, the batch is Sync.
         assert_eq!(

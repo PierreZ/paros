@@ -66,10 +66,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
     AcceptorConfig, Audit, Ballot, Command, Control, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, SNAP_CHUNK_BYTES, Seam,
-    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
+    RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
+    StorageRecord, command_hash,
 };
 
 use self::state::AuditState;
@@ -229,12 +230,20 @@ impl AuditWorld {
         self.lock().cluster_applied_max
     }
 
+    /// Whether a node outside a ballot's own configuration has answered that
+    /// ballot's Phase 1 — the mechanism the departed-straggler corpus case is
+    /// named for ("removed is not shut down"), read by that case so it can
+    /// assert it actually happened.
+    pub(crate) fn removed_member_promised(&self) -> bool {
+        self.lock().removed_member_promised
+    }
+
     /// A one-line picture of the run for the red path: per-node applied
     /// prefixes, the leader rounds, and the last chosen gap each node reported.
     pub(crate) fn diagnostics(&self) -> String {
         let st = self.lock();
         format!(
-            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} matchmakers=[{}]",
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} snap_chunks_rejected={}@{:?} matchmakers=[{}]",
             st.applied_max,
             st.cluster_applied_max,
             st.booted,
@@ -245,6 +254,8 @@ impl AuditWorld {
             st.sent_kinds,
             st.delivery_failures,
             st.edge_rejections,
+            st.snap_chunks_rejected,
+            st.snap_chunk_rejected_at,
             st.matchmaker.diagnostics()
         )
     }
@@ -1185,7 +1196,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "round" => handoff.ballot.round }
         );
         // One hop only: the node that mints a ballot by winning Phase 1 at it is
-        // the only one that may hand it on (see `RawNode::can_relinquish`).
+        // the only one that may hand it on (see `ColocatedNode::can_relinquish`).
         // Without that rule a replayed payload can re-install an authority at a
         // node that already gave it up while its own successor is still
         // exercising it — the hole this sweep found.
@@ -1424,7 +1435,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         assert_always!(
             bootstrap == deployment.bootstrap,
             "every node derives the same bootstrap configuration",
-            { "node" => node.0, "members" => deployment.bootstrap.members.len() }
+            { "node" => node.0, "members" => deployment.bootstrap.members().len() }
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
         let known = st.pool.get_or_insert_with(|| pool.clone()).clone();
@@ -1846,6 +1857,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
     }
 
+    fn snap_chunk_rejected(&self, _node: NodeId, at: Slot) {
+        let mut st = self.state();
+        // The store took every repaired chunk of the point and still refuses
+        // to call it whole: a `write_snap_chunk` that returned `Ok` and a
+        // verdict that says otherwise. The repair plane keeps pulling, so
+        // this costs liveness on that point, never safety — a *cause* that
+        // fired, hence a reachable rather than a `sometimes`.
+        st.snap_chunks_rejected += 1;
+        st.snap_chunk_rejected_at = Some(at.0);
+        reach_once!(
+            st.snap_chunk_rejected,
+            "snapshot: the store refused a repaired chunk after a successful write"
+        );
+    }
+
     fn snap_chunk_withheld(&self, _node: NodeId, to: NodeId) {
         let mut st = self.state();
         // BUGGIFY pairing for `withhold_snap_chunk`: the fired half. The
@@ -1896,6 +1922,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.waiters_cleared,
             "a deposed leader clears client replies it still held"
         );
+    }
+
+    fn client_reply_duplicated(&self, _node: NodeId, reply: paros::Reply) {
+        let mut st = self.state();
+        match reply {
+            paros::Reply::Match => reach_once!(
+                st.reply_duplicated[0],
+                "a matchmaker's registration reply is folded twice"
+            ),
+            paros::Reply::GcAck => reach_once!(
+                st.reply_duplicated[1],
+                "a matchmaker's GC ack is folded twice"
+            ),
+            paros::Reply::MatchmakerReconfigure => reach_once!(
+                st.reply_duplicated[2],
+                "a matchmaker's handover reply is folded twice"
+            ),
+            _ => {}
+        }
     }
 
     fn edge_rejected(&self, _node: NodeId, _kind: EdgeRejection) {
@@ -2123,7 +2168,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
     ) {
         self.state()
@@ -2141,16 +2186,29 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .scalars_persisted(matchmaker, scalars);
     }
 
+    fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
+        disagreements: u64,
+    ) {
+        self.state()
+            .matchmaker
+            .reconstructed(node, generation, bootstrap, disagreements);
+    }
+
     fn matchmaker_activated(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         gc_watermark: Ballot,
-        registry: &[(Ballot, Registration)],
+        effective: Option<&(Ballot, AcceptorConfig)>,
+        registry: &BTreeMap<Ballot, Registration>,
     ) {
         self.state()
             .matchmaker
-            .activated(matchmaker, set, gc_watermark, registry);
+            .activated(matchmaker, set, gc_watermark, effective, registry);
     }
 
     fn matchmaker_reconfigure_replied(
@@ -2194,12 +2252,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         to: NodeId,
         ballot: Ballot,
         generation: u64,
-        history: &[(Ballot, Registration)],
-        gc_watermark: Ballot,
+        page: &HistoryPage<'_>,
     ) {
         self.state()
             .matchmaker
-            .replied(matchmaker, to, ballot, generation, history, gc_watermark);
+            .replied(matchmaker, to, ballot, generation, page);
     }
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
@@ -2209,12 +2266,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         node: NodeId,
         ballot: Ballot,
         config: &AcceptorConfig,
-        reconfiguration: bool,
+        kind: RegistrationKind,
         generation: u64,
     ) {
         self.state()
             .matchmaker
-            .campaign_started(node, ballot, config, reconfiguration, generation);
+            .campaign_started(node, ballot, config, kind, generation);
     }
 
     // ---- garbage collection (#123) ------------------------------------------
@@ -2228,6 +2285,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         fence: Option<Slot>,
     ) {
         let mut st = self.state();
+        // The leader re-sends its request every beat and the licence is judged
+        // once per `(node, watermark)`, so ask before deriving: everything
+        // below is an O(fence x members) walk whose answer would be dropped.
+        if !st.matchmaker.gc_needs_licence(node, watermark) {
+            st.matchmaker.gc_requested(node, watermark, fence, None, "");
+            return;
+        }
         // GC invariant 1, re-derived from the audit's own durable fold: a
         // Phase-2 quorum of the configuration bound to the leader's ballot
         // holds every slot up to the fence — a durable record carrying the
@@ -2242,8 +2306,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let noop = command_hash(&Command::Control(Control::Noop));
         let mut uncovered: Vec<String> = Vec::new();
         let covered = st.config_of(watermark).cloned().map(|config| {
-            let holders = config
-                .members
+            let holders: BTreeSet<NodeId> = config
+                .members()
                 .iter()
                 .filter(|m| {
                     let m = m.0;
@@ -2274,8 +2338,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                         }
                     }
                 })
-                .count();
-            holders >= config.quorum_size()
+                .copied()
+                .collect();
+            // Judged by the configuration's own quorum system, never by a
+            // count: the custody claim the leader's GC rests on is the same
+            // Phase-2 quorum question `Collector::covered` asks in the core.
+            config.has_phase2_quorum(&holders)
         });
         st.matchmaker
             .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
@@ -2361,8 +2429,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .successor_republished(node, successor);
     }
 
-    fn retire_acked(&self, _node: NodeId, accepted: bool) {
-        self.state().matchmaker.retire_acked(accepted);
+    fn retire_acked(&self, _node: NodeId, accepted: bool, refusal: &str) {
+        let mut st = self.state();
+        // The refusal legs the shared gate cannot tell apart. `not_collected`
+        // is the one #123's rule turns from a workload discipline into a
+        // protocol answer: the node is outside the configuration it believes
+        // in force, and still refuses, because nothing proves the cluster is
+        // done with the configurations it *was* in.
+        if !accepted {
+            match refusal {
+                "not_collected" => reach_once!(
+                    st.retire_not_collected,
+                    "gc: a retirement is refused for want of an effective floor"
+                ),
+                "leader" => reach_once!(
+                    st.retire_leader,
+                    "gc: a retirement is refused by the sitting leader"
+                ),
+                _ => {}
+            }
+        }
+        st.matchmaker.retire_acked(accepted);
     }
 
     fn retired(&self, node: NodeId) {
@@ -2395,10 +2482,31 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         ballot: Ballot,
         remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+        self.state().matchmaker.registered_by(
+            node,
+            matchmaker,
+            ballot,
+            remaining,
+            watermark,
+            history_hash,
+        );
+    }
+
+    fn match_paged(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        _next: Ballot,
+        watermark: Ballot,
+        history_hash: u64,
     ) {
         self.state()
             .matchmaker
-            .registered_by(node, matchmaker, ballot, remaining);
+            .paged(node, matchmaker, ballot, watermark, history_hash);
     }
 
     fn matchmaking_completed(
@@ -2491,13 +2599,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _error: &StorageError,
         decision: StorageFaultDecision,
     ) {
-        // The sim's matchmaker store injects no faults (#119: the registry
-        // rides the generic record contract, with no fault story of its
-        // own), so a fault here is an uninjected detection — a bug.
-        assert_always!(
-            false,
-            "matchmaker: no storage fault is ever surfaced by the sim's registry store",
-            { "matchmaker" => matchmaker.0, "decision" => format!("{decision:?}") }
-        );
+        self.state().matchmaker.storage_fault(matchmaker, decision);
     }
 }

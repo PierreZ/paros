@@ -5,8 +5,8 @@
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    chunk_corpus_canonical_masks, corpus_canonical_masks, run_bare_quorum_case, run_chunk_mask,
-    run_corpus_mask, run_departed_straggler_case, run_snapshot_lifecycle_case,
+    chunk_corpus_canonical_masks, corpus_canonical_masks, departed_straggler_case,
+    run_bare_quorum_case, run_chunk_mask, run_corpus_mask, run_snapshot_lifecycle_case,
 };
 
 fn assert_mask_green(mask: u16) {
@@ -71,14 +71,30 @@ fn bare_quorum_lost_slot_waits() {
 /// Case 3 across a configuration boundary — the members in force must WAIT
 /// (the leader resigning under `REPAIR_TIMEOUT_ELECTIONS`) and recover the
 /// slot through the prior configuration once the straggler returns.
+/// The case races GC and a late write, and loses often enough that a single
+/// seed can pass having observed nothing at all: every seed must be green,
+/// and at least one of them must have reached the injection. A scripted
+/// corpus seed **is** its input (AGENTS.md, *Pinned seeds are not a
+/// regression mechanism*), so enumerating a few is a corpus, not a pin.
 #[test]
 fn departed_straggler_waits_then_recovers() {
-    let report = run_departed_straggler_case(0);
-    assert_eq!(report.failed_runs, 0, "departed-straggler case completed");
+    let mut non_vacuous = 0;
+    for seed in 0..4 {
+        let (report, reached) = departed_straggler_case(seed);
+        assert_eq!(
+            report.failed_runs, 0,
+            "departed-straggler case completed (seed {seed})"
+        );
+        assert!(
+            report.assertion_violations.is_empty(),
+            "departed-straggler case waited, then recovered (seed {seed}): {:?}",
+            report.assertion_violations
+        );
+        non_vacuous += usize::from(reached);
+    }
     assert!(
-        report.assertion_violations.is_empty(),
-        "departed-straggler case waited, then recovered: {:?}",
-        report.assertion_violations
+        non_vacuous > 0,
+        "at least one departed-straggler seed reached its injection"
     );
 }
 

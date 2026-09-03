@@ -7,7 +7,7 @@
 use super::*;
 
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
-fn run_matchmaking(n: &mut RawNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
+fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
     let requests = drain_match_requests(n);
     let replies = matchmake(mms, requests);
     replies
@@ -17,7 +17,7 @@ fn run_matchmaking(n: &mut RawNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
 }
 
 /// Fire the election clock on `n`.
-fn campaign(n: &mut RawNode) {
+fn campaign(n: &mut ColocatedNode) {
     n.set_election_timeout(1);
     n.tick();
 }
@@ -52,14 +52,53 @@ fn registered_with(
     history: BTreeMap<Ballot, Registration>,
     wm: Ballot,
 ) -> MatchReply {
+    registered_effective(mm, ballot, history, wm, None)
+}
+
+/// A registered reply that also reports the matchmaker's durable effective
+/// configuration — what survives a GC floor raised over its record.
+fn registered_effective(
+    mm: u64,
+    ballot: Ballot,
+    history: BTreeMap<Ballot, Registration>,
+    wm: Ballot,
+    effective: Option<(Ballot, AcceptorConfig)>,
+) -> MatchReply {
     MatchReply {
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
         ballot,
         generation: MatchmakerGeneration(0),
         outcome: MatchOutcome::Registered {
+            from_ballot: wm,
             history,
+            next_from_ballot: None,
             gc_watermark: wm,
+            effective,
+        },
+    }
+}
+
+/// One page of a paged answer: it starts at `from`, and `next` is the cursor
+/// the following page begins at (`None` for the last page).
+fn registered_page(
+    mm: u64,
+    ballot: Ballot,
+    from: Ballot,
+    history: BTreeMap<Ballot, Registration>,
+    next: Option<Ballot>,
+) -> MatchReply {
+    MatchReply {
+        matchmaker: MatchmakerId(mm),
+        to: ballot.node,
+        ballot,
+        generation: MatchmakerGeneration(0),
+        outcome: MatchOutcome::Registered {
+            from_ballot: from,
+            history,
+            next_from_ballot: next,
+            gc_watermark: Ballot::zero(),
+            effective: None,
         },
     }
 }
@@ -357,7 +396,7 @@ fn the_election_clock_re_sends_a_stuck_matchmaking() {
 
 /// Drive `n` through matchmaking with an explicit history and return the
 /// Phase-1 `Prepare` targets.
-fn open_phase1(n: &mut RawNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
+fn open_phase1(n: &mut ColocatedNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
     campaign(n);
     let b = n.ballot();
     drain_match_requests(n);
@@ -456,7 +495,7 @@ fn an_empty_history_completes_phase_one_at_once() {
     let targets = open_phase1(&mut n, &[]);
     assert!(n.is_leader(), "nothing to intersect with");
     assert_eq!(targets, vec![NodeId(1), NodeId(2)], "C_b is still prepared");
-    assert_eq!(n.next_slot(), Slot(0));
+    assert_eq!(n.proposer().next_slot(), Slot(0));
 }
 
 /// Safe-value selection sees every response: a value held only by an old
@@ -530,7 +569,8 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     let leader_ballot = ballot(5, 3);
     let prepare = Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(3),
+        reply_to: NodeId(3),
+        leader: NodeId(3),
         ballot: leader_ballot,
         from_slot: Slot(0),
         config: Some(cfg(&[3])),
@@ -555,7 +595,8 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     let mut plain = node(1, &[0, 1, 2]);
     plain.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(0),
+        reply_to: NodeId(0),
+        leader: NodeId(0),
         ballot: ballot(5, 0),
         from_slot: Slot(0),
         config: Some(cfg(&[0])),
@@ -602,7 +643,7 @@ fn a_stale_candidate_adopts_the_highest_reconfiguration_and_re_campaigns() {
     assert!(
         requests
             .iter()
-            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.reconfiguration)
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.kind.is_reconfiguration())
     );
 }
 
@@ -669,7 +710,7 @@ fn a_reconfiguration_campaign_is_never_stale() {
     let mut mms = registries(1);
     campaign(&mut n);
     let requests = drain_match_requests(&mut n);
-    assert!(requests.iter().all(|(_, r)| !r.reconfiguration));
+    assert!(requests.iter().all(|(_, r)| !r.kind.is_reconfiguration()));
     for reply in matchmake(&mut mms, requests) {
         n.on_match_reply(reply);
     }
@@ -683,7 +724,7 @@ fn a_reconfiguration_campaign_is_never_stale() {
     assert!(
         requests
             .iter()
-            .all(|(_, r)| r.reconfiguration && r.config == new)
+            .all(|(_, r)| r.kind.is_reconfiguration() && r.config == new)
     );
     // The ledger names an unrelated older reconfiguration: irrelevant to a
     // reconfiguration campaign, which completes and prepares its own target.
@@ -694,4 +735,275 @@ fn a_reconfiguration_campaign_is_never_stale() {
     let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
     assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
     assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// The GC hole (review finding P1): a leader's garbage collection raises the
+/// watermark above the last reconfiguration's record, so every history is
+/// empty and no reply can *show* the effective configuration. The durable
+/// scalar reports it anyway, and a candidate that rebooted to its bootstrap
+/// belief still abandons and adopts it — without the scalar it would have
+/// completed and been elected under the superseded configuration.
+#[test]
+fn a_stale_candidate_adopts_the_effective_configuration_after_gc() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // The floor sits above the reconfiguration's ballot: its record is gone
+    // and the history is empty, exactly as `advance_gc_watermark` leaves it.
+    let floor = ballot(9, 0);
+    let step = n.on_match_reply(registered_effective(
+        0,
+        b,
+        BTreeMap::new(),
+        floor,
+        Some((ballot(4, 1), cfg(&[2, 3, 4]))),
+    ));
+    assert_eq!(
+        step,
+        MatchStep::StaleConfiguration {
+            newest: ballot(4, 1)
+        },
+        "the reported scalar is the only witness left of the configuration in force"
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.kind.is_reconfiguration())
+    );
+}
+
+/// An honored reconfiguration may bind a node to an *older* ballot than the
+/// one it holds: a reconfiguration campaign at 4 whose registration reached
+/// a quorum after an ordinary leader at 9 was elected is still adopted by
+/// every later campaign. The adoption rolls `acceptors_since` back to 4, and
+/// the membership fence keeps the 9 it already recorded — the fence is the
+/// maximum over every membership, never the current binding (seeds
+/// 15760233921517076726 and 15615437002394963727: the sweep panicked on a
+/// fence asserted to never run ahead of the configuration).
+#[test]
+fn an_honored_reconfiguration_may_bind_an_older_ballot_than_the_fence() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    // A leader at 9 taught this node the membership it holds.
+    let learned = ballot(9, 1);
+    n.step(Message::Prepare {
+        config_id: n.hard_state().config_id,
+        reply_to: NodeId(1),
+        leader: NodeId(1),
+        ballot: learned,
+        from_slot: Slot(0),
+        config: Some(cfg(&[1, 2, 3])),
+    });
+    n.ready().advance();
+    assert_eq!(n.acceptors_since(), learned);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // The quorum reports a reconfiguration at 4 that names this node.
+    let step = n.on_match_reply(registered_effective(
+        0,
+        b,
+        BTreeMap::new(),
+        Ballot::zero(),
+        Some((ballot(4, 1), cfg(&[2, 3, 4]))),
+    ));
+    assert_eq!(
+        step,
+        MatchStep::StaleConfiguration {
+            newest: ballot(4, 1)
+        }
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    // The fence did not follow the binding down: this node is a member of
+    // the adopted configuration, so it refuses to retire at any watermark.
+    assert!(!n.may_retire(ballot(9, 1)));
+    assert!(!n.may_retire(ballot(10, 1)));
+}
+
+/// The reported scalar and the histories are folded together, maximum wins:
+/// a matchmaker whose floor collected the newest record still reports it,
+/// and a matchmaker still holding an older record does not outrank it.
+#[test]
+fn the_effective_configuration_is_the_maximum_of_the_shown_and_the_reported() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 3);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // Matchmaker 0 still holds the older change; matchmaker 1 collected
+    // both records but reports the newer one as its durable scalar.
+    let older = BTreeMap::from([reconfigured(ballot(2, 1), &[1, 2, 3])]);
+    assert_eq!(
+        n.on_match_reply(registered_effective(
+            0,
+            b,
+            older,
+            Ballot::zero(),
+            Some((ballot(2, 1), cfg(&[1, 2, 3]))),
+        )),
+        MatchStep::Registered { remaining: 1 }
+    );
+    assert_eq!(
+        n.on_match_reply(registered_effective(
+            1,
+            b,
+            BTreeMap::new(),
+            ballot(8, 0),
+            Some((ballot(5, 2), cfg(&[2, 3, 4]))),
+        )),
+        MatchStep::StaleConfiguration {
+            newest: ballot(5, 2)
+        }
+    );
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+}
+
+/// Beliefs are not facts: a candidate never reports an effective
+/// configuration for an ordinary registration, so a matchmaker whose
+/// registry only ever saw beliefs answers `None` and nothing moves.
+#[test]
+fn an_ordinary_registration_never_raises_the_effective_configuration() {
+    let mut mms = registries(1);
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    for reply in matchmake(&mut mms, requests) {
+        match reply.outcome {
+            MatchOutcome::Registered { effective, .. } => assert_eq!(effective, None),
+            MatchOutcome::Refused(r) => panic!("expected a registration, got {r:?}"),
+        }
+    }
+    assert_eq!(mms[0].hard_state().effective, None);
+}
+
+/// A full page of beliefs at rounds `1..=REGISTRY_PAGE`, all naming
+/// `members` — what a matchmaker's first page looks like when its registry
+/// does not fit in one answer.
+fn full_page(members: &[u64]) -> BTreeMap<Ballot, Registration> {
+    (1..=crate::matchmaker::REGISTRY_PAGE)
+        .map(|round| belief(ballot(round as u64, 1), members))
+        .collect()
+}
+
+/// Review finding P9: a registry that retains more than `REGISTRY_PAGE`
+/// registrations answers in pages, and a page that is not the last counts
+/// for nothing — the candidate re-asks with the cursor, and the quorum
+/// closes only on a complete answer.
+#[test]
+fn a_paged_answer_counts_only_once_its_last_page_lands() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert_eq!(drain_match_requests(&mut n).len(), 1);
+    let cursor = ballot(200, 1);
+    let step = n.on_match_reply(registered_page(
+        0,
+        b,
+        Ballot::zero(),
+        full_page(&[0, 1, 3]),
+        Some(cursor),
+    ));
+    assert_eq!(step, MatchStep::Paged { next: cursor });
+    // The candidate asked that matchmaker for the rest, from the cursor,
+    // and opened no Phase 1.
+    let requests = drain_match_requests(&mut n);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, MatchmakerId(0));
+    assert_eq!(requests[0].1.from_ballot, Some(cursor));
+    assert!(
+        prepares(&drain(&mut n)).is_empty(),
+        "an incomplete answer opens no Phase 1"
+    );
+    // A page at the wrong cursor is not the one owed: ignored whole.
+    assert_eq!(
+        n.on_match_reply(registered_page(0, b, Ballot::zero(), BTreeMap::new(), None)),
+        MatchStep::Ignored
+    );
+    // A page carrying a continuation without filling the page is malformed.
+    assert_eq!(
+        n.on_match_reply(registered_page(
+            0,
+            b,
+            cursor,
+            BTreeMap::from([belief(ballot(200, 1), &[1, 2, 3])]),
+            Some(ballot(300, 1))
+        )),
+        MatchStep::Ignored
+    );
+    // The last page closes the answer, and the union spans both pages.
+    let second = BTreeMap::from([belief(ballot(200, 1), &[1, 2, 3])]);
+    let step = n.on_match_reply(registered_page(0, b, cursor, second, None));
+    let MatchStep::Completed { prior, .. } = step else {
+        panic!("the last page closes the quorum: {step:?}");
+    };
+    assert_eq!(prior, vec![cfg(&[0, 1, 3]), cfg(&[1, 2, 3])]);
+}
+
+/// The matchmaker side: a registry larger than one page answers a prefix
+/// and names the cursor the rest starts at, and the cursor request answers
+/// the remainder without registering anything twice.
+#[test]
+fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
+    let mut mm = registries(1);
+    let mm = &mut mm[0];
+    let page = crate::matchmaker::REGISTRY_PAGE;
+    for round in 1..=page + 1 {
+        mm.step(MatchRequest::new(
+            NodeId(1),
+            ballot(round as u64, 1),
+            cfg(&[0, 1, 2]),
+            MatchmakerGeneration(0),
+        ));
+        mm.ready().advance();
+    }
+    let top = ballot(page as u64 + 5, 1);
+    mm.step(MatchRequest::new(
+        NodeId(1),
+        top,
+        cfg(&[0, 1, 2]),
+        MatchmakerGeneration(0),
+    ));
+    let ready = mm.ready();
+    let first = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let MatchOutcome::Registered {
+        from_ballot,
+        history,
+        next_from_ballot,
+        ..
+    } = first
+    else {
+        panic!("expected a registration");
+    };
+    assert_eq!(from_ballot, Ballot::zero());
+    assert_eq!(history.len(), page);
+    assert_eq!(next_from_ballot, Some(ballot(page as u64 + 1, 1)));
+    // The cursor request re-answers idempotently, from where the first page
+    // stopped, and registers nothing.
+    mm.step(
+        MatchRequest::new(NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
+            .from_page(next_from_ballot.expect("a cursor")),
+    );
+    let ready = mm.ready();
+    assert!(ready.writes().is_empty(), "a cursor request writes nothing");
+    let second = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let MatchOutcome::Registered {
+        from_ballot,
+        history,
+        next_from_ballot,
+        ..
+    } = second
+    else {
+        panic!("expected a registration");
+    };
+    assert_eq!(from_ballot, ballot(page as u64 + 1, 1));
+    assert_eq!(history.len(), 1);
+    assert_eq!(next_from_ballot, None);
 }

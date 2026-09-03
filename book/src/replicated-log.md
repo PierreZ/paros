@@ -115,14 +115,14 @@ It explains the protocol as five kinds of process:
   **commanders** for Phase 2),
 - **acceptors**, the fault-tolerant memory that promises and votes.
 
-paros does not run these as separate processes. A single `RawNode` plays all of
+paros does not run these as separate processes. A single `ColocatedNode` plays all of
 them at once: it is an acceptor (it promises and votes), a replica (it holds the
 log and tracks `chosen_index`), and, when it wins an election, a leader. The
 mapping is:
 
 | Paxos Made Moderately Complex | paros |
 |---|---|
-| replica (log, `slot_num`) | the `RawNode` log + `chosen_index` (`node.rs`) |
+| replica (log, `slot_num`) | the `ColocatedNode` log + `chosen_index` (`node.rs`) |
 | acceptor (`ballot_num`, accepted pvalues) | `HardState.max_promised_ballot` + `accepted` |
 | pvalue `(b, s, c)` | an `accepted` entry `(Slot, (Ballot, Entry))` |
 | leader / scout / commander | the `Candidate` and `Leader` roles in one node |

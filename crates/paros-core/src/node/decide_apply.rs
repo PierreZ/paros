@@ -6,9 +6,9 @@
 //! components decide; this module builds the messages and keeps the node's
 //! probe, allocator and read rounds consistent with what they decided.
 
-use super::{Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot};
 
-impl RawNode {
+impl ColocatedNode {
     // ---- proposer / learner ----------------------------------------------
 
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
@@ -28,7 +28,7 @@ impl RawNode {
         // exactly like a beat ack — a busy leader must not need idle beats to
         // keep its window full.
         if self.role == NodeRole::Leader && ballot == self.ballot {
-            self.quorum_acked_by.insert(from);
+            self.proposer.credit_authority(from);
         }
         self.try_decide(slot);
     }
@@ -75,8 +75,7 @@ impl RawNode {
         // but not an acceptor: it records nothing and casts no vote.
         let own_vote = if self.is_acceptor() && ballot >= self.acceptor.promised() {
             self.acceptor.set_promise(ballot, &mut self.pending_writes);
-            self.acceptor
-                .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+            self.record_accepted(slot, ballot, command.clone());
             Some(me)
         } else {
             None
@@ -88,7 +87,8 @@ impl RawNode {
         // never contacted for a new ballot's Phase 2.
         self.broadcast_acceptors(&Message::Accept {
             config_id: self.config_id,
-            from: me,
+            reply_to: me,
+            leader: me,
             ballot,
             slot,
             command,
@@ -144,7 +144,7 @@ impl RawNode {
     /// and `try_decide` fires the moment a slot's accept quorum completes while
     /// the leader streams later slots concurrently, so slot 6 routinely decides
     /// before slot 5. Nothing here records a command as *applied*: that is the
-    /// replica's contiguous walk ([`RawNode::advance_chosen_index`]).
+    /// replica's contiguous walk ([`ColocatedNode::advance_chosen_index`]).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, round = ballot.round)))]
     pub(super) fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it
@@ -196,14 +196,11 @@ impl RawNode {
         // it picked up from a failed earlier ballot, and `chosen` is rebuilt
         // from the accepted log on restart. Keeping the stale entry would
         // resurrect a value the cluster never chose for this slot.
-        self.acceptor
-            .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+        self.record_accepted(slot, ballot, command.clone());
         self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
-        if self.proposer.probe_resolved_elsewhere(slot) && self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
+        self.proposer.probe_resolved_elsewhere(slot);
         // The chosen/accepted coupling: a chosen slot always holds its
         // authoritative accepted record, at the same command (`serve_catchup`
         // and election recovery both read one map and trust the other).
@@ -229,9 +226,11 @@ impl RawNode {
     /// fresh-leader fence).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
-        let truncate_up_to = self
-            .replica
-            .advance(self.acceptor.records(), &mut self.pending_writes);
+        let acceptor = &self.acceptor;
+        let truncate_up_to = self.replica.advance(
+            |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
+            &mut self.pending_writes,
+        );
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }

@@ -34,7 +34,7 @@
 //! `next_slot - 1`), a fresh-leadership reset (`heartbeat_seq`, the
 //! `CheckQuorum` window, in-flight read rounds), or deliberately **not**
 //! transferred: a handoff is refused while any recovery, repair, or
-//! application-heal state is open (see [`RawNode::can_relinquish`]).
+//! application-heal state is open (see [`ColocatedNode::can_relinquish`]).
 //!
 //! # Why no durable relinquishment fence is needed
 //!
@@ -42,7 +42,7 @@
 //! crashes and restarts believing it still owns `B`.* In paros that state is
 //! unreachable, and not by accident:
 //!
-//! 1. **Leadership is volatile.** `RawNode::new` boots every node as a
+//! 1. **Leadership is volatile.** `ColocatedNode::new` boots every node as a
 //!    `Follower` with an empty `proposer` map, whatever the disk says. There is
 //!    no durable record of "I am leader at `B`" to resurrect.
 //! 2. **Only `try_become_leader` sets `role = Leader`**, only from `Candidate`,
@@ -55,7 +55,7 @@
 //!
 //! So a crash *is* an abdication, and the durable-fence question collapses into
 //! a much smaller one: **A must stop exercising `B` before the `Relinquish` can
-//! be observed.** [`RawNode::relinquish_to`] answers it by abdicating
+//! be observed.** [`ColocatedNode::relinquish_to`] answers it by abdicating
 //! synchronously — the same call that queues the message demotes the node — so
 //! the message cannot exist without the abdication having already happened, in
 //! memory, on the single-threaded core.
@@ -65,11 +65,11 @@
 //! For a given `ballot`, at most one physical node ever exercises Phase 2:
 //!
 //! - A relinquishes at most once per leadership, because the very act demotes
-//!   it and a demoted node fails [`RawNode::can_relinquish`].
+//!   it and a demoted node fails [`ColocatedNode::can_relinquish`].
 //! - **Only the node that minted a ballot ever relinquishes it**: a successor
 //!   may not hand an inherited authority on. That one-hop rule is what keeps
 //!   the whole mechanism free of a durable relinquishment record; see
-//!   [`RawNode::can_relinquish`] for the replay the simulation found without
+//!   [`ColocatedNode::can_relinquish`] for the replay the simulation found without
 //!   it.
 //! - The intended successor is named **inside** the payload
 //!   ([`Message::Relinquish::to`]), so a duplicated, misrouted, replayed, or
@@ -90,8 +90,10 @@
 //! the departed leader knew about is unreachable — resigns, and ordinary
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
-use super::{BTreeMap, BTreeSet, Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::AcceptorConfig;
+use super::{
+    Audience, BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot,
+};
+use crate::membership::AcceptorConfig;
 use crate::proposer::RecoveryPolicy;
 
 /// Maximum slots one [`Message::Relinquish`] transfers (`decided` + `pending`).
@@ -132,7 +134,7 @@ pub enum LeadershipOrigin {
     },
 }
 
-/// What one successful [`RawNode::relinquish_to`] handed over — the caller's
+/// What one successful [`ColocatedNode::relinquish_to`] handed over — the caller's
 /// receipt, for observability. Pure data: producing it changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handoff {
@@ -213,7 +215,7 @@ fn tail_shape_valid(
         .all(|slot| *slot >= from_slot && *slot < next_slot)
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// Whether this node is currently in a state a cooperative handoff may
     /// leave from.
     ///
@@ -272,7 +274,7 @@ impl RawNode {
     pub fn can_relinquish(&self) -> bool {
         self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
-            && self.acceptors.members.len() > 1
+            && self.acceptors.members().len() > 1
             && self.proposer.election().is_none()
             && self.matchmaking.is_none()
             && self.proposer.recovery().is_none()
@@ -280,7 +282,12 @@ impl RawNode {
             && self.replica.app_repair().is_none()
             && self.acceptor.faulty().is_empty()
             && self.ballot >= self.acceptor.promised()
-            && self.next_slot.0.saturating_sub(self.first_unchosen().0) <= HANDOFF_BATCH as u64
+            && self
+                .proposer
+                .next_slot()
+                .0
+                .saturating_sub(self.first_unchosen().0)
+                <= HANDOFF_BATCH as u64
     }
 
     /// The peers a handoff may be addressed to: every member of the active
@@ -288,7 +295,7 @@ impl RawNode {
     #[must_use]
     pub fn handoff_candidates(&self) -> Vec<NodeId> {
         self.acceptors
-            .members
+            .members()
             .iter()
             .copied()
             .filter(|p| *p != self.config.id)
@@ -297,7 +304,7 @@ impl RawNode {
 
     /// **Relinquish this leadership's Phase-2 authority to `target`** and step
     /// down in the same breath. Returns the receipt on success, `None` when the
-    /// node is not in a handoff-eligible state ([`RawNode::can_relinquish`]) or
+    /// node is not in a handoff-eligible state ([`ColocatedNode::can_relinquish`]) or
     /// `target` is not a peer.
     ///
     /// The queued [`Message::Relinquish`] carries the ballot, the allocator
@@ -355,7 +362,7 @@ impl RawNode {
             "only the node that minted a ballot relinquishes it"
         );
         let from_slot = self.first_unchosen();
-        let next_slot = self.next_slot;
+        let next_slot = self.proposer.next_slot();
         let mut decided: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut pending: BTreeMap<Slot, Command> = BTreeMap::new();
         for s in from_slot.0..next_slot.0 {
@@ -403,7 +410,7 @@ impl RawNode {
             .has_matchmakers()
             .then(|| self.acceptors.clone());
         self.pending_messages.push((
-            target,
+            Audience::Node(target),
             Message::Relinquish {
                 config_id: self.config_id,
                 from: self.config.id,
@@ -485,7 +492,7 @@ impl RawNode {
             // allocator under an authority this node is actively exercising.
             || (self.role == NodeRole::Leader && self.ballot == ballot)
             // The allocator never moves backwards, whoever holds the ballot.
-            || next_slot < self.next_slot
+            || next_slot < self.proposer.next_slot()
             || next_slot < self.first_unchosen()
         {
             self.handoff.rejected_stale = self.handoff.rejected_stale.saturating_add(1);
@@ -501,7 +508,9 @@ impl RawNode {
         // static membership.
         let config = match (self.config.has_matchmakers(), config) {
             (false, None) => None,
-            (true, Some(config)) if config.members.iter().all(|m| self.in_pool(*m)) => Some(config),
+            (true, Some(config)) if config.members().iter().all(|m| self.in_pool(*m)) => {
+                Some(config)
+            }
             _ => {
                 self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
                 return;
@@ -518,7 +527,7 @@ impl RawNode {
         // exactly the runs that can least afford one.
         //
         // This mirrors the sender-side refusal in
-        // [`RawNode::can_relinquish`]: a handoff moves a *settled* leadership
+        // [`ColocatedNode::can_relinquish`]: a handoff moves a *settled* leadership
         // between nodes that are both in a position to keep it settled.
         // Refusing costs one ordinary election, which is precisely the
         // machinery the repair needs anyway.
@@ -547,25 +556,26 @@ impl RawNode {
             // over exactly the configuration the ballot was registered with.
             self.acceptors = config;
             self.acceptors_since = ballot;
+            self.record_membership();
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();
-        self.repair_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;
         self.election_gap_fills = 0;
-        self.next_slot = next_slot;
+        self.proposer.set_next_slot(next_slot);
         // A fresh leadership's beat sequence and read rounds, exactly as
         // `try_become_leader` resets them: acks must echo the current ballot,
-        // and no read captured under the predecessor may confirm here.
+        // and no read captured under the predecessor may confirm here. The
+        // inherited read fence: nothing the predecessor acked can sit above
+        // `next_slot - 1`, so no read confirms here until the chosen prefix
+        // covers it. Identical in meaning to a fresh leader's fence, and it is
+        // also what the fence deadline below watches.
         self.heartbeat_seq = 0;
-        self.read_rounds.clear();
-        self.quorum_elapsed = 0;
-        self.quorum_acked_by.clear();
-        if self.is_acceptor() {
-            self.quorum_acked_by.insert(me);
-        }
+        let fence = next_slot.0.checked_sub(1).map(Slot);
+        self.proposer
+            .open_authority(fence, self.is_acceptor().then_some(me));
         self.handoff.installed = self.handoff.installed.saturating_add(1);
 
         // Learn the decided part of the tail. Trusting the predecessor here is
@@ -589,11 +599,6 @@ impl RawNode {
             next_slot,
             RecoveryPolicy::Inherited,
         );
-        // The inherited read fence: nothing the predecessor acked can sit above
-        // `next_slot - 1`, so no read confirms here until the chosen prefix
-        // covers it. Identical in meaning to a fresh leader's fence, and it is
-        // also what the fence deadline below watches.
-        self.read_floor = self.next_slot.0.checked_sub(1).map(Slot);
         self.pump_leader_recovery();
 
         // Install postconditions, mirroring `try_become_leader`'s.
@@ -606,7 +611,7 @@ impl RawNode {
             "installing closes any campaign"
         );
         assert!(
-            self.next_slot >= self.first_unchosen(),
+            self.proposer.next_slot() >= self.first_unchosen(),
             "an inherited frontier sits at or past the chosen prefix"
         );
         // The durable half landed exactly on the inherited authority: the
@@ -617,7 +622,7 @@ impl RawNode {
             "an installed authority sits exactly at this node's promise"
         );
         assert!(
-            self.next_slot == next_slot,
+            self.proposer.next_slot() == next_slot,
             "an installed authority adopts the transferred frontier verbatim"
         );
     }
@@ -641,7 +646,8 @@ impl RawNode {
             return;
         }
         let covered = self
-            .read_floor
+            .proposer
+            .read_floor()
             .is_none_or(|fence| self.replica.chosen_index().is_some_and(|ci| ci >= fence));
         if covered {
             self.handoff_fence_elapsed = 0;

@@ -260,8 +260,15 @@ impl<T: TimeProvider> StorageFaults<T> {
         }
     }
 
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.enabled && self.time.now() < self.cutoff
+    }
+
+    /// This disk's whole-batch fsync-failure rate — the same location the
+    /// node's own `sync` draws on, so the matchmaker registry rides the
+    /// seed's write-path profile instead of inventing one.
+    pub(crate) fn fsync_fail(&self) -> f64 {
+        self.rates.fsync_fail
     }
 }
 

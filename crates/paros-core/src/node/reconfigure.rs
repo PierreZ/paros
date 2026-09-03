@@ -45,7 +45,7 @@
 //! took part in (its `on_prepare` guard is pool-based, never
 //! configuration-based) until GC retires those configurations (#123) —
 //! "removed" is not "shut down". A leader its own reconfiguration removed
-//! drives the change to completion and then resigns (`RawNode::tick`), so an
+//! drives the change to completion and then resigns (`ColocatedNode::tick`), so an
 //! ordinary election lands leadership inside `C_new`; the cooperative handoff
 //! is *not* used across a configuration change (a handoff continues the
 //! *same* ballot with no Phase 1, which is exactly what a configuration
@@ -58,11 +58,12 @@
 //! **without matchmakers refuses every reconfiguration**: plain Multi-Paxos
 //! is a permanent configuration, not a transitional one.
 
-use super::{NodeId, NodeRole, RawNode};
-use crate::matchmaker::AcceptorConfig;
+use super::{ColocatedNode, NodeId, NodeRole};
+use crate::matchmaker::RegistrationKind;
+use crate::membership::AcceptorConfig;
 use crate::types::Ballot;
 
-/// Why [`RawNode::reconfigure`] refused a request. Each is an operating
+/// Why [`ColocatedNode::reconfigure`] refused a request. Each is an operating
 /// condition (the caller retries or gives up), never a panic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconfigureRefusal {
@@ -88,7 +89,7 @@ pub enum ReconfigureRefusal {
     RoundExhausted,
 }
 
-/// The outcome of [`RawNode::reconfigure`].
+/// The outcome of [`ColocatedNode::reconfigure`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconfigureResult {
     /// This node is not the leader; the caller should retry the hinted node
@@ -104,7 +105,7 @@ pub enum ReconfigureResult {
     Started(Ballot),
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// Leader entry point for an **online reconfiguration**: move this
     /// leadership to a fresh ballot registered with `config` as its acceptor
     /// set. See the module doc for the flow, the accepted stall window, and
@@ -114,7 +115,7 @@ impl RawNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition — every refusal is a result value).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, members = config.members.len())))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, members = config.members().len())))]
     pub fn reconfigure(&mut self, config: &AcceptorConfig) -> ReconfigureResult {
         if self.role != NodeRole::Leader {
             return ReconfigureResult::NotLeader(self.leader);
@@ -125,7 +126,7 @@ impl RawNode {
         if !config.is_well_formed() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Malformed);
         }
-        if !config.members.iter().all(|m| self.in_pool(*m)) {
+        if !config.members().iter().all(|m| self.in_pool(*m)) {
             return ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember);
         }
         if *config == self.acceptors {
@@ -153,7 +154,7 @@ impl RawNode {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);
         }
         let previous = self.ballot;
-        self.campaign(Some(config.clone()));
+        self.campaign(RegistrationKind::Reconfiguration, config.clone());
         // Postconditions: a fresh ballot above the one this leadership held,
         // matchmaking open for it with `C_new`, and no Phase-1 or Phase-2
         // state left over from the old ballot (the stall is real).
@@ -168,7 +169,7 @@ impl RawNode {
         assert!(
             self.matchmaking
                 .as_ref()
-                .is_some_and(|m| m.config == *config && m.reconfiguration),
+                .is_some_and(|m| m.config == *config && m.kind.is_reconfiguration()),
             "a reconfiguration registers the requested configuration"
         );
         assert!(

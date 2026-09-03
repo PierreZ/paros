@@ -17,10 +17,13 @@
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
+use std::collections::BTreeMap;
+
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, Slot,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
+    RegistrationKind, Slot,
 };
 
 use crate::grpc::EdgeRejection;
@@ -52,6 +55,30 @@ pub struct Deployment {
     /// Every matchmaker a matchmaker-set reconfiguration may draw from
     /// (`Config::matchmaker_pool()`).
     pub matchmaker_pool: Vec<MatchmakerId>,
+}
+
+/// One `MatchB` page as it leaves a matchmaker: where it starts, the
+/// registrations it carries, where the next one starts (`None` when the
+/// answer is complete) and the durable watermark it was computed under.
+///
+/// A borrowed view, never an owned copy: the registry is the driver's own
+/// `BTreeMap` and an audit that made it allocate would be a port that
+/// changes the shipped program (AGENTS.md, *Audit doctrine*).
+pub struct HistoryPage<'a> {
+    /// Where this page starts — the request's cursor, floored at the
+    /// watermark.
+    pub from_ballot: Ballot,
+    /// The registrations it carries, in ballot order.
+    pub history: &'a BTreeMap<Ballot, Registration>,
+    /// Where the next page starts; `None` when the answer is complete.
+    pub next_from_ballot: Option<Ballot>,
+    /// The durable watermark in force when the page was computed.
+    pub gc_watermark: Ballot,
+    /// The matchmaker's durable effective configuration
+    /// (`MatchmakerHardState::effective`), reported beside the history: GC
+    /// drops the record, never the scalar, so a page whose window is empty
+    /// can still name the acceptor set in force.
+    pub effective: Option<&'a (Ballot, AcceptorConfig)>,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
@@ -213,6 +240,13 @@ pub trait Audit {
     /// server state advanced ([`DriverHooks::drop_client_reply`](crate::DriverHooks)).
     fn client_reply_dropped(&self, node: NodeId, reply: crate::hooks::Reply) {}
 
+    /// The driver deliberately re-queued this one reply so the node loop
+    /// folds it twice
+    /// ([`DriverHooks::duplicate_client_reply`](crate::DriverHooks)) — the
+    /// mirror of [`Audit::client_reply_dropped`], and the test of every
+    /// idempotency claim the matchmaker plane's answers rest on.
+    fn client_reply_duplicated(&self, node: NodeId, reply: crate::hooks::Reply) {}
+
     /// A snapshot install persisted while this node was a live Candidate — the
     /// #88 window (`on_install_snapshot` deliberately does not touch the
     /// election, so the campaign stays open across the install).
@@ -239,7 +273,7 @@ pub trait Audit {
     /// measure against it, never against a fixed count.
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {}
 
-    /// This node's logical clock ticked (`RawNode::tick`), once per driver
+    /// This node's logical clock ticked (`ColocatedNode::tick`), once per driver
     /// tick. The unit every core timeout is counted in.
     fn ticked(&self, node: NodeId) {}
 
@@ -317,6 +351,13 @@ pub trait Audit {
     ) {
     }
 
+    /// This node's store **refused** a repaired chunk of the decided snapshot
+    /// at `at`: every chunk the point still lacked arrived and every write
+    /// returned `Ok`, yet the store does not call the point whole. The pull
+    /// keeps asking — the point stays incomplete until a custodian serves
+    /// bytes the store accepts.
+    fn snap_chunk_rejected(&self, node: NodeId, at: Slot) {}
+
     /// This node answered a chunk request for a point it no longer retains
     /// with its full, more advanced snapshot (`Message::InstallSnapshot`) —
     /// the unchanged whole-blob fallback.
@@ -371,16 +412,16 @@ pub trait Audit {
     fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
 
     /// The gRPC edge refused an inbound request before it reached the node
-    /// loop — a checksum or decode failure on a client proposal or a peer
-    /// batch. The refusal is the transport's own integrity gate; nothing
-    /// inside the node changed.
+    /// loop — a peer message that decoded from the wire but not into a
+    /// `Message`. The refusal happens at the edge; nothing inside the node
+    /// changed.
     fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
 
     /// This candidate opened a matchmaking phase for `ballot`, registering
-    /// `config` (`C_b`) with every matchmaker; `reconfiguration` marks a
-    /// campaign opened by a reconfiguration request rather than the election
+    /// `config` (`C_b`) with every matchmaker; `kind` says whether the
+    /// campaign was opened by a reconfiguration request or by the election
     /// clock. Reported at the instant the phase opens, before any request is
     /// sent. Never fires on plain Multi-Paxos.
     fn matchmaking_started(
@@ -388,7 +429,7 @@ pub trait Audit {
         node: NodeId,
         ballot: Ballot,
         config: &AcceptorConfig,
-        reconfiguration: bool,
+        kind: RegistrationKind,
         generation: u64,
     ) {
     }
@@ -405,23 +446,49 @@ pub trait Audit {
     /// configuration other than the one its ordinary campaign registered for
     /// `ballot`: the campaign was abandoned and the configuration registered
     /// at `newest` — the effective configuration — adopted as the node's
-    /// belief (`RawNode::on_match_reply`, `StaleConfiguration`).
+    /// belief (`ColocatedNode::on_match_reply`, `StaleConfiguration`).
     fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
 
     /// This candidate's election clock fired while its matchmaking was still
     /// open and re-asked the unanswered matchmakers instead of abandoning the
-    /// campaign (`RawNode::tick`). `count` is the monotone total for this
+    /// campaign (`ColocatedNode::tick`). `count` is the monotone total for this
     /// incarnation; the campaign's ballot is unchanged.
     fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, count: u64) {}
 
     /// This candidate folded a `Registered` reply from `matchmaker` for
     /// `ballot`; `remaining` registrations are still needed for the quorum.
+    ///
+    /// `watermark` and `history_hash` name **which** answer was folded (a
+    /// matchmaker answers a re-sent request again, from a registry a floor
+    /// may have been raised on in between, so the copies differ). Without
+    /// them an oracle can only ask whether *some* choice of one copy per
+    /// matchmaker explains the campaign's union — a cartesian product over
+    /// the copies, superlinear and strictly weaker than the point check the
+    /// candidate itself can report.
     fn match_registered_by(
         &self,
         node: NodeId,
         matchmaker: MatchmakerId,
         ballot: Ballot,
         remaining: usize,
+        watermark: Ballot,
+        history_hash: u64,
+    ) {
+    }
+
+    /// This candidate folded a `Registered` page from `matchmaker` for
+    /// `ballot` that was **not** the last one: the registration does not
+    /// count toward the quorum yet, and the next page is asked for from
+    /// `next`. `watermark` and `history_hash` name the page, exactly as
+    /// [`Audit::match_registered_by`] names the terminal one.
+    fn match_paged(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        next: Ballot,
+        watermark: Ballot,
+        history_hash: u64,
     ) {
     }
 
@@ -527,7 +594,7 @@ pub trait Audit {
     fn reconfigurer_resend_skipped(&self, node: NodeId) {}
 
     /// This node abandoned a handover whose running phase made no progress
-    /// for `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (a member that
+    /// for `reconfigure_timeout_elections` election timeouts (a member that
     /// never answers); the frozen generation stays for the next node that
     /// meets it to finish.
     fn reconfigurer_aborted(&self, node: NodeId) {}
@@ -558,9 +625,12 @@ pub trait Audit {
     }
 
     /// This node answered an operator `Retire` request: accepted (the node
-    /// shuts down for good at its next tick) or refused because it is still
-    /// a member of the configuration it believes in force.
-    fn retire_acked(&self, node: NodeId, accepted: bool) {}
+    /// shuts down for good at its next tick) or refused, with `refusal`
+    /// naming the leg that refused it — `"plain"`, `"leader"`, `"member"`,
+    /// or `"not_collected"` (the request carried no GC watermark above this
+    /// node's membership fence, so nothing proves the cluster is done with
+    /// it). Empty when accepted.
+    fn retire_acked(&self, node: NodeId, accepted: bool, refusal: &str) {}
 
     /// This node is shutting down for good, retired by its operator after a
     /// leader's garbage collection named it retirable.
@@ -577,8 +647,27 @@ pub trait Audit {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &[(Ballot, Registration)],
+        registry: &BTreeMap<Ballot, Registration>,
         gc_watermark: Ballot,
+    ) {
+    }
+
+    /// This node's handover closed its freeze: a quorum of `generation`
+    /// answered, and `bootstrap` is the reconstruction now on its way to
+    /// every proposed member of the successor. Reported on the driver beat
+    /// that closes the freeze, never on the ack that completed the quorum
+    /// (#125, review finding P5).
+    ///
+    /// `disagreements` counts the ballots two frozen registries reported
+    /// with different registrations: the union keeps one, *durably*, so the
+    /// count is what makes "a reconstruction sees one registration per
+    /// ballot" a checkable claim rather than a silent narrowing.
+    fn reconfigurer_reconstructed(
+        &self,
+        node: NodeId,
+        generation: u64,
+        bootstrap: &PendingBootstrap,
+        disagreements: u64,
     ) {
     }
 
@@ -594,13 +683,16 @@ pub trait Audit {
 
     /// This matchmaker durably activated a successor generation (after the
     /// fsync): `set` is the new set, `gc_watermark` the reconstructed floor,
-    /// and `registry` the reconstructed registry it now serves from.
+    /// `effective` the inherited effective configuration (the maximum of the
+    /// local and the reconstructed one) and `registry` the reconstructed
+    /// registry it now serves from.
     fn matchmaker_activated(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         gc_watermark: Ballot,
-        registry: &[(Ballot, Registration)],
+        effective: Option<&(Ballot, AcceptorConfig)>,
+        registry: &BTreeMap<Ballot, Registration>,
     ) {
     }
 
@@ -647,8 +739,7 @@ pub trait Audit {
         to: NodeId,
         ballot: Ballot,
         generation: u64,
-        history: &[(Ballot, Registration)],
-        gc_watermark: Ballot,
+        page: &HistoryPage<'_>,
     ) {
     }
 

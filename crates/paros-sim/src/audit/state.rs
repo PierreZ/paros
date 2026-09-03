@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -44,9 +44,13 @@ pub(super) struct DeposedStreak {
     pub(super) deposed: bool,
     /// Ticks this node has run while `deposed` held.
     pub(super) ticks: u64,
-    /// Whether a beat at this ballot was seen since the last tick: a leader
-    /// beats every tick, so a tick with no beat means it stepped down.
-    pub(super) beat_since_tick: bool,
+    /// Consecutive ticks with no beat observed at this ballot. A leader beats
+    /// every [`paros::HEARTBEAT_TICKS`] ticks, so more than one whole beat
+    /// period of silence means it stepped down — but *one* period of silence
+    /// does not: the send seam's `drop_outgoing` skips `Audit::sent`, so a
+    /// fully dropped beat is invisible here, and a single beatless tick used
+    /// to close the streak and hand a zombie leader a fresh budget.
+    pub(super) beatless_ticks: u64,
 }
 
 /// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
@@ -383,7 +387,7 @@ pub(super) struct AuditState {
     pub(super) handoff_carried_tail: bool,
     /// Leadership was handed over more than once in this run. Distinct
     /// authorities: one authority is handed on at most once (see
-    /// `RawNode::can_relinquish`'s *One hop only*).
+    /// `ColocatedNode::can_relinquish`'s *One hop only*).
     pub(super) handoff_repeated: bool,
     /// A refusal path fired: wrong addressee/non-member, stale authority, or a
     /// malformed tail.
@@ -426,6 +430,20 @@ pub(super) struct AuditState {
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
     pub(super) edge_rejected: bool,
+    /// Chunk repairs the store refused after every write returned `Ok`, and
+    /// the last point one was refused at — the dynamic context the reachable
+    /// gate itself cannot carry (`assert_reachable!` takes only a message).
+    pub(super) snap_chunks_rejected: u64,
+    pub(super) snap_chunk_rejected_at: Option<u64>,
+    pub(super) snap_chunk_rejected: bool,
+    /// A matchmaker-plane reply the node loop folded twice, per kind
+    /// (`Match`, `GcAck`, `MatchmakerReconfigure`).
+    pub(super) reply_duplicated: [bool; 3],
+    /// A `Retire` refused because no effective GC floor sat above the target's
+    /// membership fence (#123's `not_collected` leg).
+    pub(super) retire_not_collected: bool,
+    /// A `Retire` refused because the target was the sitting leader.
+    pub(super) retire_leader: bool,
     pub(super) redirect_dropped: bool,
     pub(super) duplicated_any: bool,
     pub(super) duplicated_quorum_kind: bool,
@@ -560,16 +578,21 @@ impl AuditState {
         let Some(prior) = self.prior_of(ballot) else {
             return;
         };
-        let senders = self.promise_senders.get(&(ballot.round, ballot.node.0));
+        // The promise quorum the candidate holds: every matchmaker-reported
+        // promise sender, plus its own (a candidate promises itself). Judged
+        // by each prior configuration's own quorum system — the same
+        // predicate the core's Phase-1 completion asks — rather than
+        // re-derived here as arithmetic; a sender outside a configuration
+        // never counts toward it.
+        let mut promised: BTreeSet<paros::NodeId> = self
+            .promise_senders
+            .get(&(ballot.round, ballot.node.0))
+            .map(|s| s.iter().map(|n| paros::NodeId(*n)).collect())
+            .unwrap_or_default();
+        promised.insert(ballot.node);
         let uncovered = prior
             .iter()
-            .filter(|c| {
-                let own = usize::from(c.contains(ballot.node));
-                let answered = senders.map_or(0, |s| {
-                    s.iter().filter(|n| c.contains(paros::NodeId(**n))).count()
-                });
-                own + answered < c.quorum_size()
-            })
+            .filter(|c| !c.has_phase1_quorum(&promised))
             .count();
         assert_always!(
             uncovered == 0,
@@ -847,14 +870,11 @@ impl AuditState {
         let config = self.config_of(ballot).cloned();
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
-        let quorum = config.as_ref().map(AcceptorConfig::quorum_size);
-        let votes = config.as_ref().map_or(0, |c| {
-            holders
-                .iter()
-                .filter(|n| c.contains(paros::NodeId(**n)))
-                .count()
-        });
-        if quorum.is_some_and(|q| votes >= q) {
+        let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
+        if config
+            .as_ref()
+            .is_some_and(|c| c.has_phase2_quorum(&voters))
+        {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -907,12 +927,13 @@ impl AuditState {
         let Some(config) = self.config_of(ballot).cloned() else {
             return;
         };
-        let majority = config.quorum_size();
-        let above = self
+        let above: BTreeSet<paros::NodeId> = self
             .promised
             .iter()
-            .filter(|(n, p)| config.contains(paros::NodeId(**n)) && **p > ballot)
-            .count();
+            .filter(|(_, p)| **p > ballot)
+            .map(|(n, _)| paros::NodeId(*n))
+            .collect();
+        let outvoted = config.has_phase1_quorum(&above);
         let entry = self.deposed_streaks.entry(node).or_default();
         if entry.round != ballot.round || entry.node != ballot.node.0 {
             *entry = DeposedStreak {
@@ -921,14 +942,14 @@ impl AuditState {
                 seq,
                 deposed: false,
                 ticks: 0,
-                beat_since_tick: false,
+                beatless_ticks: 0,
             };
         } else if entry.seq == seq {
             return;
         }
         entry.seq = seq;
-        entry.beat_since_tick = true;
-        if above >= majority {
+        entry.beatless_ticks = 0;
+        if outvoted {
             entry.deposed = true;
         } else {
             entry.deposed = false;
@@ -942,13 +963,15 @@ impl AuditState {
         let Some(entry) = self.deposed_streaks.get_mut(&node) else {
             return;
         };
-        if !entry.beat_since_tick {
-            // No beat this tick: the leadership is over (a leader beats every
-            // tick), so the streak is closed.
+        entry.beatless_ticks += 1;
+        if entry.beatless_ticks > HEARTBEAT_TICKS {
+            // More than one whole beat period without a beat: the leadership
+            // is over, so the streak is closed. Exactly one period of silence
+            // is tolerated because a beat can be lost at the send seam
+            // without the audit ever seeing it.
             self.deposed_streaks.remove(&node);
             return;
         }
-        entry.beat_since_tick = false;
         if !entry.deposed {
             return;
         }

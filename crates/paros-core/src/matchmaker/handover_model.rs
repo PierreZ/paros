@@ -64,6 +64,10 @@ const ABANDON_TICKS: u64 = 12;
 /// starving the handover it is meant to exercise).
 const MAILBOX: usize = 96;
 
+/// The bounded drain that empties the network before the converged state is
+/// judged: the recovery tail's last probe leaves replies in flight.
+const DRAIN_STEPS: usize = 4_000;
+
 /// A seeded `splitmix64`: deterministic, dependency-free.
 struct Rng(u64);
 
@@ -226,6 +230,28 @@ struct Reach {
     republished: u64,
     /// A reconfigurer was killed while a decree it opened was in flight.
     killed_deciding: u64,
+    /// A matchmaker dropped a pending bootstrap the chosen successor
+    /// settled, without activating anything (review finding P6).
+    pruned_losing_bootstrap: u64,
+    /// A generation was activated carrying an effective configuration
+    /// inherited from the one it replaced (review finding P1).
+    inherited_effective: u64,
+    /// A `finish` closed its freeze with fewer members than the generation
+    /// it replaces — the ratchet review finding P5 is about, now bounded by
+    /// the driver's cadence instead of by the quorum-completing ack.
+    finish_shrank_the_set: u64,
+    /// A batch reached the disk **torn**: a prefix of its writes landed and
+    /// the matchmaker died before the rest. A real fsync does not tear a
+    /// batch in the middle, but a driver that persists op by op and dies
+    /// between two of them does, and that is the shape the crash seams
+    /// could not produce (they lose or keep the batch whole).
+    crash_torn_prefix: u64,
+    /// An activation whose *own* watermark was above the reconstruction's,
+    /// so the max rule in `Matchmaker::activate` fired on the local side.
+    activated_with_local_floor: u64,
+    /// Two matchmakers were active for two different generations at once —
+    /// a half-completed handover, the state every discovery rule exists for.
+    concurrent_generations: u64,
 }
 
 impl Reach {
@@ -242,6 +268,15 @@ impl Reach {
             ("activated_after_restart", self.activated_after_restart),
             ("republished", self.republished),
             ("killed_deciding", self.killed_deciding),
+            ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
+            ("inherited_effective", self.inherited_effective),
+            ("finish_shrank_the_set", self.finish_shrank_the_set),
+            ("crash_torn_prefix", self.crash_torn_prefix),
+            (
+                "activated_with_local_floor",
+                self.activated_with_local_floor,
+            ),
+            ("concurrent_generations", self.concurrent_generations),
         ];
         for (name, count) in counters {
             assert!(
@@ -264,6 +299,10 @@ struct Ledger {
     votes: BTreeMap<MatchmakerGeneration, BTreeSet<(MatchmakerId, Ballot, Vec<MatchmakerId>)>>,
     /// Per generation: how many matchmakers activated its chosen successor.
     activations: BTreeMap<MatchmakerGeneration, BTreeSet<MatchmakerId>>,
+    /// Per generation: every effective configuration durably held as that
+    /// generation's, and by whom (the scalar the GC watermark never
+    /// collects).
+    effectives: BTreeMap<MatchmakerGeneration, BTreeMap<Ballot, BTreeSet<MatchmakerId>>>,
 }
 
 impl Ledger {
@@ -319,6 +358,41 @@ impl Ledger {
         );
     }
 
+    /// Invariant: **the effective configuration crosses a generation
+    /// boundary**. Every ballot a majority of `M_generation` durably holds
+    /// as its effective configuration is at or below the one the successor
+    /// activated: a handover's stop quorum intersects that majority, and
+    /// the reconstruction takes the maximum. Without it a handover would
+    /// forget the acceptor set in force exactly as an unbounded GC did
+    /// (review finding P1) — the record is not in the reconstructed
+    /// registry when the floor already rose over it.
+    fn assert_effective_preserved(
+        &self,
+        generation: MatchmakerGeneration,
+        activated: Option<&(Ballot, AcceptorConfig)>,
+    ) {
+        let old = self
+            .members_of(generation)
+            .expect("a succeeded generation was authoritative");
+        let Some(held) = self.effectives.get(&generation) else {
+            return;
+        };
+        for (ballot, holders) in held {
+            let held_by_members = holders.iter().filter(|m| old.contains(**m)).count();
+            if held_by_members < old.quorum_size() {
+                continue;
+            }
+            assert!(
+                activated.is_some_and(|(activated, _)| *activated >= *ballot),
+                "an activated generation inherits the effective configuration: generation {} held {:?} by {:?}, activated {:?}",
+                generation.0,
+                ballot,
+                holders,
+                activated.map(|(b, _)| *b)
+            );
+        }
+    }
+
     /// Invariant 3: the registry activated for `generation.next()` with
     /// `watermark` carries every registration of `generation` a majority of
     /// `M_generation` durably holds at or above `watermark`.
@@ -360,6 +434,10 @@ struct World {
     reach: Reach,
     /// Whether faults are still being injected.
     chaos: bool,
+    /// The smallest target an explicit `start` ever proposed. A `finish`
+    /// proposes the members that answered a freeze — a quorum of the old
+    /// set at least — so only an operator can take the set below that.
+    smallest_started: Option<usize>,
 }
 
 impl World {
@@ -400,6 +478,7 @@ impl World {
             ledger,
             reach: Reach::default(),
             chaos: true,
+            smallest_started: None,
         }
     }
 
@@ -411,8 +490,29 @@ impl World {
         &mut self.nodes[usize::try_from(id.0).expect("index")]
     }
 
+    /// Pending bootstraps on `id`'s disk that a chosen `successor` settles:
+    /// at or below its generation and not the successor itself.
+    fn settled_pending(&self, id: MatchmakerId, successor: &MatchmakerSet) -> usize {
+        self.sites[usize::try_from(id.0).expect("index")]
+            .disk
+            .hard_state
+            .pending
+            .iter()
+            .filter(|p| p.set.generation <= successor.generation && p.set != *successor)
+            .count()
+    }
+
+    /// The generation `id`'s disk stands at.
+    fn disk_generation(&self, id: MatchmakerId) -> MatchmakerGeneration {
+        self.sites[usize::try_from(id.0).expect("index")]
+            .disk_set()
+            .generation
+    }
+
     fn queue_requests(&mut self, from: NodeId) {
-        let requests = self.node(from).reconfigurer.take_requests();
+        let ready = self.node(from).reconfigurer.ready();
+        let requests = ready.requests().to_vec();
+        ready.advance();
         for (to, request) in requests {
             self.send(Envelope::Reconfigure { to, request });
         }
@@ -434,6 +534,20 @@ impl World {
     fn persist(&mut self, id: MatchmakerId, writes: &[MatchmakerWriteOp]) {
         let generation_before = self.site(id).disk_set().generation;
         for op in writes {
+            // Whether an activation's *own* floor is the one that survives:
+            // `Matchmaker::activate` installs the maximum of the local
+            // watermark and the reconstruction's, and only the pre-install
+            // disk knows which was which.
+            let local_floor_won = match op {
+                MatchmakerWriteOp::InstallRegistry { scalars, .. } => {
+                    let disk = &self.site(id).disk.hard_state;
+                    disk.pending
+                        .iter()
+                        .find(|p| p.set.generation == scalars.generation)
+                        .is_some_and(|p| p.gc_watermark < scalars.gc_watermark)
+                }
+                _ => false,
+            };
             self.site(id).disk.apply(op);
             match op {
                 MatchmakerWriteOp::Register {
@@ -463,6 +577,9 @@ impl World {
                     scalars,
                     registrations,
                 } => {
+                    if local_floor_won {
+                        self.reach.activated_with_local_floor += 1;
+                    }
                     let set = MatchmakerSet {
                         generation: scalars.generation,
                         members: scalars.members.clone(),
@@ -475,6 +592,11 @@ impl World {
                         scalars.gc_watermark,
                         registrations,
                     );
+                    self.ledger
+                        .assert_effective_preserved(succeeded, scalars.effective.as_ref());
+                    if scalars.effective.is_some() {
+                        self.reach.inherited_effective += 1;
+                    }
                     self.ledger
                         .activations
                         .entry(succeeded)
@@ -495,6 +617,16 @@ impl World {
         let set = site.disk_set();
         let phase = site.disk_phase();
         let successor = site.disk.hard_state.successor.clone();
+        let effective = site.disk.hard_state.effective.clone();
+        if let Some((ballot, _)) = effective {
+            self.ledger
+                .effectives
+                .entry(set.generation)
+                .or_default()
+                .entry(ballot)
+                .or_default()
+                .insert(id);
+        }
         if phase == MatchmakerPhase::Active || phase == MatchmakerPhase::Stopped {
             self.ledger.observe_authoritative(&set, "disk");
         }
@@ -515,6 +647,18 @@ impl World {
         match envelope {
             Envelope::Reconfigure { to, request } => {
                 let from = request.from();
+                // Review finding P6: a `Chosen` settles every competing
+                // proposal at or below the successor's generation. What is
+                // counted is the *prune*, not the activation: the generation
+                // is unchanged, so nothing was activated, and the durable
+                // pending list shrank anyway.
+                let published = match &request {
+                    ReconfigureRequest::Chosen { successor, .. } => Some(successor.clone()),
+                    _ => None,
+                };
+                let before = published
+                    .as_ref()
+                    .map(|s| (self.settled_pending(to, s), self.disk_generation(to)));
                 self.at_matchmaker(
                     to,
                     |mm| mm.step_reconfigure(request),
@@ -529,6 +673,12 @@ impl World {
                             .collect()
                     },
                 );
+                if let (Some(successor), Some((settled, generation))) = (published, before)
+                    && self.disk_generation(to) == generation
+                    && self.settled_pending(to, &successor) < settled
+                {
+                    self.reach.pruned_losing_bootstrap += 1;
+                }
             }
             Envelope::Register { to, request } => {
                 self.at_matchmaker(
@@ -576,6 +726,14 @@ impl World {
         let crash_before = chaos && self.rng.chance(1, 120);
         let crash_between = chaos && self.rng.chance(1, 120);
         let crash_after = chaos && self.rng.chance(1, 200);
+        // A batch that reaches the disk torn: a prefix of its writes lands
+        // and the matchmaker dies before the rest. The three crash seams
+        // above keep a batch whole (lost, or durable); a driver that
+        // persists op by op and dies between two of them does not, and the
+        // core's own ordering — a scalar write staged before the record it
+        // covers, an `InstallRegistry` that must be one write — is exactly
+        // what that shape tests.
+        let crash_torn = chaos && self.rng.chance(1, 90);
         let site = self.site(to);
         let Some(mm) = site.live.as_mut() else {
             // Down: the message is lost.
@@ -590,6 +748,14 @@ impl World {
             // The batch dies whole before it is durable, no reply leaves.
             site.live = None;
             self.reach.crash_before_persist += 1;
+            return;
+        }
+        if crash_torn && writes.len() > 1 {
+            let landed = 1 + usize::try_from(self.rng.below(writes.len() as u64 - 1))
+                .expect("a page index fits");
+            self.persist(to, &writes[..landed]);
+            self.site(to).live = None;
+            self.reach.crash_torn_prefix += 1;
             return;
         }
         self.persist(to, &writes);
@@ -677,7 +843,9 @@ impl World {
                     self.republish(to, reply.matchmaker, &believed);
                 }
             }
-            MatchRefusal::Stale { .. } | MatchRefusal::BelowWatermark { .. } => {}
+            MatchRefusal::Stale { .. }
+            | MatchRefusal::BelowWatermark { .. }
+            | MatchRefusal::Malformed => {}
         }
     }
 
@@ -706,12 +874,19 @@ impl World {
 
     fn start_handover(&mut self, node: NodeId) {
         let target = self.random_target();
+        let size = target.len();
         let believed = self.node(node).believed.clone();
         let started = self
             .node(node)
             .reconfigurer
             .start(&believed, target)
             .is_ok();
+        if started {
+            // An operator may deliberately shrink the set; a `finish` may
+            // not (see `assert_converged`).
+            self.smallest_started =
+                Some(self.smallest_started.map_or(size, |s: usize| s.min(size)));
+        }
         if std::env::var("HANDOVER_MODEL_TRACE").is_ok() {
             eprintln!(
                 "start node={} believed_gen={} started={started} busy_phase={:?}",
@@ -738,7 +913,14 @@ impl World {
         let offset = self.rng.below(2);
         let members: Vec<NodeId> = (0..3).map(|i| NodeId(i + offset)).collect();
         let config = AcceptorConfig::new(members, QuorumSystem::Majority);
-        let request = MatchRequest::new(node, ballot, config, believed.generation);
+        // Some registrations are an operator's *reconfiguration*, which is
+        // what raises the matchmakers' effective-configuration scalar — the
+        // fact a handover must carry across the generation boundary.
+        let request = if self.rng.chance(1, 3) {
+            MatchRequest::reconfigure(node, ballot, config, believed.generation)
+        } else {
+            MatchRequest::new(node, ballot, config, believed.generation)
+        };
         for m in believed.members {
             self.send(Envelope::Register {
                 to: m,
@@ -806,6 +988,23 @@ impl World {
                 n.backoff -= 1;
                 continue;
             }
+            // The driver's beat closes a completed freeze (review finding
+            // P5): the quorum-completing ack only counts, and every
+            // straggler that arrives before this beat widens the
+            // reconstruction — and a finish's proposal.
+            let n = self.node(node);
+            let was = n.reconfigurer.old().map(|s| s.members.len());
+            let shrank =
+                n.reconfigurer
+                    .close_stop()
+                    .zip(was)
+                    .is_some_and(|(reconstruction, len)| {
+                        reconstruction.bootstrap.set.members.len() < len
+                    });
+            if shrank {
+                self.reach.finish_shrank_the_set += 1;
+            }
+            let n = self.node(node);
             n.reconfigurer.resend();
             self.queue_requests(node);
         }
@@ -960,7 +1159,7 @@ impl World {
             let member = top_set.contains(MatchmakerId(i as u64));
             if member {
                 assert!(
-                    live.phase() == MatchmakerPhase::Active && live.set() == *top_set,
+                    live.phase() == MatchmakerPhase::Active && *live.set() == *top_set,
                     "seed {seed}: after quiescence every member of the top generation {} is active for it; mm{i} is {:?} at {:?}{}",
                     top.0,
                     live.phase(),
@@ -982,6 +1181,44 @@ impl World {
                     self.dump()
                 );
             }
+        }
+        // Review finding P5: a `finish` proposes the members that answered
+        // its freeze — a quorum of the generation it replaces, never fewer —
+        // so nothing but an operator's explicit target can take the set
+        // below the bootstrap's own quorum. Closing the freeze on the
+        // quorum-completing ack made every finish propose exactly that
+        // quorum, and a run of them ratcheted five members to three to two.
+        let bootstrap_quorum = usize::try_from(BOOTSTRAP).expect("pool fits") / 2 + 1;
+        let floor = self
+            .smallest_started
+            .map_or(bootstrap_quorum, |started| started.min(bootstrap_quorum));
+        assert!(
+            top_set.members.len() >= floor,
+            "seed {seed}: the top generation {} keeps at least {floor} members; it has {:?}{}",
+            top.0,
+            top_set.members,
+            self.dump()
+        );
+        for (i, site) in self.sites.iter().enumerate() {
+            let live = site.live.as_ref().expect("quiescence boots everything");
+            // Review finding P6: every proposal at or below the top
+            // generation is settled — the chosen ones were activated, the
+            // losing ones pruned by the learn path — so no matchmaker still
+            // carries one in its durable scalars.
+            assert!(
+                live.hard_state()
+                    .pending
+                    .iter()
+                    .all(|p| p.set.generation > *top),
+                "seed {seed}: no matchmaker keeps a pending bootstrap settled by the top generation {}; mm{i} holds {:?}{}",
+                top.0,
+                live.hard_state()
+                    .pending
+                    .iter()
+                    .map(|p| (p.set.generation.0, p.set.members.clone()))
+                    .collect::<Vec<_>>(),
+                self.dump()
+            );
         }
         for (i, node) in self.nodes.iter().enumerate() {
             assert!(
@@ -1032,6 +1269,15 @@ impl World {
             self.quiet_step(step);
             self.check_all();
         }
+        // Judge the converged state on an empty network: the last probe's
+        // republications are in flight, and a matchmaker left behind learns
+        // the top generation from them.
+        let mut guard = 0;
+        while !self.network.is_empty() && guard < DRAIN_STEPS {
+            self.deliver_random();
+            self.check_all();
+            guard += 1;
+        }
         self.assert_converged(seed);
         if self
             .ledger
@@ -1049,33 +1295,35 @@ impl World {
         for i in 0..POOL {
             self.check_disk(MatchmakerId(i));
         }
+        // A half-completed handover: two matchmakers serving two different
+        // generations at once. Everything the discovery rules exist for
+        // (the `Generation` refusal, the republication, the successor a
+        // frozen member points at) is reachable only from here.
+        let generations: BTreeSet<MatchmakerGeneration> = self
+            .sites
+            .iter()
+            .filter(|site| site.disk_phase() == MatchmakerPhase::Active)
+            .map(|site| site.disk_set().generation)
+            .collect();
+        if generations.len() > 1 {
+            self.reach.concurrent_generations += 1;
+        }
     }
 }
 
 impl Site {
+    /// What a boot from this disk would resolve to — the core's own rule
+    /// ([`super::resolved_set`]), not a second copy of it.
     fn disk_set(&self) -> MatchmakerSet {
-        let hs = &self.disk.hard_state;
-        if hs.generation == MatchmakerGeneration(0) && hs.members.is_empty() {
-            MatchmakerSet::new(MatchmakerGeneration(0), self.config.bootstrap.clone())
-        } else {
-            MatchmakerSet {
-                generation: hs.generation,
-                members: hs.members.clone(),
-            }
-        }
+        super::resolved_set(&self.disk.hard_state, &self.config.bootstrap)
     }
 
     fn disk_phase(&self) -> MatchmakerPhase {
-        match self.disk.hard_state.phase {
-            MatchmakerPhase::Fresh => {
-                if self.config.bootstrap.contains(&self.config.id) {
-                    MatchmakerPhase::Active
-                } else {
-                    MatchmakerPhase::Inactive
-                }
-            }
-            phase => phase,
-        }
+        super::resolved_phase(
+            &self.disk.hard_state,
+            self.config.id,
+            &self.config.bootstrap,
+        )
     }
 }
 
@@ -1105,9 +1353,144 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.activated_after_restart += reach.activated_after_restart;
         total.republished += reach.republished;
         total.killed_deciding += reach.killed_deciding;
+        total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
+        total.inherited_effective += reach.inherited_effective;
+        total.finish_shrank_the_set += reach.finish_shrank_the_set;
+        total.crash_torn_prefix += reach.crash_torn_prefix;
+        total.activated_with_local_floor += reach.activated_with_local_floor;
+        total.concurrent_generations += reach.concurrent_generations;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();
+}
+
+/// The reviewer's directed two-finisher case: `M_0 = {A, B, C}` is frozen
+/// and its reconfigurer gone. Two nodes meet it and finish it — one hears
+/// `{A, B}`, the other `{B, C}` — so they propose **different** well-formed
+/// successors over the same generation. The decree serializes them: exactly
+/// one set is authoritative for generation 1, the loser's Phase 1 finds the
+/// winner's vote and proposes it (P2c), and both nodes end up believing the
+/// same set.
+///
+/// The seeded campaign reaches this shape by luck; naming it pins the one
+/// interleaving where the two proposals are incompatible and both quorums
+/// exist.
+#[test]
+fn two_finishers_with_different_stop_quorums_choose_one_successor() {
+    let mut world = World::new(2_000);
+    world.chaos = false;
+    let (a, b, c) = (MatchmakerId(0), MatchmakerId(1), MatchmakerId(2));
+    let (f1, f2) = (NodeId(0), NodeId(1));
+    let believed = world.node(f1).believed.clone();
+    assert_eq!(believed.members, vec![a, b, c]);
+    world.node(f1).reconfigurer.finish(&believed).expect("f1");
+    world.node(f2).reconfigurer.finish(&believed).expect("f2");
+    world.queue_requests(f1);
+    world.queue_requests(f2);
+    // F1 reaches only A and B, F2 only B and C: two different stop quorums
+    // of the same generation.
+    let reachable = |from: NodeId, to: MatchmakerId| {
+        if from == f1 {
+            to == a || to == b
+        } else {
+            to == b || to == c
+        }
+    };
+    let mut pending: Vec<Envelope> = std::mem::take(&mut world.network);
+    while let Some(envelope) = pending.first().cloned() {
+        pending.remove(0);
+        match &envelope {
+            Envelope::Reconfigure { to, request } if !reachable(request.from(), *to) => {}
+            _ => world.deliver(envelope),
+        }
+        pending.append(&mut std::mem::take(&mut world.network));
+    }
+    // Each closes its own freeze on its own beat, with what answered it.
+    let first = world
+        .node(f1)
+        .reconfigurer
+        .close_stop()
+        .expect("f1 froze a quorum");
+    let second = world
+        .node(f2)
+        .reconfigurer
+        .close_stop()
+        .expect("f2 froze a quorum");
+    assert_eq!(first.bootstrap.set.members, vec![a, b]);
+    assert_eq!(second.bootstrap.set.members, vec![b, c]);
+    assert_ne!(first.bootstrap.set, second.bootstrap.set);
+    // From here the partition heals and the recovery tail runs both
+    // finishers to completion — including the discovery a losing node needs
+    // (its own probe meets a frozen member that names the successor).
+    for step in 0..400 {
+        world.quiet_step(step);
+    }
+    world.check_all();
+    let chosen = world
+        .ledger
+        .authoritative
+        .get(&MatchmakerGeneration(1))
+        .expect("one successor is chosen")
+        .clone();
+    assert!(
+        chosen == first.bootstrap.set || chosen == second.bootstrap.set,
+        "the chosen set is one of the two proposals: {chosen:?}"
+    );
+    // `observe_authoritative` already asserted there is only one; both
+    // finishers must have converged on it.
+    for node in [f1, f2] {
+        assert_eq!(
+            world.node(node).believed,
+            chosen,
+            "the loser adopts the winner"
+        );
+    }
+}
+
+/// Review finding P5, the other half: closing the freeze on the
+/// quorum-completing ack made every `finish` propose exactly `quorum(M_g)`
+/// members — a five-member set became three, then two, then one, each
+/// handover halving the fault tolerance with nobody asking. The freeze now
+/// closes on the driver's beat, so a third member answering before that
+/// beat is part of the proposal.
+#[test]
+fn a_straggler_that_answers_before_the_close_widens_the_finish() {
+    let mut world = World::new(0);
+    world.chaos = false;
+    let node = NodeId(0);
+    let believed = world.node(node).believed.clone();
+    assert_eq!(believed.members.len(), 3);
+    assert_eq!(believed.quorum_size(), 2);
+    world
+        .node(node)
+        .reconfigurer
+        .finish(&believed)
+        .expect("finish");
+    world.queue_requests(node);
+    // Every freeze answer arrives, and none of them closes the phase: the
+    // quorum is a floor, not a deadline.
+    while !world.network.is_empty() {
+        let envelope = world.network.remove(0);
+        world.deliver(envelope);
+    }
+    assert!(matches!(
+        world.node(node).reconfigurer.phase(),
+        ReconfigurerPhase::Stopping { .. }
+    ));
+    assert!(world.node(node).reconfigurer.stop_quorum_reached());
+    let reconstruction = world
+        .node(node)
+        .reconfigurer
+        .close_stop()
+        .expect("the quorum closes on the beat");
+    assert_eq!(
+        reconstruction.bootstrap.set.members, believed.members,
+        "every member that answered the freeze is in the finish's proposal"
+    );
+    assert_eq!(
+        reconstruction.disagreements, 0,
+        "no two frozen registries disagreed on a ballot"
+    );
 }
 
 /// The reviewer's directed case: `M_0 = {A, B, C}`; the stop quorum `{A, B}`
@@ -1115,6 +1498,12 @@ fn handover_holds_under_seeded_chaos_and_converges() {
 /// finishes with `{A, B}`; `A` then disappears; `C`'s late stop reply
 /// arrives. The successor is `{A, B}` with the union of both histories, and
 /// the late reply changes nothing.
+///
+/// This is the *narrow* half of review finding P5, and it is narrow only
+/// because `C` never answers at all: the freeze closes on a driver beat
+/// (`tick_nodes`), so an ack that arrives before that beat widens both the
+/// reconstruction and the proposal — see
+/// [`a_straggler_that_answers_before_the_close_widens_the_finish`].
 #[test]
 fn finish_with_a_partial_quorum_and_a_late_straggler() {
     let mut world = World::new(0);
@@ -1382,7 +1771,12 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                                     .start(&believed, vec![MatchmakerId(3)])
                                     .expect("start");
                             }
-                            world.node(reconfigurer_node).reconfigurer.take_requests();
+                            {
+                                let ready = world.node(reconfigurer_node).reconfigurer.ready();
+                                let requests = ready.requests().to_vec();
+                                ready.advance();
+                                requests
+                            };
                             let stop = ReconfigureRequest::Stop {
                                 from: reconfigurer_node,
                                 generation: MatchmakerGeneration(0),
@@ -1430,6 +1824,9 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                                 .network
                                 .retain(|e| !matches!(e, Envelope::Reconfigure { .. }));
                         }
+                        // The driver's beat closes the freeze once its
+                        // quorum answered (review finding P5).
+                        world.node(reconfigurer_node).reconfigurer.close_stop();
                         let phase = world.node(reconfigurer_node).reconfigurer.phase().clone();
                         let ReconfigurerPhase::Bootstrapping { bootstrap, .. } = phase else {
                             panic!(

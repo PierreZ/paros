@@ -5,10 +5,10 @@
 //! it broke instead of surfacing as a rare seed.
 
 use super::{
-    ClientId, ClientSeq, Command, ConfigId, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
-    LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, ProposeResult, RawNode, Slot,
-    TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered,
-    drain, make_leader, node, ucmd, val,
+    ClientId, ClientSeq, ColocatedNode, Command, ConfigId, Control, HANDOFF_BATCH,
+    HANDOFF_FENCE_ELECTIONS, LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole,
+    ProposeResult, Slot, TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all,
+    deliver_filtered, drain, make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
@@ -39,7 +39,7 @@ fn a_handoff_moves_the_same_ballot_to_another_node_without_a_second_phase_1() {
     let mut nodes = cluster_with_three_chosen();
     let ballot_before = nodes[0].ballot();
     assert_eq!(nodes[0].leadership_origin(), LeadershipOrigin::Elected);
-    let frontier = nodes[0].next_slot();
+    let frontier = nodes[0].proposer().next_slot();
 
     let receipt = nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
     assert_eq!(receipt.ballot, ballot_before);
@@ -68,7 +68,7 @@ fn a_handoff_moves_the_same_ballot_to_another_node_without_a_second_phase_1() {
         LeadershipOrigin::Handoff { from: NodeId(0) }
     );
     assert_eq!(
-        nodes[1].next_slot(),
+        nodes[1].proposer().next_slot(),
         frontier,
         "the allocator frontier moves with the authority"
     );
@@ -159,7 +159,7 @@ fn an_installed_authority_is_never_handed_on_again() {
     // copy of the *original* payload could otherwise re-install that ballot at a
     // node that had already handed it on — while its own successor is still
     // exercising it. Refusing the second hop keeps uniqueness structural with no
-    // durable relinquishment record; see `RawNode::can_relinquish`.
+    // durable relinquishment record; see `ColocatedNode::can_relinquish`.
     let mut nodes = cluster_with_three_chosen();
     let authority = nodes[0].ballot();
     nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
@@ -231,7 +231,7 @@ fn a_restart_cannot_resurrect_a_relinquished_authority() {
     // and restarts believing it still owns B" scenario. Leadership is volatile,
     // so the reboot is itself the fence: a Follower whose only route back to
     // leadership campaigns at a strictly higher round.
-    let rebooted = RawNode::new(&TestStorage::from_node(&nodes[0]));
+    let rebooted = ColocatedNode::new(&TestStorage::from_node(&nodes[0]));
     assert_eq!(rebooted.role(), NodeRole::Follower);
     assert_eq!(rebooted.leadership_origin(), LeadershipOrigin::Elected);
     nodes[0] = rebooted;
@@ -261,12 +261,12 @@ fn a_second_node_cannot_install_a_relinquish_addressed_elsewhere() {
     // no-op rather than an allocator rewind.
     nodes[1].step(msg.clone());
     assert!(nodes[1].is_leader());
-    let frontier = nodes[1].next_slot();
+    let frontier = nodes[1].proposer().next_slot();
     let _ = nodes[1].propose(ClientId(3), ClientSeq(1), val(5));
     nodes[1].step(msg);
     assert_eq!(nodes[1].handoff_counters().installed, 1, "installed once");
     assert!(
-        nodes[1].next_slot() > frontier,
+        nodes[1].proposer().next_slot() > frontier,
         "the allocator never rewinds"
     );
 }
@@ -340,7 +340,7 @@ fn a_successor_that_crashes_after_installing_leaves_an_ordinary_election_behind(
     // The successor dies with the authority. Leadership is volatile, so its
     // reboot is a Follower — nobody holds the ballot, and the ordinary election
     // is the only way back.
-    nodes[1] = RawNode::new(&TestStorage::from_node(&nodes[1]));
+    nodes[1] = ColocatedNode::new(&TestStorage::from_node(&nodes[1]));
     assert_eq!(nodes[1].role(), NodeRole::Follower);
     nodes[1].set_election_timeout(NO_CHECK_QUORUM);
     assert!(nodes.iter().all(|n| !n.is_leader()));
@@ -410,7 +410,7 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
         config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: superseding,
-        slot: nodes[0].next_slot(),
+        slot: nodes[0].proposer().next_slot(),
         command: ucmd(8, 1, 3),
     });
     assert!(nodes[0].is_leader(), "the still-Leader window is the point");
@@ -426,9 +426,9 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
     let mut with_rot = cluster_with_three_chosen();
     let mut disk = TestStorage::from_node(&with_rot[0]);
     disk.rot(Slot(1));
-    with_rot[0] = RawNode::new(&disk);
+    with_rot[0] = ColocatedNode::new(&disk);
     with_rot[0].set_election_timeout(NO_CHECK_QUORUM);
-    assert!(!with_rot[0].faulty_entries().is_empty());
+    assert!(!with_rot[0].acceptor().faulty().is_empty());
     assert!(!with_rot[0].can_relinquish());
 }
 
@@ -460,9 +460,9 @@ fn a_successor_that_needs_phase_1_repair_refuses_the_handoff() {
     let mut nodes = cluster_with_three_chosen();
     let mut disk = TestStorage::from_node(&nodes[1]);
     disk.rot(Slot(1));
-    nodes[1] = RawNode::new(&disk);
+    nodes[1] = ColocatedNode::new(&disk);
     nodes[1].set_election_timeout(NO_CHECK_QUORUM);
-    assert!(!nodes[1].faulty_entries().is_empty());
+    assert!(!nodes[1].acceptor().faulty().is_empty());
 
     nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
     let q = drain(&mut nodes[0]);

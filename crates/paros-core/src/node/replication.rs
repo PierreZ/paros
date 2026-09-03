@@ -1,15 +1,20 @@
-use super::{Ballot, Message, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::AcceptorConfig;
+use super::{Audience, Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
+use crate::membership::AcceptorConfig;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
 /// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
 /// always beats before any follower's election clock fires.
-pub(super) const HEARTBEAT_TICKS: u64 = 1;
+///
+/// Public because an observer that judges "this leader is still beating" has
+/// to know the period a beat is expected in: an oracle counting beatless
+/// ticks against a hard-coded 1 silently stops being right the moment this
+/// changes.
+pub const HEARTBEAT_TICKS: u64 = 1;
 
-impl RawNode {
+impl ColocatedNode {
     /// Broadcast one leader beat at a fresh, monotonically increasing
     /// per-ballot sequence number. Both the tick self-trigger and
-    /// [`RawNode::read_index`] beat through here, so every broadcast beat
+    /// [`ColocatedNode::read_index`] beat through here, so every broadcast beat
     /// carries a seq an ack can be matched against.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn broadcast_heartbeat(&mut self) {
@@ -61,7 +66,7 @@ impl RawNode {
         if from == me {
             // Leader self-trigger: broadcast the beat. Re-sending the un-acked
             // `Accept`s is a *separate* decision the driver makes on the same
-            // cadence — see [`RawNode::resend_pending`].
+            // cadence — see [`ColocatedNode::resend_pending`].
             self.broadcast_heartbeat();
             return;
         }
@@ -98,7 +103,7 @@ impl RawNode {
                 .then_some(self.replica.chosen_index())
                 .flatten();
             self.pending_messages.push((
-                from,
+                Audience::Node(from),
                 Message::HeartbeatAck {
                     config_id: self.config_id,
                     from: me,
@@ -129,7 +134,7 @@ impl RawNode {
             // our first unchosen slot.
             let from_slot = self.first_unchosen();
             self.pending_messages.push((
-                from,
+                Audience::Node(from),
                 Message::CatchUpRequest {
                     from: me,
                     from_slot,
@@ -178,12 +183,8 @@ impl RawNode {
         }
         // CheckQuorum: an ack at our ballot is proof this peer can still reach
         // us and has not promised past us — credit the current window.
-        self.quorum_acked_by.insert(from);
-        for round in &mut self.read_rounds {
-            if seq >= round.required_seq {
-                round.acked_by.insert(from);
-            }
-        }
+        self.proposer.credit_authority(from);
+        self.proposer.credit_read_ack(from, seq);
         self.try_confirm_reads();
         // The GC fence tally (#123): a configured member's chosen index.
         self.note_peer_chosen(from, chosen);

@@ -1,7 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
-use crate::matchmaker::MatchmakerId;
-pub use crate::membership::QuorumSystem;
+use crate::membership::{MatchmakerId, QuorumSystem};
 use crate::types::{Ballot, ConfigId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
@@ -17,7 +16,7 @@ use crate::types::{Ballot, ConfigId, NodeId, Slot};
 ///
 /// An acceptor must persist a raised `max_promised_ballot` before replying
 /// [`crate::Message::Promise`], and persist a new accepted entry (a
-/// [`crate::WriteOp::AppendAccepted`]) before replying
+/// [`crate::AcceptorWrite::AppendAccepted`]) before replying
 /// [`crate::Message::Accepted`]. Sending either reply before the corresponding
 /// write is durable violates Paxos safety: a crash could "un-promise" or
 /// "un-accept", letting two different values be chosen for one slot. The
@@ -55,7 +54,7 @@ pub struct HardState {
 ///   configuration in force *before any ballot was registered*; every ballot
 ///   binds its own acceptor configuration through the matchmakers, drawn from
 ///   `nodes`, and the node tracks the configuration of the highest ballot it
-///   has seen (`RawNode::acceptors`). A node may be in `nodes` without being
+///   has seen (`ColocatedNode::acceptors`). A node may be in `nodes` without being
 ///   in `peers` — a spare waiting to be added — and may be in `peers` and
 ///   later removed; either way it stays addressable, answers Phase 1 for the
 ///   ballots it took part in, and learns the chosen log as a replica.
@@ -80,7 +79,7 @@ pub struct Config {
     /// Multi-Paxos**: no matchmaking phase runs and no reconfiguration is
     /// honored. Non-empty turns every campaign into matchmaking followed by a
     /// cross-configuration Phase 1. A matchmaker-set reconfiguration (#125)
-    /// moves the node's *volatile* belief (`RawNode::matchmaker_set`) to a
+    /// moves the node's *volatile* belief (`ColocatedNode::matchmaker_set`) to a
     /// later generation; this stays the set a fresh incarnation asks first.
     pub matchmakers: Vec<MatchmakerId>,
     /// Every matchmaker that may ever be in a matchmaker set — the pool a

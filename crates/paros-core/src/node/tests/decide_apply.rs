@@ -34,7 +34,7 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
 
 #[test]
 fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
-    // The dedup half of #54. `RawNode::new` rebuilds `inflight` from every
+    // The dedup half of #54. `ColocatedNode::new` rebuilds `inflight` from every
     // accepted-but-unchosen entry, so the restarted old leader boots holding
     // `(client 1, seq 2) -> slot 1`. When slot 1 decides as a `Noop`, that mapping
     // must go: keeping it would answer the client's retry with `Duplicate(slot 1)`,
@@ -50,7 +50,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
     storage
         .accepted
         .insert(Slot(1), (ballot(1, 0), ucmd(1, 2, 20)));
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     assert_eq!(
         n.replica.inflight_at(ClientId(1), ClientSeq(2)),
         Some(Slot(1)),
@@ -131,7 +131,11 @@ fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
         "the idempotent ack names the slot the command applied at"
     );
     // And no second slot was ever allocated for it.
-    assert_eq!(nodes[0].next_slot, Slot(1), "exactly one slot consumed");
+    assert_eq!(
+        nodes[0].proposer().next_slot(),
+        Slot(1),
+        "exactly one slot consumed"
+    );
 }
 
 #[test]
@@ -181,7 +185,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
         "chosen-but-unapplied dedups to its slot, it is not acked as applied"
     );
     assert_eq!(
-        nodes[0].next_slot,
+        nodes[0].proposer().next_slot(),
         Slot(2),
         "and no second slot was allocated for a command already chosen"
     );
@@ -378,7 +382,7 @@ fn restart_rebuilds_state_from_hard_state() {
         config: Config {
             id: NodeId(1),
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
-            quorum_system: crate::state::QuorumSystem::Majority,
+            quorum_system: crate::membership::QuorumSystem::Majority,
             nodes: Vec::new(),
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
@@ -386,10 +390,10 @@ fn restart_rebuilds_state_from_hard_state() {
         first_slot: Slot(0),
         faulty: Vec::new(),
     };
-    let n = RawNode::new(&storage);
+    let n = ColocatedNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
     assert_eq!(
-        n.next_slot,
+        n.proposer().next_slot(),
         Slot(3),
         "next_slot is past the highest accepted slot"
     );
@@ -418,7 +422,7 @@ fn propose_control_is_leader_only() {
         "a non-leader redirects the truncate to the leader"
     );
     assert_eq!(
-        nodes[1].first_slot(),
+        nodes[1].acceptor().first_slot(),
         Slot(0),
         "no truncation on a redirect"
     );
@@ -443,7 +447,7 @@ fn commit_below_floor_is_not_relearned() {
         "a below-floor commit is not relearned"
     );
     assert!(
-        !n.accepted().contains_key(&Slot(1)),
+        !n.acceptor().records().contains_key(&Slot(1)),
         "a below-floor commit records nothing below the floor"
     );
 }

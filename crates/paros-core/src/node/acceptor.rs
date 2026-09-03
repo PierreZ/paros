@@ -1,17 +1,19 @@
 //! The node's **acceptor wiring**: how a `Prepare` and an `Accept` on the wire
 //! reach the [`Acceptor`](crate::acceptor::Acceptor) component, and the role
 //! couplings a deployment adds around pure voting — a `Prepare` that deposes
-//! a stale leadership, an `Accept` whose sender is adopted as the leader, the
+//! a stale leadership, an `Accept` whose named leader is adopted as the leader hint, the
 //! configuration a ballot carries. The component decides; this module builds
 //! the reply and keeps the node's volatile leadership consistent with it.
 
 use super::{
-    Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot, WriteOp, command_fingerprint,
+    Audience, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, WriteOp,
+    command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
+use crate::write::AcceptorWrite;
 
-impl RawNode {
+impl ColocatedNode {
     // ---- acceptor ---------------------------------------------------------
 
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
@@ -23,11 +25,13 @@ impl RawNode {
     /// to prepare the acceptors of every *older* one — the members that keep
     /// answering Phase 1 for the ballots they took part in until GC retires
     /// them — and it need not be a member of that older configuration itself.
-    /// The guard is "the sender is the ballot's owner and a pooled node".
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, from_slot = from_slot.0)))]
+    /// The guard is "the campaigning `leader` is the ballot's owner, and both
+    /// it and the `reply_to` address are pooled nodes".
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, round = ballot.round, from_slot = from_slot.0)))]
     pub(super) fn on_prepare(
         &mut self,
-        from: NodeId,
+        reply_to: NodeId,
+        leader: NodeId,
         ballot: Ballot,
         from_slot: Slot,
         config: Option<AcceptorConfig>,
@@ -35,8 +39,9 @@ impl RawNode {
         let me = self.config.id;
         let writes_at_entry = self.pending_writes.len();
         // A Promise continuation is valid only for the pooled proposer named
-        // by the ballot. This also prevents replies to arbitrary wire ids.
-        if !self.in_pool(from) || ballot.node != from {
+        // by the ballot. The reply address is checked against the pool too,
+        // so a promise never answers an arbitrary wire id.
+        if !self.in_pool(reply_to) || !self.in_pool(leader) || ballot.node != leader {
             return;
         }
         match self
@@ -59,7 +64,7 @@ impl RawNode {
                     self.pending_writes.len() == writes_at_entry,
                     "a nacked prepare queues no durable write"
                 );
-                self.push_nack(from, ballot, from_slot);
+                self.push_nack(reply_to, ballot, from_slot);
             }
             PrepareOutcome::Refused => {
                 // Negative space: a Nack means the prepare lost — the promise
@@ -72,7 +77,7 @@ impl RawNode {
                     self.pending_writes.len() == writes_at_entry,
                     "a nacked prepare queues no durable write"
                 );
-                self.push_nack(from, ballot, from_slot);
+                self.push_nack(reply_to, ballot, from_slot);
             }
             PrepareOutcome::Promised { raised } => {
                 // A same-ballot continuation can arrive after this node
@@ -110,14 +115,15 @@ impl RawNode {
                 // scan of the batch, always-on by choice.
                 if raised {
                     assert!(
-                        self.pending_writes
-                            .iter()
-                            .any(|op| matches!(op, WriteOp::SetPromise(b) if *b == ballot)),
+                        self.pending_writes.iter().any(|op| matches!(
+                            op,
+                            WriteOp::Acceptor(AcceptorWrite::SetPromise(b)) if *b == ballot
+                        )),
                         "a promise reply ships with its durable raise in the batch"
                     );
                 }
                 self.pending_messages.push((
-                    from,
+                    Audience::Node(reply_to),
                     Message::Promise {
                         config_id: self.config_id,
                         from: me,
@@ -134,16 +140,24 @@ impl RawNode {
 
     /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
     /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
-    pub(super) fn on_accept(&mut self, from: NodeId, ballot: Ballot, slot: Slot, command: Command) {
-        // Wire hygiene: this handler adopts the *sender* as the leader hint and
-        // promises the ballot, so neither id may sit outside the pool — the
-        // same refusal every quorum-counting handler
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, round = ballot.round, slot = slot.0)))]
+    pub(super) fn on_accept(
+        &mut self,
+        reply_to: NodeId,
+        leader: NodeId,
+        ballot: Ballot,
+        slot: Slot,
+        command: Command,
+    ) {
+        // Wire hygiene: this handler adopts `leader` as the leader hint,
+        // answers `reply_to`, and promises the ballot, so none of the three
+        // ids may sit outside the pool — the same refusal every
+        // quorum-counting handler
         // (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`) already
         // applies to its sender. Membership of the ballot's configuration is
         // the leader's tally's business: an acceptor accepts any ballot at or
         // above its promise.
-        if !self.in_pool(from) || !self.in_pool(ballot.node) {
+        if !self.in_pool(reply_to) || !self.in_pool(leader) || !self.in_pool(ballot.node) {
             return;
         }
         let me = self.config.id;
@@ -158,21 +172,21 @@ impl RawNode {
             // Heartbeat commit reconciliation heals any real gap.
             AcceptOutcome::BelowFloor => {}
             AcceptOutcome::Admitted => {
-                // The redirect hint is the **sender**, never `ballot.node`.
-                // They are the same node for an elected leader, and
-                // deliberately different after a cooperative handoff: the
-                // ballot keeps naming the node that owns the authority, while
-                // the node exercising Phase 2 — the one a client must be sent
-                // to — is whoever put this `Accept` on the wire. Pointing at
-                // `ballot.node` there sent clients to a node that had already
-                // stepped down, and, when this node *is* `ballot.node` (the
-                // predecessor accepting under the authority it just gave
-                // away), made a Follower name itself as leader and redirect
-                // clients to itself.
-                if from != me && self.role != NodeRole::Follower {
-                    self.become_follower(Some(from));
+                // The redirect hint is the message's own `leader`, never
+                // `ballot.node`. They are the same node for an elected
+                // leader, and deliberately different after a cooperative
+                // handoff: the ballot keeps naming the node that owns the
+                // authority, while the node exercising Phase 2 — the one a
+                // client must be sent to — is the one this `Accept` names as
+                // its leader. Pointing at `ballot.node` there sent clients to
+                // a node that had already stepped down, and, when this node
+                // *is* `ballot.node` (the predecessor accepting under the
+                // authority it just gave away), made a Follower name itself as
+                // leader and redirect clients to itself.
+                if leader != me && self.role != NodeRole::Follower {
+                    self.become_follower(Some(leader));
                 } else {
-                    self.leader = Some(from);
+                    self.leader = Some(leader);
                     self.election_elapsed = 0;
                 }
                 if ballot > self.ballot {
@@ -194,8 +208,7 @@ impl RawNode {
                 if slot < self.first_unchosen() && !self.replica.is_chosen(slot) {
                     self.mark_chosen(slot, &command, ballot);
                 } else {
-                    self.acceptor
-                        .record_accepted(slot, ballot, command, &mut self.pending_writes);
+                    self.record_accepted(slot, ballot, command);
                 }
                 // The `Accepted` reply's durability claim: the promise sits
                 // exactly at the accepted ballot, and the matching
@@ -206,13 +219,15 @@ impl RawNode {
                     "an accept lands with the promise at its ballot"
                 );
                 assert!(
-                    self.pending_writes.iter().any(
-                        |op| matches!(op, WriteOp::AppendAccepted { slot: s, .. } if *s == slot)
-                    ),
+                    self.pending_writes.iter().any(|op| matches!(
+                        op,
+                        WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot: s, .. })
+                            if *s == slot
+                    )),
                     "an accepted reply ships with its durable append in the batch"
                 );
                 self.pending_messages.push((
-                    from,
+                    Audience::Node(reply_to),
                     Message::Accepted {
                         config_id: self.config_id,
                         from: me,
@@ -238,7 +253,7 @@ impl RawNode {
                     self.pending_writes.len() == writes_at_entry,
                     "a nacked accept queues no durable write"
                 );
-                self.push_nack(from, ballot, slot);
+                self.push_nack(reply_to, ballot, slot);
             }
         }
     }
@@ -247,7 +262,7 @@ impl RawNode {
     /// that won.
     fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
         self.pending_messages.push((
-            to,
+            Audience::Node(to),
             Message::Nack {
                 config_id: self.config_id,
                 from: self.config.id,

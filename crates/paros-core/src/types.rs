@@ -43,7 +43,7 @@ pub struct Value(pub Vec<u8>);
 /// truncation drops the log records it was derived from, and it travels beside
 /// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
 /// every restart — reproduces the identical duplicate-suppression decision at
-/// the apply seam (see [`crate::RawNode::advance_chosen_index`]'s doc).
+/// the apply seam (see [`crate::ColocatedNode::advance_chosen_index`]'s doc).
 pub type SessionEntry = (ClientId, ClientSeq, Slot);
 
 /// A log entry: the [`Value`] chosen for a slot, tagged with the client request
@@ -76,7 +76,7 @@ pub enum Control {
     /// Truncate the log: every node drops its retained prefix up to `up_to`
     /// (clamped to its own chosen index) when it applies this slot. The
     /// leader-decided, cluster-wide analogue of a local
-    /// [`crate::RawNode::compact`] call, forwarded by normal replication +
+    /// [`crate::ColocatedNode::compact`] call, forwarded by normal replication +
     /// catch-up.
     Truncate {
         /// The last slot the application permits dropping (inclusive).
@@ -110,7 +110,7 @@ pub enum Control {
     /// old leader accepted alone, below a later slot that did reach the quorum —
     /// would otherwise never be proposed by anyone again, freezing the contiguous
     /// chosen prefix one below it forever (see
-    /// [`RawNode::chosen_gap`](crate::RawNode::chosen_gap)). Deciding a `Noop`
+    /// [`ColocatedNode::chosen_gap`](crate::ColocatedNode::chosen_gap)). Deciding a `Noop`
     /// there is safe for the ordinary Phase-1 reason: quorum intersection
     /// guarantees a value already chosen at that slot would have been reported, so
     /// the slot is genuinely free.
@@ -135,6 +135,27 @@ pub enum Command {
     User(Entry),
     /// A paros-interpreted control command (interpreted only at apply time).
     Control(Control),
+}
+
+/// A consensus value that can name itself in one word.
+///
+/// Phase 2 carries the fingerprint, not the value: an `Accepted` reports
+/// *which* value the acceptor took, so a leader never credits an ack for a
+/// different value at the same `(slot, ballot)`. That is the only thing the
+/// [`crate::proposer::Proposer`] role ever needs to know about a value, which
+/// is why it is a trait rather than a `Command`-shaped function call: a
+/// deployment over some other value type implements this and reuses the role
+/// unchanged.
+pub trait Fingerprint {
+    /// A stable identity for this value. Two values that compare equal must
+    /// fingerprint equal; distinct values should collide only by accident.
+    fn fingerprint(&self) -> u64;
+}
+
+impl Fingerprint for Command {
+    fn fingerprint(&self) -> u64 {
+        command_fingerprint(self)
+    }
 }
 
 /// A stable fingerprint of the complete consensus value identity.

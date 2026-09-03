@@ -47,6 +47,16 @@ const SHAPE_KEY: &str = "paros-node-shapes";
 /// for why it is a floor and not a tunable.
 const ROUND_TRIP_FLOOR_MS: u64 = 250;
 
+/// The default per-restart chance of a terminal storage loss — a wiped node
+/// disk (#124) or an unusable matchmaker registry (#125).
+const DEFAULT_LOSS_PCT: u32 = 35;
+/// The floor of both loss knobs: rare enough that a seed still has restarts
+/// that come back.
+const MIN_LOSS_PCT: u32 = 5;
+/// The ceiling of both loss knobs: the dead-node and matchmaker-loss budgets
+/// bound the damage, so the extreme stays a valid deployment.
+const MAX_LOSS_PCT: u32 = 75;
+
 /// Everything the swarm fixes about one logical node for one seed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NodeShape {
@@ -59,6 +69,18 @@ pub(crate) struct NodeShape {
     pub(crate) seam_crash_bias: f64,
     /// The node's disk: its write-path fault rates.
     pub(crate) write_rates: WritePathRates,
+    /// Percent chance that a chaotic restart of this node comes back on an
+    /// empty disk (#124, `crate::process`). Floor 5: the coin must stay rare
+    /// enough that a run is a run and not an all-amnesia cluster (a node that
+    /// wipes on its first restart never contributes a second incarnation to
+    /// anything). Ceiling 75: the world's dead-node budget bounds the damage
+    /// whatever the rate, so the extreme is a valid, very forgetful disk.
+    pub(crate) wipe_pct: u32,
+    /// Percent chance that a chaotic restart of this *matchmaker* finds its
+    /// registry unusable (#125). Same floor and ceiling, and the same
+    /// argument: the matchmaker-loss budget (one per run, and only where the
+    /// bootstrap set can spare it) bounds it.
+    pub(crate) matchmaker_loss_pct: u32,
 }
 
 impl NodeShape {
@@ -68,6 +90,8 @@ impl NodeShape {
             tunables: DriverTunables::default(),
             seam_crash_bias: 1.0,
             write_rates: WritePathRates::default(),
+            wipe_pct: DEFAULT_LOSS_PCT,
+            matchmaker_loss_pct: DEFAULT_LOSS_PCT,
         }
     }
 
@@ -144,7 +168,49 @@ impl NodeShape {
             // every campaign that lost a reply; the election timeout still
             // bounds it.
             match_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
+            // The GC re-send cadence, its own location: the two round trips
+            // are unrelated, and a seed should be able to be extreme in one
+            // and ordinary in the next. Floor 1; the ceiling is unbounded and
+            // still winnable — a watermark that is never raised costs the
+            // matchmakers their retained histories, never safety.
+            gc_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
+            // The handover re-send cadence. Floor 1; bounded above by the
+            // stall budget drawn just below — a cadence past
+            // `election_timeout * reconfigure_timeout_elections` would let
+            // the phase be abandoned before it is ever re-sent, which is no
+            // retry rather than a slow one, so the ceiling stays under the
+            // smallest budget the next knob can draw (1 timeout × the
+            // election base's own floor).
+            reconfigurer_resend_ticks: buggify_knob!(5_u64, 1_u64..11_u64),
+            // The handover stall budget. Floor 1 election timeout: one
+            // re-sent request has time to be answered, and a phase nobody
+            // answers is abandoned within a timeout instead of holding the
+            // `Busy` refusal for the tail.
+            reconfigure_timeout_elections: buggify_knob!(4_u64, 1_u64..17_u64),
+            // The preempted decree's backoff ceiling, drawn independently of
+            // the election clock (it used to be `2 × election_timeout_base`,
+            // which correlated the two). Floor 1: a one-tick draw is no
+            // jitter at all, so dueling reconfigurers may keep preempting
+            // each other — a liveness cost the stall budget ends, never a
+            // safety one.
+            reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
         };
+        if tunables.gc_resend_ticks != 5 {
+            // BUGGIFY pairing: the GC cadence extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme GC re-send cadence");
+        }
+        if tunables.reconfigurer_resend_ticks != 5 {
+            // BUGGIFY pairing: the handover cadence extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme handover re-send cadence");
+        }
+        if tunables.reconfigure_timeout_elections != 4 {
+            // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme handover stall budget");
+        }
+        if tunables.reconfigure_backoff_max_ticks != 10 {
+            // BUGGIFY pairing: the decree backoff extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme decree backoff ceiling");
+        }
         // The crash bias is a plain multiplier with no floor to defend: at
         // its extreme the seams crash on one batch in three inside the
         // window, and the window still closes long before the tail does.
@@ -154,6 +220,8 @@ impl NodeShape {
             tunables,
             seam_crash_bias,
             write_rates: WritePathRates::draw(),
+            wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
+            matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
         }
     }
 }
@@ -384,6 +452,11 @@ pub(crate) fn matchmaker_bootstrap_ranks(
                 "a run bootstraps on a subset of the matchmaker pool, leaving spares"
             );
             let rotation = buggify_knob!(0_usize, 1_usize..pool);
+            if rotation != 0 {
+                // BUGGIFY pairing: the matchmaker spares are not simply the
+                // highest ranks.
+                assert_reachable!("a run's matchmaker spares are drawn from the low ranks");
+            }
             let mut ranks: Vec<u64> = (0..size)
                 .map(|i| u64::try_from((rotation + i) % pool).unwrap_or(u64::MAX))
                 .collect();
@@ -393,13 +466,20 @@ pub(crate) fn matchmaker_bootstrap_ranks(
         .clone()
 }
 
-/// The smallest matchmaker set a run may put in force (#125): three where
-/// the bootstrap set has three or more members (one loss keeps a quorum, and
-/// the world may then lose one matchmaker for good), else the bootstrap size
-/// itself. Not a tunable: it is what the matchmaker-loss budget is computed
-/// over.
+/// The smallest bootstrap matchmaker set that can lose one member and keep a
+/// quorum — and therefore the smallest set the world will ever take a
+/// matchmaker from ([`StorageWorld::park_matchmaker`]) and the ceiling of
+/// [`matchmaker_floor`]. Not a tunable: it is what the matchmaker-loss budget
+/// is computed over.
+///
+/// [`StorageWorld::park_matchmaker`]: crate::world::StorageWorld::park_matchmaker
+pub(crate) const MATCHMAKER_LOSS_FLOOR: usize = 3;
+
+/// The smallest matchmaker set a run may put in force (#125):
+/// [`MATCHMAKER_LOSS_FLOOR`] where the bootstrap set has that many members or
+/// more, else the bootstrap size itself.
 pub(crate) fn matchmaker_floor(bootstrap: usize) -> usize {
-    bootstrap.min(3)
+    bootstrap.min(MATCHMAKER_LOSS_FLOOR)
 }
 
 /// The shape gate, evaluated once per run from the workload's `check()`: every

@@ -14,7 +14,7 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
-    Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, parse_addr, proposal_checksum,
+    Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, parse_addr,
 };
 
 use crate::audit::{ClientHistory, audit_world, check_run};
@@ -33,7 +33,7 @@ const COMPACT_STORM: u8 = 7;
 /// read), as opposed to [`READ_STATE`]'s internal inspect probe.
 const READ_INDEX: u8 = 8;
 /// **Retired.** Once a client-side stand-in for the leader's matchmaking
-/// phase (#119); superseded by the real phase in `paros_core::RawNode`
+/// phase (#119); superseded by the real phase in `paros_core::ColocatedNode`
 /// (#120), which a client must not race — a client-minted registration above
 /// the leader's round would refuse every campaign. The id stays reserved so
 /// the alphabet's ids never shift; the operation is a no-op.
@@ -65,6 +65,10 @@ const OP_COUNT: u8 = 14;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
+
+/// The `shrink` entry of [`RECONFIGURE_SHAPES`], the shape a rotation through
+/// a ring no larger than the set in force actually composes.
+const SHRINK_SHAPE: usize = 1;
 /// The shapes a [`RECONFIGURE_MATCHMAKERS`] step draws from, as indices into
 /// [`RECONFIGURE_SHAPES`]: a matchmaker set has no leader to remove.
 const MATCHMAKER_SHAPES: [usize; 4] = [0, 1, 2, 4];
@@ -128,6 +132,14 @@ struct ChainConfig {
     compact_beat_ms: u64,
     /// Compaction re-asks per operation. Floor 1.
     compact_attempts: u8,
+    /// Beat between reconfiguration re-asks at the same node — an `unsettled`
+    /// leader, or a `busy` matchmaker reconfigurer. Floor 10 ms, like the
+    /// compaction beat it used to borrow: the answer it waits for is a
+    /// driver-paced phase, so a beat below one tick only re-asks inside the
+    /// same tick. Its own knob because the two cadences bound different
+    /// things — compaction waits on a decided marker, a handover on a phase
+    /// the reconfigurer abandons after a stall budget.
+    reconfigure_beat_ms: u64,
     /// Reconfiguration re-asks per operation (following `not_leader`
     /// redirects, or an `unsettled` leader a beat later). Floor 1.
     reconfigure_attempts: u8,
@@ -149,6 +161,16 @@ struct ChainConfig {
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
     /// back to the first enabled op).
     weights: [u64; OP_COUNT as usize],
+    /// Per-shape weights of the acceptor reconfiguration composer, one knob
+    /// each (the operation-weight family's floor and ceiling): a seed can be
+    /// a cluster that mostly grows and never shrinks, or the reverse. Floor
+    /// 0 for any single weight — an all-zero draw, and any shape the set in
+    /// force cannot take, walks the shape ring, so no draw makes the step a
+    /// no-op.
+    reconfigure_shape_weights: [u64; RECONFIGURE_SHAPES.len()],
+    /// The same, per matchmaker shape (a matchmaker set has no leader to
+    /// remove, so it is the four-entry [`MATCHMAKER_SHAPES`] ring).
+    matchmaker_shape_weights: [u64; MATCHMAKER_SHAPES.len()],
 }
 
 impl ChainConfig {
@@ -171,6 +193,7 @@ impl ChainConfig {
             probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
             compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
+            reconfigure_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             reconfigure_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             reconfigure_matchmakers_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
@@ -205,12 +228,47 @@ impl ChainConfig {
                 // the dead-node budget bounds how many may go.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
+            // grow, shrink, replace, remove-leader, rotate
+            reconfigure_shape_weights: [
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+            ],
+            // grow, shrink, replace, rotate
+            matchmaker_shape_weights: [
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+                buggify_knob!(10_u64, 0_u64..41_u64),
+            ],
         }
     }
 
     fn weight(&self, operation: u8) -> u64 {
         self.weights[usize::from(operation)]
     }
+}
+
+/// Pick an index of `weights` from one draw, weighted. An all-zero draw (or a
+/// weight family a seed zeroed out entirely) falls back to the plain modulo:
+/// every shape stays reachable, and the shape ring in the caller covers the
+/// ones the set in force cannot take.
+fn weighted_index(weights: &[u64], draw: u64) -> usize {
+    let total: u64 = weights.iter().sum();
+    if total == 0 {
+        let len = u64::try_from(weights.len()).unwrap_or(1).max(1);
+        return usize::try_from(draw % len).unwrap_or(0);
+    }
+    let mut ticket = draw % total;
+    for (i, weight) in weights.iter().enumerate() {
+        if ticket < *weight {
+            return i;
+        }
+        ticket -= *weight;
+    }
+    0
 }
 
 /// Where a client sends its next attempt after a redirect, a transport error,
@@ -310,6 +368,12 @@ enum ReconfigureResult {
 /// leaves the configuration. `None` when the shape is impossible here (no
 /// spare to grow onto, nothing above the floor to shrink); the step is then
 /// a no-op.
+///
+/// The index and name returned are the shape **observed in the composed set**,
+/// not the one asked for: a `rotate` through a candidate ring no larger than
+/// the set in force drops members instead of replacing them, which is a
+/// `shrink`, and labelling it a rotation lit the whole-set-rotation gate on a
+/// successor that shared every surviving member with its predecessor.
 fn compose_reconfiguration(
     shape: usize,
     members: &[u64],
@@ -317,7 +381,7 @@ fn compose_reconfiguration(
     floor: usize,
     leader: Option<u64>,
     draw: u64,
-) -> Option<(&'static str, Vec<u64>)> {
+) -> Option<(usize, &'static str, Vec<u64>)> {
     let mut current: Vec<u64> = members.to_vec();
     current.sort_unstable();
     current.dedup();
@@ -332,7 +396,8 @@ fn compose_reconfiguration(
     let dead: Option<usize> = current.iter().position(|n| !candidates.contains(n));
     let pick = |len: usize| usize::try_from(draw % u64::try_from(len).unwrap_or(1)).unwrap_or(0);
     let mut next = current.clone();
-    let name = RECONFIGURE_SHAPES[shape % RECONFIGURE_SHAPES.len()];
+    let mut observed = shape % RECONFIGURE_SHAPES.len();
+    let name = RECONFIGURE_SHAPES[observed];
     match name {
         "grow" => {
             if spares.is_empty() {
@@ -375,7 +440,12 @@ fn compose_reconfiguration(
     if next == current || next.len() < floor {
         return None;
     }
-    Some((name, next))
+    if RECONFIGURE_SHAPES[observed] == "rotate" && next.len() < current.len() {
+        // A ring no larger than the set in force cannot rotate it: what came
+        // out is the surviving members, one short — a shrink.
+        observed = SHRINK_SHAPE;
+    }
+    Some((observed, RECONFIGURE_SHAPES[observed], next))
 }
 
 /// The ids (ranks into `ips`) a reconfiguration may still draw from: every
@@ -485,6 +555,8 @@ struct AdversarialCoverage {
     /// A node refused a retirement (it was a member again by the time the
     /// request landed).
     retire_refused: bool,
+    /// A refused retirement handed the parked identity back to the world.
+    retire_released: bool,
 }
 
 struct OnDrop<F: FnOnce()> {
@@ -719,7 +791,6 @@ impl Workload for ChainWorkload {
                 let call = client.propose(Propose {
                     client: client_id,
                     seq,
-                    checksum: proposal_checksum(client_id, seq, &payload),
                     command: payload,
                 });
                 if abandon {
@@ -856,7 +927,7 @@ impl Workload for ChainWorkload {
                         }
                         ReconfigureResult::Refused { refusal, .. } if refusal == "unsettled" => {
                             if time
-                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
                                 .await
                                 .is_err()
                             {
@@ -898,7 +969,7 @@ impl Workload for ChainWorkload {
                         // terminal for this operation.
                         ReconfigureMatchmakersResult::Refused { refusal } if refusal == "busy" => {
                             if time
-                                .sleep(Duration::from_millis(config.compact_beat_ms))
+                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
                                 .await
                                 .is_err()
                             {
@@ -1728,23 +1799,85 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let shape = usize::try_from(raw_class % 5).unwrap_or(0);
+                    let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
                     let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
-                    let candidates =
-                        live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
-                    if let Some((name, next)) = members.as_deref().and_then(|members| {
-                        compose_reconfiguration(
-                            shape,
-                            members,
-                            &candidates,
-                            config_floor,
-                            leader_id,
-                            raw_payload,
-                        )
-                    }) {
+                    let live = live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
+                    // The adversarial draw (R5): compose from *every* rank
+                    // instead, so the request may name an identity the run
+                    // lost for good. A well-behaved operator would not, and
+                    // the protocol must survive one who does. What it must
+                    // never be asked for is an *unwinnable* configuration —
+                    // one whose live members cannot form a quorum — so every
+                    // composition, adversarial or not, is filtered on that
+                    // and the shape ring falls through to one that holds.
+                    // This binds the ordinary path too: `grow` keeps the set
+                    // in force whole, so growing onto a spare from a
+                    // configuration that already carried a dead member left
+                    // one live of two (hunt seed 11169765483580423663); the
+                    // ring now reaches `replace`/`shrink` instead, which move
+                    // the dead identity out — the composer's documented job.
+                    let all_ranks: Vec<u64> =
+                        (0..u64::try_from(server_count).unwrap_or(0)).collect();
+                    let adversarial_members = buggify_with_prob!(0.10);
+                    let keeps_live_quorum = |next: &[u64]| {
+                        next.iter().filter(|m| live.contains(m)).count() * 2 > next.len()
+                    };
+                    // Most shapes need a spare, which most seeds do not have:
+                    // walk the shape ring from the draw so an impossible
+                    // shape falls through to the next one instead of making
+                    // the whole step a silent no-op.
+                    let compose_from = |candidates: &[u64]| {
+                        members.as_deref().and_then(|members| {
+                            (0..RECONFIGURE_SHAPES.len()).find_map(|k| {
+                                let shape = (drawn + k) % RECONFIGURE_SHAPES.len();
+                                compose_reconfiguration(
+                                    shape,
+                                    members,
+                                    candidates,
+                                    config_floor,
+                                    leader_id,
+                                    raw_payload,
+                                )
+                                .filter(|(_, _, next)| keeps_live_quorum(next))
+                                .map(|(observed, name, next)| (shape, observed, name, next))
+                            })
+                        })
+                    };
+                    let composed = if adversarial_members {
+                        compose_from(&all_ranks).or_else(|| compose_from(&live))
+                    } else {
+                        compose_from(&live)
+                    };
+                    if let Some((shape, observed, name, next)) = composed {
+                        assert_always!(
+                            keeps_live_quorum(&next),
+                            "reconfiguration: a requested configuration keeps a live quorum",
+                            {
+                                "members" => next.len() as u64,
+                                "live" => next.iter().filter(|m| live.contains(m)).count() as u64
+                            }
+                        );
+                        if next.iter().any(|m| !live.contains(m)) {
+                            assert_reachable!(
+                                "reconfiguration: a requested configuration names an identity lost for good"
+                            );
+                        }
+                        if shape != drawn {
+                            assert_reachable!(
+                                "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
+                        if members
+                            .as_deref()
+                            .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)))
+                        {
+                            assert_reachable!(
+                                "reconfiguration: a successor acceptor set shares no member with its predecessor"
+                            );
+                        }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_request");
                         let outcome = reconfigure_once(probe_target, next).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
@@ -1758,7 +1891,7 @@ impl Workload for ChainWorkload {
                                     "reconfiguration: a deployment without matchmakers never accepts a reconfiguration",
                                     { "shape" => name }
                                 );
-                                self.adversarial.reconfigure_started[shape] = true;
+                                self.adversarial.reconfigure_started[observed] = true;
                                 Self::update_leader_hint(
                                     &mut leader_hint,
                                     &mut stale_leader_hint,
@@ -1801,28 +1934,60 @@ impl Workload for ChainWorkload {
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
-                    let shape_slot = usize::try_from(raw_class % 4).unwrap_or(0);
+                    let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
                         &crate::world::parked_matchmakers(ctx.state()),
                     );
                     let request = if has_matchmakers {
+                        // The same shape ring as the acceptor composer: a
+                        // matchmaker set at its floor admits no shrink and a
+                        // full bootstrap leaves no spare, so a fixed shape
+                        // would make the step a no-op for the whole run.
                         current.as_ref().and_then(|(_, members)| {
-                            compose_reconfiguration(
-                                MATCHMAKER_SHAPES[shape_slot],
-                                members,
-                                &candidates,
-                                matchmaker_floor,
-                                None,
-                                raw_payload,
-                            )
+                            (0..MATCHMAKER_SHAPES.len()).find_map(|k| {
+                                let slot = (drawn_slot + k) % MATCHMAKER_SHAPES.len();
+                                compose_reconfiguration(
+                                    MATCHMAKER_SHAPES[slot],
+                                    members,
+                                    &candidates,
+                                    matchmaker_floor,
+                                    None,
+                                    raw_payload,
+                                )
+                                .map(|(observed, name, next)| {
+                                    // The observed shape's own slot: a
+                                    // rotation that came out a shrink is
+                                    // gated as the shrink it is.
+                                    let observed_slot = MATCHMAKER_SHAPES
+                                        .iter()
+                                        .position(|s| *s == observed)
+                                        .unwrap_or(slot);
+                                    (slot, observed_slot, name, next)
+                                })
+                            })
                         })
                     } else {
                         // Plain Multi-Paxos: the request is sent anyway, and
                         // the point is the refusal.
-                        current.is_some().then_some(("plain", vec![0]))
+                        current
+                            .is_some()
+                            .then_some((drawn_slot, drawn_slot, "plain", vec![0]))
                     };
-                    if let Some((name, next)) = request {
+                    if let Some((shape_slot, observed_slot, name, next)) = request {
+                        if shape_slot != drawn_slot {
+                            assert_reachable!(
+                                "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
+                        if current
+                            .as_ref()
+                            .is_some_and(|(_, in_force)| in_force.iter().all(|m| !next.contains(m)))
+                        {
+                            assert_reachable!(
+                                "generation: a successor matchmaker set shares no member with its predecessor"
+                            );
+                        }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_matchmakers_request");
                         let outcome = reconfigure_matchmakers_once(target, next).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_matchmakers_outcome");
@@ -1844,7 +2009,8 @@ impl Workload for ChainWorkload {
                                     generation,
                                     "chain_reconfigure_matchmakers_started"
                                 );
-                                self.adversarial.reconfigure_matchmakers_started[shape_slot] = true;
+                                self.adversarial.reconfigure_matchmakers_started[observed_slot] =
+                                    true;
                             }
                             ReconfigureMatchmakersResult::Refused { refusal } => {
                                 assert_always!(
@@ -1863,24 +2029,44 @@ impl Workload for ChainWorkload {
                     // no-op.
                     let probe_target = leader_hint.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
-                    let retirable: Vec<u64> = moonpool_sim::select! {
+                    // The retirable list, the configuration in force and the
+                    // effective GC watermark come from the *same* reply: the
+                    // world can hold the protocol to "a retirable node is
+                    // outside C_b", and the node itself refuses the request
+                    // unless the watermark proves every configuration it was
+                    // a member of is forgotten (#123).
+                    let inspected = moonpool_sim::select! {
                         response = probe.inspect(InspectRequest {}) => response
                             .ok()
-                            .map(|response| response.into_inner().retirable)
-                            .unwrap_or_default(),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => Vec::new(),
-                        () = shutdown.cancelled() => Vec::new(),
+                            .map(tonic::Response::into_inner),
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
+                        () = shutdown.cancelled() => None,
                     };
+                    let (retirable, in_force, gc_watermark) = inspected
+                        .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
+                        .unwrap_or_default();
                     assert_always!(
                         retirable.is_empty() || has_matchmakers,
                         "gc: a deployment without matchmakers never names a retirable node"
                     );
                     let parked = crate::world::parked_nodes(ctx.state());
-                    let victims: Vec<usize> = retirable
+                    // The adversarial aim (R5): send the retirement to a node
+                    // the *same* reply names as a current member instead of a
+                    // retirable one. A well-behaved operator would not; the
+                    // node must refuse it (`member`, or `leader` when it is
+                    // the sitting one), so the world reservation is skipped
+                    // for this draw — nothing is parked, and a refusal has
+                    // nothing to release.
+                    let aim_at_member = buggify_with_prob!(0.10);
+                    let pool: &[u64] = if aim_at_member { &in_force } else { &retirable };
+                    let victims: Vec<usize> = pool
                         .iter()
                         .filter_map(|id| usize::try_from(*id).ok())
                         .filter(|i| *i < server_count && !parked.contains(&servers[*i]))
                         .collect();
+                    if aim_at_member && !victims.is_empty() {
+                        assert_reachable!("gc: a retirement is aimed at a current member");
+                    }
                     if !victims.is_empty() {
                         let victim = victims[usize::try_from(
                             raw_payload % u64::try_from(victims.len()).unwrap_or(1),
@@ -1891,17 +2077,25 @@ impl Workload for ChainWorkload {
                         // node holds); a restart of a parked identity exits
                         // at boot, so an ambiguous ack can never bring it
                         // back. Refused by the budget: the step is a no-op.
-                        let reserved = {
+                        let reserved = if aim_at_member {
+                            // No reservation: the target is a member, the
+                            // node refuses, and parking it would remove a
+                            // live acceptor the protocol still names.
+                            true
+                        } else {
                             let world = crate::world::storage_world(ctx.state());
                             let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-                            guard
-                                .retire(&servers[victim], u64::try_from(victim).unwrap_or(u64::MAX))
+                            guard.retire(
+                                &servers[victim],
+                                u64::try_from(victim).unwrap_or(u64::MAX),
+                                &in_force,
+                            )
                         };
                         if reserved {
                             tracing::info!(node = victim as u64, "chain_retire_request");
                             let mut client = internal_clients[victim].clone();
                             let accepted: Option<bool> = moonpool_sim::select! {
-                                response = client.retire(RetireRequest {}) => response
+                                response = client.retire(RetireRequest { gc_watermark }) => response
                                     .ok()
                                     .map(|response| response.into_inner().accepted),
                                 _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
@@ -1910,7 +2104,27 @@ impl Workload for ChainWorkload {
                             tracing::info!(node = victim as u64, accepted = ?accepted, "chain_retire_outcome");
                             match accepted {
                                 Some(true) => self.adversarial.retired = true,
-                                Some(false) => self.adversarial.retire_refused = true,
+                                Some(false) => {
+                                    // Refused means the node is a member of
+                                    // the configuration in force, is the
+                                    // leader, or no effective floor sits
+                                    // above its membership fence: it is still
+                                    // live, so the pre-emptive park must be
+                                    // undone or the harness has removed a
+                                    // member outside the protocol. Only ever
+                                    // on an explicit refusal — an ambiguous
+                                    // ack may have been honored.
+                                    self.adversarial.retire_refused = true;
+                                    let world = crate::world::storage_world(ctx.state());
+                                    let released = world
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .release_retirement(
+                                            &servers[victim],
+                                            u64::try_from(victim).unwrap_or(u64::MAX),
+                                        );
+                                    self.adversarial.retire_released |= released;
+                                }
                                 None => {}
                             }
                         }
@@ -1970,6 +2184,9 @@ impl Workload for ChainWorkload {
         }
         if self.adversarial.retire_refused {
             assert_reachable!("gc: a retirement is refused by a node that is a member again");
+        }
+        if self.adversarial.retire_released {
+            assert_reachable!("gc: a refused retirement releases the parked identity");
         }
         if self.adversarial.compact_storm_modes[0] {
             assert_reachable!("chain: compact-storm overask is exercised");
@@ -2319,9 +2536,9 @@ mod tests {
         let members = [1_u64, 2, 3];
         let pool5 = [0_u64, 1, 2, 3, 4];
         let grow = compose_reconfiguration(0, &members, &pool5, 3, Some(1), 7).unwrap();
-        assert_eq!(grow.0, "grow");
-        assert_eq!(grow.1.len(), 4);
-        assert!(grow.1.iter().all(|n| *n < 5));
+        assert_eq!(grow.1, "grow");
+        assert_eq!(grow.2.len(), 4);
+        assert!(grow.2.iter().all(|n| *n < 5));
         assert!(
             compose_reconfiguration(0, &[0, 1, 2], &[0, 1, 2], 3, None, 0).is_none(),
             "no spare"
@@ -2331,18 +2548,18 @@ mod tests {
             "at the floor"
         );
         let shrink = compose_reconfiguration(1, &[0, 1, 2, 3], &pool5, 3, None, 2).unwrap();
-        assert_eq!((shrink.0, shrink.1.len()), ("shrink", 3));
+        assert_eq!((shrink.1, shrink.2.len()), ("shrink", 3));
         let replace = compose_reconfiguration(2, &members, &pool5, 3, None, 1).unwrap();
-        assert_eq!(replace.0, "replace");
-        assert_eq!(replace.1.len(), 3);
-        assert_ne!(replace.1, members.to_vec());
+        assert_eq!(replace.1, "replace");
+        assert_eq!(replace.2.len(), 3);
+        assert_ne!(replace.2, members.to_vec());
         assert!(
             compose_reconfiguration(3, &members, &pool5, 3, Some(1), 0).is_none(),
             "removing the leader at the floor is refused"
         );
         let removed = compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, Some(2), 0).unwrap();
         assert_eq!(
-            (removed.0, removed.1.clone()),
+            (removed.1, removed.2.clone()),
             ("remove-leader", vec![0, 1, 3])
         );
         assert!(
@@ -2351,13 +2568,20 @@ mod tests {
         );
         let rotate =
             compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2, 3, 4, 5], 3, None, 2).unwrap();
-        assert_eq!((rotate.0, rotate.1.clone()), ("rotate", vec![3, 4, 5]));
+        assert_eq!((rotate.1, rotate.2.clone()), ("rotate", vec![3, 4, 5]));
+        // A rotation through a ring no larger than the set in force drops a
+        // member instead of replacing it: observed as the shrink it is.
+        let short_ring = compose_reconfiguration(4, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 1).unwrap();
+        assert_eq!(
+            (short_ring.1, short_ring.2.clone()),
+            ("shrink", vec![0, 2, 3])
+        );
         // A dead member (outside the candidates) is the first one moved out.
         let heal = compose_reconfiguration(2, &[0, 1, 2], &[0, 2, 3], 3, None, 0).unwrap();
-        assert_eq!((heal.0, heal.1.clone()), ("replace", vec![0, 2, 3]));
+        assert_eq!((heal.1, heal.2.clone()), ("replace", vec![0, 2, 3]));
         let drop_dead = compose_reconfiguration(1, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 5).unwrap();
         assert_eq!(
-            (drop_dead.0, drop_dead.1.clone()),
+            (drop_dead.1, drop_dead.2.clone()),
             ("shrink", vec![0, 2, 3])
         );
         assert!(

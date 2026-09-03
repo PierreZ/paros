@@ -113,7 +113,7 @@ crash semantics (`StorageError::Io` / `FsyncFailed` with the `WriteOutcome` ambi
 ## Boot-time scan
 
 On recovery, `NodeStorage::boot_scan` — called by the driver **before**
-`RawNode::new` reads anything — scans the durable records and produces the
+`ColocatedNode::new` reads anything — scans the durable records and produces the
 `faulty_entries` / `faulty_snapshot` / `faulty_metainfo` sets. In Stage 7 any non-empty
 set ⇒ the classified `StorageError` ⇒ the driver's typed crash decision. The scan itself
 may only:

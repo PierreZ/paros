@@ -41,7 +41,7 @@ holds a value, exactly as Compartmentalized Paxos treats a `Noop`. Only the
 **apply** step, when a node executes a slot, interprets a control command.
 
 So a truncation flows like this: the application asks the leader (the `Compact`
-RPC), the leader proposes it (`RawNode::propose_control`), and every node prunes
+RPC), the leader proposes it (`ColocatedNode::propose_control`), and every node prunes
 *when it applies that slot*, off the hot path.
 
 ```mermaid

@@ -1,5 +1,5 @@
 use super::{
-    BTreeMap, Ballot, Command, Message, NodeId, RawNode, SessionEntry, Slot, Value, WriteOp,
+    Audience, BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, SessionEntry, Slot, Value,
 };
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
@@ -7,7 +7,7 @@ use super::{
 /// backlog is drained over several rounds rather than one unbounded message.
 const CATCHUP_BATCH: usize = 64;
 
-impl RawNode {
+impl ColocatedNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, from_slot = from_slot.0)))]
     pub(super) fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {
@@ -95,8 +95,10 @@ impl RawNode {
         if entries.is_empty() {
             return;
         }
-        self.pending_messages
-            .push((to, Message::CatchUpResponse { from: me, entries }));
+        self.pending_messages.push((
+            Audience::Node(to),
+            Message::CatchUpResponse { from: me, entries },
+        ));
     }
 
     /// Learn every decided entry a peer replayed to us. Each is chosen (durable,
@@ -165,35 +167,30 @@ impl RawNode {
         );
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
-        // The MAX guard at entry makes this addition exact; `saturating_add`
-        // stays as defense in depth.
-        let first = Slot(chosen_index.0.saturating_add(1));
-        // Fully compact up to the snapshot: everything at or below `chosen_index`
-        // is folded into the opaque bytes, so drop the in-memory prefix and raise
-        // the floor to `first`. Faulty entries in the folded prefix are healed
-        // by the install: their decided effects live in the opaque bytes now.
-        self.acceptor.truncate(first);
         // The replica jumps its prefix, closes a repair the boundary covers,
         // and adopts the serving peer's session ledger for the folded prefix
         // (#94: those slots' records will never be walked here).
         self.replica.install(chosen_index, &sessions);
-        // A probe blocked below the boundary is resolved by the fold as well.
-        self.proposer.probe_retain_from(first);
-        if self.proposer.probe().is_none() {
-            self.repair_elapsed = 0;
-        }
-        self.proposer.retain_rounds_from(first);
-        self.next_slot = self.next_slot.max(first);
-        // Persist the install (opaque bytes + boundary + sealed sessions).
-        // Snapshot-xor-entries: this batch surfaces no committed user entries
-        // for the folded prefix; the application installs the opaque state via
-        // the driver's storage write, and the ledger is sealed beside it.
-        self.pending_writes.push(WriteOp::InstallSnapshot {
+        // Fully compact up to the snapshot: everything at or below
+        // `chosen_index` is folded into the opaque bytes, so the acceptor drops
+        // the in-memory prefix, raises the floor one past the boundary and
+        // persists the install (opaque bytes + boundary + sealed sessions).
+        // Faulty entries in the folded prefix are healed by it: their decided
+        // effects live in the opaque bytes now. Snapshot-xor-entries: this
+        // batch surfaces no committed user entries for the folded prefix; the
+        // application installs the opaque state via the driver's storage write,
+        // and the ledger is sealed beside it.
+        let first = self.acceptor.install(
             chosen_index,
             ballot,
             snapshot,
             sessions,
-        });
+            &mut self.pending_writes,
+        );
+        // A probe blocked below the boundary is resolved by the fold as well.
+        self.proposer.probe_retain_from(first);
+        self.proposer.retain_rounds_from(first);
+        self.proposer.raise_next_slot(first);
         // Install postconditions: the floor lands exactly one past the new
         // chosen boundary, and the durable promise absorbed the snapshot's
         // ballot without ever regressing.
@@ -220,7 +217,7 @@ impl RawNode {
             "a snapshot install never rewinds the chosen index"
         );
         assert!(
-            self.next_slot >= self.acceptor.first_slot(),
+            self.proposer.next_slot() >= self.acceptor.first_slot(),
             "a snapshot install carries the allocator past the folded prefix"
         );
         // Every open recovery structure now refers only to retained slots:

@@ -17,7 +17,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, Slot};
+use paros_core::{Message, NodeId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,7 +156,7 @@ pub trait DriverHooks {
     }
 
     /// Whether to skip this beat's re-send of the open matchmaking request
-    /// (`paros_core::RawNode::resend_matchmaking`). Consulted only while a
+    /// (`paros_core::ColocatedNode::resend_matchmaking`). Consulted only while a
     /// matchmaking phase is open, so a `true` always has an effect: the
     /// campaign waits one more beat for the answers the transport may have
     /// lost. Always safe — the re-send is a pure optimization, the matchmaker
@@ -168,7 +168,7 @@ pub trait DriverHooks {
     }
 
     /// Whether to skip re-sending the open garbage-collection request this
-    /// beat ([`paros_core::RawNode::resend_gc`]). Consulted only when a
+    /// beat ([`paros_core::ColocatedNode::resend_gc`]). Consulted only when a
     /// re-send is due; skipping always costs a beat, never safety.
     fn skip_gc_resend(&self) -> bool {
         false
@@ -182,13 +182,31 @@ pub trait DriverHooks {
         false
     }
 
+    /// Whether to give up the running matchmaker-set handover this beat
+    /// ([`paros_core::MatchmakerReconfigurer::abandon`]), consulted from the
+    /// handover beat while one runs — `phase` is where it stands, so a
+    /// simulation can select each phase's abandonment independently.
+    ///
+    /// **Abandoning is always safe**, which is why this is a hook and not a
+    /// fault: the reconfigurer holds no durable state, the freeze and the
+    /// bootstrap are idempotent, the decree's votes stay durable at the
+    /// matchmakers, and the next node to meet the frozen generation
+    /// finishes it. It is the driver's own timeout
+    /// ([`RECONFIGURE_TIMEOUT_ELECTIONS`](crate::RECONFIGURE_TIMEOUT_ELECTIONS))
+    /// taken early — the rare-but-valid decision that puts a *second*
+    /// reconfigurer on a generation someone else half-replaced.
+    fn abandon_reconfigurer(&self, phase: &ReconfigurerPhase) -> bool {
+        let _ = phase;
+        false
+    }
+
     /// Whether the current leader should voluntarily step down.
     fn resign_leadership(&self) -> bool {
         false
     }
 
     /// Whether this leader should **cooperatively hand its Phase-2 authority
-    /// on** right now (`paros_core::RawNode::relinquish_to`), instead of
+    /// on** right now (`paros_core::ColocatedNode::relinquish_to`), instead of
     /// keeping it until an election takes it away.
     ///
     /// Consulted only when the core reports the leadership is in a
@@ -354,6 +372,23 @@ pub trait DriverHooks {
     /// dedup path. Deterministically produces "committed, applied, and the
     /// client does not know", the precondition of the dedup-window edges.
     fn drop_client_reply(&self, _reply: Reply) -> bool {
+        false
+    }
+
+    /// Whether to deliver this one reply **twice**, the mirror of
+    /// [`DriverHooks::drop_client_reply`]. Always safe: a duplicate is what
+    /// the sender's own re-send produces once its first answer was merely
+    /// slow, so every reply the driver folds must already be idempotent —
+    /// this makes the second copy arrive on purpose instead of by luck.
+    ///
+    /// Consulted only where a duplicate is *expressible*: the matchmaker
+    /// plane's replies, which reach the node loop through a channel and are
+    /// folded into `ColocatedNode` / the reconfigurer ([`Reply::Match`],
+    /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
+    /// seams take no duplicate by construction — a unary gRPC response is
+    /// delivered exactly once, and the *client's* retry is the duplicate that
+    /// path has to survive, which `drop_client_reply` already produces.
+    fn duplicate_client_reply(&self, _reply: Reply) -> bool {
         false
     }
 

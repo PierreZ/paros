@@ -1,4 +1,4 @@
-//! Resource bounds of the public `RawNode` API (issue #96): Promise paging,
+//! Resource bounds of the public `ColocatedNode` API (issue #96): Promise paging,
 //! bounded leader recovery, bounded chosen-prefix release, Nack round
 //! isolation, and Accepted fingerprints. Every scenario here is deterministic
 //! and drives only public methods; the simulation campaign remains responsible
@@ -7,9 +7,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, LEADER_RECOVERY_BATCH, Message,
-    NodeId, NodeRole, PROMISE_BATCH, ProposeResult, RawNode, Slot, TestStorage, Value,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, ColocatedNode, Command, ConfigId, Control, Entry,
+    LEADER_RECOVERY_BATCH, Message, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, Slot,
+    TestStorage, Value, command_fingerprint,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
@@ -24,16 +24,27 @@ fn command(slot: u64) -> Command {
 
 type ReadyOutput = (Vec<(NodeId, Message)>, Option<(usize, usize, usize)>);
 
-fn take_ready(node: &mut RawNode) -> ReadyOutput {
+fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
+    let pool: Vec<NodeId> = node.config().pool().to_vec();
+    let me = node.config().id;
     let ready = node.ready();
-    let messages = ready.messages().to_vec();
+    let messages: Vec<(NodeId, Message)> = ready
+        .messages()
+        .iter()
+        .flat_map(|(audience, msg)| {
+            audience
+                .resolve(&pool, me)
+                .into_iter()
+                .map(move |to| (to, msg.clone()))
+        })
+        .collect();
     let recovery = ready.recovery_batch();
     ready.advance();
     (messages, recovery)
 }
 
-fn candidate(id: u64) -> (RawNode, Ballot) {
-    let mut node = RawNode::new(&TestStorage::new(id, &[0, 1, 2]));
+fn candidate(id: u64) -> (ColocatedNode, Ballot) {
+    let mut node = ColocatedNode::new(&TestStorage::new(id, &[0, 1, 2]));
     node.set_election_timeout(1);
     node.tick();
     let ballot = node.ballot();
@@ -57,7 +68,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
             .accepted
             .insert(Slot(slot), (Ballot::zero(), command(slot)));
     }
-    let mut acceptor = RawNode::new(&storage);
+    let mut acceptor = ColocatedNode::new(&storage);
     let mut cursor = Slot(0);
     let mut pages = 0_usize;
     let mut entries_seen = 0_usize;
@@ -66,7 +77,8 @@ fn promise_suffix_and_leader_recovery_are_paged() {
     loop {
         acceptor.step(Message::Prepare {
             config_id: ConfigId::default(),
-            from: NodeId(1),
+            reply_to: NodeId(1),
+            leader: NodeId(1),
             ballot,
             from_slot: cursor,
             config: None,
@@ -106,7 +118,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
         let (candidate_messages, recovery) = take_ready(&mut candidate);
         if let Some(next) = next_from_slot {
             let Some(Message::Prepare {
-                from,
+                reply_to: from,
                 ballot: continuation_ballot,
                 from_slot,
                 ..
@@ -166,7 +178,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
 /// Accepted ack into an unbounded Ready write batch.
 #[test]
 fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
-    let mut gapped = RawNode::new(&TestStorage::new(0, &[0, 1, 2]));
+    let mut gapped = ColocatedNode::new(&TestStorage::new(0, &[0, 1, 2]));
     let prior = Ballot {
         round: 1,
         node: NodeId(1),
@@ -263,7 +275,8 @@ fn nack_hints_and_stale_campaigns_are_isolated() {
     let _ = take_ready(&mut stale);
     stale.step(Message::Prepare {
         config_id: ConfigId::default(),
-        from: NodeId(1),
+        reply_to: NodeId(1),
+        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
         config: None,

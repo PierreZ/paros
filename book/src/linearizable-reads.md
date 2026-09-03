@@ -129,13 +129,13 @@ replies time out, and the client retries elsewhere. That is the whole fix for
 the diagram above: step 9 can no longer happen, because node 0 can never again
 collect a quorum of acks at ballot (3,0).
 
-In the sans-IO core this follows the etcd-raft shape: `RawNode::read_index(ctx)`
+In the sans-IO core this follows the etcd-raft shape: `ColocatedNode::read_index(ctx)`
 starts a round, and the confirmation surfaces through the `Ready` handshake as
 a consume-once `ReadState`, after the batch's committed entries are applied:
 
 ```rust
 pub struct ReadState {
-    /// The driver-supplied correlation token from `RawNode::read_index`.
+    /// The driver-supplied correlation token from `ColocatedNode::read_index`.
     pub ctx: u64,
     /// The read index: the applied watermark the read observes.
     pub index: Option<Slot>,
@@ -262,7 +262,7 @@ returned watermark 4 — the write the client had been promised, missing.
 
 The fix is a definition, not a special case: `applied_seq` is written **only**
 by the contiguous walk that advances the prefix, which is what the boot rebuild
-in `RawNode::new` had always meant by it. Both dedup tables move together,
+in `ColocatedNode::new` had always meant by it. Both dedup tables move together,
 which matters more than it looks. Move the applied table alone and a retry
 arriving in the chosen-but-not-yet-applied window misses *both* tables and
 takes a fresh slot for a command already chosen — duplicate execution, strictly

@@ -23,9 +23,6 @@ message Propose {
   uint64 client = 1;
   uint64 seq = 2;
   bytes command = 3;
-  // Stable FNV-1a digest over the request identity and command bytes. The
-  // server validates it before the value can enter the consensus log.
-  fixed64 checksum = 4;
 }
 
 message ProposeAck {

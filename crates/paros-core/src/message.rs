@@ -1,15 +1,67 @@
 //! The protocol message enum. Pure in-memory data — the core never serializes
 //! it. The driver decodes inbound bytes into a [`Message`] before
-//! [`crate::RawNode::step`], and encodes [`crate::Ready::messages`] after
+//! [`crate::ColocatedNode::step`], and encodes [`crate::Ready::messages`] after
 //! draining a batch.
 
 use std::collections::BTreeMap;
 
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
+/// **Who a message is addressed to**, in the protocol's own terms rather
+/// than in addresses.
+///
+/// The core decides *audiences*; the driver holds the deployment map that
+/// turns one into a list of nodes ([`Audience::resolve`]). That split is what
+/// keeps the batch small — a heartbeat to a six-node pool is one entry, not
+/// six clones of the same bytes — and it is what a compartmentalized
+/// deployment needs, where "the acceptors of this configuration" is a column
+/// of a grid rather than a membership the sender enumerates.
+///
+/// There is no "the proposer of ballot `b`" audience: since `Prepare` and
+/// `Accept` carry an explicit `reply_to`, a reply is addressed to the address
+/// the request named ([`Audience::Node`]), which is exactly what lets a
+/// proxied request be answered without the acceptor knowing who the leader
+/// is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Audience {
+    /// One node, by id: every reply, every targeted request, the single
+    /// successor of a handoff.
+    Node(NodeId),
+    /// The Phase-2 addressees of `config`
+    /// ([`AcceptorConfig::phase2_addressees`]) — an `Accept`'s fan-out. A
+    /// removed node is never contacted for a new ballot's accepts, and a
+    /// grid or compartmentalized deployment addresses one column here.
+    AcceptorsOf(AcceptorConfig),
+    /// Every node of the pool — the learner fan-out (commits, beats,
+    /// catch-up), which reaches spares and removed members too so every
+    /// replica keeps the chosen log.
+    Learners,
+}
+
+impl Audience {
+    /// The nodes this audience names, given the deployment's `pool` and the
+    /// sender's own id (which is never addressed: a node does not send to
+    /// itself). In pool / membership order, so a batch's sends keep the order
+    /// the core queued them in.
+    #[must_use]
+    pub fn resolve(&self, pool: &[NodeId], me: NodeId) -> Vec<NodeId> {
+        match self {
+            Audience::Node(to) => vec![*to],
+            Audience::AcceptorsOf(config) => config
+                .phase2_addressees()
+                .iter()
+                .copied()
+                .filter(|p| *p != me)
+                .collect(),
+            Audience::Learners => pool.iter().copied().filter(|p| *p != me).collect(),
+        }
+    }
+}
+
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
-/// self-events all enter through the single [`crate::RawNode::step`] router.
+/// self-events all enter through the single [`crate::ColocatedNode::step`] router.
 ///
 /// `#[non_exhaustive]` so later stages can add variants (e.g. snapshot transfer,
 /// reconfiguration) without a breaking change.
@@ -25,8 +77,16 @@ pub enum Message {
         /// Durable cluster configuration identity.
         #[cfg_attr(feature = "serde", serde(default))]
         config_id: ConfigId,
-        /// Sender.
-        from: NodeId,
+        /// Where the `Promise` (or `Nack`) is addressed. The **reply address**
+        /// alone: it says nothing about who owns the ballot.
+        reply_to: NodeId,
+        /// The node running this campaign — the owner of `ballot`, which an
+        /// acceptor checks against [`Ballot::node`](crate::Ballot::node) before
+        /// promising. Equal to `reply_to` on every deployment paros ships
+        /// today; the two are separate fields so a later compartmentalized
+        /// deployment can put a proxy on the reply path without the acceptor's
+        /// ballot-ownership guard reading the proxy's id.
+        leader: NodeId,
         /// The ballot being prepared.
         ballot: Ballot,
         /// First slot this prepare covers (the candidate's `chosen_index + 1`).
@@ -83,8 +143,18 @@ pub enum Message {
         /// Durable cluster configuration identity.
         #[cfg_attr(feature = "serde", serde(default))]
         config_id: ConfigId,
-        /// Sender.
-        from: NodeId,
+        /// Where the `Accepted` (or `Nack`) is addressed. The **reply address**
+        /// alone.
+        reply_to: NodeId,
+        /// The node exercising `ballot`'s Phase-2 authority — the **leader
+        /// hint** an acceptor adopts and a client is redirected to. It is
+        /// deliberately not [`Ballot::node`](crate::Ballot::node): after a
+        /// cooperative handoff the ballot keeps naming the node that won it
+        /// while a different node drives Phase 2. Equal to `reply_to` on every
+        /// deployment paros ships today; the two are separate fields so a
+        /// later compartmentalized deployment can interpose a proxy leader
+        /// without an acceptor adopting the proxy as its leader.
+        leader: NodeId,
         /// The ballot under which the command is proposed.
         ballot: Ballot,
         /// The target slot.
@@ -208,7 +278,7 @@ pub enum Message {
     /// `at_index`." The leader tallies these for the `Truncate`-coupling rule
     /// (truncation is proposed only once a quorum has snapshotted at the
     /// index). **Driver-terminal**: the driver's snapshot-repair layer owns
-    /// it end to end; [`crate::RawNode::step`] ignores it — consensus state
+    /// it end to end; [`crate::ColocatedNode::step`] ignores it — consensus state
     /// never depends on snapshot custody.
     SnapAck {
         /// Durable cluster configuration identity. Snap repair is
@@ -275,10 +345,10 @@ pub enum Message {
     /// An authority is relinquished **at most once** and never exercised
     /// again by the node that gave it up. In paros that rule needs no durable
     /// fence: leadership is entirely volatile state
-    /// ([`RawNode::new`](crate::RawNode::new) always boots a Follower, and
+    /// ([`ColocatedNode::new`](crate::ColocatedNode::new) always boots a Follower, and
     /// `on_check_leader` only ever campaigns at a strictly higher round), so a
     /// crash is itself an abdication — and
-    /// [`RawNode::relinquish_to`](crate::RawNode::relinquish_to) abdicates
+    /// [`ColocatedNode::relinquish_to`](crate::ColocatedNode::relinquish_to) abdicates
     /// *synchronously, in the same call that queues this message*, before it
     /// can possibly reach the transport. See that method's `# Safety` section
     /// for the full argument.

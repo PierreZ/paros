@@ -172,9 +172,14 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
     // A partial compaction drops slots 0..=1 and keeps slot 2.
     let floor = leader.compact(Slot(1));
     assert_eq!(floor, Slot(2), "floor is one past the last dropped slot");
-    assert_eq!(leader.first_slot(), Slot(2));
+    assert_eq!(leader.acceptor().first_slot(), Slot(2));
     assert_eq!(
-        leader.accepted().keys().copied().collect::<Vec<_>>(),
+        leader
+            .acceptor()
+            .records()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
         vec![Slot(2)],
         "only slot 2 is retained in the accepted log"
     );
@@ -187,8 +192,8 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
     // Over-requesting past the chosen index clamps to it: everything drops.
     let floor = leader.compact(Slot(100));
     assert_eq!(floor, Slot(3), "clamped to chosen_index + 1");
-    assert_eq!(leader.first_slot(), Slot(3));
-    assert!(leader.accepted().is_empty());
+    assert_eq!(leader.acceptor().first_slot(), Slot(3));
+    assert!(leader.acceptor().records().is_empty());
     assert!(leader.replica.chosen().is_empty());
 }
 
@@ -199,7 +204,7 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
     // applies that slot (the fused-node analogue of a cluster-wide floor).
     let mut nodes = cluster_with_three_chosen();
     for n in &nodes {
-        assert_eq!(n.first_slot(), Slot(0), "no truncation yet");
+        assert_eq!(n.acceptor().first_slot(), Slot(0), "no truncation yet");
         assert_eq!(n.hard_state().chosen_index, Some(Slot(2)));
     }
 
@@ -217,7 +222,7 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
     // itself is chosen.
     for (i, n) in nodes.iter().enumerate() {
         assert_eq!(
-            n.first_slot(),
+            n.acceptor().first_slot(),
             Slot(2),
             "node {i} truncated to the decided floor"
         );
@@ -227,14 +232,17 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
             "node {i} chose the control slot"
         );
         assert!(
-            !n.accepted().contains_key(&Slot(0)),
+            !n.acceptor().records().contains_key(&Slot(0)),
             "node {i} dropped slot 0"
         );
         assert!(
-            !n.accepted().contains_key(&Slot(1)),
+            !n.acceptor().records().contains_key(&Slot(1)),
             "node {i} dropped slot 1"
         );
-        assert!(n.accepted().contains_key(&Slot(2)), "node {i} keeps slot 2");
+        assert!(
+            n.acceptor().records().contains_key(&Slot(2)),
+            "node {i} keeps slot 2"
+        );
     }
 }
 
@@ -289,13 +297,17 @@ fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
     let mut nodes = cluster_with_three_chosen();
     let leader = &mut nodes[0];
     leader.compact(Slot(2)); // full compaction: floor -> 3, accepted empty
-    assert!(leader.accepted().is_empty());
+    assert!(leader.acceptor().records().is_empty());
 
     let storage = TestStorage::from_node(leader);
-    let restarted = RawNode::new(&storage);
-    assert_eq!(restarted.first_slot(), Slot(3), "floor survives a restart");
+    let restarted = ColocatedNode::new(&storage);
+    assert_eq!(
+        restarted.acceptor().first_slot(),
+        Slot(3),
+        "floor survives a restart"
+    );
     assert!(
-        restarted.accepted().is_empty(),
+        restarted.acceptor().records().is_empty(),
         "the truncated log rebuilds empty"
     );
     assert_eq!(
@@ -304,7 +316,7 @@ fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
         "the chosen index is unchanged by truncation"
     );
     assert_eq!(
-        restarted.next_slot,
+        restarted.proposer().next_slot(),
         Slot(3),
         "next_slot falls back to first-unchosen when the log is empty"
     );
@@ -399,7 +411,7 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
         "jumped to the snapshot's chosen prefix"
     );
     assert_eq!(
-        n.first_slot(),
+        n.acceptor().first_slot(),
         Slot(6),
         "fully compacted up to the snapshot"
     );
@@ -491,7 +503,7 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
         "the walk resumed over the out-of-order chosen slot at the boundary"
     );
     assert_eq!(
-        x.chosen_gap(),
+        x.replica().chosen_gap(),
         None,
         "no stranded chosen slot survives the install"
     );
