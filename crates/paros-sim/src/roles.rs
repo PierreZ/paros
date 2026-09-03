@@ -19,8 +19,10 @@
 //! Multi-Paxos is first-class*): a seed whose matchmaker group drew zero
 //! members deploys no matchmakers, and every campaign goes straight to
 //! `Prepare`. The main campaign draws the matchmaker count per seed
-//! ([`crate::MATCHMAKER_POOL_RANGE`]); the scripted corpus registers no
-//! matchmaker group at all, so its three nodes are three acceptors, as before.
+//! ([`crate::MATCHMAKER_POOL_RANGE`]); the scripted corpus registers the
+//! [`ACCEPTOR_GROUP`] and no matchmaker group, which reads here **exactly**
+//! like a main-campaign seed whose matchmaker group drew zero members —
+//! byte-identical, one code path, no corpus special case.
 
 use std::net::IpAddr;
 
@@ -87,21 +89,15 @@ fn sort_ips(ips: &mut Vec<String>) {
     ips.dedup();
 }
 
-/// The seed's deployment, read off the topology's process groups. A topology
-/// with no registered acceptor group (a builder that used a single unnamed
-/// `.processes()` registration — the corpus, the contract suite) treats every
-/// process as an acceptor, which is exactly the plain deployment.
+/// The seed's deployment, read off the topology's process groups. Every
+/// builder registers its nodes as the [`ACCEPTOR_GROUP`] — a process is named
+/// by [`crate::process::NodeProcess::name`], corpus and main campaign alike —
+/// so a topology with no matchmaker group is simply a deployment whose
+/// matchmaker list is empty: the plain one.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
-    let mut acceptors = topology.ips_in_group(ACCEPTOR_GROUP);
+    let acceptors = topology.ips_in_group(ACCEPTOR_GROUP);
     let matchmakers = topology.ips_in_group(MATCHMAKER_GROUP);
-    if acceptors.is_empty() {
-        // Single-group builders: every process is an acceptor. The caller may
-        // be one of them (`all_process_ips` excludes the caller).
-        acceptors = topology.all_process_ips().to_vec();
-        acceptors.push(topology.my_ip.clone());
-        acceptors.retain(|ip| topology.group_for(ip) != Some(MATCHMAKER_GROUP));
-    }
     let map = Deployment::from_groups(acceptors, matchmakers);
     assert_always!(
         !map.acceptors.is_empty(),
