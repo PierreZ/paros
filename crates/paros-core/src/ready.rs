@@ -4,14 +4,14 @@
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::message::Message;
-use crate::node::{RawNode, ReadState};
+use crate::node::{ColocatedNode, ReadState};
 use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
 use crate::write::{self, MustSync, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
 ///
-/// `Ready` holds the unique mutable borrow of its [`RawNode`]. Because that
+/// `Ready` holds the unique mutable borrow of its [`ColocatedNode`]. Because that
 /// borrow is alive for the lifetime of the `Ready`, the borrow checker makes a
 /// second `node.ready()` a **compile error** until this guard is consumed by
 /// [`Ready::advance`]. (Contrast etcd-raft, which only *panics at runtime* on a
@@ -37,16 +37,16 @@ use crate::write::{self, MustSync, WriteOp};
 /// an `.await`. An async driver should copy the buckets out
 /// (`writes().to_vec()`, `must_sync()`, `messages().to_vec()`,
 /// `committed().to_vec()`), `advance()`, await its I/O, then call
-/// [`RawNode::advance_recovery`] to release the next bounded continuation.
+/// [`ColocatedNode::advance_recovery`] to release the next bounded continuation.
 #[must_use = "a Ready must be processed and then advanced; dropping it silently skips a batch"]
 pub struct Ready<'a> {
-    node: &'a mut RawNode,
+    node: &'a mut ColocatedNode,
 }
 
 impl<'a> Ready<'a> {
-    /// Wrap a uniquely-borrowed node. Crate-internal: only [`RawNode::ready`]
+    /// Wrap a uniquely-borrowed node. Crate-internal: only [`ColocatedNode::ready`]
     /// constructs a `Ready`.
-    pub(crate) fn new(node: &'a mut RawNode) -> Self {
+    pub(crate) fn new(node: &'a mut ColocatedNode) -> Self {
         Self { node }
     }
 
@@ -124,7 +124,7 @@ impl<'a> Ready<'a> {
     /// (the leader-side half of the matchmaker contract, #120). Sent **after**
     /// step 1 like every message — the candidate's promise raise travels in
     /// the same batch — over the matchmaker RPC service, never the peer wire;
-    /// the answers come back through [`RawNode::on_match_reply`]. Always empty
+    /// the answers come back through [`ColocatedNode::on_match_reply`]. Always empty
     /// on plain Multi-Paxos.
     #[must_use]
     pub fn match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
@@ -133,14 +133,14 @@ impl<'a> Ready<'a> {
 
     /// Garbage-collection requests to send this batch (#123), one per
     /// addressed matchmaker, over the matchmaker RPC service; the acks come
-    /// back through [`RawNode::on_gc_ack`]. Always empty on plain Multi-Paxos.
+    /// back through [`ColocatedNode::on_gc_ack`]. Always empty on plain Multi-Paxos.
     #[must_use]
     pub fn gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
         self.node.pending_gc_requests()
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique
-    /// borrow, so the next [`RawNode::ready`] is allowed. Consumes `self` — the
+    /// borrow, so the next [`ColocatedNode::ready`] is allowed. Consumes `self` — the
     /// guard cannot be reused.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.node.config().id.0)))]
     pub fn advance(self) {

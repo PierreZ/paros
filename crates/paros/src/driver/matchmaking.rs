@@ -10,8 +10,8 @@ use std::time::Duration;
 use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
 use moonpool_hyper::ReconnectingChannel;
 use paros_core::{
-    Ballot, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep, MatchmakerId,
-    NodeId, RawNode, ReconfigureReply, ReconfigureRequest, Slot,
+    Ballot, ColocatedNode, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep,
+    MatchmakerId, NodeId, ReconfigureReply, ReconfigureRequest, Slot,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -226,7 +226,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
 /// the audit folds the campaign's opening ahead of its first request.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn surface_matchmaking<A: Audit>(
-    node: &RawNode,
+    node: &ColocatedNode,
     last_matchmaking: &mut Option<Ballot>,
     audit: &A,
     self_id: u64,
@@ -250,7 +250,7 @@ pub(crate) fn surface_matchmaking<A: Audit>(
 /// Send one batch of matchmaking requests, each as its own RPC task whose
 /// answer (if any) is fed back into the node loop through the reply inbox.
 /// The task draws no randomness and consults no hook — a lost or late reply
-/// is exactly what [`RawNode::resend_matchmaking`] exists for.
+/// is exactly what [`ColocatedNode::resend_matchmaking`] exists for.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
 fn send_match_requests<P: Providers, A: Audit>(
     providers: &P,
@@ -307,7 +307,7 @@ pub(crate) fn folded_answer(reply: &MatchReply) -> Option<(Ballot, u64)> {
 /// [`folded_answer`] for that reply.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn report_match_step<A: Audit>(
-    node: &RawNode,
+    node: &ColocatedNode,
     audit: &A,
     self_id: u64,
     matchmaker: MatchmakerId,

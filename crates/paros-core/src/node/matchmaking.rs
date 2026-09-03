@@ -16,8 +16,8 @@
 //! The phase is deliberately its own state ([`Matchmaking`]) beside
 //! [`super::election::Election`], never folded into it: a reader must be able
 //! to point at the matchmaking state, the Phase-1 state, and the boundary
-//! between them ([`super::RawNode::start_phase1`]). A candidate holds exactly
-//! one of the two, and `RawNode::assert_invariants` says so.
+//! between them ([`super::ColocatedNode::start_phase1`]). A candidate holds exactly
+//! one of the two, and `ColocatedNode::assert_invariants` says so.
 //!
 //! # Plain Multi-Paxos never comes here
 //!
@@ -106,13 +106,13 @@
 //!   included — the effective configuration outlives its record as the
 //!   durable scalar every `Registered` reply reports
 //!   ([`crate::MatchmakerHardState::effective`]).
-//! - **Lost replies** are the driver's business: [`super::RawNode::resend_matchmaking`]
+//! - **Lost replies** are the driver's business: [`super::ColocatedNode::resend_matchmaking`]
 //!   re-queues the request for every matchmaker that has not answered, and
 //!   skipping the call is always safe — the matchmaker answers a repeated
 //!   request idempotently from its retained history, and a campaign that never
 //!   completes is simply abandoned at the next election timeout.
 
-use super::{BTreeMap, BTreeSet, Ballot, NodeId, NodeRole, RawNode};
+use super::{BTreeMap, BTreeSet, Ballot, ColocatedNode, NodeId, NodeRole};
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, REGISTRY_PAGE, Registration,
     RegistrationKind,
@@ -127,7 +127,7 @@ pub(super) struct Matchmaking {
     /// `C_b`: the configuration this ballot will run with once registered.
     pub(super) config: AcceptorConfig,
     /// What this campaign registers: an operator's deliberate change
-    /// ([`super::RawNode::reconfigure`]) or this node's belief about the
+    /// ([`super::ColocatedNode::reconfigure`]) or this node's belief about the
     /// configuration in force (the election clock). Only a
     /// [`RegistrationKind::Belief`] campaign is subject to the
     /// stale-configuration abort.
@@ -158,7 +158,7 @@ pub(super) struct Matchmaking {
 }
 
 /// What one matchmaker reply did to an open campaign, returned by
-/// [`super::RawNode::on_match_reply`] so the driver can report the transition
+/// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition
 /// it caused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatchStep {
@@ -433,17 +433,17 @@ pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, M
     (matchmaker, to, ballot, answer)
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// Re-queue the open matchmaking request toward every matchmaker that has
     /// not answered yet. A no-op on a node with no open matchmaking phase.
     ///
     /// **The driver is expected to call this on a steady cadence** while
-    /// [`RawNode::matchmaking_pending`] reports an open phase, so a request
+    /// [`ColocatedNode::matchmaking_pending`] reports an open phase, so a request
     /// or reply the transport lost does not stall the campaign until the
     /// election timeout abandons it.
     ///
     /// **Skipping a call is always safe.** Re-sending is pure optimization,
-    /// exactly like [`RawNode::resend_pending`]: the matchmaker answers a
+    /// exactly like [`ColocatedNode::resend_pending`]: the matchmaker answers a
     /// repeated request idempotently from its retained history (it registers
     /// nothing twice), and a campaign that never completes its matchmaking is
     /// simply abandoned at the next election timeout and retried at a higher
@@ -484,7 +484,7 @@ impl RawNode {
     }
 
     /// Whether a matchmaking phase is open — the driver's cue to pace
-    /// [`RawNode::resend_matchmaking`], consulted only where a re-send can
+    /// [`ColocatedNode::resend_matchmaking`], consulted only where a re-send can
     /// have an effect.
     #[must_use]
     pub fn matchmaking_pending(&self) -> bool {
@@ -511,7 +511,7 @@ impl RawNode {
     /// - `Registered`: the history is unioned and the watermark maxed; once a
     ///   **quorum of matchmakers** has registered the ballot, `H_b` is
     ///   computed (the union, filtered by the maximum watermark) and handed to
-    ///   Phase 1 through [`RawNode::start_phase1`] — no `Prepare` ever leaves
+    ///   Phase 1 through [`ColocatedNode::start_phase1`] — no `Prepare` ever leaves
     ///   before that instant (invariant 1). An ordinary campaign whose
     ///   histories name a **reconfiguration** to a configuration other than
     ///   the one it registered abandons the campaign and adopts that
@@ -523,7 +523,7 @@ impl RawNode {
     ///   `BelowWatermark` refusal raises the round floor the next campaign
     ///   opens above). A refusal naming a **chosen successor set** (#125:
     ///   `Stopped { successor }`, or `Generation` from a later generation) is
-    ///   adopted through [`RawNode::learn_matchmakers`] and reported as
+    ///   adopted through [`ColocatedNode::learn_matchmakers`] and reported as
     ///   `Superseded`; the next campaign asks the new set. A refused
     ///   registration never becomes a leadership (invariant 4).
     ///
@@ -576,7 +576,7 @@ impl RawNode {
         step
     }
 
-    /// The `Registered` half of [`RawNode::on_match_reply`]: union this
+    /// The `Registered` half of [`ColocatedNode::on_match_reply`]: union this
     /// matchmaker's history, and once a quorum has registered the ballot,
     /// either adopt an effective configuration this campaign is stale against
     /// or hand `H_b` to Phase 1.
@@ -695,7 +695,7 @@ impl RawNode {
         }
     }
 
-    /// The refusal half of [`RawNode::on_match_reply`]: raise the round floor
+    /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor
     /// the next campaign opens above, adopt a chosen successor set when the
     /// refusal names one, and abandon the campaign either way.
     fn fold_refusal(&mut self, refusal: MatchRefusal) -> MatchStep {

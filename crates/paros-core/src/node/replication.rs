@@ -1,4 +1,4 @@
-use super::{Ballot, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
@@ -11,10 +11,10 @@ use crate::membership::AcceptorConfig;
 /// changes.
 pub const HEARTBEAT_TICKS: u64 = 1;
 
-impl RawNode {
+impl ColocatedNode {
     /// Broadcast one leader beat at a fresh, monotonically increasing
     /// per-ballot sequence number. Both the tick self-trigger and
-    /// [`RawNode::read_index`] beat through here, so every broadcast beat
+    /// [`ColocatedNode::read_index`] beat through here, so every broadcast beat
     /// carries a seq an ack can be matched against.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn broadcast_heartbeat(&mut self) {
@@ -66,7 +66,7 @@ impl RawNode {
         if from == me {
             // Leader self-trigger: broadcast the beat. Re-sending the un-acked
             // `Accept`s is a *separate* decision the driver makes on the same
-            // cadence — see [`RawNode::resend_pending`].
+            // cadence — see [`ColocatedNode::resend_pending`].
             self.broadcast_heartbeat();
             return;
         }

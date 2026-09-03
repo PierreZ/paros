@@ -2,9 +2,9 @@
 //! set the caller names. Generic over the acceptor identity `A` and the value
 //! `V`, sans-IO like everything else here — the caller carries the messages.
 //!
-//! # Why a kernel beside [`crate::RawNode`], not extracted from it
+//! # Why a kernel beside [`crate::ColocatedNode`], not extracted from it
 //!
-//! [`crate::RawNode`] runs single-decree Paxos per log slot, but its Phase 1
+//! [`crate::ColocatedNode`] runs single-decree Paxos per log slot, but its Phase 1
 //! is inseparable from what makes it Multi-Paxos: one `Prepare` per ballot
 //! over a whole log suffix, paged `Promise`s, the CTRL tri-state
 //! (`have`/`none`/`faulty`), the cross-configuration completion predicate, the

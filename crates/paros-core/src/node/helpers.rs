@@ -1,4 +1,4 @@
-use super::{Ballot, Command, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 use crate::types::Control;
 
@@ -16,7 +16,7 @@ fn command_payload_bytes(command: &Command) -> u64 {
     }
 }
 
-impl RawNode {
+impl ColocatedNode {
     // ---- helpers ----------------------------------------------------------
 
     /// Record `(ballot, command)` in the acceptor's log and attribute the
@@ -81,9 +81,9 @@ impl RawNode {
     /// Record that `acceptors`/`acceptors_since` just moved: if the new
     /// configuration names this node, the ballot it is bound to is the newest
     /// at which this node was a member. Called from every assignment to
-    /// `acceptors_since` — [`RawNode::learn_config`], `try_become_leader`, a
+    /// `acceptors_since` — [`ColocatedNode::learn_config`], `try_become_leader`, a
     /// handoff install, and the adoption of an effective configuration — so
-    /// [`RawNode::may_retire`] never under-reports the membership it must
+    /// [`ColocatedNode::may_retire`] never under-reports the membership it must
     /// outlive.
     pub(super) fn record_membership(&mut self) {
         if self.is_acceptor() {
@@ -131,7 +131,7 @@ impl RawNode {
 
     /// Drop every volatile leadership and campaign state: the open campaign
     /// phases, the in-flight rounds, recovery, repair, read rounds and the
-    /// inherited origin. Shared by [`RawNode::become_follower`] and a fresh
+    /// inherited origin. Shared by [`ColocatedNode::become_follower`] and a fresh
     /// campaign, so a leader that reconfigures abandons exactly what a
     /// deposed one does.
     ///

@@ -66,13 +66,13 @@ pub enum WriteOp {
     /// A write of the node's acceptor role: the raised promise, or the
     /// `(ballot, command)` accepted for a slot. Overwriting a stale
     /// lower-ballot accept for a now-chosen slot is load-bearing for restart
-    /// safety (see [`crate::RawNode`]).
+    /// safety (see [`crate::ColocatedNode`]).
     Acceptor(AcceptorWrite<Command>),
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor. Application-driven (see
-    /// [`crate::RawNode::compact`]); `first` always sits within the chosen
+    /// [`crate::ColocatedNode::compact`]); `first` always sits within the chosen
     /// prefix, so nothing undecided is dropped.
     Truncate {
         /// The first slot still retained. Everything below it is dropped.

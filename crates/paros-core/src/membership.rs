@@ -128,7 +128,7 @@ impl QuorumSystem {
     /// A majority addresses the whole membership: any subset large enough may
     /// answer. A grid or a compartmentalized deployment would address one
     /// *column* here, and that is the whole of the change — the caller
-    /// ([`crate::RawNode`]'s Phase-2 fan-out) already asks the boundary
+    /// ([`crate::ColocatedNode`]'s Phase-2 fan-out) already asks the boundary
     /// instead of iterating the membership itself.
     #[must_use]
     pub fn phase2_addressees<I>(self, members: &[I]) -> &[I] {
@@ -222,7 +222,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// Phase-1 and Phase-2 quorums always intersect
     /// ([`QuorumSystem::cross_intersects`]). Asserted by both quorum
     /// predicates; a boundary that takes a configuration from outside
-    /// (`RawNode::reconfigure`) refuses a malformed one here instead of
+    /// (`ColocatedNode::reconfigure`) refuses a malformed one here instead of
     /// letting a later quorum tally panic on it.
     ///
     /// The ordering clause is not cosmetic and matches

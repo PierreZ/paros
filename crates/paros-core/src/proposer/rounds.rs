@@ -158,7 +158,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     /// page.
     pub fn resend_page(&mut self) -> Vec<(Slot, Ballot, V)> {
         // No round survives below the compaction floor (the cross-role
-        // invariant `RawNode::assert_invariants` pins), so a fresh cursor
+        // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
         // starts at the bottom of the map and needs no floor handed in.
         let start = self.resend_cursor.unwrap_or(Slot(0));
         let mut pending: Vec<(Slot, Ballot, V)> = self

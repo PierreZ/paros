@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{Message, NodeId, RawNode, Slot, Value};
+use paros_core::{ColocatedNode, Message, NodeId, Slot, Value};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Seam};
@@ -54,7 +54,7 @@ pub(crate) struct SnapRepair {
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0, to = to.0, at = at.0, chunks = chunks.len()))]
 pub(crate) fn handle_snap_chunk_request<S, H, A>(
-    node: &RawNode,
+    node: &ColocatedNode,
     storage: &S,
     out: &Outbound,
     hooks: &H,
@@ -154,7 +154,7 @@ pub(crate) fn handle_snap_chunk_request<S, H, A>(
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id, at = at.0, chunks = chunks.len()))]
 pub(crate) fn handle_snap_chunk_response<S, H, A>(
-    node: &mut RawNode,
+    node: &mut ColocatedNode,
     storage: &mut S,
     snap: &mut SnapRepair,
     hooks: &H,
@@ -288,7 +288,7 @@ where
 /// bookkeeping, and the chunk-repair pull.
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 pub(crate) fn snap_repair_tick<S, H, A>(
-    node: &RawNode,
+    node: &ColocatedNode,
     storage: &S,
     out: &Outbound,
     hooks: &H,

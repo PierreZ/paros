@@ -45,7 +45,7 @@
 //! took part in (its `on_prepare` guard is pool-based, never
 //! configuration-based) until GC retires those configurations (#123) —
 //! "removed" is not "shut down". A leader its own reconfiguration removed
-//! drives the change to completion and then resigns (`RawNode::tick`), so an
+//! drives the change to completion and then resigns (`ColocatedNode::tick`), so an
 //! ordinary election lands leadership inside `C_new`; the cooperative handoff
 //! is *not* used across a configuration change (a handoff continues the
 //! *same* ballot with no Phase 1, which is exactly what a configuration
@@ -58,12 +58,12 @@
 //! **without matchmakers refuses every reconfiguration**: plain Multi-Paxos
 //! is a permanent configuration, not a transitional one.
 
-use super::{NodeId, NodeRole, RawNode};
+use super::{ColocatedNode, NodeId, NodeRole};
 use crate::matchmaker::RegistrationKind;
 use crate::membership::AcceptorConfig;
 use crate::types::Ballot;
 
-/// Why [`RawNode::reconfigure`] refused a request. Each is an operating
+/// Why [`ColocatedNode::reconfigure`] refused a request. Each is an operating
 /// condition (the caller retries or gives up), never a panic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconfigureRefusal {
@@ -89,7 +89,7 @@ pub enum ReconfigureRefusal {
     RoundExhausted,
 }
 
-/// The outcome of [`RawNode::reconfigure`].
+/// The outcome of [`ColocatedNode::reconfigure`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconfigureResult {
     /// This node is not the leader; the caller should retry the hinted node
@@ -105,7 +105,7 @@ pub enum ReconfigureResult {
     Started(Ballot),
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// Leader entry point for an **online reconfiguration**: move this
     /// leadership to a fresh ballot registered with `config` as its acceptor
     /// set. See the module doc for the flow, the accepted stall window, and

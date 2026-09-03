@@ -156,7 +156,7 @@ pub trait DriverHooks {
     }
 
     /// Whether to skip this beat's re-send of the open matchmaking request
-    /// (`paros_core::RawNode::resend_matchmaking`). Consulted only while a
+    /// (`paros_core::ColocatedNode::resend_matchmaking`). Consulted only while a
     /// matchmaking phase is open, so a `true` always has an effect: the
     /// campaign waits one more beat for the answers the transport may have
     /// lost. Always safe — the re-send is a pure optimization, the matchmaker
@@ -168,7 +168,7 @@ pub trait DriverHooks {
     }
 
     /// Whether to skip re-sending the open garbage-collection request this
-    /// beat ([`paros_core::RawNode::resend_gc`]). Consulted only when a
+    /// beat ([`paros_core::ColocatedNode::resend_gc`]). Consulted only when a
     /// re-send is due; skipping always costs a beat, never safety.
     fn skip_gc_resend(&self) -> bool {
         false
@@ -206,7 +206,7 @@ pub trait DriverHooks {
     }
 
     /// Whether this leader should **cooperatively hand its Phase-2 authority
-    /// on** right now (`paros_core::RawNode::relinquish_to`), instead of
+    /// on** right now (`paros_core::ColocatedNode::relinquish_to`), instead of
     /// keeping it until an election takes it away.
     ///
     /// Consulted only when the core reports the leadership is in a
@@ -383,7 +383,7 @@ pub trait DriverHooks {
     ///
     /// Consulted only where a duplicate is *expressible*: the matchmaker
     /// plane's replies, which reach the node loop through a channel and are
-    /// folded into `RawNode` / the reconfigurer ([`Reply::Match`],
+    /// folded into `ColocatedNode` / the reconfigurer ([`Reply::Match`],
     /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
     /// seams take no duplicate by construction — a unary gRPC response is
     /// delivered exactly once, and the *client's* retry is the duplicate that

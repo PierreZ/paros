@@ -59,7 +59,7 @@ Region 2 at `b`; the Phase-1 completion predicate over *every* configuration in 
 covers Region 3) — this is the whole forgettability condition, and it is deliberately not
 Scenario 3: the chosen prefix's durability is the existing chosen-index / truncation /
 snapshot machinery's, and nothing new is added to make GC possible. The rule lives in
-`RawNode::gc_covered`; the derivation is the module doc of `node/gc.rs`.
+`ColocatedNode::gc_covered`; the derivation is the module doc of `node/gc.rs`.
 
 Two more preconditions keep the "Region 2 is decided" half honest: GC waits while any
 Phase-1-shaped work is open (`leader_recovery`, the CTRL `repair_probe`, `app_repair`), the
@@ -196,10 +196,10 @@ appears in the bootstrap history). A bootstrapped set becomes authoritative only
 `M_{g+1}` members activate their pending bootstrap as their registry
 (`MatchmakerWriteOp::InstallRegistry`).
 
-### Why the single-decree kernel is still beside `RawNode`, and what replaces it
+### Why the single-decree kernel is still beside `ColocatedNode`, and what replaces it
 
 The successor is decided by classic single-decree Paxos, and the question was whether to
-carve that out of `RawNode`. When the handover landed, `RawNode` *was* Multi-Paxos in one
+carve that out of `ColocatedNode`. When the handover landed, `ColocatedNode` *was* Multi-Paxos in one
 piece — one `Prepare` per ballot over a log suffix, paged `Promise`s, the CTRL tri-state,
 the cross-configuration completion predicate, the no-op gap fill, the read fence, the
 bounded leader recovery — and extracting a single decree from that would have re-derived
@@ -212,7 +212,7 @@ stay with the caller.
 
 That reason no longer holds as stated. The core has since been decomposed into roles
 (`acceptor.rs`, `proposer.rs`, `replica.rs`, with `membership.rs` as the quorum boundary;
-AGENTS.md, *The core is composable*), and `RawNode` is the wiring that colocates them.
+AGENTS.md, *The core is composable*), and `ColocatedNode` is the wiring that colocates them.
 A single decree is then the same `Proposer` + `Acceptor` over a one-slot log — the
 reconfigurer would drive the shared proposer against the matchmakers' shared acceptor, with
 no second value-selection rule to keep in agreement. Moving the kernel onto those roles is

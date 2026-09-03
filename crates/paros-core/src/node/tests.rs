@@ -1,11 +1,11 @@
 //! Unit tests for the Multi-Paxos state machine. Tests are a child module of
-//! `node`, so they may read `RawNode`'s private fields directly.
+//! `node`, so they may read `ColocatedNode`'s private fields directly.
 
 use std::collections::BTreeMap;
 
 use super::{
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep,
-    NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, RawNode, ReadIndexResult,
+    ColocatedNode, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin,
+    MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, ReadIndexResult,
     ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
@@ -53,7 +53,7 @@ impl TestStorage {
     /// Snapshot a live node's durable state (scalars + accepted log + compaction
     /// floor) into a fresh storage, the way a real driver's persisted disk would
     /// look, for building the "restart from durable storage" path in tests.
-    fn from_node(n: &RawNode) -> Self {
+    fn from_node(n: &ColocatedNode) -> Self {
         Self {
             hard_state: n.hard_state(),
             accepted: n.acceptor().records().clone(),
@@ -92,22 +92,22 @@ impl Storage for TestStorage {
     }
 }
 
-fn node(id: u64, members: &[u64]) -> RawNode {
-    RawNode::new(&TestStorage::new(id, members))
+fn node(id: u64, members: &[u64]) -> ColocatedNode {
+    ColocatedNode::new(&TestStorage::new(id, members))
 }
 
 /// A node of a **matchmaker deployment**: bootstrap membership `members`,
 /// addressable pool `pool` (a superset holding the spares), and `matchmakers`
 /// matchmakers.
-fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> RawNode {
+fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> ColocatedNode {
     let mut storage = TestStorage::new(id, members);
     storage.config.nodes = pool.iter().copied().map(NodeId).collect();
     storage.config.matchmakers = (0..matchmakers).map(MatchmakerId).collect();
-    RawNode::new(&storage)
+    ColocatedNode::new(&storage)
 }
 
 /// Drain a node's pending matchmaking requests and clear the batch.
-fn drain_match_requests(n: &mut RawNode) -> Vec<(MatchmakerId, MatchRequest)> {
+fn drain_match_requests(n: &mut ColocatedNode) -> Vec<(MatchmakerId, MatchRequest)> {
     let ready = n.ready();
     let requests = ready.match_requests().to_vec();
     ready.advance();
@@ -194,7 +194,7 @@ fn ballot(round: u64, node: u64) -> Ballot {
 }
 
 /// Drain a node's pending messages and clear the batch.
-fn drain(n: &mut RawNode) -> Vec<(NodeId, Message)> {
+fn drain(n: &mut ColocatedNode) -> Vec<(NodeId, Message)> {
     let ready = n.ready();
     let msgs = ready.messages().to_vec();
     ready.advance();
@@ -203,7 +203,7 @@ fn drain(n: &mut RawNode) -> Vec<(NodeId, Message)> {
 
 /// The chosen client value at `slot` on this node, if any (a control command has
 /// no client value and reads back as `None`).
-fn chosen_at(n: &RawNode, slot: u64) -> Option<Value> {
+fn chosen_at(n: &ColocatedNode, slot: u64) -> Option<Value> {
     n.replica
         .chosen()
         .get(&Slot(slot))
@@ -215,7 +215,7 @@ fn chosen_at(n: &RawNode, slot: u64) -> Option<Value> {
 /// `keep` is false, enqueueing each delivery's resulting messages. Runs to
 /// quiescence (a reliable network with a caller-controlled partition).
 fn deliver_filtered(
-    nodes: &mut [RawNode],
+    nodes: &mut [ColocatedNode],
     mut queue: Vec<(NodeId, Message)>,
     keep: impl Fn(NodeId, &Message) -> bool,
 ) {
@@ -232,7 +232,7 @@ fn deliver_filtered(
     }
 }
 
-fn deliver_all(nodes: &mut [RawNode], queue: Vec<(NodeId, Message)>) {
+fn deliver_all(nodes: &mut [ColocatedNode], queue: Vec<(NodeId, Message)>) {
     deliver_filtered(nodes, queue, |_, _| true);
 }
 
@@ -246,7 +246,7 @@ const NO_CHECK_QUORUM: u64 = 1_000_000;
 /// followers learn who the leader is (a follower only adopts a leader on
 /// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
 /// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
-fn make_leader(nodes: &mut [RawNode], idx: usize) {
+fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
     nodes[idx].set_election_timeout(1);
     nodes[idx].tick(); // fires CheckLeader -> Candidate, broadcasts Prepare
     let q = drain(&mut nodes[idx]);
@@ -263,7 +263,7 @@ fn make_leader(nodes: &mut [RawNode], idx: usize) {
 
 /// Drive a fresh 3-node cluster with node 0 as leader and get slots 0..=2 chosen
 /// everywhere, then return the cluster (`chosen_index` is `Some(Slot(2))`).
-fn cluster_with_three_chosen() -> [RawNode; 3] {
+fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
     let mut nodes = [
         node(0, &[0, 1, 2]),
         node(1, &[0, 1, 2]),
@@ -283,7 +283,7 @@ fn cluster_with_three_chosen() -> [RawNode; 3] {
 /// Step `msg` into whichever node it is addressed to, without draining it (so
 /// its pending buckets stay observable), returning nothing. Panics if `to` is
 /// not a cluster member.
-fn step_at(nodes: &mut [RawNode], to: NodeId, msg: Message) {
+fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
     let idx = nodes
         .iter()
         .position(|n| n.config().id == to)

@@ -34,7 +34,7 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
 
 #[test]
 fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
-    // The dedup half of #54. `RawNode::new` rebuilds `inflight` from every
+    // The dedup half of #54. `ColocatedNode::new` rebuilds `inflight` from every
     // accepted-but-unchosen entry, so the restarted old leader boots holding
     // `(client 1, seq 2) -> slot 1`. When slot 1 decides as a `Noop`, that mapping
     // must go: keeping it would answer the client's retry with `Duplicate(slot 1)`,
@@ -50,7 +50,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
     storage
         .accepted
         .insert(Slot(1), (ballot(1, 0), ucmd(1, 2, 20)));
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     assert_eq!(
         n.replica.inflight_at(ClientId(1), ClientSeq(2)),
         Some(Slot(1)),
@@ -390,7 +390,7 @@ fn restart_rebuilds_state_from_hard_state() {
         first_slot: Slot(0),
         faulty: Vec::new(),
     };
-    let n = RawNode::new(&storage);
+    let n = ColocatedNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
     assert_eq!(
         n.proposer().next_slot(),

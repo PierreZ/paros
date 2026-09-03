@@ -13,8 +13,8 @@
 //!   never decide; build with `default-features = false` for a dependency-free
 //!   core with the identical state machine.
 //!
-//! The application drives the core: feed events via [`RawNode::step`] and logical time
-//! via [`RawNode::tick`], drain a batch of work via [`RawNode::ready`], and
+//! The application drives the core: feed events via [`ColocatedNode::step`] and logical time
+//! via [`ColocatedNode::tick`], drain a batch of work via [`ColocatedNode::ready`], and
 //! acknowledge it via [`Ready::advance`]. The core *describes* the side effects
 //! to perform; the caller *performs* them.
 //!
@@ -27,7 +27,7 @@
 //!
 //! # The handshake is type-enforced
 //!
-//! [`RawNode::ready`] returns a [`Ready`] that holds the node's unique mutable
+//! [`ColocatedNode::ready`] returns a [`Ready`] that holds the node's unique mutable
 //! borrow, so calling `ready()` again before [`Ready::advance`] is a *compile*
 //! error — not a runtime panic.
 //!
@@ -36,7 +36,7 @@
 //! Beside the node lives the sans-IO **matchmaker** ([`Matchmaker`], the
 //! per-ballot acceptor-configuration registry of Matchmaker Paxos), driven
 //! through the same `step` → `ready` → `advance` shape. It is a separate handle:
-//! a cluster deployed without matchmakers never constructs one, and [`RawNode`]
+//! a cluster deployed without matchmakers never constructs one, and [`ColocatedNode`]
 //! never steps a matchmaker message.
 
 pub mod acceptor;
@@ -66,9 +66,9 @@ pub use membership::{
 };
 pub use message::Message;
 pub use node::{
-    GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters,
-    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
-    REPAIR_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
+    ColocatedNode, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff,
+    HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH,
+    ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState, ReconfigureRefusal,
     ReconfigureResult,
 };
 pub use ready::Ready;

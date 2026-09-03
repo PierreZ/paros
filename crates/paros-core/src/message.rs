@@ -1,6 +1,6 @@
 //! The protocol message enum. Pure in-memory data — the core never serializes
 //! it. The driver decodes inbound bytes into a [`Message`] before
-//! [`crate::RawNode::step`], and encodes [`crate::Ready::messages`] after
+//! [`crate::ColocatedNode::step`], and encodes [`crate::Ready::messages`] after
 //! draining a batch.
 
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
-/// self-events all enter through the single [`crate::RawNode::step`] router.
+/// self-events all enter through the single [`crate::ColocatedNode::step`] router.
 ///
 /// `#[non_exhaustive]` so later stages can add variants (e.g. snapshot transfer,
 /// reconfiguration) without a breaking change.
@@ -226,7 +226,7 @@ pub enum Message {
     /// `at_index`." The leader tallies these for the `Truncate`-coupling rule
     /// (truncation is proposed only once a quorum has snapshotted at the
     /// index). **Driver-terminal**: the driver's snapshot-repair layer owns
-    /// it end to end; [`crate::RawNode::step`] ignores it — consensus state
+    /// it end to end; [`crate::ColocatedNode::step`] ignores it — consensus state
     /// never depends on snapshot custody.
     SnapAck {
         /// Durable cluster configuration identity. Snap repair is
@@ -293,10 +293,10 @@ pub enum Message {
     /// An authority is relinquished **at most once** and never exercised
     /// again by the node that gave it up. In paros that rule needs no durable
     /// fence: leadership is entirely volatile state
-    /// ([`RawNode::new`](crate::RawNode::new) always boots a Follower, and
+    /// ([`ColocatedNode::new`](crate::ColocatedNode::new) always boots a Follower, and
     /// `on_check_leader` only ever campaigns at a strictly higher round), so a
     /// crash is itself an abdication — and
-    /// [`RawNode::relinquish_to`](crate::RawNode::relinquish_to) abdicates
+    /// [`ColocatedNode::relinquish_to`](crate::ColocatedNode::relinquish_to) abdicates
     /// *synchronously, in the same call that queues this message*, before it
     /// can possibly reach the transport. See that method's `# Safety` section
     /// for the full argument.

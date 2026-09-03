@@ -3,7 +3,7 @@
 //! walks the retained chosen prefix back through the application, and opens the
 //! application repair when the prefix cannot be replayed locally.
 
-use paros_core::{AcceptorConfig, Ballot, Command, Control, NodeId, RawNode, Slot};
+use paros_core::{AcceptorConfig, Ballot, ColocatedNode, Command, Control, NodeId, Slot};
 
 use crate::audit::{Audit, Deployment};
 use crate::hooks::{DriverHooks, Seam};
@@ -30,7 +30,7 @@ use super::ready::storage_fault_crash;
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
-    node: &mut RawNode,
+    node: &mut ColocatedNode,
     storage: &mut S,
     self_id: u64,
     hooks: &H,
@@ -135,7 +135,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
                 };
                 // A #94 duplicate slot replays exactly as the live walk applied
                 // it: a no-op. The core re-derived `duplicate_slots` from the
-                // sealed sessions + the retained log in `RawNode::new`, so the
+                // sealed sessions + the retained log in `ColocatedNode::new`, so the
                 // substitution is deterministic across the restart.
                 let noop = Command::Control(Control::Noop);
                 let command = if node.replica().duplicate_slots().contains(&slot) {

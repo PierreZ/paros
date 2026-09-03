@@ -144,7 +144,7 @@ messages is not lost at all — the retry lands and it decides. The hole needs t
 leader to *forget*: the `proposer` map is volatile, so a crash or a step-down
 drops it, and slot 1 stops being re-sent by anyone.
 
-`RawNode::chosen_gap` is what makes the failure observable from outside the core:
+`ColocatedNode::chosen_gap` is what makes the failure observable from outside the core:
 `Ready` only ever hands the driver the *contiguous* prefix, so a chosen slot
 stranded above a hole is invisible otherwise. A gap is a normal transient — that is
 what pipelining looks like — while a gap that survives quiescence is the wedge, and

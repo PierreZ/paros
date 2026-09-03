@@ -6,9 +6,9 @@
 //! components decide; this module builds the messages and keeps the node's
 //! probe, allocator and read rounds consistent with what they decided.
 
-use super::{Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot};
 
-impl RawNode {
+impl ColocatedNode {
     // ---- proposer / learner ----------------------------------------------
 
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
@@ -144,7 +144,7 @@ impl RawNode {
     /// and `try_decide` fires the moment a slot's accept quorum completes while
     /// the leader streams later slots concurrently, so slot 6 routinely decides
     /// before slot 5. Nothing here records a command as *applied*: that is the
-    /// replica's contiguous walk ([`RawNode::advance_chosen_index`]).
+    /// replica's contiguous walk ([`ColocatedNode::advance_chosen_index`]).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, round = ballot.round)))]
     pub(super) fn mark_chosen(&mut self, slot: Slot, command: &Command, ballot: Ballot) {
         // A slot below our floor was chosen and then truncated; do not relearn it

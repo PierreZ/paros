@@ -43,7 +43,7 @@ pub struct Value(pub Vec<u8>);
 /// truncation drops the log records it was derived from, and it travels beside
 /// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
 /// every restart — reproduces the identical duplicate-suppression decision at
-/// the apply seam (see [`crate::RawNode::advance_chosen_index`]'s doc).
+/// the apply seam (see [`crate::ColocatedNode::advance_chosen_index`]'s doc).
 pub type SessionEntry = (ClientId, ClientSeq, Slot);
 
 /// A log entry: the [`Value`] chosen for a slot, tagged with the client request
@@ -76,7 +76,7 @@ pub enum Control {
     /// Truncate the log: every node drops its retained prefix up to `up_to`
     /// (clamped to its own chosen index) when it applies this slot. The
     /// leader-decided, cluster-wide analogue of a local
-    /// [`crate::RawNode::compact`] call, forwarded by normal replication +
+    /// [`crate::ColocatedNode::compact`] call, forwarded by normal replication +
     /// catch-up.
     Truncate {
         /// The last slot the application permits dropping (inclusive).
@@ -110,7 +110,7 @@ pub enum Control {
     /// old leader accepted alone, below a later slot that did reach the quorum —
     /// would otherwise never be proposed by anyone again, freezing the contiguous
     /// chosen prefix one below it forever (see
-    /// [`RawNode::chosen_gap`](crate::RawNode::chosen_gap)). Deciding a `Noop`
+    /// [`ColocatedNode::chosen_gap`](crate::ColocatedNode::chosen_gap)). Deciding a `Noop`
     /// there is safe for the ordinary Phase-1 reason: quorum intersection
     /// guarantees a value already chosen at that slot would have been reported, so
     /// the slot is genuinely free.

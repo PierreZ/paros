@@ -187,7 +187,7 @@ pub const EV_SNAPSHOT_OFFERED: &str = "snapshot_offered";
 pub const EV_GAP_FILLED: &str = "election_gap_filled";
 
 /// Tracing event: this node holds a **chosen gap** — a slot it knows is chosen
-/// sitting above its contiguous applied prefix (see [`RawNode::chosen_gap`]).
+/// sitting above its contiguous applied prefix (see [`ColocatedNode::chosen_gap`]).
 /// Carries `node`, `hole` (the first slot missing from the prefix) and `above`
 /// (the highest chosen slot past it). Emitted once per tick while the gap exists,
 /// so its *persistence* is what the trace records, not a single instant. A gap is

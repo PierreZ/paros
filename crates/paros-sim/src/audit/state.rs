@@ -387,7 +387,7 @@ pub(super) struct AuditState {
     pub(super) handoff_carried_tail: bool,
     /// Leadership was handed over more than once in this run. Distinct
     /// authorities: one authority is handed on at most once (see
-    /// `RawNode::can_relinquish`'s *One hop only*).
+    /// `ColocatedNode::can_relinquish`'s *One hop only*).
     pub(super) handoff_repeated: bool,
     /// A refusal path fired: wrong addressee/non-member, stale authority, or a
     /// malformed tail.

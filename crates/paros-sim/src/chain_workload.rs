@@ -33,7 +33,7 @@ const COMPACT_STORM: u8 = 7;
 /// read), as opposed to [`READ_STATE`]'s internal inspect probe.
 const READ_INDEX: u8 = 8;
 /// **Retired.** Once a client-side stand-in for the leader's matchmaking
-/// phase (#119); superseded by the real phase in `paros_core::RawNode`
+/// phase (#119); superseded by the real phase in `paros_core::ColocatedNode`
 /// (#120), which a client must not race — a client-minted registration above
 /// the leader's round would refuse every campaign. The id stays reserved so
 /// the alphabet's ids never shift; the operation is a no-op.

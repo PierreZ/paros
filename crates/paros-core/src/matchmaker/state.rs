@@ -171,7 +171,7 @@ pub struct MatchmakerConfig {
 /// One ledger record: the configuration registered under a ballot, and
 /// what [kind](RegistrationKind) it was: an **operator's reconfiguration**
 /// (a leader moving the cluster to a new acceptor set,
-/// `RawNode::reconfigure`) or a candidate restating the configuration it
+/// `ColocatedNode::reconfigure`) or a candidate restating the configuration it
 /// believed in force.
 ///
 /// **The effective configuration is a registration fact, not a Paxos-chosen
@@ -191,7 +191,7 @@ pub struct MatchmakerConfig {
 /// an explicit request, and requests are monotone by ballot: the
 /// highest-ballot one a matchmaker quorum holds is the **effective
 /// configuration** — the one every ordinary campaign must register (see
-/// `RawNode::on_match_reply`). Once a reconfiguration's matchmaking has
+/// `ColocatedNode::on_match_reply`). Once a reconfiguration's matchmaking has
 /// completed at a matchmaker quorum, quorum intersection hands that record
 /// to every later campaign's matchmaking, so no later ordinary election can
 /// reinstate a superseded configuration; before that it may be lost like any
@@ -221,7 +221,7 @@ pub enum RegistrationKind {
     #[default]
     Belief,
     /// An operator's explicit change, through
-    /// [`RawNode::reconfigure`](crate::RawNode::reconfigure). Monotone by
+    /// [`ColocatedNode::reconfigure`](crate::ColocatedNode::reconfigure). Monotone by
     /// ballot, and the only kind the effective configuration is read from.
     Reconfiguration,
 }

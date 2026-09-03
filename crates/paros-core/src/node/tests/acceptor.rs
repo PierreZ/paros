@@ -5,7 +5,7 @@ use super::*;
 fn matching_configuration_message_is_processed_and_reply_is_tagged() {
     let mut storage = TestStorage::new(0, &[0, 1]);
     storage.hard_state.config_id = ConfigId(7);
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
 
     n.step(Message::Prepare {
         config_id: ConfigId(7),
@@ -33,7 +33,7 @@ fn matching_configuration_message_is_processed_and_reply_is_tagged() {
 fn mismatching_configuration_message_is_ignored_before_dispatch() {
     let mut storage = TestStorage::new(0, &[0, 1]);
     storage.hard_state.config_id = ConfigId(7);
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     let promise_before = n.hard_state().max_promised_ballot;
 
     // A foreign configuration id is an operating condition (a stale peer, a
@@ -172,7 +172,7 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
 
     // Restart: rebuild from the durable state (scalars + accepted log).
     let storage = TestStorage::from_node(&n);
-    let restarted = RawNode::new(&storage);
+    let restarted = ColocatedNode::new(&storage);
 
     assert_eq!(
         chosen_at(&restarted, 0),

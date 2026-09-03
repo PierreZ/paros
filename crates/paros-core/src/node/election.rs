@@ -8,13 +8,14 @@
 
 use super::matchmaking::Matchmaking;
 use super::{
-    BTreeMap, Ballot, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot,
+    BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole,
+    Slot,
 };
 use crate::matchmaker::{MatchRequest, RegistrationKind};
 use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 
-impl RawNode {
+impl ColocatedNode {
     // ---- election / leadership --------------------------------------------
 
     /// Election clock fired: campaign for leadership at a fresh ballot with
@@ -26,7 +27,7 @@ impl RawNode {
     /// is not part of, and a spare that campaigned would register a
     /// configuration nobody asked for). A reconfiguration that removes the
     /// sitting leader is the one deliberate exception, and it runs through
-    /// [`RawNode::reconfigure`], not here.
+    /// [`ColocatedNode::reconfigure`], not here.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
@@ -46,7 +47,7 @@ impl RawNode {
     ///
     /// `kind` says what the registration *is* — this node's belief about the
     /// configuration in force (the election clock), or an operator's
-    /// reconfiguration ([`RawNode::reconfigure`]) — and `config` is what to
+    /// reconfiguration ([`ColocatedNode::reconfigure`]) — and `config` is what to
     /// register either way. The two were one `Option<AcceptorConfig>` doing
     /// double duty, where `None` silently meant both "the belief" and "not a
     /// reconfiguration".
@@ -509,7 +510,7 @@ impl RawNode {
     }
 
     /// Start one bounded page of inherited Phase-2 rounds. The first page is
-    /// created on election victory; [`RawNode::advance_recovery`] schedules at
+    /// created on election victory; [`ColocatedNode::advance_recovery`] schedules at
     /// most one more page after the driver finishes the batch just processed.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn pump_leader_recovery(&mut self) {

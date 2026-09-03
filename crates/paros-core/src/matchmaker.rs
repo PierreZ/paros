@@ -1,5 +1,5 @@
 //! The **matchmaker**: a per-ballot acceptor-configuration registry (Matchmaker
-//! Paxos §3.1–§3.2), as a sans-IO state machine beside [`crate::RawNode`].
+//! Paxos §3.1–§3.2), as a sans-IO state machine beside [`crate::ColocatedNode`].
 //!
 //! A matchmaker separates *who are the acceptors* from *what value is chosen*.
 //! It keeps a tiny durable map `ballot -> acceptor configuration` plus a GC
@@ -10,9 +10,9 @@
 //!
 //! This module is the registry side only: the pure state machine, its durable
 //! state, and its request / reply / refusal semantics — driven through the same
-//! `step` → `ready` → `advance` shape as [`crate::RawNode`], so the driver's
+//! `step` → `ready` → `advance` shape as [`crate::ColocatedNode`], so the driver's
 //! persist-before-reply ordering is structural rather than remembered. It is a
-//! **separate handle the caller drives**: [`crate::RawNode`] never steps a
+//! **separate handle the caller drives**: [`crate::ColocatedNode`] never steps a
 //! matchmaker message, and a cluster deployed without matchmakers never
 //! constructs one (see AGENTS.md, *Plain Multi-Paxos is first-class*).
 //!
@@ -262,7 +262,7 @@ impl Matchmaker {
 
     /// The durable scalars as they stand (including a write not yet flushed
     /// by the driver — the core applies a write the instant it decides it,
-    /// exactly as [`crate::RawNode`] does).
+    /// exactly as [`crate::ColocatedNode`] does).
     #[must_use]
     pub fn hard_state(&self) -> &MatchmakerHardState {
         &self.hard_state

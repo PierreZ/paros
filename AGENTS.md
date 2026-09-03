@@ -120,15 +120,16 @@ upstream fix lands and its compatibility gates pass.
 
 ## Architecture
 
-Sans-IO core driven by moonpool (etcd-raft `RawNode`/`Node` model). `paros-core` is a pure
+Sans-IO core driven by moonpool (etcd-raft's `RawNode`/`Node` split: `ColocatedNode` in,
+`paros::run_node` out). `paros-core` is a pure
 synchronous state machine — `step`/`tick` in, one `Ready` out, `advance()` handshake; no I/O, clock,
 RNG, or deps. The `ready()`/`advance()` handshake is type-enforced: `ready(&mut self) -> Ready<'_>`
 holds the node's unique borrow, so a second `ready()` before `advance()` is a *compile* error.
 Persist-before-send durability ordering is documented on `Ready`/`HardState`. Contract reference:
 `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`.
 
-**The core is composable: one file per role, `RawNode` is wiring.** `paros-core` is not one
-state machine but a small set of Paxos *roles*, each its own module and type, and `RawNode` is
+**The core is composable: one file per role, `ColocatedNode` is wiring.** `paros-core` is not one
+state machine but a small set of Paxos *roles*, each its own module and type, and `ColocatedNode` is
 the one deployment that colocates them on a node — it holds the role transitions, the timers,
 the message construction and the persist-before-send batch, and **no protocol tally of its
 own**. The roles:
@@ -173,7 +174,7 @@ over a one-slot log; the matchmaker folds into the role system; flexible quorums
 Compartmentalized Paxos become deployment data. Each of those is a later phase; the first
 phase extracted the three roles with the behaviour, the public API and the sweep unchanged.
 
-The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `RawNode` and does all I/O.
+The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
 code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
@@ -195,7 +196,7 @@ today's guarantees. The rules, which every later session reads before touching `
   fixed-membership path. A cluster deployed without matchmakers exchanges the same messages and
   persists the same scalars it does today. The matchmaker is its own state machine
   (`paros_core::Matchmaker`), its own wire contract, and its own driver (`paros::run_matchmaker`);
-  `RawNode` never steps a matchmaker message.
+  `ColocatedNode` never steps a matchmaker message.
 - A reconfiguration request on a cluster without matchmakers is **refused** (`accepted: false`),
   never quietly honored.
 - Removing every matchmaker feature must leave the plain program's behaviour unchanged — the same
@@ -216,14 +217,14 @@ the same treatment when it lands.
 
 **Matchmaking and reconfiguration doctrine (M4.2–M4.4).** On a deployment that names
 matchmakers, every campaign is *matchmaking, then Phase 1*: the candidate registers `(b, C_b)`
-with the matchmakers (`Ready::match_requests`, `RawNode::on_match_reply`) and sends no `Prepare`
+with the matchmakers (`Ready::match_requests`, `ColocatedNode::on_match_reply`) and sends no `Prepare`
 until a matchmaker quorum answered; the replies' histories are unioned above the **maximum**
 watermark into `H_b`; a refusal abandons the campaign (the next one opens above the refuser's
 highest round); a campaign whose matchmakers are slow is re-asked on every election timeout,
 never abandoned by the clock. **The ledger distinguishes a belief from a fact.** Every
 registration carries a `reconfiguration` flag (`paros_core::Registration`): an ordinary campaign
 registers the configuration the candidate *believes* in force (learned from a leader's
-`Prepare`, `Heartbeat` or `Relinquish`), a `RawNode::reconfigure` campaign registers an
+`Prepare`, `Heartbeat` or `Relinquish`), a `ColocatedNode::reconfigure` campaign registers an
 operator's explicit change. The **effective configuration** is the highest-ballot
 reconfiguration registration a matchmaker quorum holds: an ordinary campaign whose histories
 name one other than what it registered abandons, adopts it, and re-campaigns
@@ -238,7 +239,7 @@ proposal that never reached a quorum. GC (#123) never retires the highest reconf
 registration. Phase 1
 then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
 in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
-`C_b` alone. A **reconfiguration is a round change** (`RawNode::reconfigure`, the `Reconfigure`
+`C_b` alone. A **reconfiguration is a round change** (`ColocatedNode::reconfigure`, the `Reconfigure`
 RPC): a configuration is bound to a ballot and never edited, so the leader moves to a fresh ballot
 registered with `C_new`, stalls command issuance for one matchmaking round trip plus one Phase 1
 (the accepted trade — `FrankenPaxos`'s zero-stall overlap is deliberately not implemented), and
@@ -270,7 +271,7 @@ matchmaker: "these configurations are never returned again") never need each oth
 Retirement is an operator act: "removed is not shut down" until GC says nobody will ask again,
 and the `Retire` RPC **carries the evidence**. The operator reads the effective watermark from a
 leader's `Inspect` beside the retirable list and sends it in `RetireRequest.gc_watermark`; the
-node honors the request (`RawNode::may_retire`) only when it has matchmakers, is neither a member
+node honors the request (`ColocatedNode::may_retire`) only when it has matchmakers, is neither a member
 of the configuration it believes in force nor the leader, *and* that watermark sits strictly above
 `last_member_ballot` — the highest ballot a configuration naming this node was bound to. The first
 three are beliefs and the third one is volatile (a reboot regresses `acceptors` to the bootstrap
@@ -360,8 +361,8 @@ separation; #81 removed the message-class nemesis, which mixed them):
   `tracing`, add derives and spans — observation, never a decision), and it is perturbed **only through its public
   API** — the methods its caller chooses to call, and the data it is handed. Where a rare-but-valid
   decision needs to become reachable, the core's job is to *expose that decision as a method with an
-  honest contract* (`RawNode::resend_pending` — "the driver is expected to call this each beat;
-  skipping is always safe, re-send is pure optimization"; `RawNode::step_down` — "a leader may
+  honest contract* (`ColocatedNode::resend_pending` — "the driver is expected to call this each beat;
+  skipping is always safe, re-send is pure optimization"; `ColocatedNode::step_down` — "a leader may
   resign") and nothing more. Removing every perturbation must leave the shipped program unchanged,
   which here is trivially true: the perturbation is a caller that stops calling.
 - **BUGGIFY, prong 1 — hook the driver's rare-but-valid decisions.** Timing and policy choices the
@@ -464,7 +465,7 @@ substitutes for the other:
   returns — never assert on external input; re-assert it only once it has crossed the validation
   boundary. Style rules: precondition stacks at function entry, postconditions at exit, split
   compound conditions, assert positive *and* negative space, pair each property across two code
-  paths (e.g. the write-side flush ordering vs. the boot read-back). `RawNode::assert_invariants`
+  paths (e.g. the write-side flush ordering vs. the boot read-back). `ColocatedNode::assert_invariants`
   is the dedicated cross-field checker (ordering chain, role/election couplings, floor bounds,
   chosen-gap contract), called at boot and at every public mutating entry point — cheap checks
   stay O(1)/O(log n); O(N) structural checks are *also* hard `assert!` (owner's call: no
@@ -503,11 +504,11 @@ application state. The application owns compaction of its own state. What paros 
   a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, the
   `Noop` a new leader fills an undecided hole with (see *Election gap fill* below), or the
   `Snap{at_index}` marker that decides a snapshot point (#101). A client
-  asks the **leader** to truncate (the `Compact` RPC → `RawNode::propose_control`); the leader
+  asks the **leader** to truncate (the `Compact` RPC → `ColocatedNode::propose_control`); the leader
   proposes `Truncate` only once a quorum advertises custody of a decided snapshot point covering
   it (otherwise it seeds a `Snap` marker and answers `accepted: false` — clients can be refused
   and retry), decides it by ordinary consensus, and every node truncates *lazily* when it
-  applies that slot (`RawNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
+  applies that slot (`ColocatedNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
   forwarded by normal replication + catch-up. The consensus/acceptor paths treat `Command` fully
   opaquely (exactly as Compartmentalized Paxos treats a `Noop`); only the replica/apply path
   interprets a control command, which keeps the eventual M5 compartment split clean.
@@ -524,14 +525,14 @@ application state. The application owns compaction of its own state. What paros 
   is kept durably (the `NodeStorage` custody surface: `record_snapshot`/`read_snap_chunk`/
   `write_snap_chunk`/`restore_from_snap_point`), advertised to peers, and healed chunk-by-chunk
   through a driver-terminal repair plane (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never
-  enter `RawNode`); a node can restore its application from a decided point it holds. The bytes
+  enter `ColocatedNode`); a node can restore its application from a decided point it holds. The bytes
   stay opaque throughout — paros ships, stores, and checksums them, never reads them.
 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
 rejoins** (#124): a snapshot restores the log, not the promise, so a naive rejoin could regress a
 promise it once made. **Today that rule is enforced by the harness, not by the library**: the
 storage world parks a wiped identity for the run, and an empty-but-openable store is
-indistinguishable from a first boot to `RawNode::new`, so `run_node` would happily bring a wiped
+indistinguishable from a first boot to `ColocatedNode::new`, so `run_node` would happily bring a wiped
 node back as a fresh member. Closing it needs a durable format marker on the store
 (`NodeStorage`) that `run_node` refuses to boot an existing member without. That is an open
 item, not a claim the library makes. A wiped identity is parked for the run exactly like a retired one and the
@@ -546,7 +547,7 @@ honor `CrashAndWipe` directly.
 *election* destroys a leader's authority and makes the successor rediscover the log
 through Phase 1. A *handoff* moves the existing logical Phase-2 authority to another
 physical node, which continues under the **same ballot** with **no second Phase 1** —
-`RawNode::relinquish_to` → `Message::Relinquish` → `on_relinquish`. What travels is
+`ColocatedNode::relinquish_to` → `Message::Relinquish` → `on_relinquish`. What travels is
 small and explicit: the ballot, the allocator frontier (`next_slot`), and the tail
 `[first_unchosen, next_slot)` split into slots already chosen and slots with an open
 Phase-2 round; the two **exactly tile** the range, and a handoff-installed recovery has
@@ -556,7 +557,7 @@ carry the safety:
 - **Abdication is synchronous with the decision.** `relinquish_to` queues the message and
   `become_follower`s in the *same call*, before any I/O — so emitting it without
   abdicating is not expressible. No durable fence is needed for the crash case, because
-  paros leadership is entirely volatile (`RawNode::new` always boots a Follower, and
+  paros leadership is entirely volatile (`ColocatedNode::new` always boots a Follower, and
   `on_check_leader` only campaigns at a strictly higher round): a crash *is* an
   abdication.
 - **The successor is named inside the payload** (`to`), so a duplicate, a misroute, or a
@@ -588,7 +589,7 @@ allocates `next_slot`, and a restart recomputes `next_slot` the same way — and
 prefix would freeze one below it cluster-wide and forever, with reads fenced above it and
 commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
 quorum intersection: a value already chosen there would have been reported by some Promise. The core
-surfaces the failure through `RawNode::chosen_gap()` (the `Ready` handshake only ever hands out the
+surfaces the failure through `ColocatedNode::chosen_gap()` (the `Ready` handshake only ever hands out the
 *contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver reports
 each tick through `Audit::chosen_gap` and `paros_sim::audit` asserts against at quiescence.
 
@@ -653,12 +654,12 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
 - `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
-  the membership boundary in `membership.rs`) and `RawNode`, the node that wires them
+  the membership boundary in `membership.rs`) and `ColocatedNode`, the node that wires them
   (`node.rs`; its `node/*.rs` submodules are named by *concern* — election, replication,
   handoff, GC, matchmaking, reconfiguration — and hold the wiring for that concern, never a
   role's state) and, beside it, the sans-IO
   matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
-  the caller drives, never stepped by `RawNode`), its generation handover
+  the caller drives, never stepped by `ColocatedNode`), its generation handover
   (`matchmaker/reconfigurer.rs`) and the single-decree kernel the handover decides with
   (`single_decree.rs`): std-only, wasm-safe, and dependency-free
   with `default-features = false` (CI checks that build too). Two features, both observation-only:

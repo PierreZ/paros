@@ -1,5 +1,5 @@
 //! The node's **boot wiring**: the one path that turns durable state back
-//! into a [`RawNode`]. Bootstrap and restart share it, so a rebooted node
+//! into a [`ColocatedNode`]. Bootstrap and restart share it, so a rebooted node
 //! answers exactly as it would have without the crash.
 //!
 //! Three steps, each with its own trust-boundary asserts: the configuration's
@@ -9,12 +9,12 @@
 //! read back rather than persisted beside it.
 
 use super::{
-    Acceptor, BTreeMap, Ballot, Command, Config, HEARTBEAT_TICKS, HandoffCounters,
-    LeadershipOrigin, NodeRole, Proposer, RawNode, Replica, Slot, Storage,
+    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, HEARTBEAT_TICKS, HandoffCounters,
+    LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
 
-impl RawNode {
+impl ColocatedNode {
     /// Construct from a read-only [`Storage`] by reading durable state back in.
     /// Bootstrap and restart share this path. The volatile dedup tables
     /// (`applied_seq`, `inflight`) and the `chosen` map are rebuilt from the

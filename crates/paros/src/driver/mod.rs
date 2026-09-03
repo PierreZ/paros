@@ -1,5 +1,5 @@
 //! The provider-generic node driver — the `Node` layer that owns the sans-IO
-//! [`paros_core::RawNode`] and performs all I/O.
+//! [`paros_core::ColocatedNode`] and performs all I/O.
 //!
 //! Written once over moonpool's `P: Providers` abstraction, so the *same* loop
 //! runs in production (`TokioProviders`) and deterministic simulation
@@ -64,9 +64,9 @@ use moonpool_core::{
 };
 use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Control, GcAck, MatchRefusal, MatchReply,
-    MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, ProposeResult,
-    QuorumSystem, RawNode, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, GcAck, MatchRefusal,
+    MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole,
+    ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
@@ -122,7 +122,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     /// crash or a storage fault the driver decided to crash on.
     fn settle<S: NodeStorage>(
         &self,
-        node: &mut RawNode,
+        node: &mut ColocatedNode,
         storage: &mut S,
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
@@ -148,7 +148,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
 /// differ) and `S: NodeStorage` (the injected durable storage). The loop owns a
-/// [`RawNode`], serves the Paros gRPC interface, feeds client proposals and
+/// [`ColocatedNode`], serves the Paros gRPC interface, feeds client proposals and
 /// peer messages into the core, sends the core's outbound messages to the peers
 /// named in `members`, and ticks until `shutdown` fires.
 ///
@@ -221,7 +221,7 @@ where
     A: Audit + Clone + Send + Sync + 'static,
 {
     // Stage 7: verify and classify every durable record BEFORE anything else —
-    // in particular before `RawNode::new` reads the store — so no corrupted
+    // in particular before `ColocatedNode::new` reads the store — so no corrupted
     // bytes ever cross into protocol logic. A detected mismatch is the same
     // deliberate crash decision as any other storage fault: typed on the
     // audit, then `RunError::Storage` unwinds the incarnation. The scan itself
@@ -246,13 +246,13 @@ where
         .map_err(|e| SimulationError::InvalidState(format!("node gRPC listener: {e}")))?;
 
     // The sans-IO core, bootstrapped from durable storage.
-    let mut node = RawNode::new(&storage);
+    let mut node = ColocatedNode::new(&storage);
     let self_id = node.config().id.0;
 
     replay_boot_state(&mut node, &mut storage, self_id, hooks, audit)?;
 
     // Tonic handlers run as h2 request tasks and forward into these typed
-    // queues. The loop remains the sole owner of RawNode. The edge's
+    // queues. The loop remains the sole owner of ColocatedNode. The edge's
     // integrity rejections are reported through the audit like every other
     // externally meaningful transition (observation only: the closure
     // returns nothing and the edge's answer does not depend on it).
@@ -831,7 +831,7 @@ where
                 // the tick arm acts on, so it produces no `Ready` batch.
                 // Operator decommissioning (#123): a node a leader's GC named
                 // retirable is shut down for good. The decision is the core's
-                // (`RawNode::may_retire`), because the deciding condition is a
+                // (`ColocatedNode::may_retire`), because the deciding condition is a
                 // protocol fact — an effective GC watermark strictly above
                 // every ballot a configuration naming this node was bound to —
                 // and not the operator's belief that it read a retirable list.
@@ -936,7 +936,7 @@ where
                         .filter(|(_, holders)| node.acceptors().has_phase2_quorum(holders))
                         .map(|(&point, _)| point)
                         .max();
-                    let propose_marker = |node: &mut RawNode, snap: &mut SnapRepair| {
+                    let propose_marker = |node: &mut ColocatedNode, snap: &mut SnapRepair| {
                         if snap.marker_pending.is_none()
                             && let ProposeResult::Accepted(slot) = node.propose_snap_marker()
                         {

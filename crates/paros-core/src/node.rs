@@ -1,4 +1,4 @@
-//! The [`RawNode`] handle: the sans-IO Multi-Paxos state machine and the
+//! The [`ColocatedNode`] handle: the sans-IO Multi-Paxos state machine and the
 //! `step`/`tick`/`ready`/`advance` contract.
 
 mod acceptor;
@@ -69,7 +69,7 @@ pub enum NodeRole {
     Leader,
 }
 
-/// The outcome of [`RawNode::propose`], telling the driver how to answer the
+/// The outcome of [`ColocatedNode::propose`], telling the driver how to answer the
 /// client. The driver acks on commit: it holds the reply for `Accepted`/
 /// `Duplicate` until that slot commits, redirects on `NotLeader`, and acks
 /// immediately on `Chosen`.
@@ -97,7 +97,7 @@ pub enum ProposeResult {
     Chosen(Slot),
 }
 
-/// The outcome of [`RawNode::read_index`], telling the driver how to answer the
+/// The outcome of [`ColocatedNode::read_index`], telling the driver how to answer the
 /// reading client: redirect on `NotLeader`, or park the reply and wait for the
 /// matching [`ReadState`] to surface via [`Ready::read_states`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,29 +118,51 @@ pub enum ReadIndexResult {
 /// by confirmation time — the linearization point a read at `ctx` observes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadState {
-    /// The driver-supplied correlation token from [`RawNode::read_index`].
+    /// The driver-supplied correlation token from [`ColocatedNode::read_index`].
     pub ctx: u64,
     /// The read index: the applied watermark the read observes (`None` = empty
     /// prefix). The node's chosen index is at or past it on confirmation.
     pub index: Option<Slot>,
 }
 
-/// The pure, synchronous, single-threaded Multi-Paxos state machine.
+/// **The deployment that colocates all three Paxos roles on one node**, and
+/// the wiring between them.
 ///
-/// No I/O, no clock, no randomness. Inputs arrive via [`RawNode::step`] (peer
-/// messages and tick-injected self-events), [`RawNode::tick`] (logical time),
-/// and [`RawNode::propose`] (a client value). Output is drained via
-/// [`RawNode::ready`] and acknowledged via [`Ready::advance`].
+/// `paros-core` is not one state machine but a small set of roles — the
+/// [`Acceptor`](crate::acceptor::Acceptor) (the durable promise, the accepted
+/// log, the compaction floor, the CTRL tri-state), the
+/// [`Proposer`](crate::proposer::Proposer) (the Phase-1 election, its repair
+/// probe, the Phase-2 rounds, the bounded recovery, the allocator and the
+/// leadership's standing authority) and the
+/// [`Replica`](crate::replica::Replica) (the chosen prefix, the apply walk,
+/// the at-most-once ledger). Each is its own type and decides its own
+/// questions. This is the deployment Multi-Paxos names: all three on every
+/// node, plus what only a colocation can own —
 ///
-/// Stage 3 is **Multi-Paxos**: a per-slot replicated log with a stable leader.
-/// A node times out (randomized election timeout supplied by the driver),
-/// becomes a Candidate, runs **one** Phase 1 for its ballot over the whole log
-/// suffix, and on a promise quorum becomes Leader: it re-proposes recovered
-/// in-flight slots (gap fill) and then streams Phase-2 `Accept`s for fresh
-/// client values. Heartbeats hold leadership; a `Nack` or a higher ballot makes
-/// a node step down (the dueling-proposer livelock fix). Client requests are
-/// deduplicated by `(ClientId, ClientSeq)` for at-most-once execution.
-pub struct RawNode {
+/// - the **role transitions** (Follower / Candidate / Leader) the roles
+///   themselves know nothing about,
+/// - the **timers**: the election clock, the heartbeat, the repair and
+///   handoff-fence deadlines,
+/// - the **message construction**: every role hands back a decision, and this
+///   is where it becomes a [`Message`] addressed to somebody,
+/// - the **persist-before-send batch**: one ordered [`WriteOp`] sequence per
+///   [`Ready`], the roles' writes and the node's retention ops in one place,
+/// - and the **cross-role invariants** no single role can state
+///   ([`ColocatedNode::assert_invariants`]).
+///
+/// It holds **no protocol tally of its own**: every quorum question goes to a
+/// role, and every role's answer comes back as data. A second deployment —
+/// a compartmentalized proxy leader, a bare acceptor, a read-only replica —
+/// is a different wiring over the same three roles, not a different core.
+///
+/// Pure, synchronous and single-threaded: no I/O, no clock, no randomness.
+/// Inputs arrive via [`ColocatedNode::step`] (peer messages and
+/// tick-injected self-events), [`ColocatedNode::tick`] (logical time), and
+/// [`ColocatedNode::propose`] (a client value). Output is drained via
+/// [`ColocatedNode::ready`] and acknowledged via [`Ready::advance`]. The name
+/// mirrors etcd-raft's `RawNode`/`Node` split, whose driver half is
+/// `paros::run_node`.
+pub struct ColocatedNode {
     /// This node's static identity, bootstrap membership, pool and matchmaker
     /// set.
     config: Config,
@@ -152,7 +174,7 @@ pub struct RawNode {
     /// deployment with matchmakers; on plain Multi-Paxos it is the bootstrap
     /// configuration for the node's whole life. Never edited underneath a
     /// live ballot: a configuration is bound to a ballot, and a change is a
-    /// round change ([`RawNode::reconfigure`]).
+    /// round change ([`ColocatedNode::reconfigure`]).
     acceptors: AcceptorConfig,
     /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
     /// bootstrap configuration).
@@ -162,7 +184,7 @@ pub struct RawNode {
     /// that left this node inside `acceptors` (boot, `learn_config`,
     /// `try_become_leader`, a handoff install, an adopted effective
     /// configuration). Monotone, volatile, and the whole of what
-    /// [`RawNode::may_retire`] needs: a GC watermark strictly above it means
+    /// [`ColocatedNode::may_retire`] needs: a GC watermark strictly above it means
     /// no surviving configuration can ask this node for a Phase-1 promise,
     /// because every configuration it was ever a member of is forgotten.
     last_member_ballot: Ballot,
@@ -171,7 +193,7 @@ pub struct RawNode {
     /// The **acceptor** component ([`crate::acceptor::Acceptor`]): the
     /// durable promise, the per-slot accepted log, the compaction floor and
     /// the CTRL tri-state's faulty entries. Rebuilt on boot from the durable
-    /// log (see [`RawNode::new`]); persisted one delta at a time through the
+    /// log (see [`ColocatedNode::new`]); persisted one delta at a time through the
     /// [`WriteOp`]s it emits into this node's batch.
     acceptor: Acceptor<Command>,
     /// The **replica** component ([`crate::replica::Replica`]): the chosen
@@ -196,7 +218,7 @@ pub struct RawNode {
     /// `(started, gap_fills, remaining)` for this Ready's recovery chunk.
     pending_recovery_batch: Option<(usize, usize, usize)>,
 
-    /// Logical clock, advanced by [`RawNode::tick`].
+    /// Logical clock, advanced by [`ColocatedNode::tick`].
     tick_count: u64,
 
     // ---- leadership / election (all volatile) ----
@@ -222,7 +244,7 @@ pub struct RawNode {
     /// Fixed heartbeat interval in ticks (not randomized).
     heartbeat_timeout: u64,
     /// Monotone per-ballot beat sequence, bumped at each broadcast
-    /// ([`RawNode::broadcast_heartbeat`]); reset on winning an election. Acks
+    /// ([`ColocatedNode::broadcast_heartbeat`]); reset on winning an election. Acks
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
@@ -278,7 +300,7 @@ pub struct RawNode {
     round_floor: u64,
     /// Election timeouts that found a matchmaking phase still open and
     /// re-sent its requests instead of abandoning the campaign (see
-    /// [`RawNode::tick`]). Observability only.
+    /// [`ColocatedNode::tick`]). Observability only.
     matchmaking_timeouts: u64,
     /// Monotone count of recovery-timeout step-downs this incarnation (a leader
     /// resigning because it could not finish repairing its blocked slots).
@@ -313,7 +335,7 @@ pub struct RawNode {
     election_gap_fills: u64,
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// The single input entry point: every stimulus is a [`Message`], routed by
     /// variant and role. Tick-injected self-events (`CheckLeader`/`Heartbeat`)
     /// enter here too. A ballot-bearing message naming a configuration other
@@ -500,7 +522,7 @@ impl RawNode {
     /// acceptors' point of view (they store it opaquely, exactly like a client
     /// entry). Its *effect* — for [`Control::Truncate`], dropping the log prefix —
     /// is applied lazily by every node when the slot enters its contiguous chosen
-    /// prefix (see [`RawNode::advance_chosen_index`]).
+    /// prefix (see [`ColocatedNode::advance_chosen_index`]).
     ///
     /// # Panics
     ///
@@ -667,7 +689,7 @@ impl RawNode {
     ///
     /// Re-sending a leader's still-pending `Accept`s is deliberately *not* part of
     /// this: it is a separate decision on the same cadence, so the driver can skip
-    /// it (see [`RawNode::resend_pending`]).
+    /// it (see [`ColocatedNode::resend_pending`]).
     ///
     /// # Panics
     ///
@@ -865,7 +887,7 @@ impl RawNode {
     /// nothing pending.
     ///
     /// **The driver is expected to call this on each heartbeat beat**, right after
-    /// [`RawNode::tick`] — that is what lets a peer that lost the original
+    /// [`ColocatedNode::tick`] — that is what lets a peer that lost the original
     /// `Accept` (or was down when it went out) catch up without waiting for an
     /// election.
     ///
@@ -955,7 +977,7 @@ impl RawNode {
     ///
     /// In the deterministic simulation this is the decision that makes an
     /// undecided slot **permanent**: the hole a skipped
-    /// [`resend_pending`](RawNode::resend_pending) leaves behind heals for as long
+    /// [`resend_pending`](ColocatedNode::resend_pending) leaves behind heals for as long
     /// as its holder keeps re-proposing it, and stops healing the moment that node
     /// stops being leader (#54) — and the leadership churn it creates is what
     /// #67's arc needs.
@@ -1007,7 +1029,7 @@ impl RawNode {
     }
 
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
-    /// from its `RandomProvider`). Clears the [`RawNode::needs_election_timeout`]
+    /// from its `RandomProvider`). Clears the [`ColocatedNode::needs_election_timeout`]
     /// flag.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
     pub fn set_election_timeout(&mut self, ticks: u64) {
@@ -1048,7 +1070,7 @@ impl RawNode {
         &self.acceptors
     }
 
-    /// The ballot [`RawNode::acceptors`] was registered under
+    /// The ballot [`ColocatedNode::acceptors`] was registered under
     /// (`Ballot::zero()` for the bootstrap configuration).
     #[must_use]
     pub fn acceptors_since(&self) -> Ballot {
@@ -1056,7 +1078,7 @@ impl RawNode {
     }
 
     /// Whether this node is a member of its active configuration
-    /// ([`RawNode::acceptors`]) — a real acceptor whose own vote counts.
+    /// ([`ColocatedNode::acceptors`]) — a real acceptor whose own vote counts.
     #[must_use]
     pub fn is_acceptor(&self) -> bool {
         self.acceptors.contains(self.config.id)
@@ -1074,7 +1096,7 @@ impl RawNode {
 
     /// Election timeouts this incarnation that re-sent an open matchmaking
     /// phase's requests instead of abandoning the campaign. Observability
-    /// only (see [`RawNode::tick`]).
+    /// only (see [`ColocatedNode::tick`]).
     #[must_use]
     pub fn matchmaking_timeouts(&self) -> u64 {
         self.matchmaking_timeouts
@@ -1102,7 +1124,7 @@ impl RawNode {
 
     /// The node's **replica** role: the chosen log, the contiguous apply
     /// walk, the at-most-once ledger and the application repair cursor. A
-    /// read view, like [`RawNode::acceptor`].
+    /// read view, like [`ColocatedNode::acceptor`].
     #[must_use]
     pub fn replica(&self) -> &Replica {
         &self.replica
@@ -1111,7 +1133,7 @@ impl RawNode {
     /// The node's **proposer** role: the open Phase 1, the CTRL repair
     /// probe, the in-flight Phase-2 rounds, the allocator frontier and the
     /// leadership's standing authority. A read view, like
-    /// [`RawNode::acceptor`].
+    /// [`ColocatedNode::acceptor`].
     #[must_use]
     pub fn proposer(&self) -> &Proposer<NodeId, Command> {
         &self.proposer

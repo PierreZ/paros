@@ -6,13 +6,13 @@
 //! the reply and keeps the node's volatile leadership consistent with it.
 
 use super::{
-    Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot, WriteOp, command_fingerprint,
+    Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, WriteOp, command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
 use crate::membership::AcceptorConfig;
 use crate::write::AcceptorWrite;
 
-impl RawNode {
+impl ColocatedNode {
     // ---- acceptor ---------------------------------------------------------
 
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.

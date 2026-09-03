@@ -2,7 +2,7 @@
 //!
 //! This is the user-facing entry point. It re-exports the sans-IO
 //! [`paros_core`] state machine and adds the **driver** that owns it and
-//! performs I/O — the etcd-raft `Node` layer to `paros_core`'s `RawNode`.
+//! performs I/O — the etcd-raft `Node` layer to `paros_core`'s `ColocatedNode`.
 //!
 //! [`run_node`] is written once over moonpool's `P: Providers` abstraction, so
 //! the *same* code runs in production (`TokioProviders`) and deterministic
@@ -63,17 +63,17 @@ pub use paros_core::acceptor::Acceptor;
 pub use paros_core::proposer::Proposer;
 pub use paros_core::replica::Replica;
 pub use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control,
-    DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome, GcRequest, GcStep,
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
-    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
-    MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
-    ProposeResult, QuorumSystem, REGISTRY_PAGE, RawNode, ReadIndexResult, ReadState, Ready,
-    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
-    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
+    AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config,
+    ConfigId, Control, DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome,
+    GcRequest, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff,
+    HandoffCounters, HardState, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome,
+    MatchRefusal, MatchReply, MatchRequest, MatchStep, Matchmaker, MatchmakerConfig,
+    MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerReady,
+    MatchmakerReconfigurer, MatchmakerSet, MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole,
+    PROMISE_BATCH, PendingBootstrap, ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult,
+    ReadState, Ready, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
+    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage,
+    SessionEntry, Slot, StartRefusal, Storage, Value, WriteOp, command_fingerprint,
 };
 
 pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;

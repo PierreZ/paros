@@ -244,7 +244,7 @@ impl std::error::Error for StorageError {}
 pub trait NodeStorage: Storage {
     /// Boot-time integrity scan (Stage 7): verify every durable record and
     /// classify every mismatch **before** any byte reaches
-    /// [`paros_core::RawNode`]. The driver calls this once per incarnation,
+    /// [`paros_core::ColocatedNode`]. The driver calls this once per incarnation,
     /// before constructing the core, so no corrupted bytes ever cross into
     /// protocol logic — the caller sees the typed outcome, never the bytes.
     ///
@@ -337,7 +337,7 @@ pub trait NodeStorage: Storage {
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor (returned by
     /// [`Storage::first_slot`] after a restart). The application drives this via
-    /// [`paros_core::RawNode::compact`], which only ever names slots within the
+    /// [`paros_core::ColocatedNode::compact`], which only ever names slots within the
     /// chosen prefix, so nothing undecided is dropped. `sealed` carries the
     /// at-most-once ledger records whose slots this truncation drops; persist
     /// them durably (upsert by `(client, seq)`) so [`Storage::sealed_sessions`]
@@ -478,7 +478,7 @@ pub trait NodeStorage: Storage {
 }
 
 /// The library's default in-memory storage: enough to *construct* a
-/// [`paros_core::RawNode`] and to receive the semantic writes the driver makes
+/// [`paros_core::ColocatedNode`] and to receive the semantic writes the driver makes
 /// while draining a [`paros_core::Ready`]. The durable scalars and the per-slot
 /// accepted log are stored separately (never a single blob).
 ///

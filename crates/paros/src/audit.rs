@@ -273,7 +273,7 @@ pub trait Audit {
     /// measure against it, never against a fixed count.
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {}
 
-    /// This node's logical clock ticked (`RawNode::tick`), once per driver
+    /// This node's logical clock ticked (`ColocatedNode::tick`), once per driver
     /// tick. The unit every core timeout is counted in.
     fn ticked(&self, node: NodeId) {}
 
@@ -446,12 +446,12 @@ pub trait Audit {
     /// configuration other than the one its ordinary campaign registered for
     /// `ballot`: the campaign was abandoned and the configuration registered
     /// at `newest` — the effective configuration — adopted as the node's
-    /// belief (`RawNode::on_match_reply`, `StaleConfiguration`).
+    /// belief (`ColocatedNode::on_match_reply`, `StaleConfiguration`).
     fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
 
     /// This candidate's election clock fired while its matchmaking was still
     /// open and re-asked the unanswered matchmakers instead of abandoning the
-    /// campaign (`RawNode::tick`). `count` is the monotone total for this
+    /// campaign (`ColocatedNode::tick`). `count` is the monotone total for this
     /// incarnation; the campaign's ballot is unchanged.
     fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, count: u64) {}
 

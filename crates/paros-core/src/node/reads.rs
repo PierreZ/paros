@@ -1,4 +1,4 @@
-use super::{NodeRole, RawNode, ReadState};
+use super::{ColocatedNode, NodeRole, ReadState};
 
 /// Ticks a pending read-index round may wait for its ack quorum before the
 /// leader garbage-collects it (lost acks, an unreachable quorum). Dropped
@@ -6,7 +6,7 @@ use super::{NodeRole, RawNode, ReadState};
 /// client reply (its retry sweep answers first, well inside this window).
 pub(super) const READ_ROUND_TTL_TICKS: u64 = 20;
 
-impl RawNode {
+impl ColocatedNode {
     /// Hand the proposer this node's active configuration and chosen prefix
     /// and queue every read round they confirm
     /// ([`crate::proposer::Proposer::confirm_reads`], where the Phase-2

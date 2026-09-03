@@ -47,7 +47,7 @@
 //! chose: a `Noop` gap fill over a chosen value, two values for one slot.
 //!
 //! The two floors relate as follows. The **compaction floor**
-//! (`RawNode::first_slot`, `Control::Truncate`) is per node and says "these
+//! (`ColocatedNode::first_slot`, `Control::Truncate`) is per node and says "these
 //! slots are chosen and their records are gone here; recover them from a
 //! snapshot" — the acceptor's below-floor `Nack` is the paper's acceptor-side
 //! persisted watermark, already in place. The **GC watermark** is per
@@ -65,7 +65,7 @@
 //!
 //! Once covered, the leader asks every matchmaker of the current generation
 //! to raise the watermark to `b` (`GcRequest`, re-sent on the driver's
-//! cadence — [`RawNode::resend_gc`] — because a lost request or ack only
+//! cadence — [`ColocatedNode::resend_gc`] — because a lost request or ack only
 //! stalls it) and treats the floor as **effective only once a quorum acked
 //! it**: every future matchmaking quorum intersects that set, and the
 //! **maximum** reported watermark filters `H` (#120's invariant 3), so every
@@ -96,12 +96,12 @@
 //! — it never has to be bounded by a registration it must keep — and the
 //! cost is one configuration per matchmaker.
 
-use super::{Ballot, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, ColocatedNode, NodeId, NodeRole, Slot};
 use crate::collector::{Collector, GcStep};
 use crate::matchmaker::{GcAck, GcRequest};
 use crate::membership::{AcceptorConfig, MatchmakerId};
 
-impl RawNode {
+impl ColocatedNode {
     /// Open the GC campaign of a freshly won leadership over `prior` (`H_b`).
     /// Called once per election on a matchmaker deployment; the fence is
     /// the read fence (`next_slot - 1`).
@@ -196,7 +196,7 @@ impl RawNode {
     /// effective.
     ///
     /// **The driver is expected to call this on a steady cadence** while
-    /// [`RawNode::gc_pending`] reports one, and **skipping a call is always
+    /// [`ColocatedNode::gc_pending`] reports one, and **skipping a call is always
     /// safe**: a floor that is never raised costs unbounded histories and
     /// un-retirable acceptors, never safety.
     ///
@@ -213,7 +213,7 @@ impl RawNode {
     }
 
     /// Whether a GC request is out and not yet acked by a quorum — the
-    /// driver's cue to pace [`RawNode::resend_gc`].
+    /// driver's cue to pace [`ColocatedNode::resend_gc`].
     #[must_use]
     pub fn gc_pending(&self) -> bool {
         self.role == NodeRole::Leader
@@ -250,7 +250,7 @@ impl RawNode {
     /// turns the belief into a fact, and the operator can only obtain it from
     /// a leader whose GC actually reached a matchmaker quorum
     /// (`InspectReply::gc_watermark`, populated by
-    /// [`RawNode::gc_effective`]).
+    /// [`ColocatedNode::gc_effective`]).
     #[must_use]
     pub fn may_retire(&self, watermark: Ballot) -> bool {
         self.config.has_matchmakers()

@@ -7,7 +7,7 @@
 use super::*;
 
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
-fn run_matchmaking(n: &mut RawNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
+fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
     let requests = drain_match_requests(n);
     let replies = matchmake(mms, requests);
     replies
@@ -17,7 +17,7 @@ fn run_matchmaking(n: &mut RawNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
 }
 
 /// Fire the election clock on `n`.
-fn campaign(n: &mut RawNode) {
+fn campaign(n: &mut ColocatedNode) {
     n.set_election_timeout(1);
     n.tick();
 }
@@ -396,7 +396,7 @@ fn the_election_clock_re_sends_a_stuck_matchmaking() {
 
 /// Drive `n` through matchmaking with an explicit history and return the
 /// Phase-1 `Prepare` targets.
-fn open_phase1(n: &mut RawNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
+fn open_phase1(n: &mut ColocatedNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
     campaign(n);
     let b = n.ballot();
     drain_match_requests(n);

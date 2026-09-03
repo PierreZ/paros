@@ -49,7 +49,7 @@ fn promise_quorum_makes_leader() {
 /// the three nodes with node 1 freshly elected. The hole at slot 1 is what the
 /// promise quorum {1,2} never saw — and what `next_slot` (3, from the recovered
 /// slot 2) jumped clean over.
-fn wedge_after_election() -> [RawNode; 3] {
+fn wedge_after_election() -> [ColocatedNode; 3] {
     let mut nodes = [
         node(0, &[0, 1, 2]),
         node(1, &[0, 1, 2]),
@@ -333,7 +333,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
             ),
         );
     }
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     let prepared = ballot(1, 1);
     let mut cursor = Slot(0);
     let mut pages = Vec::new();
@@ -735,7 +735,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
 /// both strictly *before* the commit reached the candidate, which is before it
 /// won. Promises never decrease, so every member of that Phase-1 quorum is
 /// pinned at `b'` from then on, and both gates that could give the stale leader a
-/// quorum reject it: [`RawNode::on_accept`] and [`RawNode::on_heartbeat`] each
+/// quorum reject it: [`ColocatedNode::on_accept`] and [`ColocatedNode::on_heartbeat`] each
 /// require `ballot >= max_promised_ballot`. The stale leader cannot even count
 /// itself towards an accept quorum — `start_accept_round` skips its own
 /// self-accept for the same reason.
@@ -821,7 +821,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     // is what makes a snapshot the only way it can be healed.
     let mut storage = TestStorage::new(0, &[0, 1, 2]);
     storage.hard_state.max_promised_ballot = ballot(4, 1);
-    let mut x = RawNode::new(&storage);
+    let mut x = ColocatedNode::new(&storage);
 
     let b = ballot(5, 0);
     let m = ballot(5, 2);

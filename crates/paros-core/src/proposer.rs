@@ -32,7 +32,7 @@
 //! [`Fingerprint`](crate::Fingerprint), the "which value is this" an
 //! `Accepted` reports. The node deployment is `Proposer<NodeId, Command>`.
 //!
-//! [`RawNode`](crate::RawNode) is the wiring: it opens the phases, feeds the
+//! [`ColocatedNode`](crate::ColocatedNode) is the wiring: it opens the phases, feeds the
 //! folds, turns the outcomes into messages and role transitions, and pumps
 //! the recovery one bounded page at a time.
 
@@ -351,7 +351,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// The component's own cross-field invariants. The proposer holds no
     /// durable state and no floor of its own: "no in-flight round survives
     /// below the compaction floor" couples two roles, so it is asserted by
-    /// the wiring that owns both ([`crate::RawNode::assert_invariants`]).
+    /// the wiring that owns both ([`crate::ColocatedNode::assert_invariants`]).
     ///
     /// # Panics
     ///

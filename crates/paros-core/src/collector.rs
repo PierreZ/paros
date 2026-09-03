@@ -22,7 +22,7 @@ use crate::matchmaker::GcAck;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId, Slot};
 
-/// What one GC ack did, returned by [`crate::RawNode::on_gc_ack`].
+/// What one GC ack did, returned by [`crate::ColocatedNode::on_gc_ack`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GcStep {
     /// Not for the open campaign: nothing changed.

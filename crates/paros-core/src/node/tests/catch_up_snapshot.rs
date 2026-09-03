@@ -300,7 +300,7 @@ fn restart_from_truncated_storage_rebuilds_floor_and_next_slot() {
     assert!(leader.acceptor().records().is_empty());
 
     let storage = TestStorage::from_node(leader);
-    let restarted = RawNode::new(&storage);
+    let restarted = ColocatedNode::new(&storage);
     assert_eq!(
         restarted.acceptor().first_slot(),
         Slot(3),

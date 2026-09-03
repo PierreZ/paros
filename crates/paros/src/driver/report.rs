@@ -3,7 +3,7 @@
 //! the held-reply bookkeeping a step-down performs.
 
 use moonpool_core::{Providers, RandomProvider};
-use paros_core::{Ballot, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RawNode};
+use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole};
 
 use crate::audit::Audit;
 use crate::grpc::ReadAck;
@@ -17,7 +17,7 @@ use super::ready::ClientWaiters;
 ///
 /// Pure observation — it exists only so [`DriverHooks::initiate_handoff`] can be
 /// biased toward the interesting shapes instead of firing uniformly.
-pub(crate) fn handoff_context(node: &RawNode, candidates: usize) -> HandoffContext {
+pub(crate) fn handoff_context(node: &ColocatedNode, candidates: usize) -> HandoffContext {
     let first_unchosen = node.hard_state().chosen_index.map_or(0, |ci| ci.0 + 1);
     let tail = usize::try_from(node.proposer().next_slot().0.saturating_sub(first_unchosen))
         .unwrap_or(usize::MAX);
@@ -71,7 +71,7 @@ pub(crate) fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
 /// authority changes hands.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn report_handoff<A: Audit>(
-    node: &RawNode,
+    node: &ColocatedNode,
     last: &mut HandoffCounters,
     self_id: u64,
     audit: &A,
@@ -147,7 +147,7 @@ pub(crate) struct Deltas {
 /// reconfiguration removed it.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn report_membership<A: Audit>(
-    node: &RawNode,
+    node: &ColocatedNode,
     last_membership: &mut (u64, u64),
     self_id: u64,
     audit: &A,
@@ -182,7 +182,7 @@ fn report_membership<A: Audit>(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
-    node: &mut RawNode,
+    node: &mut ColocatedNode,
     providers: &P,
     last: &mut Deltas,
     waiters: &mut ClientWaiters,

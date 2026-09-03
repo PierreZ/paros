@@ -113,7 +113,7 @@ demo). Mechanically: repair *fills or replaces-with-proven-identical* —
 
 paros grows **one dedicated repair plane and nothing else**: the #101 snap-chunk
 messages (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse`), handled driver-terminally —
-they never enter `RawNode`, so the core protocol still grows no recovery RPC and the M5
+they never enter `ColocatedNode`, so the core protocol still grows no recovery RPC and the M5
 compartment split stays clean. Every other repair rides a path that already exists:
 
 | Faulty item | Recovery path |

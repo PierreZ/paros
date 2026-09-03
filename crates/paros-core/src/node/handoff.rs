@@ -34,7 +34,7 @@
 //! `next_slot - 1`), a fresh-leadership reset (`heartbeat_seq`, the
 //! `CheckQuorum` window, in-flight read rounds), or deliberately **not**
 //! transferred: a handoff is refused while any recovery, repair, or
-//! application-heal state is open (see [`RawNode::can_relinquish`]).
+//! application-heal state is open (see [`ColocatedNode::can_relinquish`]).
 //!
 //! # Why no durable relinquishment fence is needed
 //!
@@ -42,7 +42,7 @@
 //! crashes and restarts believing it still owns `B`.* In paros that state is
 //! unreachable, and not by accident:
 //!
-//! 1. **Leadership is volatile.** `RawNode::new` boots every node as a
+//! 1. **Leadership is volatile.** `ColocatedNode::new` boots every node as a
 //!    `Follower` with an empty `proposer` map, whatever the disk says. There is
 //!    no durable record of "I am leader at `B`" to resurrect.
 //! 2. **Only `try_become_leader` sets `role = Leader`**, only from `Candidate`,
@@ -55,7 +55,7 @@
 //!
 //! So a crash *is* an abdication, and the durable-fence question collapses into
 //! a much smaller one: **A must stop exercising `B` before the `Relinquish` can
-//! be observed.** [`RawNode::relinquish_to`] answers it by abdicating
+//! be observed.** [`ColocatedNode::relinquish_to`] answers it by abdicating
 //! synchronously — the same call that queues the message demotes the node — so
 //! the message cannot exist without the abdication having already happened, in
 //! memory, on the single-threaded core.
@@ -65,11 +65,11 @@
 //! For a given `ballot`, at most one physical node ever exercises Phase 2:
 //!
 //! - A relinquishes at most once per leadership, because the very act demotes
-//!   it and a demoted node fails [`RawNode::can_relinquish`].
+//!   it and a demoted node fails [`ColocatedNode::can_relinquish`].
 //! - **Only the node that minted a ballot ever relinquishes it**: a successor
 //!   may not hand an inherited authority on. That one-hop rule is what keeps
 //!   the whole mechanism free of a durable relinquishment record; see
-//!   [`RawNode::can_relinquish`] for the replay the simulation found without
+//!   [`ColocatedNode::can_relinquish`] for the replay the simulation found without
 //!   it.
 //! - The intended successor is named **inside** the payload
 //!   ([`Message::Relinquish::to`]), so a duplicated, misrouted, replayed, or
@@ -90,7 +90,7 @@
 //! the departed leader knew about is unreachable — resigns, and ordinary
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
-use super::{BTreeMap, BTreeSet, Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 use crate::proposer::RecoveryPolicy;
 
@@ -132,7 +132,7 @@ pub enum LeadershipOrigin {
     },
 }
 
-/// What one successful [`RawNode::relinquish_to`] handed over — the caller's
+/// What one successful [`ColocatedNode::relinquish_to`] handed over — the caller's
 /// receipt, for observability. Pure data: producing it changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handoff {
@@ -213,7 +213,7 @@ fn tail_shape_valid(
         .all(|slot| *slot >= from_slot && *slot < next_slot)
 }
 
-impl RawNode {
+impl ColocatedNode {
     /// Whether this node is currently in a state a cooperative handoff may
     /// leave from.
     ///
@@ -302,7 +302,7 @@ impl RawNode {
 
     /// **Relinquish this leadership's Phase-2 authority to `target`** and step
     /// down in the same breath. Returns the receipt on success, `None` when the
-    /// node is not in a handoff-eligible state ([`RawNode::can_relinquish`]) or
+    /// node is not in a handoff-eligible state ([`ColocatedNode::can_relinquish`]) or
     /// `target` is not a peer.
     ///
     /// The queued [`Message::Relinquish`] carries the ballot, the allocator
@@ -525,7 +525,7 @@ impl RawNode {
         // exactly the runs that can least afford one.
         //
         // This mirrors the sender-side refusal in
-        // [`RawNode::can_relinquish`]: a handoff moves a *settled* leadership
+        // [`ColocatedNode::can_relinquish`]: a handoff moves a *settled* leadership
         // between nodes that are both in a position to keep it settled.
         // Refusing costs one ordinary election, which is precisely the
         // machinery the repair needs anyway.

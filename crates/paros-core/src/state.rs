@@ -54,7 +54,7 @@ pub struct HardState {
 ///   configuration in force *before any ballot was registered*; every ballot
 ///   binds its own acceptor configuration through the matchmakers, drawn from
 ///   `nodes`, and the node tracks the configuration of the highest ballot it
-///   has seen (`RawNode::acceptors`). A node may be in `nodes` without being
+///   has seen (`ColocatedNode::acceptors`). A node may be in `nodes` without being
 ///   in `peers` — a spare waiting to be added — and may be in `peers` and
 ///   later removed; either way it stays addressable, answers Phase 1 for the
 ///   ballots it took part in, and learns the chosen log as a replica.
@@ -79,7 +79,7 @@ pub struct Config {
     /// Multi-Paxos**: no matchmaking phase runs and no reconfiguration is
     /// honored. Non-empty turns every campaign into matchmaking followed by a
     /// cross-configuration Phase 1. A matchmaker-set reconfiguration (#125)
-    /// moves the node's *volatile* belief (`RawNode::matchmaker_set`) to a
+    /// moves the node's *volatile* belief (`ColocatedNode::matchmaker_set`) to a
     /// later generation; this stays the set a fresh incarnation asks first.
     pub matchmakers: Vec<MatchmakerId>,
     /// Every matchmaker that may ever be in a matchmaker set — the pool a

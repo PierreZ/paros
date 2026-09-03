@@ -104,12 +104,12 @@ pub struct DriverTunables {
     /// batcher's keep-the-newest overflow shedding.
     pub delivery_batch: usize,
     /// Ticks between re-sends of an open matchmaking request
-    /// (`RawNode::resend_matchmaking`), on a deployment with matchmakers.
+    /// (`ColocatedNode::resend_matchmaking`), on a deployment with matchmakers.
     /// Floor 1: a re-send per tick is a request per tick per matchmaker, which
     /// the registry answers idempotently. The default is one election-timeout
     /// base, so a lost reply costs about one round trip before the retry.
     pub match_resend_ticks: u64,
-    /// Ticks between re-sends of an open GC request (`RawNode::resend_gc`),
+    /// Ticks between re-sends of an open GC request (`ColocatedNode::resend_gc`),
     /// on a deployment with matchmakers. Its own cadence, not matchmaking's:
     /// the two pace unrelated round trips and a seed should be able to be
     /// extreme in one and ordinary in the other. Floor 1 (a request per tick,

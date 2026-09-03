@@ -1196,7 +1196,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "round" => handoff.ballot.round }
         );
         // One hop only: the node that mints a ballot by winning Phase 1 at it is
-        // the only one that may hand it on (see `RawNode::can_relinquish`).
+        // the only one that may hand it on (see `ColocatedNode::can_relinquish`).
         // Without that rule a replayed payload can re-install an authority at a
         // node that already gave it up while its own successor is still
         // exercising it — the hole this sweep found.

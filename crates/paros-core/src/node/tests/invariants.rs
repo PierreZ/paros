@@ -221,7 +221,7 @@ fn compaction_stops_below_an_open_application_repair() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
-    let mut n = RawNode::new(&storage);
+    let mut n = ColocatedNode::new(&storage);
     n.open_app_repair(Slot(1));
     assert_eq!(
         n.replica().app_repair(),

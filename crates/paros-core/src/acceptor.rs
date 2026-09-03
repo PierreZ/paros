@@ -25,7 +25,7 @@
 //!
 //! It knows nothing about leadership, elections, replicas, matchmakers, the
 //! network, timers, randomness, or *why* a `Prepare` arrived — the
-//! [`crate::RawNode`] wiring owns those couplings (a `Prepare` that deposes a
+//! [`crate::ColocatedNode`] wiring owns those couplings (a `Prepare` that deposes a
 //! leader, a heartbeat that adopts a sender) and builds the wire messages.
 //! Every durable change it makes is emitted as a [`WriteOp`] into the batch
 //! the caller hands it, so the persist-before-send ordering stays the

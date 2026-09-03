@@ -23,7 +23,7 @@
 //!   v
 //! Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of
 //!   |             each has learned it (stragglers are told again by any node that
-//!   v             meets them, see `RawNode::on_match_reply`)
+//!   v             meets them, see `ColocatedNode::on_match_reply`)
 //! Idle
 //! ```
 //!

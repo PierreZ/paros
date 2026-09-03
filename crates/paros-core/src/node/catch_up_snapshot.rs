@@ -1,11 +1,11 @@
-use super::{BTreeMap, Ballot, Command, Message, NodeId, RawNode, SessionEntry, Slot, Value};
+use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, SessionEntry, Slot, Value};
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
 /// lagging peer that needs more re-requests on the next heartbeat, so a large
 /// backlog is drained over several rounds rather than one unbounded message.
 const CATCHUP_BATCH: usize = 64;
 
-impl RawNode {
+impl ColocatedNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, from_slot = from_slot.0)))]
     pub(super) fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {

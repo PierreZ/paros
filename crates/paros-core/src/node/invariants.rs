@@ -1,5 +1,5 @@
 //! The node's **cross-field invariant checker**: the one place that says what
-//! a `RawNode`'s volatile state may never look like.
+//! a `ColocatedNode`'s volatile state may never look like.
 //!
 //! It runs unconditionally — TigerBeetle-style, no `debug_assert!` — at boot
 //! and at the exit of every public mutating entry point, so a broken coupling
@@ -9,9 +9,9 @@
 //! deployment), the per-role state machine, and the volatile leadership state
 //! that may exist only on a leader.
 
-use super::{Ballot, LeadershipOrigin, NodeRole, RawNode};
+use super::{Ballot, ColocatedNode, LeadershipOrigin, NodeRole};
 
-impl RawNode {
+impl ColocatedNode {
     /// Assert every cross-field invariant of the node's volatile state, plus
     /// each role's own. Most checks are O(1) or O(log n) (min-key probes);
     /// the role checkers add bounded structural scans over the retained log,

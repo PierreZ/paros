@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::SimulationError;
 use paros_core::{
-    AcceptorWrite, Ballot, Command, ConfigId, Control, GcRequest, MatchRequest, MatchmakerId,
-    Message, NodeId, NodeRole, RawNode, ReadState, SessionEntry, Slot, Value, WriteOp,
+    AcceptorWrite, Ballot, ColocatedNode, Command, ConfigId, Control, GcRequest, MatchRequest,
+    MatchmakerId, Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -120,7 +120,7 @@ fn send_snapshot_offers<S, H, A>(
 /// campaign is open (`on_install_snapshot` deliberately does not touch the
 /// election), so the sweep can prove the interleaving is visited.
 fn note_mid_election_snapshot<A: Audit>(
-    node: &RawNode,
+    node: &ColocatedNode,
     writes: &[WriteOp],
     self_id: u64,
     audit: &A,
@@ -216,7 +216,7 @@ fn ack_committed_waiters<S, H, A>(
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 pub(crate) fn drain_ready<S, H, A>(
-    node: &mut RawNode,
+    node: &mut ColocatedNode,
     storage: &mut S,
     out: &Outbound,
     waiters: &mut ClientWaiters,
