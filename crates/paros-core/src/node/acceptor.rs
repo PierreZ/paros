@@ -205,8 +205,7 @@ impl RawNode {
                 if slot < self.first_unchosen() && !self.replica.is_chosen(slot) {
                     self.mark_chosen(slot, &command, ballot);
                 } else {
-                    self.acceptor
-                        .record_accepted(slot, ballot, command, &mut self.pending_writes);
+                    self.record_accepted(slot, ballot, command);
                 }
                 // The `Accepted` reply's durability claim: the promise sits
                 // exactly at the accepted ballot, and the matching

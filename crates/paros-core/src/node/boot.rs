@@ -132,6 +132,7 @@ impl RawNode {
             repair_step_downs: 0,
             repair_case1: 0,
             repair_case2: 0,
+            repair_bytes: 0,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),

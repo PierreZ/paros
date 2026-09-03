@@ -1,8 +1,37 @@
-use super::{Ballot, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot};
+use super::{Ballot, Command, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot};
 use crate::membership::AcceptorConfig;
+use crate::types::Control;
+
+/// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost
+/// metric: a protocol-aware repair moves one entry, not the log).
+///
+/// This is a *deployment's* reading of an opaque value, which is why it lives
+/// in the wiring and not in [`crate::acceptor::Acceptor`]: to the acceptor
+/// role a value has no meaning at all, only identity.
+fn command_payload_bytes(command: &Command) -> u64 {
+    match command {
+        Command::User(entry) => entry.value.0.len() as u64,
+        Command::Control(Control::Truncate { .. } | Control::Snap { .. }) => 8,
+        Command::Control(Control::Noop) => 1,
+    }
+}
 
 impl RawNode {
     // ---- helpers ----------------------------------------------------------
+
+    /// Record `(ballot, command)` in the acceptor's log and attribute the
+    /// repair cost when the record healed a faulty entry in place. The one
+    /// path the wiring takes to [`crate::acceptor::Acceptor::record_accepted`],
+    /// so no call site can forget the tally.
+    pub(super) fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
+        let bytes = command_payload_bytes(&command);
+        if self
+            .acceptor
+            .record_accepted(slot, ballot, command, &mut self.pending_writes)
+        {
+            self.repair_bytes += bytes;
+        }
+    }
 
     /// Whether `node` is in the addressable pool — the wire-hygiene boundary
     /// every handler draws around a sender: a misrouted or misconfigured id

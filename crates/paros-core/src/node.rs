@@ -305,6 +305,11 @@ pub struct RawNode {
     /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
     /// assembled from stragglers; decided `Noop`).
     repair_case2: u64,
+    /// Payload bytes the acceptor's in-place repairs shipped this
+    /// incarnation. Tallied here, not in the acceptor: it needs the *meaning*
+    /// of a value ([`command_payload_bytes`]), and to an acceptor a value is
+    /// opaque.
+    repair_bytes: u64,
     /// How this node came to hold its current leadership (see
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,
@@ -1290,13 +1295,12 @@ impl RawNode {
     /// step-downs, repair payload bytes)`.
     #[must_use]
     pub fn repair_counters(&self) -> (u64, u64, u64, u64, u64) {
-        let (faulty_repaired, repair_bytes) = self.acceptor.repair_counters();
         (
-            faulty_repaired,
+            self.acceptor.faulty_repaired(),
             self.repair_case1,
             self.repair_case2,
             self.repair_step_downs,
-            repair_bytes,
+            self.repair_bytes,
         )
     }
 

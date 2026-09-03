@@ -75,8 +75,7 @@ impl RawNode {
         // but not an acceptor: it records nothing and casts no vote.
         let own_vote = if self.is_acceptor() && ballot >= self.acceptor.promised() {
             self.acceptor.set_promise(ballot, &mut self.pending_writes);
-            self.acceptor
-                .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+            self.record_accepted(slot, ballot, command.clone());
             Some(me)
         } else {
             None
@@ -197,8 +196,7 @@ impl RawNode {
         // it picked up from a failed earlier ballot, and `chosen` is rebuilt
         // from the accepted log on restart. Keeping the stale entry would
         // resurrect a value the cluster never chose for this slot.
-        self.acceptor
-            .record_accepted(slot, ballot, command.clone(), &mut self.pending_writes);
+        self.record_accepted(slot, ballot, command.clone());
         self.replica.learn(slot, command);
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).

@@ -29,23 +29,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Command, Control, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum accepted records and faulty entries carried by one promise page —
 /// the bound this role enforces in [`Acceptor::promise_page`], and the reason
 /// a `Promise` carries a continuation cursor.
 pub const PROMISE_BATCH: usize = 64;
-
-/// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost metric:
-/// a protocol-aware repair moves one entry, not the log).
-fn command_payload_bytes(command: &Command) -> u64 {
-    match command {
-        Command::User(entry) => entry.value.0.len() as u64,
-        Command::Control(Control::Truncate { .. } | Control::Snap { .. }) => 8,
-        Command::Control(Control::Noop) => 1,
-    }
-}
 
 /// What a `Prepare` did at this acceptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +96,6 @@ pub struct Acceptor {
     faulty: BTreeMap<Slot, Ballot>,
     /// Faulty entries healed in place by a fresh record, this incarnation.
     faulty_repaired: u64,
-    /// Payload bytes those repairs shipped.
-    repair_bytes: u64,
 }
 
 impl Acceptor {
@@ -132,7 +120,6 @@ impl Acceptor {
             first_slot,
             faulty,
             faulty_repaired: 0,
-            repair_bytes: 0,
         };
         acceptor.assert_invariants();
         acceptor
@@ -224,11 +211,15 @@ impl Acceptor {
         self.faulty.keys().next().copied()
     }
 
-    /// `(faulty entries repaired in place, payload bytes those repairs
-    /// shipped)` this incarnation — the CTRL §5.2 metric.
+    /// Faulty entries repaired in place this incarnation — half of the CTRL
+    /// §5.2 metric. The other half, the payload bytes those repairs shipped,
+    /// is the caller's to tally: it needs the *meaning* of a value, which an
+    /// acceptor deliberately does not have (see the module doc's opacity
+    /// rule), and [`Acceptor::record_accepted`] reports each repair as it
+    /// happens.
     #[must_use]
-    pub fn repair_counters(&self) -> (u64, u64) {
-        (self.faulty_repaired, self.repair_bytes)
+    pub fn faulty_repaired(&self) -> u64 {
+        self.faulty_repaired
     }
 
     // ---- Phase 1 ------------------------------------------------------------
@@ -346,6 +337,10 @@ impl Acceptor {
     /// over a faulty entry is the in-place repair (fill or
     /// replace-with-proven-identical, never delete).
     ///
+    /// Returns whether this record *was* such an in-place repair, so a caller
+    /// that understands what a value is can attribute the repair's cost to it
+    /// (the acceptor cannot: to it a value is opaque).
+    ///
     /// # Panics
     ///
     /// If `slot` is below the floor, `ballot` is above the promise (the write
@@ -361,7 +356,7 @@ impl Acceptor {
         ballot: Ballot,
         command: Command,
         writes: &mut Vec<WriteOp>,
-    ) {
+    ) -> bool {
         assert!(
             slot >= self.first_slot,
             "never record an accept below the compaction floor"
@@ -370,9 +365,9 @@ impl Acceptor {
             ballot <= self.promised,
             "a record is never accepted above the promise"
         );
-        if self.faulty.remove(&slot).is_some() {
+        let repaired = self.faulty.remove(&slot).is_some();
+        if repaired {
             self.faulty_repaired += 1;
-            self.repair_bytes += command_payload_bytes(&command);
         }
         if let Some((recorded_ballot, recorded)) = self.records.get(&slot)
             && ballot <= *recorded_ballot
@@ -388,6 +383,7 @@ impl Acceptor {
             ballot,
             command,
         });
+        repaired
     }
 
     /// Drop every record and faulty entry below `first`, raise the floor to
