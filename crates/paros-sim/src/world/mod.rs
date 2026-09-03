@@ -315,6 +315,10 @@ pub(crate) struct StorageWorld {
     /// registry stays down, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
+    /// Matchmakers whose registry fsync has failed at least once this run.
+    /// The budget is what keeps the run winnable: at most `quorum - 1` of
+    /// the bootstrap set, so a matchmaking quorum always survives.
+    matchmaker_sync_failures: BTreeSet<String>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
@@ -429,6 +433,28 @@ impl StorageWorld {
         self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_lost");
+        true
+    }
+
+    /// Whether matchmaker `key` may fail its registry fsync now (#125).
+    ///
+    /// **The floor is structural.** A matchmaker whose fsync fails is a
+    /// matchmaker the driver fail-stops and the process restarts — and the
+    /// restart may lose its registry for good, which is only survivable
+    /// while a quorum of the bootstrap set is intact. So at most
+    /// `quorum - 1 = bootstrap / 2` distinct matchmakers may ever fail a
+    /// sync in one run; a matchmaker already in the set keeps failing (its
+    /// disk is the sick one), and a deployment too small to spare one
+    /// never fails at all.
+    pub(crate) fn permit_matchmaker_sync_failure(&mut self, key: &str, bootstrap: usize) -> bool {
+        if self.matchmaker_sync_failures.contains(key) {
+            return true;
+        }
+        if bootstrap == 0 || self.matchmaker_sync_failures.len() >= bootstrap / 2 {
+            return false;
+        }
+        self.matchmaker_sync_failures.insert(key.to_string());
+        tracing::info!(matchmaker = %key, "matchmaker_sync_failing");
         true
     }
 

@@ -92,6 +92,7 @@ use paros::{
     AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE,
     ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Seam, Slot,
+    StorageFaultDecision,
 };
 
 /// One matchmaker's folded registry.
@@ -326,6 +327,7 @@ pub(super) struct MatchmakerAudit {
     matchmaker_departed: bool,
     matchmaker_refused_step: bool,
     matchmaker_lost: bool,
+    storage_fault: bool,
     successor_republished: bool,
     reconstruction_checked: bool,
     handover_with_prior_registrations: bool,
@@ -2490,6 +2492,28 @@ impl MatchmakerAudit {
             | ReconfigureReply::Accepted { .. }
             | ReconfigureReply::Nacked { .. } => {}
         }
+    }
+
+    /// The registry's store surfaced a fault (#125). The sim injects
+    /// exactly one — a whole-batch fsync failure, budgeted so a matchmaking
+    /// quorum is never sick at once — and the driver's only honest answer
+    /// is to fail-stop: the registry has no in-place repair, and a
+    /// matchmaker whose disk keeps failing is *replaced* through a
+    /// matchmaker-set reconfiguration.
+    pub(super) fn storage_fault(
+        &mut self,
+        matchmaker: MatchmakerId,
+        decision: StorageFaultDecision,
+    ) {
+        assert_always!(
+            decision == StorageFaultDecision::Crash,
+            "matchmaker: a registry storage fault fail-stops the matchmaker",
+            { "matchmaker" => matchmaker.0 }
+        );
+        reach_once!(
+            self.storage_fault,
+            "matchmaker: a registry fsync failure fail-stops the matchmaker"
+        );
     }
 
     /// A matchmaker's registry was lost for good (the harness's coin).

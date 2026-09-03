@@ -2599,13 +2599,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _error: &StorageError,
         decision: StorageFaultDecision,
     ) {
-        // The sim's matchmaker store injects no faults (#119: the registry
-        // rides the generic record contract, with no fault story of its
-        // own), so a fault here is an uninjected detection — a bug.
-        assert_always!(
-            false,
-            "matchmaker: no storage fault is ever surfaced by the sim's registry store",
-            { "matchmaker" => matchmaker.0, "decision" => format!("{decision:?}") }
-        );
+        self.state().matchmaker.storage_fault(matchmaker, decision);
     }
 }

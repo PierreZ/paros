@@ -500,6 +500,15 @@ async fn run_matchmaker_role(
     );
     let checker = audit_world(ctx.state());
     let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
+    // The registry's own write path rides the seed's node-disk profile and
+    // the same chaos window (see `world::matchmaker`): the only fault it
+    // draws is the whole-batch fsync failure, budgeted by the world.
+    let registry_faults = StorageFaults::new(
+        ctx.time().clone(),
+        Duration::from_millis(crate::CHAOS_DURATION_MS),
+        perturb,
+        shape.write_rates,
+    );
     if incarnation.is_restart()
         && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
@@ -527,7 +536,12 @@ async fn run_matchmaker_role(
             tracing::info!(matchmaker = id.0, "matchmaker_stays_down");
             return Ok(());
         }
-        let storage = DurableMatchmakerStorage::restore(Arc::downgrade(&world), my_ip.to_string());
+        let storage = DurableMatchmakerStorage::restore(
+            Arc::downgrade(&world),
+            my_ip.to_string(),
+            registry_faults.clone(),
+            bootstrap.len(),
+        );
         match run_matchmaker(
             ctx.providers().clone(),
             storage,
@@ -540,9 +554,11 @@ async fn run_matchmaker_role(
         )
         .await
         {
-            // A seam crash (the registry store injects no faults of its own,
-            // so a storage exit takes the same path): rebuild from the
-            // durable world, after the matchmaker's own restart-delay knob.
+            // A seam crash, or the registry's own fsync failure: both mean
+            // this incarnation's un-synced batch is gone, so both rebuild
+            // from the durable world, after the matchmaker's own
+            // restart-delay knob. A restart may then draw the loss coin and
+            // hand the replacement to a matchmaker-set reconfiguration.
             // Its floor is structural: a matchmaker held down is a
             // matchmaking phase that waits, never a cluster that stalls.
             Err(RunError::SeamCrash(_) | RunError::Storage(_)) => {
@@ -633,12 +649,14 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             DurableMatchmakerStorage::restore(
                 Arc::downgrade(&world),
                 format!("10.9.8.{registry_instance}"),
+                faults.clone(),
+                0,
             )
         };
-        let reopen_registry = |old: DurableMatchmakerStorage| {
+        let reopen_registry = |old: DurableMatchmakerStorage<_>| {
             let key = old.key().to_string();
             drop(old);
-            DurableMatchmakerStorage::restore(Arc::downgrade(&world), key)
+            DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0)
         };
         paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry);
         // The crash half the shared suite cannot express (an in-memory store
@@ -659,7 +677,12 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 node: NodeId(1),
             };
             let key = "10.9.7.1".to_string();
-            let mut store = DurableMatchmakerStorage::restore(Arc::downgrade(&world), key.clone());
+            let mut store = DurableMatchmakerStorage::restore(
+                Arc::downgrade(&world),
+                key.clone(),
+                faults.clone(),
+                0,
+            );
             store.register(ballot(1), &config).expect("register 1");
             store.sync().expect("sync 1");
             store
@@ -669,7 +692,8 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 .set_gc_watermark(ballot(1))
                 .expect("raise (never synced)");
             drop(store);
-            let rebooted = DurableMatchmakerStorage::restore(Arc::downgrade(&world), key);
+            let rebooted =
+                DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0);
             assert_always!(
                 rebooted.registered_ballots() == vec![ballot(1)]
                     && rebooted.registration(ballot(2)).is_none(),
