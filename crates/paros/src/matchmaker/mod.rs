@@ -199,7 +199,13 @@ where
                     let set = matchmaker.set();
                     let registry: Vec<(Ballot, Registration)> =
                         registrations.iter().map(|(b, r)| (*b, r.clone())).collect();
-                    audit.matchmaker_activated(id, &set, scalars.gc_watermark, &registry);
+                    audit.matchmaker_activated(
+                        id,
+                        &set,
+                        scalars.gc_watermark,
+                        scalars.effective.as_ref(),
+                        &registry,
+                    );
                     tracing::info!(
                         matchmaker = id.0,
                         generation = set.generation.0,

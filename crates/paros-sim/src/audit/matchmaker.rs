@@ -109,6 +109,12 @@ struct Registry {
     /// The durable generation state last persisted (or recovered):
     /// `(generation, phase)`. `None` until the first fold.
     generation: Option<(u64, MatchmakerPhase)>,
+    /// The highest **reconfiguration** registration this matchmaker ever
+    /// made durable — never pruned, so a raised floor cannot hide it.
+    highest_reconfiguration: Option<Ballot>,
+    /// The ballot of the durable effective configuration scalar, from the
+    /// last scalars this matchmaker persisted.
+    effective: Option<Ballot>,
 }
 
 /// One candidate's matchmaking phase for one ballot, as the fold sees it.
@@ -425,6 +431,35 @@ fn ledger_disagreement(
                 .any(|((_, eb), er)| *eb == *b && er != r)
         })
         .map(|(b, _)| b.round)
+}
+
+/// **The effective configuration survives the watermark** (#123 x #125): a
+/// matchmaker's durable effective-configuration scalar is at or above every
+/// reconfiguration registration it ever made durable.
+///
+/// The scalar and the record answer different questions, and only the record
+/// is a Phase-1 obligation the GC floor may collect — so raising the floor
+/// over the last flagged record must leave the scalar untouched. Judged at
+/// both seams the two meet: when the floor rises
+/// ([`MatchmakerAudit::watermark_raised`]) and when the scalars are
+/// persisted ([`MatchmakerAudit::scalars_persisted`]). Before the scalar
+/// existed the record *was* the only witness, an ordinary leader's GC erased
+/// it, and a stale candidate was elected under a superseded configuration
+/// (review finding P1).
+fn check_effective_survives(matchmaker: MatchmakerId, entry: &Registry) {
+    let Some(highest) = entry.highest_reconfiguration else {
+        return;
+    };
+    assert_always!(
+        entry.effective.is_some_and(|held| held >= highest),
+        "gc: the effective configuration survives the watermark",
+        {
+            "matchmaker" => matchmaker.0,
+            "highest_round" => highest.round,
+            "effective_round" => entry.effective.map_or(0, |b| b.round),
+            "watermark_round" => entry.watermark.round
+        }
+    );
 }
 
 /// A phase, for the detail maps.
@@ -821,6 +856,9 @@ impl MatchmakerAudit {
             }
         );
         entry.registered.insert(ballot, config.clone());
+        if config.reconfiguration {
+            entry.highest_reconfiguration = entry.highest_reconfiguration.max(Some(ballot));
+        }
         self.note_reconfiguration(matchmaker.0, ballot, config);
         reach_once!(
             self.registered_any,
@@ -843,6 +881,7 @@ impl MatchmakerAudit {
         entry.watermark = watermark;
         // Mirror the disk: registrations below the floor are gone.
         entry.registered = entry.registered.split_off(&watermark);
+        check_effective_survives(matchmaker, entry);
         reach_once!(
             self.watermark_raised,
             "matchmaker: the gc watermark is raised"
@@ -2112,6 +2151,8 @@ impl MatchmakerAudit {
             );
         }
         entry.generation = Some((generation, scalars.phase));
+        entry.effective = scalars.effective.as_ref().map(|(ballot, _)| *ballot);
+        check_effective_survives(matchmaker, entry);
         if !scalars.pending.is_empty() {
             reach_once!(
                 self.matchmaker_bootstrapped_flag,
@@ -2126,6 +2167,7 @@ impl MatchmakerAudit {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         gc_watermark: Ballot,
+        effective: Option<&(Ballot, AcceptorConfig)>,
         registry: &[(Ballot, Registration)],
     ) {
         let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
@@ -2188,6 +2230,12 @@ impl MatchmakerAudit {
         entry.registered = registry.iter().cloned().collect();
         entry.watermark = gc_watermark;
         entry.generation = Some((set.generation.0, MatchmakerPhase::Active));
+        // The activation inherits the effective configuration (the maximum
+        // of the local and the reconstructed one), so the fold must follow
+        // it: a successor's scalar may name a ballot no record of this
+        // matchmaker ever held.
+        entry.effective = effective.map(|(ballot, _)| *ballot);
+        check_effective_survives(matchmaker, entry);
         // The write-once ledger spans generations: the reconstructed
         // registry re-states registrations other matchmakers made, with the
         // same bytes.

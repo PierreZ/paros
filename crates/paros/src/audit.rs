@@ -611,12 +611,15 @@ pub trait Audit {
 
     /// This matchmaker durably activated a successor generation (after the
     /// fsync): `set` is the new set, `gc_watermark` the reconstructed floor,
-    /// and `registry` the reconstructed registry it now serves from.
+    /// `effective` the inherited effective configuration (the maximum of the
+    /// local and the reconstructed one) and `registry` the reconstructed
+    /// registry it now serves from.
     fn matchmaker_activated(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         gc_watermark: Ballot,
+        effective: Option<&(Ballot, AcceptorConfig)>,
         registry: &[(Ballot, Registration)],
     ) {
     }

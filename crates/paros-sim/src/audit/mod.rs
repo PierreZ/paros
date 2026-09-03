@@ -2190,11 +2190,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         gc_watermark: Ballot,
+        effective: Option<&(Ballot, AcceptorConfig)>,
         registry: &[(Ballot, Registration)],
     ) {
         self.state()
             .matchmaker
-            .activated(matchmaker, set, gc_watermark, registry);
+            .activated(matchmaker, set, gc_watermark, effective, registry);
     }
 
     fn matchmaker_reconfigure_replied(
