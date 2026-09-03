@@ -354,14 +354,35 @@ pub fn run_storage_contract_suite() -> SimulationReport {
 
 // --- the CTRL evaluation corpus ----------------------------------------------
 
-/// The corpus cluster: three scripted-lifecycle nodes, no swarm chaos (every
-/// fault is a targeted injection from the workload). See `crate::corpus`.
-fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
-    SimulationBuilder::new()
+/// The scripted corpus cluster, the one shape every corpus case is built
+/// from: `nodes` scripted-lifecycle nodes bootstrapped on `bootstrap` of them
+/// (`None` — the usual case — bootstraps on all), `matchmakers` scripted
+/// matchmakers (zero on every case but the departed straggler, which needs a
+/// prior configuration), and no swarm chaos at all — every fault is a
+/// targeted injection from the workload. The caller adds its
+/// `workload_factory`, iterations and seeds. See `crate::corpus`.
+fn scripted_builder(
+    nodes: usize,
+    bootstrap: Option<usize>,
+    matchmakers: usize,
+) -> SimulationBuilder {
+    let mut builder = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
+        .processes(nodes, move || match bootstrap {
+            Some(ranks) => Box::new(NodeProcess::scripted_with_bootstrap(ranks)),
+            None => Box::new(NodeProcess::scripted()),
+        });
+    if matchmakers > 0 {
+        builder = builder.processes(matchmakers, || Box::new(MatchmakerProcess::scripted()));
+    }
+    builder
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .chaos_duration(CORPUS_CHAOS)
+}
+
+/// The E1 mask corpus builder (see `crate::corpus`).
+fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
+    scripted_builder(corpus::CORPUS_NODES, None, 0)
         .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
 }
 
@@ -435,11 +456,7 @@ pub fn run_corpus_seed(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
-    SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
-        .fault_factory(|| Box::new(ScriptedLifecycle))
-        .chaos_duration(CORPUS_CHAOS)
+    scripted_builder(corpus::CORPUS_NODES, None, 0)
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -472,16 +489,7 @@ pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
 pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
     let sink: NonVacuousSink = Arc::new(Mutex::new(false));
     let workload_sink = sink.clone();
-    let report = SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::DEPARTED_POOL, || {
-            Box::new(NodeProcess::scripted_with_bootstrap(
-                corpus::DEPARTED_BOOTSTRAP,
-            ))
-        })
-        .processes(1, || Box::new(MatchmakerProcess::scripted()))
-        .fault_factory(|| Box::new(ScriptedLifecycle))
-        .chaos_duration(CORPUS_CHAOS)
+    let report = scripted_builder(corpus::DEPARTED_POOL, Some(corpus::DEPARTED_BOOTSTRAP), 1)
         .workload_factory(move || {
             Box::new(corpus::DepartedStragglerWorkload::new(Some(
                 workload_sink.clone(),
@@ -500,11 +508,7 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
-    SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
-        .fault_factory(|| Box::new(ScriptedLifecycle))
-        .chaos_duration(CORPUS_CHAOS)
+    scripted_builder(corpus::CORPUS_NODES, None, 0)
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -516,11 +520,7 @@ fn chunk_corpus_builder(
     source: corpus::ChunkMaskSource,
     rot_live_node0: bool,
 ) -> SimulationBuilder {
-    SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(corpus::CORPUS_NODES, || Box::new(NodeProcess::scripted()))
-        .fault_factory(|| Box::new(ScriptedLifecycle))
-        .chaos_duration(CORPUS_CHAOS)
+    scripted_builder(corpus::CORPUS_NODES, None, 0)
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
 }
 

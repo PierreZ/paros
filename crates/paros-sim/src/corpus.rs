@@ -39,7 +39,6 @@
 //!   slot through the prior configuration once it returns.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
 use std::sync::PoisonError;
 use std::time::Duration;
 
@@ -108,10 +107,13 @@ fn invalid(message: impl Into<String>) -> SimulationError {
     SimulationError::InvalidState(message.into())
 }
 
-fn sorted_servers(ctx: &SimContext) -> SimulationResult<Vec<String>> {
-    let mut servers = ctx.topology().all_process_ips().to_vec();
-    servers.sort_by_key(|ip| ip.parse::<IpAddr>().ok());
-    servers.dedup();
+/// The corpus case's acceptors, read off the deployment map like every other
+/// workload's (`crate::roles`) — never off `all_process_ips`, which would
+/// silently include a matchmaker's IP on the one case that deploys one.
+fn corpus_servers(ctx: &SimContext) -> SimulationResult<Vec<String>> {
+    let servers = crate::roles::deployment(ctx.topology())
+        .acceptors()
+        .to_vec();
     let valid = servers.len() == CORPUS_NODES;
     assert_always!(
         valid,
@@ -615,7 +617,7 @@ impl Workload for E1MaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case: prime → inject → derive → judge
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -826,7 +828,7 @@ impl Workload for BareQuorumWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -1275,7 +1277,7 @@ impl Workload for SnapshotLifecycleWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted compound scenario
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
@@ -1526,7 +1528,7 @@ impl Workload for ChunkMaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = sorted_servers(ctx)?;
+        let servers = corpus_servers(ctx)?;
         let clients = CorpusClients::connect(ctx, &servers)?;
         let time = ctx.time().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
