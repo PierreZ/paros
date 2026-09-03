@@ -494,6 +494,7 @@ mod tests {
                 gc_watermark: ballot(2, 1),
                 history: bootstrap.history.clone(),
                 successor: Some(set(1, &[0, 1, 3])),
+                decree_promised: ballot(3, 2),
             },
             ReconfigureReply::Bootstrapped {
                 matchmaker: MatchmakerId(3),

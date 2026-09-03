@@ -159,6 +159,11 @@ message StopAck {
   Ballot gc_watermark = 2;
   repeated Registration history = 3;
   optional MatchmakerSet successor = 4;
+  // The highest decree ballot promised for the frozen generation: the
+  // reconfigurer opens its decree strictly above the maximum over its stop
+  // quorum, so a rebooted node never reuses a ballot of its earlier
+  // incarnation.
+  Ballot decree_promised = 5;
 }
 
 message BootstrapAck {

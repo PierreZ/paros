@@ -229,6 +229,24 @@ intersect or exceeds its acceptors, and a reply from an identity outside the set
 The handover's safety argument below is made under that model only; a flexible matchmaker
 quorum system would have to replace the set's rule and the kernel together.
 
+### The decree ballot must be unique across incarnations
+
+The reconfigurer holds no durable state, and that includes its decree round: a node that
+reboots comes back with a fresh reconfigurer counting from round 1 again. Its earlier
+incarnation may have taken a Phase-1 quorum at `(1, N)` and had `V1` accepted at a minority;
+the new one, proposing `V2` for the same generation, reaches a different promise quorum at
+`(1, N)` and sends `Accept(1, N, V2)` to a matchmaker that already voted `V1` at that very
+ballot. The core asserts there (one ballot, one value — crash beats corruption); without the
+assert a later proposer's Phase 1 would see two values at one ballot and could choose the wrong
+one. The handover model checker found this on seed 103.
+
+The rule: every `Stopped` reply carries the matchmaker's current decree promise, and the
+reconfigurer opens its decree at `max(own round, max promise over the stop quorum) + 1`. That
+is enough because a value can only be accepted at a ballot that first held a *promise quorum*,
+and every promise quorum of `M_g` intersects the stop quorum — so the floor sits at or above
+every ballot the node's earlier incarnations could have had a value accepted at. Retries within
+one incarnation keep the counter; a Nack still reopens above the refusing promise.
+
 ### Invariant 1, and what proved it load-bearing
 
 > **At most one matchmaker set is authoritative per generation.**

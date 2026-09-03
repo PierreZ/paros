@@ -1212,12 +1212,14 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
             gc_watermark,
             history,
             successor,
+            decree_promised,
             ..
         } => Kind::Stopped(matchmaker::StopAck {
             generation: generation.0,
             gc_watermark: Some(mm_ballot_to_proto(*gc_watermark)),
             history: registrations_to_proto(history),
             successor: successor.as_ref().map(mm_set_to_proto),
+            decree_promised: Some(mm_ballot_to_proto(*decree_promised)),
         }),
         ReconfigureReply::Bootstrapped { set, .. } => {
             Kind::Bootstrapped(matchmaker::BootstrapAck {
@@ -1297,6 +1299,7 @@ pub fn reconfigure_reply_from_wire(
                 .successor
                 .map(|s| mm_set_from_proto(Some(s)))
                 .transpose()?,
+            decree_promised: mm_ballot_from_proto(ack.decree_promised)?,
         },
         Kind::Bootstrapped(ack) => ReconfigureReply::Bootstrapped {
             matchmaker,

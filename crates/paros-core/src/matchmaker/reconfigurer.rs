@@ -15,9 +15,11 @@
 //!   v
 //! Deciding        single-decree Paxos over M_g as acceptors (`DecreeProposer`, a
 //!   |             majority of M_g for both phases — the only quorum model paros
-//!   |             supports for matchmakers): Phase 1 at a fresh ballot, P2c adopts a
-//!   |             competing proposal already voted, Phase 2 with the selected value;
-//!   |             a Nack reopens higher on the driver's next re-send
+//!   |             supports for matchmakers): Phase 1 at a fresh ballot strictly above
+//!   |             the stop quorum's decree promises (a rebooted node must never reuse
+//!   |             a ballot of its earlier incarnation), P2c adopts a competing proposal
+//!   |             already voted, Phase 2 with the selected value; a Nack reopens
+//!   |             higher on the driver's next re-send
 //!   v
 //! Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of
 //!   |             each has learned it (stragglers are told again by any node that
@@ -38,7 +40,12 @@
 //! the next attempt (this node's or another's) re-runs the same steps: the
 //! stop is idempotent, the bootstrap is keyed by the proposed set, and the
 //! decree's votes are durable at the matchmakers, so the retry either adopts
-//! what was already chosen or completes what was started.
+//! what was already chosen or completes what was started. The one thing a
+//! fresh incarnation must not do is reuse a decree ballot its predecessor
+//! may have had a value accepted at: the `Stopped` replies carry each frozen
+//! member's decree promise, and the decree opens strictly above their
+//! maximum (the handover model checker, `super::handover_model`, found the
+//! reuse on its seed 103 — two values at one ballot).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +79,10 @@ pub enum ReconfigurerPhase {
         target: Option<Vec<MatchmakerId>>,
         /// The frozen registries collected so far.
         acks: BTreeMap<MatchmakerId, (Ballot, BTreeMap<Ballot, Registration>)>,
+        /// The highest decree ballot any frozen member reported promised:
+        /// the decree opens strictly above it (see `decree_floor` on
+        /// [`ReconfigureReply::Stopped`]).
+        decree_floor: Ballot,
     },
     /// Handing the reconstruction to the proposed successor's members.
     Bootstrapping {
@@ -81,6 +92,8 @@ pub enum ReconfigurerPhase {
         bootstrap: PendingBootstrap,
         /// Members that durably hold it.
         acks: BTreeSet<MatchmakerId>,
+        /// The stop quorum's decree floor, carried to the decree.
+        decree_floor: Ballot,
     },
     /// Running the successor decree over the old generation.
     Deciding {
@@ -257,6 +270,7 @@ impl MatchmakerReconfigurer {
             old: current.clone(),
             target: Some(target),
             acks: BTreeMap::new(),
+            decree_floor: Ballot::zero(),
         };
         self.elapsed = 0;
         self.resend();
@@ -283,6 +297,7 @@ impl MatchmakerReconfigurer {
             old: current.clone(),
             target: None,
             acks: BTreeMap::new(),
+            decree_floor: Ballot::zero(),
         };
         self.elapsed = 0;
         self.resend();
@@ -454,12 +469,18 @@ impl MatchmakerReconfigurer {
         }
         match &mut self.phase {
             ReconfigurerPhase::Idle => ReconfigurerStep::Ignored,
-            ReconfigurerPhase::Stopping { old, target, acks } => {
+            ReconfigurerPhase::Stopping {
+                old,
+                target,
+                acks,
+                decree_floor,
+            } => {
                 let ReconfigureReply::Stopped {
                     generation,
                     gc_watermark,
                     history,
                     successor,
+                    decree_promised,
                     ..
                 } = reply
                 else {
@@ -473,6 +494,7 @@ impl MatchmakerReconfigurer {
                     return ReconfigurerStep::Superseded { successor };
                 }
                 acks.insert(from, (gc_watermark, history));
+                *decree_floor = (*decree_floor).max(decree_promised);
                 let quorum = old.quorum_size();
                 if acks.len() < quorum {
                     return ReconfigurerStep::Stopped {
@@ -514,6 +536,7 @@ impl MatchmakerReconfigurer {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),
                     acks: BTreeSet::new(),
+                    decree_floor: *decree_floor,
                 };
                 self.resend();
                 ReconfigurerStep::Bootstrapping { bootstrap }
@@ -522,6 +545,7 @@ impl MatchmakerReconfigurer {
                 old,
                 bootstrap,
                 acks,
+                decree_floor,
             } => {
                 let ReconfigureReply::Bootstrapped { set, .. } = reply else {
                     return ReconfigurerStep::Ignored;
@@ -535,8 +559,12 @@ impl MatchmakerReconfigurer {
                     return ReconfigurerStep::Bootstrapped { remaining };
                 }
                 // Every member holds the reconstruction: the set may now be
-                // chosen. The decree opens at a fresh ballot of this node.
-                self.round = self.round.saturating_add(1);
+                // chosen. The decree opens at a fresh ballot of this node —
+                // strictly above every round this incarnation used *and*
+                // above the stop quorum's decree floor, so a rebooted node
+                // never reuses a ballot its earlier incarnation may have had
+                // a value accepted at (one ballot, one value).
+                self.round = self.round.max(decree_floor.round).saturating_add(1);
                 let ballot = Ballot {
                     round: self.round,
                     node: self.node,
@@ -870,7 +898,13 @@ mod tests {
     #[test]
     fn a_nacked_decree_reopens_above_the_refusing_promise() {
         let mut pool = pool(4, &[0, 1, 2]);
-        // Pre-promise the acceptors at a high ballot.
+        let mut r = MatchmakerReconfigurer::new(NodeId(1));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        // The freeze completes with no decree promise anywhere...
+        exchange(&mut r, &mut pool, &[]);
+        // ...then a competing proposer promises the acceptors at a high
+        // ballot before this reconfigurer's decree opens.
         for mm in pool.iter_mut().take(3) {
             mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
                 from: NodeId(9),
@@ -883,10 +917,6 @@ mod tests {
             let ready = mm.ready();
             ready.advance();
         }
-        let mut r = MatchmakerReconfigurer::new(NodeId(1));
-        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
-            .expect("start");
-        exchange(&mut r, &mut pool, &[]);
         exchange(&mut r, &mut pool, &[]);
         let steps = exchange(&mut r, &mut pool, &[]);
         assert!(
@@ -901,6 +931,54 @@ mod tests {
             r.phase(),
             ReconfigurerPhase::Deciding { proposer, .. } if proposer.ballot().round == 6
         ));
+        for _ in 0..4 {
+            exchange(&mut r, &mut pool, &[]);
+            r.resend();
+        }
+        assert!(!r.is_busy());
+        assert_eq!(pool[3].set(), set(1, &[0, 1, 3]));
+    }
+
+    /// A decree opens strictly above the promises the stop quorum reports:
+    /// a fresh incarnation (round counter at zero) whose predecessor took
+    /// promises at round 5 opens at 6 without a single Nack — the rule that
+    /// keeps a rebooted node from reusing a ballot its earlier incarnation
+    /// may have had a value accepted at (the handover model's seed 103).
+    #[test]
+    fn a_decree_opens_above_the_stop_quorums_promises() {
+        let mut pool = pool(4, &[0, 1, 2]);
+        // The earlier incarnation of node 1 promised the acceptors at round 5.
+        for mm in pool.iter_mut().take(3) {
+            mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+                from: NodeId(1),
+                generation: MatchmakerGeneration(0),
+                ballot: Ballot {
+                    round: 5,
+                    node: NodeId(1),
+                },
+            });
+            let ready = mm.ready();
+            ready.advance();
+        }
+        // Its fresh incarnation starts from nothing.
+        let mut r = MatchmakerReconfigurer::new(NodeId(1));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        exchange(&mut r, &mut pool, &[]);
+        let steps = exchange(&mut r, &mut pool, &[]);
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, ReconfigurerStep::Deciding { ballot } if ballot.round == 6)),
+            "the decree opens above the reported promises: {steps:?}"
+        );
+        let steps = exchange(&mut r, &mut pool, &[]);
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, ReconfigurerStep::Preempted { .. })),
+            "no Nack: {steps:?}"
+        );
         for _ in 0..4 {
             exchange(&mut r, &mut pool, &[]);
             r.resend();

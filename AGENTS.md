@@ -278,7 +278,22 @@ completeness is asserted in the audit. **Matchmaker quorums are majorities only*
 (`MatchmakerSet::quorum_size`; the decree kernel derives the same majority from the acceptor
 set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
 quorums are deliberately unsupported, and the handover's safety argument is made under the
-majority model alone. Liveness rules: a frozen generation with no successor is a
+majority model alone. The handover is proven by a sans-IO **model checker**
+(`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
+seeded schedules by default, thousands with `HANDOVER_MODEL_SEEDS`): concurrent reconfigurers
+and finishers over the real `Matchmaker` and `MatchmakerReconfigurer` with every message
+dropped, duplicated or reordered, every matchmaker crashed at each durability seam and rebooted
+from its disk, every reconfigurer killed or abandoned at any step and every node rebooted to its
+bootstrap belief — asserting after each step that at most one set is authoritative per
+generation, that a chosen set is what a majority of `M_g` durably voted at one ballot, and that
+every activated registry carries the complete reconstruction; then that the pool converges and
+that a node with no belief rediscovers the top generation from the bootstrap set. It bites:
+publishing the bootstrapped proposal without the decree is red on its first seed, and it found
+that a rebooted node's reconfigurer **reused the decree rounds of its earlier incarnation** (the
+reconfigurer is volatile; seed 103 put two values at one ballot) — hence the rule that the
+`Stopped` reply carries the matchmaker's decree promise and **the decree opens strictly above
+the maximum over the stop quorum** (every promise quorum of an earlier decree at that node
+intersects it). Liveness rules: a frozen generation with no successor is a
 cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
 the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
 freeze — the only liveness it can vouch for); and a phase that makes no progress for

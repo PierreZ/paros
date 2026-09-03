@@ -109,6 +109,8 @@
 //! completed registration reached a quorum of `M_g`, which intersects the
 //! frozen quorum the successor was reconstructed from).
 
+#[cfg(test)]
+mod handover_model;
 mod reconfigurer;
 
 use std::collections::BTreeMap;
@@ -571,6 +573,16 @@ pub enum ReconfigureReply {
         history: BTreeMap<Ballot, Registration>,
         /// The chosen successor, if learned.
         successor: Option<MatchmakerSet>,
+        /// The highest decree ballot this matchmaker has promised for the
+        /// frozen generation: the floor a reconfigurer opens its decree
+        /// above. A reconfigurer holds no durable state, so a rebooted
+        /// node's fresh incarnation would otherwise reuse the rounds its
+        /// earlier one minted — and a ballot must carry one value. Every
+        /// promise quorum an earlier decree at this node reached intersects
+        /// the stop quorum, so the maximum over the stop quorum is strictly
+        /// below no ballot that could ever have been accepted (the handover
+        /// model checker's finding, seed 103).
+        decree_promised: Ballot,
     },
     /// The bootstrap for `set` is durably pending here.
     Bootstrapped {
@@ -1111,6 +1123,7 @@ impl Matchmaker {
                             node: NodeId(u64::MAX),
                         }),
                         successor: self.hard_state.successor.clone(),
+                        decree_promised: self.hard_state.decree.promised,
                     }
                 }
             }
