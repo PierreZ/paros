@@ -571,7 +571,8 @@ impl RawNode {
             }
             MatchRefusal::Stopped { .. }
             | MatchRefusal::Generation { .. }
-            | MatchRefusal::Inactive => {}
+            | MatchRefusal::Inactive
+            | MatchRefusal::Malformed => {}
         }
         let successor = match &refusal {
             MatchRefusal::Stopped {

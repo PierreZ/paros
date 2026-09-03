@@ -908,6 +908,9 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
                 MatchRefusal::Inactive => {
                     matchmaker::refused::Reason::Inactive(matchmaker::RefusedInactive {})
                 }
+                MatchRefusal::Malformed => {
+                    matchmaker::refused::Reason::Malformed(matchmaker::RefusedMalformed {})
+                }
             };
             matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
                 reason: Some(reason),
@@ -951,6 +954,7 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
                     current: mm_set_value(current)?,
                 },
                 matchmaker::refused::Reason::Inactive(_) => MatchRefusal::Inactive,
+                matchmaker::refused::Reason::Malformed(_) => MatchRefusal::Malformed,
             })
         }
     };

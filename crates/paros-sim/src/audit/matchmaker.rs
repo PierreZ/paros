@@ -293,6 +293,7 @@ pub(super) struct MatchmakerAudit {
     refused_stopped_with_successor: bool,
     refused_generation: bool,
     refused_inactive: bool,
+    refused_malformed: bool,
     set_learned: bool,
     reconfigurer_started_flag: bool,
     reconfigurer_finishing: bool,
@@ -1028,6 +1029,7 @@ impl MatchmakerAudit {
             MatchRefusal::Stopped { .. } => "stopped",
             MatchRefusal::Generation { .. } => "generation",
             MatchRefusal::Inactive => "inactive",
+            MatchRefusal::Malformed => "malformed",
         };
         *self.refusal_counts.entry(kind).or_default() += 1;
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1105,6 +1107,12 @@ impl MatchmakerAudit {
                 reach_once!(
                     self.refused_inactive,
                     "generation: an inactive matchmaker refuses a proposer"
+                );
+            }
+            MatchRefusal::Malformed => {
+                reach_once!(
+                    self.refused_malformed,
+                    "matchmaker: a malformed configuration is refused"
                 );
             }
         }

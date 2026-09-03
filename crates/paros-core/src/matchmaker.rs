@@ -339,7 +339,15 @@ impl Matchmaker {
             config,
             reconfiguration,
         };
-        let outcome = if let Some(refusal) = self.generation_refusal(generation) {
+        let outcome = if !registration.config.is_well_formed() {
+            // Wire hygiene, before anything is touched: a configuration
+            // that does not admit its own quorum system is refused whole. A
+            // registry that stored one would make every later tally over it
+            // miscount, and the boot-time `assert_invariants` would crash
+            // the process on the way back in — an assert on external input,
+            // which is exactly what the doctrine forbids.
+            MatchOutcome::Refused(MatchRefusal::Malformed)
+        } else if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
         } else if ballot < self.hard_state.gc_watermark {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
@@ -965,6 +973,13 @@ mod tests {
         assert_eq!(history[&ballot(1, 1)].config, config(&[0, 1, 2]));
         assert_eq!(mm.highest(), Some(ballot(3, 2)));
     }
+
+    /// Review finding P10a: the registry's own wire hygiene. A
+    /// configuration that does not admit its own quorum system is external
+    /// input, and storing one would make every later tally over it
+    /// miscount — and crash the process at the next boot, when
+    /// `assert_invariants` reads it back. It is refused before anything is
+    /// touched, exactly as a stale or below-floor ballot is.
 
     #[test]
     fn a_request_at_or_below_the_highest_is_refused_with_the_highest() {
