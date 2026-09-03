@@ -121,12 +121,18 @@ impl AcceptorConfig {
         q
     }
 
-    /// Whether this configuration can be run at all: at least one acceptor,
-    /// and a quorum system whose quorums all intersect (`2q > n`). The
-    /// operating-condition twin of [`AcceptorConfig::quorum_size`]'s hard
-    /// asserts: a boundary that takes a configuration from outside
-    /// (`RawNode::reconfigure`) refuses a malformed one here instead of
-    /// letting a later quorum tally panic on it.
+    /// Whether this configuration can be run at all: at least one acceptor, a
+    /// membership that is sorted and deduplicated, and a quorum system whose
+    /// quorums all intersect (`2q > n`). The operating-condition twin of
+    /// [`AcceptorConfig::quorum_size`]'s hard asserts: a boundary that takes a
+    /// configuration from outside (`RawNode::reconfigure`) refuses a malformed
+    /// one here instead of letting a later quorum tally panic on it.
+    ///
+    /// The ordering clause is not cosmetic and matches
+    /// [`MatchmakerSet::is_well_formed`]: [`AcceptorConfig::contains`]
+    /// binary-searches the membership, so an unsorted or duplicated vector —
+    /// which only [`AcceptorConfig::new`] normalizes — would make a quorum
+    /// tally *silently* miscount rather than fail.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         let n = self.members.len();
@@ -134,7 +140,7 @@ impl AcceptorConfig {
             return false;
         }
         let q = self.quorum_system.quorum_size(n);
-        q >= 1 && 2 * q > n
+        q >= 1 && 2 * q > n && self.members.windows(2).all(|w| w[0] < w[1])
     }
 
     /// Whether `voters` hold a quorum of this configuration under its quorum
