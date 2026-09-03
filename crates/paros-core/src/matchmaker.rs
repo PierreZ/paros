@@ -108,6 +108,17 @@
 //! across generations rests on the same intersection (Appendix B: every
 //! completed registration reached a quorum of `M_g`, which intersects the
 //! frozen quorum the successor was reconstructed from).
+//!
+//! # Trust boundary of `Chosen`
+//!
+//! Three of the five reconfiguration messages are *acceptor* decisions the
+//! matchmaker makes from its own durable state — `Stop` (freeze), and the
+//! decree's `DecreePrepare`/`DecreeAccept` (promise and vote). `Bootstrap`
+//! is a durable hand-off of a proposal. `Chosen` is the one **learner
+//! notification**: the matchmaker records or activates the successor it is
+//! told, without re-deriving the decision, on the precondition that only a
+//! proposer holding the decree's Phase-2 quorum (or a node relaying such a
+//! publication) emits it. See [`ReconfigureRequest::Chosen`].
 
 #[cfg(test)]
 mod handover_model;
@@ -116,8 +127,7 @@ mod reconfigurer;
 use std::collections::BTreeMap;
 
 pub use self::reconfigurer::{
-    MatchmakerReconfigurer, RECONFIGURE_TIMEOUT_ELECTIONS, ReconfigurerPhase, ReconfigurerStep,
-    StartRefusal,
+    MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerStep, StartRefusal,
 };
 pub use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::single_decree::DecreeAcceptor;
@@ -532,6 +542,22 @@ pub enum ReconfigureRequest {
     /// The successor of `generation` was chosen: a member of `generation`
     /// records it (and freezes, if it had not), a member of the successor
     /// activates its pending bootstrap.
+    ///
+    /// **A learner notification, not an acceptor decision.** The matchmaker
+    /// that receives it does *not* verify that `successor` is what the
+    /// decree over `generation` chose — exactly as a Paxos acceptor learning
+    /// a `Commit` trusts the proposer that assembled the quorum. The
+    /// protocol precondition, on the sender: `Chosen` is emitted only by a
+    /// reconfigurer in its `Publishing` phase (entered only on a Phase-2
+    /// quorum of `M_generation`), or relayed verbatim by a node that
+    /// learned the set from such a publication (a `Stopped { successor }`
+    /// or `Generation { current }` refusal, or a `Chosen` step of its own).
+    /// Under crash faults with a correct driver that is exactly what
+    /// happens; a driver that fabricates a `Chosen` is outside the fault
+    /// model, and the core does not defend against it. Every *other* wire
+    /// check a learner can make is made: the generation chain
+    /// (`successor.generation == generation + 1`) and a set that admits the
+    /// quorum system.
     Chosen {
         /// The requesting node.
         from: NodeId,
@@ -1129,7 +1155,13 @@ impl Matchmaker {
             }
             ReconfigureRequest::Bootstrap { bootstrap, .. } => {
                 let set = bootstrap.set.clone();
-                if !set.contains(me) || set.generation <= current.generation {
+                // Wire hygiene: a proposal this matchmaker is not in, one
+                // that would not move it forward, or one that cannot admit
+                // the quorum system is refused whole.
+                if !set.contains(me)
+                    || set.generation <= current.generation
+                    || !set.is_well_formed()
+                {
                     refused(self)
                 } else {
                     // Keyed by the proposed set: two reconfigurers may
@@ -1224,8 +1256,14 @@ impl Matchmaker {
                 successor,
                 ..
             } => {
+                // A learner notification (see the type doc on
+                // `ReconfigureRequest::Chosen`): the matchmaker does not
+                // re-derive the decision, it applies what a proposer that
+                // held the Phase-2 quorum tells it — after the wire checks
+                // any learner makes (the generation chain and a set that
+                // admits the quorum system).
                 let successor = MatchmakerSet::new(successor.generation, successor.members);
-                if successor.generation != generation.next() {
+                if successor.generation != generation.next() || !successor.is_well_formed() {
                     refused(self)
                 } else if current.generation == generation
                     && matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
@@ -1291,6 +1329,10 @@ impl Matchmaker {
         if !successor.contains(self.config.id) || successor.generation <= self.set().generation {
             return false;
         }
+        assert!(
+            successor.is_well_formed(),
+            "an activated matchmaker set admits the matchmaker quorum system"
+        );
         let Some(index) = self
             .hard_state
             .pending
@@ -1300,12 +1342,32 @@ impl Matchmaker {
             return false;
         };
         let bootstrap = self.hard_state.pending.remove(index);
-        let watermark = bootstrap.gc_watermark.max(self.hard_state.gc_watermark);
+        // The activated watermark is the maximum of the reconstructed one
+        // and this matchmaker's own. Both are legitimate floors over the
+        // reconstructed registry: the reconstructed one is the maximum over
+        // a frozen quorum of `M_g`, and the local one was raised only by a
+        // `GarbageA` whose leader had established the §3.5 preconditions —
+        // "everything below `i` may be forgotten" is a fact about the
+        // cluster, not about the matchmaker that happened to hear it first,
+        // so applying it to the reconstruction forgets nothing a future
+        // Phase 1 can need. What the local floor can never do is *add*
+        // knowledge: the registry installed is exactly the reconstructed
+        // history at or above the higher floor, and nothing else.
+        let local = self.hard_state.gc_watermark;
+        let watermark = bootstrap.gc_watermark.max(local);
         let registry: BTreeMap<Ballot, Registration> = bootstrap
             .history
             .into_iter()
             .filter(|(b, _)| *b >= watermark)
             .collect();
+        assert!(
+            watermark >= bootstrap.gc_watermark && watermark >= local,
+            "an activation never lowers either watermark it inherits"
+        );
+        assert!(
+            registry.keys().all(|b| *b >= watermark),
+            "an activated registry holds nothing below the activated watermark"
+        );
         self.hard_state.generation = successor.generation;
         self.hard_state.members.clone_from(&successor.members);
         self.hard_state.phase = MatchmakerPhase::Active;
@@ -1406,6 +1468,91 @@ impl Matchmaker {
 mod tests {
     use super::*;
     use crate::membership::QuorumSystem;
+
+    /// Review 3 of #133: a member whose own GC floor sits *above* the
+    /// reconstructed one activates with the higher floor, and its registry is
+    /// exactly the reconstruction at or above that floor — before and after a
+    /// restart from the durable install.
+    #[test]
+    fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
+        let cfg =
+            |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
+        // Matchmaker 0, a member of M_0 = {0, 1, 2}: registers ballots 1..=6
+        // and hears a GarbageA raising its floor to ballot 5.
+        let mut mm = fresh(0);
+        for round in 1..=6 {
+            mm.step(MatchRequest::new(
+                NodeId(1),
+                ballot(round, 1),
+                cfg(round),
+                G0,
+            ));
+            mm.ready().advance();
+        }
+        assert_eq!(mm.advance_gc_watermark(G0, ballot(5, 1)), GcOutcome::Raised);
+        mm.ready().advance();
+        assert_eq!(
+            mm.registry().len(),
+            2,
+            "ballots 5 and 6 survive the local floor"
+        );
+        // A reconstruction from *another* frozen quorum ({1, 2}) that never
+        // heard the GarbageA: floor at ballot 2, history 2..=6.
+        let history: BTreeMap<Ballot, Registration> = (2..=6)
+            .map(|round| (ballot(round, 1), Registration::belief(cfg(round))))
+            .collect();
+        let successor = MatchmakerSet::new(
+            MatchmakerGeneration(1),
+            vec![MatchmakerId(0), MatchmakerId(3)],
+        );
+        mm.step_reconfigure(ReconfigureRequest::Bootstrap {
+            from: NodeId(9),
+            bootstrap: PendingBootstrap {
+                set: successor.clone(),
+                gc_watermark: ballot(2, 1),
+                history,
+            },
+        });
+        mm.ready().advance();
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(9),
+            generation: G0,
+            successor: successor.clone(),
+        });
+        let ready = mm.ready();
+        let installed = ready.writes().iter().find_map(|op| match op {
+            MatchmakerWriteOp::InstallRegistry {
+                scalars,
+                registrations,
+            } => Some((scalars.gc_watermark, registrations.clone())),
+            _ => None,
+        });
+        ready.advance();
+        let (durable_floor, durable_registry) =
+            installed.expect("the activation installs the registry");
+        let expected: Vec<Ballot> = vec![ballot(5, 1), ballot(6, 1)];
+        assert_eq!(mm.set(), successor);
+        assert_eq!(
+            mm.hard_state().gc_watermark,
+            ballot(5, 1),
+            "the higher floor wins"
+        );
+        assert_eq!(mm.registry().keys().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(durable_floor, ballot(5, 1));
+        assert_eq!(
+            durable_registry.keys().copied().collect::<Vec<_>>(),
+            expected
+        );
+        // The restart reads back exactly that.
+        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
+        assert_eq!(rebooted.set(), successor);
+        assert_eq!(rebooted.hard_state().gc_watermark, ballot(5, 1));
+        assert_eq!(
+            rebooted.registry().keys().copied().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(rebooted.phase(), MatchmakerPhase::Active);
+    }
 
     /// The port over an in-memory registry, for the state-machine tests.
     #[derive(Default)]

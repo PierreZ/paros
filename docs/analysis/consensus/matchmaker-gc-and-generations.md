@@ -271,10 +271,12 @@ leader, because every campaign is *matchmaking first*. Three rules, all found by
   the only liveness it can vouch for — so a member that died since (a lost registry, a machine
   gone) never blocks the bootstrap, which waits for *every* proposed member. The decree still
   adopts whatever an earlier reconfigurer got voted, and an operator can grow the set back.
-- **A phase that makes no progress for `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts is
-  abandoned** (`MatchmakerReconfigurer::tick`). Abandoning is always safe — the freeze and the
-  bootstrap are idempotent, the votes are durable — and it is what keeps a dead proposed member
-  from holding the `busy` refusal for the rest of a run.
+- **A phase that makes no progress is abandoned by the driver** after
+  `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts. The core keeps the stall clock
+  (`MatchmakerReconfigurer::tick` / `stalled_for`) and exposes `abandon`; how long is long
+  enough is driver policy (`paros::driver`), paced in the driver's own units. Abandoning is
+  always safe — the freeze and the bootstrap are idempotent, the votes are durable — and it is
+  what keeps a dead proposed member from holding the `busy` refusal for the rest of a run.
 - **A preempted decree backs off before reopening.** Every node that met the same frozen
   generation runs a finisher, and six finishers reopening their preempted decree on the same
   re-send cadence preempt each other forever (the sweep drove one seed's decree past round 800

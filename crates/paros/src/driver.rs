@@ -28,9 +28,9 @@ use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, GcAck, GcRequest,
     HandoffCounters, LeadershipOrigin, MatchRefusal, MatchReply, MatchRequest, MatchStep,
     MatchmakerGeneration, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, NodeRole,
-    ProposeResult, QuorumSystem, RECONFIGURE_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult,
-    ReadState, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
-    ReconfigurerStep, SessionEntry, Slot, StartRefusal, Value, WriteOp,
+    ProposeResult, QuorumSystem, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, SessionEntry, Slot,
+    StartRefusal, Value, WriteOp,
 };
 use prost::Message as ProstMessage;
 use tokio::sync::mpsc;
@@ -214,6 +214,13 @@ const READ_RETRY_TICKS: u64 = 10;
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// How many election timeouts a matchmaker-set handover may make no progress
+/// before this driver abandons it (`MatchmakerReconfigurer::abandon`): long
+/// enough for a slow matchmaker to answer a re-sent request, short enough that
+/// a dead one does not hold the `Busy` refusal for the rest of a run. Driver
+/// policy: the core reports the stall (`stalled_for`), the driver decides.
+pub const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 
 /// Tracing event name for a node logical-clock tick. Emitters use the string
 /// literal (tracing requires one); readers (oracles) match on this constant.
@@ -3602,6 +3609,7 @@ where
                         Ok(()) => "",
                         Err(StartRefusal::Busy) => "busy",
                         Err(StartRefusal::Empty) => "empty",
+                        Err(StartRefusal::Malformed) => "malformed",
                     }
                 };
                 let generation = node.matchmaker_set().generation.0;
@@ -3874,8 +3882,12 @@ where
                 // The running handover's re-send (#125): the same cadence,
                 // its own location; a preempted decree reopens only here, so
                 // two dueling reconfigurers are paced by their drivers.
+                reconfigurer.tick();
+                let stall_budget = node.election_timeout().saturating_mul(RECONFIGURE_TIMEOUT_ELECTIONS);
                 if reconfigurer.is_busy()
-                    && reconfigurer.tick(node.election_timeout().saturating_mul(RECONFIGURE_TIMEOUT_ELECTIONS))
+                    && stall_budget != 0
+                    && reconfigurer.stalled_for() >= stall_budget
+                    && reconfigurer.abandon()
                 {
                     // A phase that no member answers any more (a lost
                     // registry, a machine gone) is abandoned: the frozen

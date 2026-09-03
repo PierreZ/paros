@@ -63,6 +63,9 @@ pub enum StartRefusal {
     Busy,
     /// The target names no matchmaker.
     Empty,
+    /// The target does not admit the matchmaker quorum system
+    /// ([`MatchmakerSet::is_well_formed`]).
+    Malformed,
 }
 
 /// Where the reconfigurer stands.
@@ -192,15 +195,9 @@ pub struct MatchmakerReconfigurer {
     phase: ReconfigurerPhase,
     pending: Vec<(MatchmakerId, ReconfigureRequest)>,
     /// Driver ticks since the running phase last made progress (see
-    /// [`MatchmakerReconfigurer::tick`]).
+    /// [`MatchmakerReconfigurer::stalled_for`]).
     elapsed: u64,
 }
-
-/// How many election timeouts a handover phase may make no progress before
-/// the driver abandons it ([`MatchmakerReconfigurer::tick`]): long enough for
-/// a slow matchmaker to answer a re-sent request, short enough that a dead
-/// one does not hold the `Busy` refusal for the rest of a run.
-pub const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 
 impl MatchmakerReconfigurer {
     /// An idle reconfigurer for `node`.
@@ -262,10 +259,16 @@ impl MatchmakerReconfigurer {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
         }
-        let target = MatchmakerSet::new(current.generation.next(), target).members;
-        if target.is_empty() {
+        let target = MatchmakerSet::new(current.generation.next(), target);
+        if target.members.is_empty() {
             return Err(StartRefusal::Empty);
         }
+        // The successor must itself admit the quorum system every later
+        // freeze, decree and registration quorum is drawn from.
+        if !target.is_well_formed() {
+            return Err(StartRefusal::Malformed);
+        }
+        let target = target.members;
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
             target: Some(target),
@@ -304,21 +307,35 @@ impl MatchmakerReconfigurer {
         Ok(())
     }
 
-    /// One driver tick while a handover runs. A phase that makes no progress
-    /// for `timeout` ticks is **abandoned** (back to `Idle`, `true`): a
-    /// proposed member that will never answer its bootstrap, or an old
-    /// member that will never vote, must not hold a `Busy` refusal forever —
-    /// the next node to meet the frozen generation finishes it with the
-    /// members that do answer. Abandoning is always safe: the reconfigurer
-    /// holds no durable state, the freeze and the bootstrap are idempotent,
-    /// and the decree's votes stay durable at the matchmakers. A `timeout`
-    /// of zero never abandons.
-    pub fn tick(&mut self, timeout: u64) -> bool {
-        if !self.is_busy() || timeout == 0 {
-            return false;
+    /// One driver tick while a handover runs: the running phase's stall
+    /// clock advances. The core only *knows* that it has made no progress
+    /// ([`Self::stalled_for`]); whether that is long enough to give up is
+    /// the driver's decision ([`Self::abandon`]) — the timeout is policy,
+    /// paced in the driver's own units, never a constant inside the state
+    /// machine.
+    pub fn tick(&mut self) {
+        if self.is_busy() {
+            self.elapsed = self.elapsed.saturating_add(1);
         }
-        self.elapsed = self.elapsed.saturating_add(1);
-        if self.elapsed < timeout {
+    }
+
+    /// Driver ticks since the running phase last folded a reply that moved
+    /// it (zero while idle).
+    #[must_use]
+    pub fn stalled_for(&self) -> u64 {
+        self.elapsed
+    }
+
+    /// Give up the running handover (back to `Idle`; `false` when nothing
+    /// was running). A proposed member that will never answer its
+    /// bootstrap, or an old member that will never vote, must not hold a
+    /// `Busy` refusal forever — the next node to meet the frozen generation
+    /// finishes it with the members that do answer. Abandoning is always
+    /// safe: the reconfigurer holds no durable state, the freeze and the
+    /// bootstrap are idempotent, and the decree's votes stay durable at the
+    /// matchmakers.
+    pub fn abandon(&mut self) -> bool {
+        if !self.is_busy() {
             return false;
         }
         self.abort();
@@ -532,6 +549,14 @@ impl MatchmakerReconfigurer {
                         .all(|b| *b >= bootstrap.gc_watermark),
                     "a reconstruction holds nothing below its watermark"
                 );
+                // A proposed successor admits its quorum system: a `start`
+                // refused a malformed target, and a `finish` proposes the
+                // members that answered the freeze — a quorum of the old
+                // set, never fewer.
+                assert!(
+                    bootstrap.set.is_well_formed(),
+                    "a proposed successor admits the matchmaker quorum system"
+                );
                 self.phase = ReconfigurerPhase::Bootstrapping {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),
@@ -617,6 +642,12 @@ impl MatchmakerReconfigurer {
                             return ReconfigurerStep::Ignored;
                         };
                         let successor = MatchmakerSet::new(old.generation.next(), members);
+                        // The decree chose what some reconfigurer bootstrapped,
+                        // and every bootstrap was a well-formed proposal.
+                        assert!(
+                            successor.is_well_formed(),
+                            "a chosen successor admits the matchmaker quorum system"
+                        );
                         self.phase = ReconfigurerPhase::Publishing {
                             old: old.clone(),
                             successor: successor.clone(),

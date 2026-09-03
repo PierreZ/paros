@@ -57,9 +57,8 @@ pub use matchmaker::{
     AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
     MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
-    MatchmakerWriteOp, PendingBootstrap, RECONFIGURE_TIMEOUT_ELECTIONS, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Registration, RegistryStorage,
-    StartRefusal,
+    MatchmakerWriteOp, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistryStorage, StartRefusal,
 };
 pub use message::Message;
 pub use node::{

@@ -296,10 +296,18 @@ the maximum over the stop quorum** (every promise quorum of an earlier decree at
 intersects it). Liveness rules: a frozen generation with no successor is a
 cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
 the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
-freeze — the only liveness it can vouch for); and a phase that makes no progress for
-`RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts is **abandoned** (the reconfigurer holds no
-durable state; the freeze, the bootstrap and the votes stay), so a dead proposed member never
-holds a `busy` refusal for the rest of a run. Replacement is also how a matchmaker with unusable
+freeze — the only liveness it can vouch for); and a phase that makes no progress is
+**abandoned by the driver** after `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (the
+core only reports the stall, `MatchmakerReconfigurer::stalled_for`; the timeout is driver
+policy in `paros::driver`, never a constant inside the state machine; the reconfigurer holds
+no durable state, so the freeze, the bootstrap and the votes stay), so a dead proposed member
+never holds a `busy` refusal for the rest of a run. **A successor set must admit its quorum
+system** (`MatchmakerSet::is_well_formed`): `start` refuses a malformed target, a matchmaker
+refuses a `Bootstrap` or `Chosen` naming one, and a `finish` proposes the members that answered
+the freeze — a quorum of the old set, never fewer. **`Chosen` is a learner notification, not an
+acceptor decision**: a matchmaker records or activates the successor it is told without
+re-deriving the decree, on the protocol precondition that only a reconfigurer holding the
+Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
 state recovers — there is deliberately no matchmaker-specific in-place repair.
 
 **Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for

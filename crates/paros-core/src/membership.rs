@@ -234,6 +234,10 @@ impl MatchmakerSet {
     /// programmer error: the arithmetic guarantees it).
     #[must_use]
     pub fn quorum_size(&self) -> usize {
+        assert!(
+            self.is_well_formed(),
+            "a matchmaker quorum is drawn over a well-formed set"
+        );
         let quorum = self.members.len() / 2 + 1;
         // Postcondition: self-intersecting over the membership.
         assert!(
@@ -247,5 +251,29 @@ impl MatchmakerSet {
     #[must_use]
     pub fn contains(&self, id: MatchmakerId) -> bool {
         self.members.binary_search(&id).is_ok()
+    }
+
+    /// Whether this set can serve as a matchmaker configuration at all: it
+    /// names at least one matchmaker and admits the quorum system every
+    /// matchmaker-side quorum is drawn from (majority: any two quorums
+    /// intersect, `2q > n`). **A chosen `MatchmakerSet` must itself admit
+    /// the required quorum system** — the protocol boundaries that take a
+    /// set from outside refuse one that does not ([`MatchmakerReconfigurer::start`]
+    /// refuses the target, a matchmaker refuses a `Bootstrap` or `Chosen`
+    /// naming it), and the boundaries that *produce* one assert it (a
+    /// `finish` proposes the members that answered the freeze — at least a
+    /// quorum of the old set, never fewer). Under the majority system every
+    /// non-empty set qualifies; the check is the explicit invariant a
+    /// flexible matchmaker quorum system would have to satisfy too.
+    ///
+    /// [`MatchmakerReconfigurer::start`]: crate::MatchmakerReconfigurer::start
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        let n = self.members.len();
+        if n == 0 {
+            return false;
+        }
+        let q = n / 2 + 1;
+        2 * q > n && self.members.windows(2).all(|w| w[0] < w[1])
     }
 }

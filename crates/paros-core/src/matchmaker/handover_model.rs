@@ -797,7 +797,8 @@ impl World {
         for i in 0..NODES {
             let node = NodeId(i);
             let n = self.node(node);
-            if n.reconfigurer.tick(ABANDON_TICKS) {
+            n.reconfigurer.tick();
+            if n.reconfigurer.stalled_for() >= ABANDON_TICKS && n.reconfigurer.abandon() {
                 self.reach.abandoned += 1;
                 continue;
             }
@@ -1338,4 +1339,112 @@ fn a_second_handover_runs_on_the_activated_generation() {
             target.iter().copied().map(MatchmakerId).collect::<Vec<_>>()
         );
     }
+}
+
+/// Review 4 of #133: reconstruction completeness at the boundary. A
+/// registration reaches a quorum `Q1` of `M_0 = {0, 1, 2}`, a freeze reaches a
+/// quorum `Q2`, and `Q1 ∩ Q2 ≠ ∅` by majority intersection — so the
+/// reconstruction must carry the registration whatever the holder pair, the
+/// stop quorum, the order in which the freeze reaches non-holders, duplicate
+/// `Stop`s, or a holder that restarted from its disk between registering and
+/// freezing. Every combination is enumerated.
+#[test]
+fn every_quorum_registration_survives_every_stop_quorum() {
+    let quorums: [[u64; 2]; 3] = [[0, 1], [0, 2], [1, 2]];
+    let node = NodeId(0);
+    let reconfigurer_node = NodeId(1);
+    let cfg = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
+    let registered = Ballot { round: 1, node };
+    let mut cases = 0;
+    for q1 in quorums {
+        for q2 in quorums {
+            for restart in [None, Some(q1[0]), Some(q1[1])] {
+                for duplicate_stop in [false, true] {
+                    for stop_non_holders_first in [false, true] {
+                        cases += 1;
+                        let mut world = World::new(0);
+                        world.chaos = false;
+                        let request = MatchRequest::new(
+                            node,
+                            registered,
+                            cfg.clone(),
+                            MatchmakerGeneration(0),
+                        );
+                        // The freeze may reach the members outside Q1 before the
+                        // registration reaches Q1 (they refuse nothing, they were
+                        // never asked).
+                        let stop_to = |world: &mut World, m: u64| {
+                            let believed = world.node(reconfigurer_node).believed.clone();
+                            if !world.node(reconfigurer_node).reconfigurer.is_busy() {
+                                world
+                                    .node(reconfigurer_node)
+                                    .reconfigurer
+                                    .start(&believed, vec![MatchmakerId(3)])
+                                    .expect("start");
+                            }
+                            world.node(reconfigurer_node).reconfigurer.take_requests();
+                            let stop = ReconfigureRequest::Stop {
+                                from: reconfigurer_node,
+                                generation: MatchmakerGeneration(0),
+                            };
+                            world.deliver(Envelope::Reconfigure {
+                                to: MatchmakerId(m),
+                                request: stop,
+                            });
+                        };
+                        if stop_non_holders_first {
+                            for m in q2 {
+                                if !q1.contains(&m) {
+                                    stop_to(&mut world, m);
+                                }
+                            }
+                        }
+                        for m in q1 {
+                            world.deliver(Envelope::Register {
+                                to: MatchmakerId(m),
+                                request: request.clone(),
+                            });
+                        }
+                        if let Some(m) = restart {
+                            let site = world.site(MatchmakerId(m));
+                            site.live = None;
+                            site.boot();
+                        }
+                        for m in q2 {
+                            if stop_non_holders_first && !q1.contains(&m) {
+                                continue;
+                            }
+                            stop_to(&mut world, m);
+                            if duplicate_stop {
+                                stop_to(&mut world, m);
+                            }
+                        }
+                        // Deliver every reply (nothing is lost here); the
+                        // reconfigurer reconstructs on the second freeze.
+                        world
+                            .network
+                            .retain(|e| !matches!(e, Envelope::Reconfigure { .. }));
+                        while let Some(envelope) = world.network.pop() {
+                            world.deliver(envelope);
+                            world
+                                .network
+                                .retain(|e| !matches!(e, Envelope::Reconfigure { .. }));
+                        }
+                        let phase = world.node(reconfigurer_node).reconfigurer.phase().clone();
+                        let ReconfigurerPhase::Bootstrapping { bootstrap, .. } = phase else {
+                            panic!(
+                                "q1={q1:?} q2={q2:?} restart={restart:?} dup={duplicate_stop} first={stop_non_holders_first}: the freeze quorum reconstructs, got {phase:?}"
+                            );
+                        };
+                        assert_eq!(
+                            bootstrap.history.get(&registered).map(|r| &r.config),
+                            Some(&cfg),
+                            "q1={q1:?} q2={q2:?} restart={restart:?} dup={duplicate_stop} first={stop_non_holders_first}: the reconstruction carries the quorum registration"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 3 * 3 * 3 * 2 * 2);
 }
