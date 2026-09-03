@@ -43,6 +43,7 @@ mod snap_repair;
 mod transport;
 
 pub use config::{DriverTunables, RunError, parse_addr};
+pub(crate) use config::{accept_and_serve, grpc_keep_alive};
 pub use events::{
     EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED, EV_CHOSEN,
     EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED, EV_DUPLICATE_SUPPRESSED,
@@ -81,7 +82,7 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
 
 use boot::replay_boot_state;
-use config::{OnDrop, grpc_channel_config, grpc_keep_alive};
+use config::{OnDrop, grpc_channel_config};
 use events::{message_kind, message_route};
 use matchmaking::{
     MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
@@ -458,11 +459,7 @@ where
                     grpc_service.clone(),
                     incarnation_shutdown.clone().cancelled_owned(),
                 );
-                providers.task().spawn_task("paros-grpc-server", async move {
-                    if let Err(error) = connection.await {
-                        tracing::warn!(%addr, %error, "gRPC connection ended");
-                    }
-                }).detach();
+                accept_and_serve(&providers, "paros-grpc-server", "node", addr, connection);
             }
             Some((req, reply)) = rpc.propose.recv() => {
                 // A client value → the leader (deduplicated by (client, seq)). The

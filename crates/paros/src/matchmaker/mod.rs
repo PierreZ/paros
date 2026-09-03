@@ -21,10 +21,8 @@
 
 mod storage;
 
-use moonpool_core::{
-    Detach, NetworkProvider, Providers, SimulationError, TaskProvider, TcpListenerTrait,
-};
-use moonpool_hyper::{H2Server, H2ServerConfig, KeepAlive};
+use moonpool_core::{NetworkProvider, Providers, SimulationError, TcpListenerTrait};
+use moonpool_hyper::{H2Server, H2ServerConfig};
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
     MatchmakerConfig, MatchmakerId, MatchmakerWriteOp, ReconfigureReply, ReconfigureRequest,
@@ -33,7 +31,7 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, StorageFaultDecision};
-use crate::driver::{DriverTunables, RunError};
+use crate::driver::{DriverTunables, RunError, accept_and_serve, grpc_keep_alive};
 use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::StorageError;
@@ -366,11 +364,7 @@ where
         matchmaker_channel(tunables.client_inbox_capacity);
     let grpc_service = tonic::service::Routes::new(ParosMatchmakerServer::new(service)).prepare();
     let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(KeepAlive {
-            interval: tunables.keep_alive_interval,
-            timeout: tunables.keep_alive_timeout,
-            while_idle: false,
-        }),
+        keep_alive: Some(grpc_keep_alive(&tunables)),
         vectored_writes: true,
     });
 
@@ -384,11 +378,7 @@ where
                     grpc_service.clone(),
                     incarnation_shutdown.clone().cancelled_owned(),
                 );
-                providers.task().spawn_task("paros-matchmaker-grpc-server", async move {
-                    if let Err(error) = connection.await {
-                        tracing::warn!(%addr, %error, "matchmaker gRPC connection ended");
-                    }
-                }).detach();
+                accept_and_serve(&providers, "paros-matchmaker-grpc-server", "matchmaker", addr, connection);
             }
             Some((request, reply)) = inbox.requests.recv() => {
                 // One request, one batch, one reply: the core answers every

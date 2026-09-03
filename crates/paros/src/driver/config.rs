@@ -1,11 +1,14 @@
-//! Driver configuration: the per-node tunables, the transport constants they
-//! default to, the shared gRPC keep-alive/channel shapes, the scope guard, the
+//! Driver configuration and the wiring both drivers share: the per-node
+//! tunables, the transport constants they default to, the gRPC keep-alive /
+//! channel shapes, the accepted-connection server, the scope guard, the
 //! address parser, and the driver's typed exit ([`RunError`]).
 
+use std::fmt::Display;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use moonpool_core::{SimulationError, SimulationResult};
+use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
 use moonpool_hyper::{ChannelConfig, KeepAlive};
 
 use crate::hooks::Seam;
@@ -163,6 +166,31 @@ pub(crate) fn grpc_channel_config(tunables: &DriverTunables) -> ChannelConfig {
         keep_alive: Some(grpc_keep_alive(tunables)),
         ..ChannelConfig::default()
     }
+}
+
+/// Serve one accepted gRPC connection on its own detached task, ending when
+/// the incarnation does. Shared by both drivers in this crate — the node loop
+/// and the matchmaker loop differ only in the task's name and the `role` their
+/// connection errors carry.
+pub(crate) fn accept_and_serve<P, F, E>(
+    providers: &P,
+    task: &'static str,
+    role: &'static str,
+    addr: impl Display + Send + 'static,
+    connection: F,
+) where
+    P: Providers,
+    F: Future<Output = Result<(), E>> + Send + 'static,
+    E: Display + Send + 'static,
+{
+    providers
+        .task()
+        .spawn_task(task, async move {
+            if let Err(error) = connection.await {
+                tracing::warn!(%addr, %error, role, "gRPC connection ended");
+            }
+        })
+        .detach();
 }
 
 /// Ticks a parked read reply may wait for its read-index confirmation before
