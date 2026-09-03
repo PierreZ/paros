@@ -15,8 +15,6 @@ mod replication;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use self::gc::GcState;
-pub use self::gc::GcStep;
 pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
@@ -26,6 +24,8 @@ use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
+use crate::collector::Collector;
+pub use crate::collector::GcStep;
 use crate::matchmaker::{
     AcceptorConfig, GcRequest, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
     MatchmakerId, MatchmakerSet,
@@ -266,7 +266,7 @@ pub struct RawNode {
     matchmakers: MatchmakerSet,
     /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
     /// Leader-only, volatile, `None` on plain Multi-Paxos.
-    gc: Option<GcState>,
+    gc: Option<Collector>,
     /// Monotone campaign-phase counters this incarnation, for the driver's
     /// audit report: campaigns this node declined to open because it is not
     /// a member of the configuration it would register, and leaderships it

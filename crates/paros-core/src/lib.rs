@@ -40,6 +40,7 @@
 //! never steps a matchmaker message.
 
 pub mod acceptor;
+mod collector;
 mod matchmaker;
 pub mod membership;
 mod message;
