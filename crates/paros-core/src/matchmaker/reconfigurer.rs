@@ -209,8 +209,43 @@ pub enum ReconfigurerStep {
     },
 }
 
+/// One batch of a handover's outbound requests, and the compile-time gate
+/// enforcing one batch in flight — the reconfigurer's [`crate::Ready`].
+///
+/// The guard holds the reconfigurer's unique borrow, so a second
+/// [`MatchmakerReconfigurer::ready`] before [`ReconfigurerReady::advance`]
+/// is a *compile* error, and a batch that is never advanced is a `#[must_use]`
+/// warning rather than a handover that silently stalls. Before this the
+/// queue was drained by a bare `mem::take`, which every other outbound
+/// bucket in the crate had already stopped doing.
+///
+/// # Order
+///
+/// 1. Send [`ReconfigurerReady::requests`]. There is no durability step:
+///    the reconfigurer holds no durable state of its own (a crash loses the
+///    proposal and the next attempt re-runs the idempotent steps).
+/// 2. Call [`ReconfigurerReady::advance`] to release the gate.
+#[must_use = "a ReconfigurerReady must be processed and then advanced; dropping it silently skips a batch"]
+pub struct ReconfigurerReady<'a> {
+    reconfigurer: &'a mut MatchmakerReconfigurer,
+}
+
+impl ReconfigurerReady<'_> {
+    /// The requests the running phase wants on the wire, in order.
+    #[must_use]
+    pub fn requests(&self) -> &[(MatchmakerId, ReconfigureRequest)] {
+        &self.reconfigurer.pending
+    }
+
+    /// Acknowledge the batch: clears the queue and releases the unique
+    /// borrow. Consumes `self` — the guard cannot be reused.
+    pub fn advance(self) {
+        self.reconfigurer.pending.clear();
+    }
+}
+
 /// The reconfigurer handle: one running handover at most, its outbound
-/// requests drained by the driver through [`Self::take_requests`].
+/// requests drained by the driver through [`Self::ready`].
 #[derive(Debug)]
 pub struct MatchmakerReconfigurer {
     node: NodeId,
@@ -261,9 +296,12 @@ impl MatchmakerReconfigurer {
         }
     }
 
-    /// Requests queued since the last drain, in order.
-    pub fn take_requests(&mut self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
-        std::mem::take(&mut self.pending)
+    /// Drain the queued requests. Holds the unique borrow until
+    /// [`ReconfigurerReady::advance`], so a second `ready()` before
+    /// `advance()` is a compile error — the same gate
+    /// [`crate::MatchmakerReady`] and [`crate::Ready`] put on their batches.
+    pub fn ready(&mut self) -> ReconfigurerReady<'_> {
+        ReconfigurerReady { reconfigurer: self }
     }
 
     /// Replace `current` (the set this node believes authoritative) by
@@ -939,7 +977,10 @@ mod tests {
         drop: &[u64],
     ) -> Vec<ReconfigurerStep> {
         let mut steps = Vec::new();
-        for (to, request) in r.take_requests() {
+        let ready = r.ready();
+        let requests = ready.requests().to_vec();
+        ready.advance();
+        for (to, request) in requests {
             if drop.contains(&to.0) {
                 continue;
             }

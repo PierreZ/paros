@@ -492,7 +492,9 @@ impl World {
     }
 
     fn queue_requests(&mut self, from: NodeId) {
-        let requests = self.node(from).reconfigurer.take_requests();
+        let ready = self.node(from).reconfigurer.ready();
+        let requests = ready.requests().to_vec();
+        ready.advance();
         for (to, request) in requests {
             self.send(Envelope::Reconfigure { to, request });
         }
@@ -1624,7 +1626,12 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                                     .start(&believed, vec![MatchmakerId(3)])
                                     .expect("start");
                             }
-                            world.node(reconfigurer_node).reconfigurer.take_requests();
+                            {
+                                let ready = world.node(reconfigurer_node).reconfigurer.ready();
+                                let requests = ready.requests().to_vec();
+                                ready.advance();
+                                requests
+                            };
                             let stop = ReconfigureRequest::Stop {
                                 from: reconfigurer_node,
                                 generation: MatchmakerGeneration(0),

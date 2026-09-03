@@ -71,9 +71,13 @@ impl HandoverDriver {
         self.reconfigurer.finish(current)
     }
 
-    /// The requests the running phase wants on the wire right now.
+    /// The requests the running phase wants on the wire right now, taken
+    /// through the core's borrow-guarded batch.
     pub(crate) fn take_requests(&mut self) -> Vec<(MatchmakerId, ReconfigureRequest)> {
-        self.reconfigurer.take_requests()
+        let ready = self.reconfigurer.ready();
+        let requests = ready.requests().to_vec();
+        ready.advance();
+        requests
     }
 
     /// Close a freeze whose quorum has answered, on this driver's cadence
