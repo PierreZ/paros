@@ -85,6 +85,7 @@
 //!    opening, every proposed member durably holds the bootstrap.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
@@ -146,6 +147,14 @@ struct Campaign {
     reconfiguration: bool,
     /// The matchmaker generation the campaign addressed.
     generation: u64,
+    /// The effective configuration when the campaign opened, from the
+    /// audit's own never-pruned ledger ([`MatchmakerAudit::effective_at`]):
+    /// the highest-ballot reconfiguration registration below this ballot
+    /// that a quorum of `generation`'s matchmakers already held durably.
+    /// Every reply this campaign can fold was sent after that, so quorum
+    /// intersection hands the record to it — an ordinary campaign that
+    /// completes must have registered exactly this configuration.
+    effective_at_start: Option<(Ballot, AcceptorConfig)>,
 }
 
 /// The fold and the flag set (independent sticky bits per gate).
@@ -156,6 +165,13 @@ pub(super) struct MatchmakerAudit {
     /// Every `(matchmaker, ballot) -> configuration` ever folded, **never**
     /// pruned: the write-once ledger a GC'd-then-reused ballot would trip.
     ever: BTreeMap<(u64, Ballot), Registration>,
+    /// The **reconfiguration** half of that ledger, indexed the way the
+    /// effective-configuration question asks it: per ballot, the
+    /// configuration a flagged registration named and every matchmaker that
+    /// ever held it durably. Never pruned — GC drops the record from a
+    /// matchmaker's disk, but the fact that a quorum once held it is what
+    /// makes the configuration effective forever after.
+    reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
     /// Per matchmaker generation, the configuration each **completed**
@@ -482,6 +498,47 @@ impl MatchmakerAudit {
             .is_some_and(|m| m.contains(&matchmaker))
     }
 
+    /// Fold one durable registration into the reconfiguration ledger: a
+    /// belief is not a fact and never enters it.
+    fn note_reconfiguration(
+        &mut self,
+        matchmaker: u64,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
+        if !registration.reconfiguration {
+            return;
+        }
+        self.reconfigurations
+            .entry(ballot)
+            .or_insert_with(|| (registration.config.clone(), BTreeSet::new()))
+            .1
+            .insert(matchmaker);
+    }
+
+    /// The **effective configuration** at `generation`, strictly below
+    /// `below`: the highest-ballot reconfiguration registration a quorum of
+    /// that generation's matchmakers durably holds, re-derived from the
+    /// audit's own never-pruned ledger rather than from any reply. Once a
+    /// quorum holds it, quorum intersection puts it into every later
+    /// campaign's histories — and it stays effective whether or not the
+    /// record is still on any disk. `None` when no flagged registration ever
+    /// reached a quorum of that generation.
+    fn effective_at(&self, generation: u64, below: Ballot) -> Option<(Ballot, AcceptorConfig)> {
+        let quorum = self.quorum(generation);
+        self.reconfigurations
+            .range(..below)
+            .rev()
+            .find(|(_, (_, holders))| {
+                holders
+                    .iter()
+                    .filter(|m| self.member_of(generation, **m))
+                    .count()
+                    >= quorum
+            })
+            .map(|(ballot, (config, _))| (*ballot, config.clone()))
+    }
+
     /// Invariant 1 of #125: record `members` as `generation`'s authoritative
     /// set, or check it against the one already known.
     fn bind_set(&mut self, generation: u64, members: &[u64], source: &'static str) {
@@ -547,6 +604,58 @@ impl MatchmakerAudit {
             .range((0, ballot)..=(u64::MAX, ballot))
             .find(|((_, b), _)| *b == ballot)
             .map(|(_, r)| &r.config)
+    }
+
+    /// **A completed campaign runs the effective configuration** — judged
+    /// against the audit's own never-pruned ledger rather than against the
+    /// replies the candidate happened to be handed.
+    ///
+    /// The lower bound is [`Self::effective_at`] as of the campaign's
+    /// opening: the highest-ballot reconfiguration registration a quorum of
+    /// this generation's matchmakers already held. Every reply the campaign
+    /// can fold was sent after that, so quorum intersection hands the record
+    /// to it, and an ordinary campaign that reaches Phase 1 must not be
+    /// running anything *older* — that is exactly an election reinstating a
+    /// superseded configuration.
+    ///
+    /// It may legitimately be running something **newer**: a reconfiguration
+    /// request short of a quorum is still a real request, and a candidate
+    /// whose folded quorum happens to include the one matchmaker holding it
+    /// adopts it. So the configuration is accepted when it *is* the
+    /// quorum-held one, or when some flagged registration above it and below
+    /// this ballot named it. Nothing else is: a belief is not a request.
+    ///
+    /// The reply-derived check in [`Self::completed`] asks the same question
+    /// of what the candidate was *told*; this one asks it of what is *true*,
+    /// so a record dropped from every disk (a GC floor raised over it) cannot
+    /// make the question unanswerable.
+    fn check_effective_configuration(&self, node: NodeId, ballot: Ballot) {
+        let Some(campaign) = self.campaigns.get(&(node.0, ballot)) else {
+            return;
+        };
+        if campaign.reconfiguration {
+            return;
+        }
+        let (Some((newest, effective)), Some(config)) = (
+            campaign.effective_at_start.as_ref(),
+            campaign.config.as_ref(),
+        ) else {
+            return;
+        };
+        let newer_request = self
+            .reconfigurations
+            .range((Bound::Excluded(*newest), Bound::Excluded(ballot)))
+            .any(|(_, (requested, _))| requested == config);
+        assert_always!(
+            config == effective || newer_request,
+            "matchmaking: a completed campaign runs the effective configuration",
+            {
+                "node" => node.0,
+                "round" => ballot.round,
+                "newest_round" => newest.round,
+                "members" => config.members().len()
+            }
+        );
     }
 
     /// A matchmaker booted from its durable registry.
@@ -712,6 +821,7 @@ impl MatchmakerAudit {
             }
         );
         entry.registered.insert(ballot, config.clone());
+        self.note_reconfiguration(matchmaker.0, ballot, config);
         reach_once!(
             self.registered_any,
             "matchmaker: a configuration is registered"
@@ -1055,8 +1165,10 @@ impl MatchmakerAudit {
         }
         // A campaign is opened once per ballot: the ballot is fresh.
         let floor_at_start = self.effective_floor;
+        let effective_at_start = self.effective_at(generation, ballot);
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         campaign.floor_at_start = floor_at_start;
+        campaign.effective_at_start = effective_at_start;
         assert_always!(
             campaign.config.is_none() && !campaign.completed,
             "matchmaking: a campaign opens once per ballot",
@@ -1195,6 +1307,7 @@ impl MatchmakerAudit {
                 "floor_round" => floor_at_start.round
             }
         );
+        self.check_effective_configuration(node, ballot);
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         // The closing fold happened on this ballot's last folded reply, so the
         // registering set is complete here; it must be a quorum.
@@ -2088,6 +2201,9 @@ impl MatchmakerAudit {
                 "matchmaker: a ballot is registered with one configuration, ever",
                 { "matchmaker" => matchmaker.0, "round" => ballot.round, "bnode" => ballot.node.0 }
             );
+        }
+        for (ballot, registration) in registry {
+            self.note_reconfiguration(matchmaker.0, *ballot, registration);
         }
         reach_once!(
             self.matchmaker_activated_flag,
