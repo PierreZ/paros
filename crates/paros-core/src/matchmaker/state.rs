@@ -45,6 +45,13 @@ pub struct PendingBootstrap {
     /// The reconstructed registry (the union over the frozen quorum, at or
     /// above `gc_watermark`).
     pub history: BTreeMap<Ballot, Registration>,
+    /// The reconstructed **effective configuration** (the maximum over the
+    /// frozen quorum, see [`MatchmakerHardState::effective`]). Carried
+    /// separately from `history` because it is a monotone scalar the GC
+    /// watermark never collects, while the record it was derived from may
+    /// already be below `gc_watermark` and therefore absent here.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub effective: Option<(Ballot, AcceptorConfig)>,
 }
 
 /// The small, persisted-whole durable scalars of a matchmaker — the
@@ -84,6 +91,28 @@ pub struct MatchmakerHardState {
     /// Bootstraps for proposed later generations this matchmaker is a member
     /// of, keyed by the proposed set, inactive until one is chosen.
     pub pending: Vec<PendingBootstrap>,
+    /// The **effective configuration** and the ballot its reconfiguration
+    /// registration was made under: the highest-ballot flagged registration
+    /// ([`Registration::reconfiguration`]) this matchmaker has ever
+    /// accepted. Monotone in the ballot, durable before the reply that
+    /// reports it, carried into every successor generation — and, unlike the
+    /// record it is derived from, **never collected**.
+    ///
+    /// It exists because the GC watermark and the effective configuration
+    /// answer different questions. The watermark says "no future Phase 1
+    /// needs a configuration registered below here"; the effective
+    /// configuration says "this is the acceptor set in force". A leader's
+    /// GC raises the floor to its own ballot, and an *ordinary* leader
+    /// registers only a belief, so the floor routinely rises above the last
+    /// reconfiguration record and [`Matchmaker::advance_gc_watermark`]
+    /// dropped it — after which no campaign's histories named a
+    /// reconfiguration at all, `Matchmaking::stale_belief` could never fire
+    /// again, and a node that rebooted to its bootstrap belief was elected
+    /// under a superseded configuration, rolling the whole cluster back.
+    /// Keeping the *record* would mean bounding GC by it; keeping this
+    /// scalar keeps GC unconditional and costs one configuration.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub effective: Option<(Ballot, AcceptorConfig)>,
 }
 
 /// A matchmaker's static configuration: its identity and the deployment's

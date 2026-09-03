@@ -138,6 +138,12 @@ pub enum MatchOutcome {
         history: BTreeMap<Ballot, Registration>,
         /// The watermark in force when the history was computed.
         gc_watermark: Ballot,
+        /// The **effective configuration** this matchmaker durably holds
+        /// (see [`super::MatchmakerHardState::effective`]), whether or not
+        /// its record is still in `history`: GC drops the record, never the
+        /// scalar, so this is what tells a candidate which acceptor set is
+        /// in force after a floor rose over the last reconfiguration.
+        effective: Option<(Ballot, AcceptorConfig)>,
     },
     /// The request was refused; nothing was registered.
     Refused(MatchRefusal),
@@ -286,6 +292,13 @@ pub enum ReconfigureReply {
         gc_watermark: Ballot,
         /// The durable registry at or above the watermark.
         history: BTreeMap<Ballot, Registration>,
+        /// The **effective configuration** this matchmaker durably holds
+        /// (see [`super::MatchmakerHardState::effective`]). The
+        /// reconstruction takes the maximum over its stop quorum, exactly as
+        /// it takes the maximum watermark, so a successor generation
+        /// inherits the acceptor set in force even when the record it came
+        /// from was collected long ago.
+        effective: Option<(Ballot, AcceptorConfig)>,
         /// The chosen successor, if learned.
         successor: Option<MatchmakerSet>,
         /// The highest decree ballot this matchmaker has promised for the

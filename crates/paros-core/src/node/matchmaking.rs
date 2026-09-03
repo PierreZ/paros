@@ -57,8 +57,17 @@
 //!   flagged records decide, which is what keeps two stale candidates from
 //!   re-adopting each other's beliefs forever.
 //!
-//! GC (#123) must therefore never retire the highest reconfiguration
-//! registration: it is the effective configuration's only durable record.
+//! GC (#123) collects the flagged *record* like any other: the floor is a
+//! leader's own ballot and rises over it as soon as an ordinary leader
+//! campaigns above it. What it must never forget is the **fact**, which is
+//! why every matchmaker also holds the effective configuration as a durable
+//! monotone scalar the watermark does not touch
+//! ([`crate::MatchmakerHardState::effective`]) and reports it beside every
+//! history. `Matchmaking::fold` takes the maximum of the two, so a campaign
+//! whose replies show an empty history still learns the configuration in
+//! force (review finding P1: without the scalar, an ordinary leader's GC
+//! erased it and a rebooted candidate was elected under the superseded
+//! configuration).
 //!
 //! # Where the promise sits
 //!
@@ -93,9 +102,10 @@
 //!   requests are monotone by ballot and never manufactured by a campaign.
 //!   Its abandoned registration stays in the registry and is honored by every
 //!   later leader's Phase 1 (nothing was ever accepted at it, but the registry
-//!   cannot know that); GC retires it later (#123) — and must never retire
-//!   the highest reconfiguration registration, the effective configuration's
-//!   only durable record.
+//!   cannot know that); GC retires it later (#123), the flagged one
+//!   included — the effective configuration outlives its record as the
+//!   durable scalar every `Registered` reply reports
+//!   ([`crate::MatchmakerHardState::effective`]).
 //! - **Lost replies** are the driver's business: [`super::RawNode::resend_matchmaking`]
 //!   re-queues the request for every matchmaker that has not answered, and
 //!   skipping the call is always safe — the matchmaker answers a repeated
@@ -200,13 +210,15 @@ impl Matchmaking {
         }
     }
 
-    /// Fold one `Registered` reply's history and watermark. Returns `false`
-    /// when `matchmaker` had already been folded (a duplicate answer).
+    /// Fold one `Registered` reply's history, watermark and reported
+    /// effective configuration. Returns `false` when `matchmaker` had
+    /// already been folded (a duplicate answer).
     pub(super) fn fold(
         &mut self,
         matchmaker: MatchmakerId,
         history: BTreeMap<Ballot, Registration>,
         watermark: Ballot,
+        reported: Option<(Ballot, AcceptorConfig)>,
     ) -> bool {
         if !self.registered_by.insert(matchmaker) {
             return false;
@@ -216,13 +228,8 @@ impl Matchmaking {
                 config,
                 reconfiguration,
             } = registration;
-            if reconfiguration
-                && self
-                    .effective
-                    .as_ref()
-                    .is_none_or(|(newest, _)| ballot > *newest)
-            {
-                self.effective = Some((ballot, config.clone()));
+            if reconfiguration {
+                self.raise_effective(ballot, &config);
             }
             let entry = self.history.entry(ballot).or_default();
             if !entry.contains(&config) {
@@ -232,10 +239,30 @@ impl Matchmaking {
                 entry.push(config);
             }
         }
+        // The effective configuration is the maximum of what the histories
+        // *show* and what the matchmakers *hold*: GC drops the record but
+        // never the scalar, so a floor raised over the last reconfiguration
+        // leaves the reported scalar as the only witness of the acceptor set
+        // in force (see `MatchmakerHardState::effective`).
+        if let Some((ballot, config)) = reported {
+            self.raise_effective(ballot, &config);
+        }
         // The watermark is the maximum reported, never the minimum and never
         // a per-reply filter (§3.2): the union is filtered once, at closure.
         self.watermark = self.watermark.max(watermark);
         true
+    }
+
+    /// Raise the effective configuration to `(ballot, config)` when it is
+    /// newer than the one held (monotone in the ballot).
+    fn raise_effective(&mut self, ballot: Ballot, config: &AcceptorConfig) {
+        if self
+            .effective
+            .as_ref()
+            .is_none_or(|(newest, _)| ballot > *newest)
+        {
+            self.effective = Some((ballot, config.clone()));
+        }
     }
 
     /// `H_b`: every distinct configuration reported at a ballot at or above
@@ -269,9 +296,16 @@ impl Matchmaking {
     }
 }
 
-/// What one matchmaker answered: the history and watermark of a
-/// registration, or the refusal.
-pub(super) type MatchAnswer = Result<(BTreeMap<Ballot, Registration>, Ballot), MatchRefusal>;
+/// What one matchmaker answered: the history, watermark and effective
+/// configuration of a registration, or the refusal.
+pub(super) type MatchAnswer = Result<
+    (
+        BTreeMap<Ballot, Registration>,
+        Ballot,
+        Option<(Ballot, AcceptorConfig)>,
+    ),
+    MatchRefusal,
+>;
 
 /// Decode one reply into the answer the campaign folds.
 pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, MatchAnswer) {
@@ -286,7 +320,8 @@ pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, M
         MatchOutcome::Registered {
             history,
             gc_watermark,
-        } => Ok((history, gc_watermark)),
+            effective,
+        } => Ok((history, gc_watermark, effective)),
         MatchOutcome::Refused(refusal) => Err(refusal),
     };
     (matchmaker, to, ballot, answer)
@@ -400,7 +435,9 @@ impl RawNode {
             return MatchStep::Ignored;
         }
         let step = match answer {
-            Ok((history, watermark)) => self.fold_registration(matchmaker, history, watermark),
+            Ok((history, watermark, effective)) => {
+                self.fold_registration(matchmaker, history, watermark, effective)
+            }
             Err(refusal) => self.fold_refusal(refusal),
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
@@ -445,12 +482,13 @@ impl RawNode {
         matchmaker: MatchmakerId,
         history: BTreeMap<Ballot, Registration>,
         watermark: Ballot,
+        effective: Option<(Ballot, AcceptorConfig)>,
     ) -> MatchStep {
         let matchmakers = &self.matchmakers;
         let Some(m) = self.matchmaking.as_mut() else {
             return MatchStep::Ignored;
         };
-        if !m.fold(matchmaker, history, watermark) {
+        if !m.fold(matchmaker, history, watermark, effective) {
             return MatchStep::Ignored;
         }
         let registered = m.registered_by.len();

@@ -883,9 +883,11 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
         MatchOutcome::Registered {
             history,
             gc_watermark,
+            effective,
         } => matchmaker::match_reply::Outcome::Registered(matchmaker::Registered {
             history: registrations_to_proto(history),
             gc_watermark: Some(ballot_to_proto(*gc_watermark)),
+            effective: effective_to_proto(effective.as_ref()),
         }),
         MatchOutcome::Refused(refusal) => {
             let reason = match refusal {
@@ -930,6 +932,7 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
         matchmaker::match_reply::Outcome::Registered(registered) => MatchOutcome::Registered {
             history: registrations_from_proto(registered.history)?,
             gc_watermark: ballot_from_proto(registered.gc_watermark)?,
+            effective: effective_from_proto(registered.effective)?,
         },
         matchmaker::match_reply::Outcome::Refused(refused) => {
             MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {
@@ -1006,11 +1009,37 @@ pub fn garbage_collect_ack_from_wire(ack: WireGarbageCollectAck) -> Result<GcAck
     })
 }
 
+/// Encode the effective configuration scalar (absent when nothing was ever
+/// registered as a reconfiguration).
+fn effective_to_proto(
+    effective: Option<&(Ballot, AcceptorConfig)>,
+) -> Option<matchmaker::EffectiveConfiguration> {
+    effective.map(|(ballot, config)| matchmaker::EffectiveConfiguration {
+        ballot: Some(ballot_to_proto(*ballot)),
+        config: Some(config_to_proto(config)),
+    })
+}
+
+/// Decode the effective configuration scalar.
+fn effective_from_proto(
+    effective: Option<matchmaker::EffectiveConfiguration>,
+) -> Result<Option<(Ballot, AcceptorConfig)>, &'static str> {
+    effective
+        .map(|e| {
+            Ok((
+                ballot_from_proto(e.ballot)?,
+                acceptor_config_from_proto(e.config)?,
+            ))
+        })
+        .transpose()
+}
+
 fn bootstrap_to_proto(bootstrap: &PendingBootstrap) -> matchmaker::Bootstrap {
     matchmaker::Bootstrap {
         set: Some(mm_set_to_proto(&bootstrap.set)),
         gc_watermark: Some(ballot_to_proto(bootstrap.gc_watermark)),
         history: registrations_to_proto(&bootstrap.history),
+        effective: effective_to_proto(bootstrap.effective.as_ref()),
     }
 }
 
@@ -1021,6 +1050,7 @@ fn bootstrap_from_proto(
         set: mm_set_from_proto(bootstrap.set)?,
         gc_watermark: ballot_from_proto(bootstrap.gc_watermark)?,
         history: registrations_from_proto(bootstrap.history)?,
+        effective: effective_from_proto(bootstrap.effective)?,
     })
 }
 
@@ -1139,6 +1169,7 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
             generation,
             gc_watermark,
             history,
+            effective,
             successor,
             decree_promised,
             ..
@@ -1148,6 +1179,7 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
             history: registrations_to_proto(history),
             successor: successor.as_ref().map(mm_set_to_proto),
             decree_promised: Some(ballot_to_proto(*decree_promised)),
+            effective: effective_to_proto(effective.as_ref()),
         }),
         ReconfigureReply::Bootstrapped { set, .. } => {
             Kind::Bootstrapped(matchmaker::BootstrapAck {
@@ -1223,6 +1255,7 @@ pub fn reconfigure_reply_from_wire(
             generation: MatchmakerGeneration(ack.generation),
             gc_watermark: ballot_from_proto(ack.gc_watermark)?,
             history: registrations_from_proto(ack.history)?,
+            effective: effective_from_proto(ack.effective)?,
             successor: ack.successor.map(mm_set_value).transpose()?,
             decree_promised: ballot_from_proto(ack.decree_promised)?,
         },

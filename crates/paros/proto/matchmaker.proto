@@ -47,11 +47,20 @@ message Registration {
   bool reconfiguration = 3;
 }
 
+// The effective configuration: the highest-ballot reconfiguration
+// registration a matchmaker holds. A monotone scalar the GC watermark never
+// collects, so it survives a floor raised over the record it came from.
+message EffectiveConfiguration {
+  .paros.common.v1.Ballot ballot = 1;
+  .paros.common.v1.AcceptorConfig config = 2;
+}
+
 // The successful answer: every registration strictly below the request's
 // ballot and at or above the watermark, plus the watermark itself.
 message Registered {
   repeated Registration history = 1;
   .paros.common.v1.Ballot gc_watermark = 2;
+  optional EffectiveConfiguration effective = 3;
 }
 
 // A refusal, carrying what the requester needs to make progress. Diagnostics
@@ -112,6 +121,10 @@ message Bootstrap {
   MatchmakerSet set = 1;
   .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
+  // The reconstructed effective configuration (the maximum over the stop
+  // quorum), carried beside the registry the GC watermark may have collected
+  // it from.
+  optional EffectiveConfiguration effective = 4;
 }
 
 message DecreePrepare {
@@ -151,6 +164,8 @@ message StopAck {
   // quorum, so a rebooted node never reuses a ballot of its earlier
   // incarnation.
   .paros.common.v1.Ballot decree_promised = 5;
+  // The effective configuration this matchmaker durably holds.
+  optional EffectiveConfiguration effective = 6;
 }
 
 message BootstrapAck {

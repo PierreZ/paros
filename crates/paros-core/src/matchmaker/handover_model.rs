@@ -233,6 +233,9 @@ struct Reach {
     /// A matchmaker dropped a pending bootstrap the chosen successor
     /// settled, without activating anything (review finding P6).
     pruned_losing_bootstrap: u64,
+    /// A generation was activated carrying an effective configuration
+    /// inherited from the one it replaced (review finding P1).
+    inherited_effective: u64,
 }
 
 impl Reach {
@@ -250,6 +253,7 @@ impl Reach {
             ("republished", self.republished),
             ("killed_deciding", self.killed_deciding),
             ("pruned_losing_bootstrap", self.pruned_losing_bootstrap),
+            ("inherited_effective", self.inherited_effective),
         ];
         for (name, count) in counters {
             assert!(
@@ -272,6 +276,10 @@ struct Ledger {
     votes: BTreeMap<MatchmakerGeneration, BTreeSet<(MatchmakerId, Ballot, Vec<MatchmakerId>)>>,
     /// Per generation: how many matchmakers activated its chosen successor.
     activations: BTreeMap<MatchmakerGeneration, BTreeSet<MatchmakerId>>,
+    /// Per generation: every effective configuration durably held as that
+    /// generation's, and by whom (the scalar the GC watermark never
+    /// collects).
+    effectives: BTreeMap<MatchmakerGeneration, BTreeMap<Ballot, BTreeSet<MatchmakerId>>>,
 }
 
 impl Ledger {
@@ -325,6 +333,41 @@ impl Ledger {
             successor.members,
             by_ballot
         );
+    }
+
+    /// Invariant: **the effective configuration crosses a generation
+    /// boundary**. Every ballot a majority of `M_generation` durably holds
+    /// as its effective configuration is at or below the one the successor
+    /// activated: a handover's stop quorum intersects that majority, and
+    /// the reconstruction takes the maximum. Without it a handover would
+    /// forget the acceptor set in force exactly as an unbounded GC did
+    /// (review finding P1) — the record is not in the reconstructed
+    /// registry when the floor already rose over it.
+    fn assert_effective_preserved(
+        &self,
+        generation: MatchmakerGeneration,
+        activated: Option<&(Ballot, AcceptorConfig)>,
+    ) {
+        let old = self
+            .members_of(generation)
+            .expect("a succeeded generation was authoritative");
+        let Some(held) = self.effectives.get(&generation) else {
+            return;
+        };
+        for (ballot, holders) in held {
+            let held_by_members = holders.iter().filter(|m| old.contains(**m)).count();
+            if held_by_members < old.quorum_size() {
+                continue;
+            }
+            assert!(
+                activated.is_some_and(|(activated, _)| *activated >= *ballot),
+                "an activated generation inherits the effective configuration: generation {} held {:?} by {:?}, activated {:?}",
+                generation.0,
+                ballot,
+                holders,
+                activated.map(|(b, _)| *b)
+            );
+        }
     }
 
     /// Invariant 3: the registry activated for `generation.next()` with
@@ -503,6 +546,11 @@ impl World {
                         registrations,
                     );
                     self.ledger
+                        .assert_effective_preserved(succeeded, scalars.effective.as_ref());
+                    if scalars.effective.is_some() {
+                        self.reach.inherited_effective += 1;
+                    }
+                    self.ledger
                         .activations
                         .entry(succeeded)
                         .or_default()
@@ -522,6 +570,16 @@ impl World {
         let set = site.disk_set();
         let phase = site.disk_phase();
         let successor = site.disk.hard_state.successor.clone();
+        let effective = site.disk.hard_state.effective.clone();
+        if let Some((ballot, _)) = effective {
+            self.ledger
+                .effectives
+                .entry(set.generation)
+                .or_default()
+                .entry(ballot)
+                .or_default()
+                .insert(id);
+        }
         if phase == MatchmakerPhase::Active || phase == MatchmakerPhase::Stopped {
             self.ledger.observe_authoritative(&set, "disk");
         }
@@ -783,7 +841,14 @@ impl World {
         let offset = self.rng.below(2);
         let members: Vec<NodeId> = (0..3).map(|i| NodeId(i + offset)).collect();
         let config = AcceptorConfig::new(members, QuorumSystem::Majority);
-        let request = MatchRequest::new(node, ballot, config, believed.generation);
+        // Some registrations are an operator's *reconfiguration*, which is
+        // what raises the matchmakers' effective-configuration scalar — the
+        // fact a handover must carry across the generation boundary.
+        let request = if self.rng.chance(1, 3) {
+            MatchRequest::reconfigure(node, ballot, config, believed.generation)
+        } else {
+            MatchRequest::new(node, ballot, config, believed.generation)
+        };
         for m in believed.members {
             self.send(Envelope::Register {
                 to: m,
@@ -1181,6 +1246,7 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.republished += reach.republished;
         total.killed_deciding += reach.killed_deciding;
         total.pruned_losing_bootstrap += reach.pruned_losing_bootstrap;
+        total.inherited_effective += reach.inherited_effective;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();

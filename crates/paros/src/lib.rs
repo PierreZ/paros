@@ -360,6 +360,7 @@ mod tests {
                         ),
                     ]),
                     gc_watermark: ballot(2, 1),
+                    effective: Some((ballot(5, 3), config(&[1, 2, 3, 4]))),
                 },
             ),
             reply(
@@ -368,6 +369,7 @@ mod tests {
                 MatchOutcome::Registered {
                     history: BTreeMap::new(),
                     gc_watermark: Ballot::zero(),
+                    effective: None,
                 },
             ),
             reply(
@@ -451,6 +453,7 @@ mod tests {
             set: set(1, &[0, 1, 3]),
             gc_watermark: ballot(2, 1),
             history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
+            effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
         };
         for request in [
             ReconfigureRequest::Stop {
@@ -493,6 +496,7 @@ mod tests {
                 generation: g(0),
                 gc_watermark: ballot(2, 1),
                 history: bootstrap.history.clone(),
+                effective: bootstrap.effective.clone(),
                 successor: Some(set(1, &[0, 1, 3])),
                 decree_promised: ballot(3, 2),
             },

@@ -238,6 +238,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
         MatchOutcome::Registered {
             history,
             gc_watermark,
+            ..
         } => {
             let history: Vec<(Ballot, Registration)> = history
                 .iter()

@@ -53,6 +53,7 @@ use super::{
     MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
     Registration,
 };
+use crate::membership::AcceptorConfig;
 use crate::single_decree::{DecreePhase, DecreeProposer};
 use crate::types::{Ballot, NodeId};
 
@@ -93,6 +94,10 @@ pub enum ReconfigurerPhase {
         /// the decree opens strictly above it (see `decree_floor` on
         /// [`ReconfigureReply::Stopped`]).
         decree_floor: Ballot,
+        /// The highest **effective configuration** any frozen member
+        /// reported: the reconstruction carries the maximum, exactly as it
+        /// carries the maximum watermark.
+        effective: Option<(Ballot, AcceptorConfig)>,
     },
     /// Handing the reconstruction to the proposed successor's members.
     Bootstrapping {
@@ -287,6 +292,7 @@ impl MatchmakerReconfigurer {
             target: Some(target),
             acks: BTreeMap::new(),
             decree_floor: Ballot::zero(),
+            effective: None,
         };
         self.elapsed = 0;
         self.resend();
@@ -319,6 +325,7 @@ impl MatchmakerReconfigurer {
             target: None,
             acks: BTreeMap::new(),
             decree_floor: Ballot::zero(),
+            effective: None,
         };
         self.elapsed = 0;
         self.resend();
@@ -509,11 +516,13 @@ impl MatchmakerReconfigurer {
                 target,
                 acks,
                 decree_floor,
+                effective,
             } => {
                 let ReconfigureReply::Stopped {
                     generation,
                     gc_watermark,
                     history,
+                    effective: reported,
                     successor,
                     decree_promised,
                     ..
@@ -530,6 +539,15 @@ impl MatchmakerReconfigurer {
                 }
                 acks.insert(from, (gc_watermark, history));
                 *decree_floor = (*decree_floor).max(decree_promised);
+                // The effective configuration is a monotone scalar, not a
+                // record: the maximum over the frozen members carries the
+                // acceptor set in force into the successor generation even
+                // when its own registration was collected long ago.
+                if let Some((ballot, config)) = reported
+                    && effective.as_ref().is_none_or(|(held, _)| ballot > *held)
+                {
+                    *effective = Some((ballot, config));
+                }
                 let frozen: BTreeSet<MatchmakerId> = acks.keys().copied().collect();
                 if !old.has_quorum(&frozen) {
                     return ReconfigurerStep::Stopped {
@@ -559,6 +577,7 @@ impl MatchmakerReconfigurer {
                     set: MatchmakerSet::new(old.generation.next(), target),
                     gc_watermark,
                     history,
+                    effective: effective.clone(),
                 };
                 assert!(
                     bootstrap

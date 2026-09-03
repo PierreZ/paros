@@ -89,6 +89,7 @@ impl Matchmaker {
                 generation,
                 gc_watermark: self.hard_state.gc_watermark,
                 history: self.history_from_watermark(),
+                effective: self.hard_state.effective.clone(),
                 successor: self.hard_state.successor.clone(),
                 decree_promised: self.hard_state.decree.promised,
             }
@@ -351,6 +352,26 @@ impl Matchmaker {
         // history at or above the higher floor, and nothing else.
         let local = self.hard_state.gc_watermark;
         let watermark = bootstrap.gc_watermark.max(local);
+        // The effective configuration crosses the generation the same way,
+        // and by the same argument: it is monotone in its ballot, and both
+        // candidates are durable facts (this matchmaker accepted one; the
+        // reconstruction's is the maximum over a frozen quorum). Taking the
+        // maximum is what keeps the acceptor set in force across a handover
+        // even when the record it came from was collected generations ago.
+        let effective = match (
+            self.hard_state.effective.take(),
+            bootstrap.effective.clone(),
+        ) {
+            (Some((mine, config)), Some((theirs, other))) => {
+                if theirs > mine {
+                    Some((theirs, other))
+                } else {
+                    Some((mine, config))
+                }
+            }
+            (held, None) => held,
+            (None, reconstructed) => reconstructed,
+        };
         let registry: BTreeMap<Ballot, Registration> = bootstrap
             .history
             .into_iter()
@@ -370,6 +391,7 @@ impl Matchmaker {
         self.hard_state.successor = None;
         self.hard_state.decree = DecreeAcceptor::default();
         self.hard_state.gc_watermark = watermark;
+        self.hard_state.effective = effective;
         self.hard_state
             .pending
             .retain(|p| p.set.generation > successor.generation);
@@ -402,7 +424,7 @@ impl Matchmaker {
     }
 
     /// Stage a whole-scalars write.
-    fn stage_scalars(&mut self) {
+    pub(super) fn stage_scalars(&mut self) {
         self.pending_writes
             .push(MatchmakerWriteOp::SetScalars(self.hard_state.clone()));
     }

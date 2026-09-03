@@ -52,6 +52,18 @@ fn registered_with(
     history: BTreeMap<Ballot, Registration>,
     wm: Ballot,
 ) -> MatchReply {
+    registered_effective(mm, ballot, history, wm, None)
+}
+
+/// A registered reply that also reports the matchmaker's durable effective
+/// configuration — what survives a GC floor raised over its record.
+fn registered_effective(
+    mm: u64,
+    ballot: Ballot,
+    history: BTreeMap<Ballot, Registration>,
+    wm: Ballot,
+    effective: Option<(Ballot, AcceptorConfig)>,
+) -> MatchReply {
     MatchReply {
         matchmaker: MatchmakerId(mm),
         to: ballot.node,
@@ -60,6 +72,7 @@ fn registered_with(
         outcome: MatchOutcome::Registered {
             history,
             gc_watermark: wm,
+            effective,
         },
     }
 }
@@ -694,4 +707,100 @@ fn a_reconfiguration_campaign_is_never_stale() {
     let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
     assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
     assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// The GC hole (review finding P1): a leader's garbage collection raises the
+/// watermark above the last reconfiguration's record, so every history is
+/// empty and no reply can *show* the effective configuration. The durable
+/// scalar reports it anyway, and a candidate that rebooted to its bootstrap
+/// belief still abandons and adopts it — without the scalar it would have
+/// completed and been elected under the superseded configuration.
+#[test]
+fn a_stale_candidate_adopts_the_effective_configuration_after_gc() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // The floor sits above the reconfiguration's ballot: its record is gone
+    // and the history is empty, exactly as `advance_gc_watermark` leaves it.
+    let floor = ballot(9, 0);
+    let step = n.on_match_reply(registered_effective(
+        0,
+        b,
+        BTreeMap::new(),
+        floor,
+        Some((ballot(4, 1), cfg(&[2, 3, 4]))),
+    ));
+    assert_eq!(
+        step,
+        MatchStep::StaleConfiguration {
+            newest: ballot(4, 1)
+        },
+        "the reported scalar is the only witness left of the configuration in force"
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, r)| r.config == cfg(&[2, 3, 4]) && !r.reconfiguration)
+    );
+}
+
+/// The reported scalar and the histories are folded together, maximum wins:
+/// a matchmaker whose floor collected the newest record still reports it,
+/// and a matchmaker still holding an older record does not outrank it.
+#[test]
+fn the_effective_configuration_is_the_maximum_of_the_shown_and_the_reported() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 3);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // Matchmaker 0 still holds the older change; matchmaker 1 collected
+    // both records but reports the newer one as its durable scalar.
+    let older = BTreeMap::from([reconfigured(ballot(2, 1), &[1, 2, 3])]);
+    assert_eq!(
+        n.on_match_reply(registered_effective(
+            0,
+            b,
+            older,
+            Ballot::zero(),
+            Some((ballot(2, 1), cfg(&[1, 2, 3]))),
+        )),
+        MatchStep::Registered { remaining: 1 }
+    );
+    assert_eq!(
+        n.on_match_reply(registered_effective(
+            1,
+            b,
+            BTreeMap::new(),
+            ballot(8, 0),
+            Some((ballot(5, 2), cfg(&[2, 3, 4]))),
+        )),
+        MatchStep::StaleConfiguration {
+            newest: ballot(5, 2)
+        }
+    );
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+}
+
+/// Beliefs are not facts: a candidate never reports an effective
+/// configuration for an ordinary registration, so a matchmaker whose
+/// registry only ever saw beliefs answers `None` and nothing moves.
+#[test]
+fn an_ordinary_registration_never_raises_the_effective_configuration() {
+    let mut mms = registries(1);
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    campaign(&mut n);
+    let requests = drain_match_requests(&mut n);
+    for reply in matchmake(&mut mms, requests) {
+        match reply.outcome {
+            MatchOutcome::Registered { effective, .. } => assert_eq!(effective, None),
+            MatchOutcome::Refused(r) => panic!("expected a registration, got {r:?}"),
+        }
+    }
+    assert_eq!(mms[0].hard_state().effective, None);
 }

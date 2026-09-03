@@ -75,11 +75,26 @@
 //! runs ahead of the acks: nothing here reports a retirable node before the
 //! quorum holds, and a leader deposed in between simply never reports.
 //!
-//! GC never retires the highest reconfiguration registration: the watermark
-//! is the leader's own ballot, registered above every configuration in
-//! `H_b`, and the leader's own registration (a reconfiguration or the
-//! effective configuration's restatement) is what every later campaign
-//! finds at or above the floor.
+//! # GC never forgets the configuration in force
+//!
+//! The floor is the leader's own ballot, so it routinely rises **over** the
+//! last reconfiguration's record: an ordinary leader registers a *belief*
+//! (`Registration::reconfiguration == false`), and the flagged record that
+//! says which acceptor set is in force may be many rounds below. Collecting
+//! it would leave every later campaign's histories naming no reconfiguration
+//! at all, so `Matchmaking::stale_belief` could never fire again and a node
+//! that rebooted to its bootstrap belief would be elected under the
+//! superseded configuration (review finding P1).
+//!
+//! What survives is therefore not the *record* but a **durable monotone
+//! scalar** the watermark never touches:
+//! [`MatchmakerHardState::effective`](crate::MatchmakerHardState::effective).
+//! Each matchmaker raises it when it registers a flagged request, reports it
+//! in every `Registered` reply beside the history, and carries it into every
+//! successor generation; the candidate folds the maximum of what the
+//! histories *show* and what the matchmakers *hold*. GC stays unconditional
+//! — it never has to be bounded by a registration it must keep — and the
+//! cost is one configuration per matchmaker.
 
 use super::{Ballot, NodeId, NodeRole, RawNode, Slot};
 use crate::collector::{Collector, GcStep};

@@ -353,6 +353,7 @@ impl Matchmaker {
                 Some(registered) if *registered == registration => MatchOutcome::Registered {
                     history: self.history_below(ballot),
                     gc_watermark: self.hard_state.gc_watermark,
+                    effective: self.hard_state.effective.clone(),
                 },
                 _ => MatchOutcome::Refused(MatchRefusal::Stale { highest }),
             }
@@ -369,6 +370,21 @@ impl Matchmaker {
                 self.highest() == Some(ballot),
                 "a fresh registration becomes the registry's highest ballot"
             );
+            // A *reconfiguration* registration also raises the effective
+            // configuration — the monotone scalar GC never collects (see
+            // `MatchmakerHardState::effective`). Staged in the same batch as
+            // the record, so the reply that reports it never escapes a
+            // non-durable scalar.
+            if registration.reconfiguration
+                && self
+                    .hard_state
+                    .effective
+                    .as_ref()
+                    .is_none_or(|(held, _)| ballot > *held)
+            {
+                self.hard_state.effective = Some((ballot, registration.config.clone()));
+                self.stage_scalars();
+            }
             self.pending_writes.push(MatchmakerWriteOp::Register {
                 ballot,
                 registration,
@@ -376,6 +392,7 @@ impl Matchmaker {
             MatchOutcome::Registered {
                 history,
                 gc_watermark: self.hard_state.gc_watermark,
+                effective: self.hard_state.effective.clone(),
             }
         };
         if let MatchOutcome::Registered { history, .. } = &outcome {
@@ -452,6 +469,13 @@ impl Matchmaker {
     /// durable write. A request at or below the current floor is a no-op
     /// (monotone by construction, never an error); one addressing a
     /// generation this matchmaker is not active for is refused.
+    ///
+    /// The **effective configuration** scalar
+    /// ([`MatchmakerHardState::effective`]) is deliberately untouched: the
+    /// floor collects the per-ballot *records* a future Phase 1 may need,
+    /// and "which acceptor set is in force" is not one of those obligations.
+    /// Collecting it too is what let an ordinary leader's GC erase the last
+    /// reconfiguration and re-elect a superseded configuration.
     ///
     /// # This is a correctness-critical primitive, not the GC protocol
     ///
@@ -582,6 +606,17 @@ impl Matchmaker {
                 .all(|p| p.set.generation > current && p.set.contains(self.config.id)),
             "a pending bootstrap is for a later generation this matchmaker is a member of"
         );
+        // The effective configuration is a *scalar*, not a record: it may
+        // legitimately sit below the watermark (its record was collected),
+        // but it never disagrees with a record the registry still holds.
+        if let Some((ballot, config)) = &self.hard_state.effective {
+            assert!(
+                self.registry
+                    .get(ballot)
+                    .is_none_or(|r| r.reconfiguration && r.config == *config),
+                "the effective configuration agrees with its own retained record"
+            );
+        }
     }
 }
 
@@ -634,6 +669,7 @@ mod tests {
                 set: successor.clone(),
                 gc_watermark: ballot(2, 1),
                 history,
+                effective: None,
             },
         });
         mm.ready().advance();
@@ -760,6 +796,7 @@ mod tests {
             MatchOutcome::Registered {
                 history,
                 gc_watermark,
+                ..
             } => (history, *gc_watermark),
             MatchOutcome::Refused(r) => panic!("expected a registration, got {r:?}"),
         }
@@ -844,6 +881,7 @@ mod tests {
                 set: losing.clone(),
                 gc_watermark: Ballot::zero(),
                 history: history.clone(),
+                effective: None,
             },
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
@@ -888,6 +926,7 @@ mod tests {
                 set: set(1, &[0, 1, 3]),
                 gc_watermark: Ballot::zero(),
                 history,
+                effective: None,
             },
         });
         let (writes, replies) = drain_reconfigure(&mut member);
@@ -1272,6 +1311,7 @@ mod tests {
             set: successor.clone(),
             gc_watermark: ballot(1, 1),
             history,
+            effective: None,
         };
         // A bootstrap for a set this matchmaker is not in is refused.
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
