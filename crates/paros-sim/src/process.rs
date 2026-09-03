@@ -328,7 +328,7 @@ async fn run_acceptor(
         let wipe = perturb
             && config.has_matchmakers()
             && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
-            && moonpool_sim::buggify_with_prob!(0.35);
+            && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
         if wipe
             && world
                 .lock()
@@ -502,7 +502,7 @@ async fn run_matchmaker_role(
     let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
     if incarnation.is_restart()
         && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
-        && moonpool_sim::buggify_with_prob!(0.35)
+        && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

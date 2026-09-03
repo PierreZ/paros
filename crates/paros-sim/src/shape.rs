@@ -47,6 +47,16 @@ const SHAPE_KEY: &str = "paros-node-shapes";
 /// for why it is a floor and not a tunable.
 const ROUND_TRIP_FLOOR_MS: u64 = 250;
 
+/// The default per-restart chance of a terminal storage loss — a wiped node
+/// disk (#124) or an unusable matchmaker registry (#125).
+const DEFAULT_LOSS_PCT: u32 = 35;
+/// The floor of both loss knobs: rare enough that a seed still has restarts
+/// that come back.
+const MIN_LOSS_PCT: u32 = 5;
+/// The ceiling of both loss knobs: the dead-node and matchmaker-loss budgets
+/// bound the damage, so the extreme stays a valid deployment.
+const MAX_LOSS_PCT: u32 = 75;
+
 /// Everything the swarm fixes about one logical node for one seed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NodeShape {
@@ -59,6 +69,18 @@ pub(crate) struct NodeShape {
     pub(crate) seam_crash_bias: f64,
     /// The node's disk: its write-path fault rates.
     pub(crate) write_rates: WritePathRates,
+    /// Percent chance that a chaotic restart of this node comes back on an
+    /// empty disk (#124, `crate::process`). Floor 5: the coin must stay rare
+    /// enough that a run is a run and not an all-amnesia cluster (a node that
+    /// wipes on its first restart never contributes a second incarnation to
+    /// anything). Ceiling 75: the world's dead-node budget bounds the damage
+    /// whatever the rate, so the extreme is a valid, very forgetful disk.
+    pub(crate) wipe_pct: u32,
+    /// Percent chance that a chaotic restart of this *matchmaker* finds its
+    /// registry unusable (#125). Same floor and ceiling, and the same
+    /// argument: the matchmaker-loss budget (one per run, and only where the
+    /// bootstrap set can spare it) bounds it.
+    pub(crate) matchmaker_loss_pct: u32,
 }
 
 impl NodeShape {
@@ -68,6 +90,8 @@ impl NodeShape {
             tunables: DriverTunables::default(),
             seam_crash_bias: 1.0,
             write_rates: WritePathRates::default(),
+            wipe_pct: DEFAULT_LOSS_PCT,
+            matchmaker_loss_pct: DEFAULT_LOSS_PCT,
         }
     }
 
@@ -154,6 +178,8 @@ impl NodeShape {
             tunables,
             seam_crash_bias,
             write_rates: WritePathRates::draw(),
+            wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
+            matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
         }
     }
 }
