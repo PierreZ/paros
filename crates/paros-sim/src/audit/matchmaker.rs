@@ -117,6 +117,10 @@ type ReplyCopy = (Vec<(Ballot, Registration)>, Ballot);
 /// A frozen registry as a `Stopped` reply carried it: `(watermark, history)`.
 type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
 
+/// One reconstruction a handover bootstrapped: its watermark and the registry
+/// above it.
+type Reconstruction = (Ballot, BTreeMap<Ballot, Registration>);
+
 #[derive(Default)]
 struct Campaign {
     /// `C_b`, the configuration the campaign registers.
@@ -185,6 +189,7 @@ pub(super) struct MatchmakerAudit {
     reconfigurer_aborted: bool,
     reconfigurer_backed_off: bool,
     decree_checked: bool,
+    activation_checked: bool,
     /// Per proposed `(generation, members)`: the matchmakers that durably
     /// hold its bootstrap.
     bootstrapped: BTreeMap<(u64, Vec<u64>), BTreeSet<u64>>,
@@ -198,6 +203,12 @@ pub(super) struct MatchmakerAudit {
     /// `Accepted` — the Phase-2 votes, counted from the replies themselves
     /// rather than from any reconfigurer's own tally.
     decree_voters: BTreeMap<(u64, Ballot), BTreeSet<u64>>,
+    /// Per proposed `(generation, members)`: the reconstructions bootstrapped
+    /// for it, as `(watermark, history)`. More than one reconfigurer may
+    /// bootstrap the same members from a different stop quorum, so the claim
+    /// an activation is judged against is existential — the registry it
+    /// activates must be one of these, not merely a subset of one.
+    bootstrap_histories: BTreeMap<(u64, Vec<u64>), Vec<Reconstruction>>,
     /// The highest GC floor proven effective at a matchmaker quorum.
     effective_floor: Ballot,
     /// Nodes an effective floor named retirable.
@@ -1769,6 +1780,21 @@ impl MatchmakerAudit {
                     "generation: a reconstruction carries every completed registration above its watermark",
                     { "node" => node.0, "generation" => old, "missing_round" => missing.unwrap_or(0) }
                 );
+                // The reconstruction this generation is being chosen with,
+                // kept for the activation to be judged against: `activated()`
+                // overwrites the audit's folded registry with whatever the
+                // matchmaker reported, so a truncated activated copy would
+                // otherwise be invisible and every later check would compare
+                // against the corrupted state.
+                let proposed: Vec<u64> = bootstrap.set.members.iter().map(|m| m.0).collect();
+                let candidates = self
+                    .bootstrap_histories
+                    .entry((bootstrap.set.generation.0, proposed))
+                    .or_default();
+                let candidate = (bootstrap.gc_watermark, bootstrap.history.clone());
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
                 if !bootstrap.history.is_empty() {
                     reach_once!(
                         self.handover_with_prior_registrations,
@@ -2008,6 +2034,44 @@ impl MatchmakerAudit {
             "generation: activation moves to a strictly later generation",
             { "matchmaker" => matchmaker.0, "generation" => set.generation.0 }
         );
+        // Invariant 6, at the activation rather than only at the proposal:
+        // what this matchmaker activated is the reconstruction its generation
+        // was chosen with, whole — checked *before* the fold below adopts the
+        // reported registry as the audit's own.
+        if let Some(candidates) = self
+            .bootstrap_histories
+            .get(&(set.generation.0, members.clone()))
+        {
+            let reported: BTreeMap<Ballot, Registration> = registry.iter().cloned().collect();
+            // The registry may legitimately have been *pruned* since the
+            // bootstrap was recorded — a GC raise at the new generation moves
+            // the floor and drops everything below it — so what must hold is
+            // that the activation carries the whole reconstruction above the
+            // watermark it now holds, and nothing else.
+            let matches = candidates.iter().any(|(watermark, history)| {
+                *watermark <= gc_watermark
+                    && history
+                        .iter()
+                        .filter(|(ballot, _)| **ballot >= gc_watermark)
+                        .map(|(ballot, registration)| (*ballot, registration.clone()))
+                        .collect::<BTreeMap<Ballot, Registration>>()
+                        == reported
+            });
+            assert_always!(
+                matches,
+                "generation: an activated registry is the reconstruction its generation was chosen with",
+                {
+                    "matchmaker" => matchmaker.0,
+                    "generation" => set.generation.0,
+                    "reported" => reported.len(),
+                    "candidates" => candidates.len()
+                }
+            );
+            reach_once!(
+                self.activation_checked,
+                "generation: an activated registry is checked against its reconstruction"
+            );
+        }
         entry.registered = registry.iter().cloned().collect();
         entry.watermark = gc_watermark;
         entry.generation = Some((set.generation.0, MatchmakerPhase::Active));
