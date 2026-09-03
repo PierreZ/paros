@@ -28,6 +28,37 @@ use std::collections::BTreeSet;
 
 use crate::types::Ballot;
 
+/// The P2c value-selection fold, shared by every Phase-1 tally in the crate:
+/// [`DecreeProposer::on_promise`] over one decree, and the log proposer's
+/// per-slot merge over a promise page. Keep the highest-ballot report, ignore
+/// a lower one, and **assert** that two reports at one ballot agree — one
+/// ballot has exactly one proposer (P2b), so a disagreement is a protocol
+/// violation, not a tie to break. Silently keeping the first of two would let
+/// two proposers with different arrival orders select different values at one
+/// ballot, which is the one thing the rule exists to prevent.
+///
+/// The caller supplies its own assertion message: the two tallies name
+/// different coordinates (a slot's command, a decree's value) and both
+/// messages are load-bearing.
+///
+/// # Panics
+///
+/// If two reports at one ballot disagree.
+pub(crate) fn select_highest<V: PartialEq>(
+    best: &mut Option<(Ballot, V)>,
+    report: (Ballot, V),
+    disagreement: &'static str,
+) {
+    let (ballot, value) = report;
+    match best {
+        Some((held, _)) if ballot < *held => {}
+        Some((held, recorded)) if ballot == *held => {
+            assert!(*recorded == value, "{disagreement}");
+        }
+        _ => *best = Some((ballot, value)),
+    }
+}
+
 /// The acceptor half: the durable promise and the durable vote of one
 /// acceptor for one decree. Both scalars are persisted whole by the caller
 /// **before** the reply that reports them leaves (persist-before-reply, the
@@ -224,6 +255,12 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
     /// promise completes the quorum (P2c: the highest-ballot vote reported,
     /// else the own proposal); `None` otherwise, including duplicates and
     /// promises arriving outside Phase 1.
+    ///
+    /// # Panics
+    ///
+    /// If two acceptors report different values at one ballot
+    /// ([`select_highest`]): one ballot has one proposer, so that is a
+    /// protocol violation, never an operating condition.
     pub fn on_promise(&mut self, from: A, vote: Option<(Ballot, V)>) -> Option<V> {
         if self.phase != DecreePhase::Phase1
             || !self.acceptors.contains(&from)
@@ -231,10 +268,12 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
         {
             return None;
         }
-        if let Some((b, v)) = vote
-            && self.best.as_ref().is_none_or(|(best, _)| b > *best)
-        {
-            self.best = Some((b, v));
+        if let Some(report) = vote {
+            select_highest(
+                &mut self.best,
+                report,
+                "two Phase-1 votes at one decree ballot agree on the value",
+            );
         }
         if self.promised_by.len() < self.quorum {
             return None;
@@ -341,6 +380,19 @@ mod tests {
         assert_eq!(p.phase(), &DecreePhase::Preempted(ballot(5, 1)));
         assert_eq!(p.on_promise(0, None), None, "a preempted proposal is dead");
         assert_eq!(p.unanswered().count(), 0);
+    }
+
+    /// Review finding P8: the proposer half of "one ballot, one value". The
+    /// acceptor's twin is `two_values_at_one_ballot_are_a_programmer_error`;
+    /// this is the half where a silent pick would be consequential — two
+    /// proposers with different arrival orders would select different values
+    /// and two successor sets could be chosen for one generation.
+    #[test]
+    #[should_panic(expected = "two Phase-1 votes at one decree ballot agree on the value")]
+    fn two_votes_at_one_ballot_are_a_programmer_error() {
+        let mut p: DecreeProposer<u8, &str> = DecreeProposer::new(ballot(2, 0), [0, 1, 2], "mine");
+        assert_eq!(p.on_promise(0, Some((ballot(1, 0), "voted"))), None);
+        let _ = p.on_promise(1, Some((ballot(1, 0), "other")));
     }
 
     #[test]

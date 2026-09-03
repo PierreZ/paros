@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::matchmaker::AcceptorConfig;
 use crate::node::{LEADER_RECOVERY_BATCH, PROMISE_BATCH};
+use crate::single_decree::select_highest;
 use crate::types::{Ballot, Command, Control, NodeId, Slot, command_fingerprint};
 
 /// Volatile per-ballot Phase-1 state while a candidate recovers the log
@@ -441,28 +442,26 @@ fn promise_page_shape_valid(
 }
 
 /// Merge one reported `(ballot, command)` for `slot` into a highest-ballot
-/// tally: the P2c selection rule, at the merge. A lower report never
-/// replaces the recorded one, and two reports at one ballot are the same
-/// command (one proposer per ballot, P2b) — a disagreement is a protocol
-/// violation, not a tie.
+/// tally: the P2c selection rule ([`select_highest`], shared with the decree
+/// kernel), at the merge. A lower report never replaces the recorded one, and
+/// two reports at one ballot are the same command (one proposer per ballot,
+/// P2b) — a disagreement is a protocol violation, not a tie.
 fn merge_report(
     tally: &mut BTreeMap<Slot, (Ballot, Command)>,
     slot: Slot,
     ballot: Ballot,
     command: Command,
 ) {
-    match tally.get(&slot) {
-        Some((rb, _)) if ballot < *rb => {}
-        Some((rb, recorded)) if ballot == *rb => {
-            assert!(
-                *recorded == command,
-                "two Phase-1 reports of one (slot, ballot) agree on the command"
-            );
-        }
-        _ => {
-            tally.insert(slot, (ballot, command));
-        }
-    }
+    let mut best = tally.remove(&slot);
+    select_highest(
+        &mut best,
+        (ballot, command),
+        "two Phase-1 reports of one (slot, ballot) agree on the command",
+    );
+    tally.insert(
+        slot,
+        best.expect("the selection fold always holds a report"),
+    );
 }
 
 /// The proposer component (see the module doc).
