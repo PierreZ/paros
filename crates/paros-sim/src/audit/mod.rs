@@ -229,6 +229,14 @@ impl AuditWorld {
         self.lock().cluster_applied_max
     }
 
+    /// Whether a node outside a ballot's own configuration has answered that
+    /// ballot's Phase 1 — the mechanism the departed-straggler corpus case is
+    /// named for ("removed is not shut down"), read by that case so it can
+    /// assert it actually happened.
+    pub(crate) fn removed_member_promised(&self) -> bool {
+        self.lock().removed_member_promised
+    }
+
     /// A one-line picture of the run for the red path: per-node applied
     /// prefixes, the leader rounds, and the last chosen gap each node reported.
     pub(crate) fn diagnostics(&self) -> String {

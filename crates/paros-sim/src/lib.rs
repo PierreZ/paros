@@ -446,6 +446,11 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
         .run()
 }
 
+/// Where the departed-straggler case publishes whether its run genuinely
+/// reached its injection (see [`departed_straggler_case`]). Shared by the
+/// workload factory's clones.
+pub(crate) type NonVacuousSink = Arc<Mutex<bool>>;
+
 /// Run the departed-straggler case (see `crate::corpus`, #124): a four-node
 /// pool bootstrapped on three, reconfigured onto the spare, then the only
 /// clean copy of a slot left on the node the reconfiguration removed — CTRL
@@ -455,7 +460,19 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
-    SimulationBuilder::new()
+    departed_straggler_case(seed).0
+}
+
+/// The same run, reporting whether it was **non-vacuous**: `false` means the
+/// case was superseded before its injection (GC forgot the prior
+/// configuration, or a late write healed the mask) and observed nothing. A
+/// caller that enumerates seeds must require at least one `true`.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
+    let sink: NonVacuousSink = Arc::new(Mutex::new(false));
+    let workload_sink = sink.clone();
+    let report = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .processes(corpus::DEPARTED_POOL, || {
             Box::new(NodeProcess::scripted_with_bootstrap(
@@ -465,10 +482,16 @@ pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
         .processes(1, || Box::new(MatchmakerProcess::scripted()))
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .chaos_duration(CORPUS_CHAOS)
-        .workload_factory(|| Box::new(corpus::DepartedStragglerWorkload::new()))
+        .workload_factory(move || {
+            Box::new(corpus::DepartedStragglerWorkload::new(Some(
+                workload_sink.clone(),
+            )))
+        })
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run();
+    let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
+    (report, non_vacuous)
 }
 
 /// Run the §5.1.2 snapshot-lifecycle compound (see `crate::corpus`): log-only,

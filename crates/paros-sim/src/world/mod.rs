@@ -1071,13 +1071,20 @@ pub(crate) struct CorpusDiskProbe {
 
 /// A matchmaker's durable GC watermark (`None` until it wrote anything): the
 /// corpus's world-truth probe for "no floor became effective yet".
-pub(crate) fn corpus_matchmaker_watermark(handle: &StateHandle, ip: &str) -> Option<Ballot> {
+/// Whether `ip`'s durable registry still holds a registration naming `node` —
+/// the departed-straggler case's real precondition (#124): the configuration
+/// the reconfiguration left behind must still be answerable, or the case is
+/// superseded by the garbage collection it is trying to outrun. The raw
+/// watermark is not that test: an ordinary leader raises it as soon as its
+/// leadership settles, long before it collects anything the case needs.
+pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: u64) -> bool {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .matchmakers
-        .get(ip)
-        .map(|disk| disk.hard_state.gc_watermark)
+    guard.matchmakers.get(ip).is_some_and(|disk| {
+        disk.registry
+            .values()
+            .any(|registration| registration.config.contains(paros::NodeId(node)))
+    })
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
