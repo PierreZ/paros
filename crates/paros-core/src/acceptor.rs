@@ -19,7 +19,10 @@
 //! leader, a heartbeat that adopts a sender) and builds the wire messages.
 //! Every durable change it makes is emitted as a [`WriteOp`] into the batch
 //! the caller hands it, so the persist-before-send ordering stays the
-//! caller's structural contract.
+//! caller's structural contract — and every op in a batch that needs an
+//! fsync comes from here ([`crate::WriteOp::needs_sync`]): a second
+//! deployment reusing this role gets the whole durable surface with it, and
+//! cannot silently lose a write by forgetting to push one beside the call.
 //!
 //! Hard `assert!`s throughout: a broken voting invariant is a programmer
 //! error, never an operating condition (AGENTS.md, *Assertion doctrine*).
@@ -27,7 +30,7 @@
 use std::collections::BTreeMap;
 
 use crate::node::PROMISE_BATCH;
-use crate::types::{Ballot, Command, Control, Slot};
+use crate::types::{Ballot, Command, Control, SessionEntry, Slot, Value};
 use crate::write::WriteOp;
 
 /// Payload bytes a repaired command shipped (the CTRL §5.2 repair-cost metric:
@@ -372,14 +375,61 @@ impl Acceptor {
         });
     }
 
-    /// Drop every record and faulty entry below `first` and raise the floor
-    /// to it (a decided truncation, or a snapshot install folding the prefix).
-    /// The floor never moves backward.
+    /// Drop every record and faulty entry below `first`, raise the floor to
+    /// it, and emit the durable [`WriteOp::Truncate`] carrying `sealed` (the
+    /// at-most-once ledger records whose slots the drop removes). A decided
+    /// truncation: the caller has already established that the prefix is
+    /// chosen and applied.
     ///
     /// # Panics
     ///
     /// If `first` is below the floor held.
-    pub fn truncate(&mut self, first: Slot) {
+    pub fn truncate(&mut self, first: Slot, sealed: Vec<SessionEntry>, writes: &mut Vec<WriteOp>) {
+        self.drop_prefix(first);
+        writes.push(WriteOp::Truncate { first, sealed });
+    }
+
+    /// Fold the prefix an installed snapshot covers: drop every record and
+    /// faulty entry at or below `chosen_index` (their decided effects live in
+    /// the opaque bytes now), raise the floor one past it, and emit the
+    /// durable [`WriteOp::InstallSnapshot`]. Returns the new floor.
+    ///
+    /// The caller adopts the snapshot's ballot through [`Self::set_promise`]
+    /// *before* this call (the promise never regresses) and owns everything
+    /// outside the acceptor — the replica's prefix jump, the proposer's
+    /// blocked work. What the acceptor owns is the floor and the write.
+    ///
+    /// # Panics
+    ///
+    /// If the resulting floor is below the floor held, or `chosen_index` is
+    /// the numeric ceiling (the caller's wire guard refuses one).
+    pub fn install(
+        &mut self,
+        chosen_index: Slot,
+        ballot: Ballot,
+        snapshot: Value,
+        sessions: Vec<SessionEntry>,
+        writes: &mut Vec<WriteOp>,
+    ) -> Slot {
+        assert!(
+            chosen_index.0 < u64::MAX,
+            "a snapshot boundary has a floor one past it"
+        );
+        let first = Slot(chosen_index.0 + 1);
+        self.drop_prefix(first);
+        writes.push(WriteOp::InstallSnapshot {
+            chosen_index,
+            ballot,
+            snapshot,
+            sessions,
+        });
+        first
+    }
+
+    /// Drop every record and faulty entry below `first` and raise the floor
+    /// to it. The floor never moves backward. The two callers differ only in
+    /// the durable op they emit beside it.
+    fn drop_prefix(&mut self, first: Slot) {
         assert!(
             first >= self.first_slot,
             "the compaction floor never moves backward"
@@ -388,5 +438,60 @@ impl Acceptor {
         self.faulty = self.faulty.split_off(&first);
         self.first_slot = first;
         self.assert_invariants();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ClientId, ClientSeq, Entry, NodeId};
+
+    fn ballot(round: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(0),
+        }
+    }
+
+    fn command(byte: u8) -> Command {
+        Command::User(Entry {
+            client: ClientId(1),
+            seq: ClientSeq(u64::from(byte)),
+            value: Value(vec![byte]),
+        })
+    }
+
+    /// The role classification `write.rs` states: every durable change an
+    /// acceptor makes is emitted by the acceptor itself, and every op it
+    /// emits needs an fsync. `truncate` and `install` used to change the
+    /// floor and emit nothing, leaving the wiring to remember the write.
+    #[test]
+    fn every_acceptor_mutation_emits_its_own_fsynced_write() {
+        let mut acceptor = Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new());
+        let mut writes = Vec::new();
+        acceptor.set_promise(ballot(1), &mut writes);
+        acceptor.record_accepted(Slot(0), ballot(1), command(0), &mut writes);
+        acceptor.record_accepted(Slot(1), ballot(1), command(1), &mut writes);
+        acceptor.truncate(Slot(1), Vec::new(), &mut writes);
+        assert_eq!(acceptor.first_slot(), Slot(1));
+        assert!(
+            matches!(writes.last(), Some(WriteOp::Truncate { first, .. }) if *first == Slot(1)),
+            "the truncation is durable"
+        );
+        let first = acceptor.install(Slot(4), ballot(2), Value(vec![9]), Vec::new(), &mut writes);
+        assert_eq!(first, Slot(5));
+        assert_eq!(acceptor.first_slot(), Slot(5));
+        assert!(acceptor.records().is_empty(), "the folded prefix is gone");
+        assert!(
+            matches!(
+                writes.last(),
+                Some(WriteOp::InstallSnapshot { chosen_index, .. }) if *chosen_index == Slot(4)
+            ),
+            "the install is durable"
+        );
+        assert!(
+            writes.iter().all(WriteOp::needs_sync),
+            "every write an acceptor emits is safety-critical"
+        );
     }
 }

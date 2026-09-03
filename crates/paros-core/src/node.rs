@@ -1075,11 +1075,10 @@ impl RawNode {
         // A faulty entry below the floor is superseded by the compacted state
         // (only chosen slots are dropped, and truncation is decided over the
         // applied prefix): custodianship moved into the application snapshot.
-        self.acceptor.truncate(first);
+        self.acceptor
+            .truncate(first, sealed, &mut self.pending_writes);
         self.replica.truncate(first);
         self.proposer.retain_rounds_from(first);
-        self.pending_writes
-            .push(WriteOp::Truncate { first, sealed });
         // Postconditions: the floor strictly rose (the no-op path returned
         // above) and stayed clamped inside the chosen prefix.
         assert!(

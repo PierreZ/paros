@@ -21,6 +21,21 @@ use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
 /// stale lower-ballot accept), [`SetChosenIndex`](WriteOp::SetChosenIndex)
 /// advances the contiguous commit index, and [`Truncate`](WriteOp::Truncate)
 /// drops the compacted log prefix.
+///
+/// # Which role emits which op
+///
+/// The classification is role-shaped, and stays that way: **every op that
+/// [`needs_sync`](WriteOp::needs_sync) is emitted by
+/// [`Acceptor`](crate::acceptor::Acceptor)** — the promise, the accepted
+/// record, the truncation and the snapshot install are all mutations of the
+/// acceptor's own durable state, and each is emitted by the method that makes
+/// it, never pushed beside the call by the wiring.
+/// [`Replica`](crate::replica::Replica) emits exactly one op, the relaxed
+/// [`SetChosenIndex`](WriteOp::SetChosenIndex), from its apply walk;
+/// [`Proposer`](crate::proposer::Proposer) emits none at all — it holds no
+/// durable state. That is the answer to "is persist-before-send an acceptor
+/// property": it is, and a second deployment that reuses `Acceptor` gets the
+/// whole durable surface with the role.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WriteOp {

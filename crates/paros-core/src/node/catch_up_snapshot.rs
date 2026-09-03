@@ -1,6 +1,4 @@
-use super::{
-    BTreeMap, Ballot, Command, Message, NodeId, RawNode, SessionEntry, Slot, Value, WriteOp,
-};
+use super::{BTreeMap, Ballot, Command, Message, NodeId, RawNode, SessionEntry, Slot, Value};
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
 /// lagging peer that needs more re-requests on the next heartbeat, so a large
@@ -165,18 +163,26 @@ impl RawNode {
         );
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
-        // The MAX guard at entry makes this addition exact; `saturating_add`
-        // stays as defense in depth.
-        let first = Slot(chosen_index.0.saturating_add(1));
-        // Fully compact up to the snapshot: everything at or below `chosen_index`
-        // is folded into the opaque bytes, so drop the in-memory prefix and raise
-        // the floor to `first`. Faulty entries in the folded prefix are healed
-        // by the install: their decided effects live in the opaque bytes now.
-        self.acceptor.truncate(first);
         // The replica jumps its prefix, closes a repair the boundary covers,
         // and adopts the serving peer's session ledger for the folded prefix
         // (#94: those slots' records will never be walked here).
         self.replica.install(chosen_index, &sessions);
+        // Fully compact up to the snapshot: everything at or below
+        // `chosen_index` is folded into the opaque bytes, so the acceptor drops
+        // the in-memory prefix, raises the floor one past the boundary and
+        // persists the install (opaque bytes + boundary + sealed sessions).
+        // Faulty entries in the folded prefix are healed by it: their decided
+        // effects live in the opaque bytes now. Snapshot-xor-entries: this
+        // batch surfaces no committed user entries for the folded prefix; the
+        // application installs the opaque state via the driver's storage write,
+        // and the ledger is sealed beside it.
+        let first = self.acceptor.install(
+            chosen_index,
+            ballot,
+            snapshot,
+            sessions,
+            &mut self.pending_writes,
+        );
         // A probe blocked below the boundary is resolved by the fold as well.
         self.proposer.probe_retain_from(first);
         if self.proposer.probe().is_none() {
@@ -184,16 +190,6 @@ impl RawNode {
         }
         self.proposer.retain_rounds_from(first);
         self.next_slot = self.next_slot.max(first);
-        // Persist the install (opaque bytes + boundary + sealed sessions).
-        // Snapshot-xor-entries: this batch surfaces no committed user entries
-        // for the folded prefix; the application installs the opaque state via
-        // the driver's storage write, and the ledger is sealed beside it.
-        self.pending_writes.push(WriteOp::InstallSnapshot {
-            chosen_index,
-            ballot,
-            snapshot,
-            sessions,
-        });
         // Install postconditions: the floor lands exactly one past the new
         // chosen boundary, and the durable promise absorbed the snapshot's
         // ballot without ever regressing.
