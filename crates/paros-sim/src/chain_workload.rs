@@ -65,6 +65,10 @@ const OP_COUNT: u8 = 14;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
+
+/// The `shrink` entry of [`RECONFIGURE_SHAPES`], the shape a rotation through
+/// a ring no larger than the set in force actually composes.
+const SHRINK_SHAPE: usize = 1;
 /// The shapes a [`RECONFIGURE_MATCHMAKERS`] step draws from, as indices into
 /// [`RECONFIGURE_SHAPES`]: a matchmaker set has no leader to remove.
 const MATCHMAKER_SHAPES: [usize; 4] = [0, 1, 2, 4];
@@ -355,6 +359,12 @@ enum ReconfigureResult {
 /// leaves the configuration. `None` when the shape is impossible here (no
 /// spare to grow onto, nothing above the floor to shrink); the step is then
 /// a no-op.
+///
+/// The index and name returned are the shape **observed in the composed set**,
+/// not the one asked for: a `rotate` through a candidate ring no larger than
+/// the set in force drops members instead of replacing them, which is a
+/// `shrink`, and labelling it a rotation lit the whole-set-rotation gate on a
+/// successor that shared every surviving member with its predecessor.
 fn compose_reconfiguration(
     shape: usize,
     members: &[u64],
@@ -362,7 +372,7 @@ fn compose_reconfiguration(
     floor: usize,
     leader: Option<u64>,
     draw: u64,
-) -> Option<(&'static str, Vec<u64>)> {
+) -> Option<(usize, &'static str, Vec<u64>)> {
     let mut current: Vec<u64> = members.to_vec();
     current.sort_unstable();
     current.dedup();
@@ -377,7 +387,8 @@ fn compose_reconfiguration(
     let dead: Option<usize> = current.iter().position(|n| !candidates.contains(n));
     let pick = |len: usize| usize::try_from(draw % u64::try_from(len).unwrap_or(1)).unwrap_or(0);
     let mut next = current.clone();
-    let name = RECONFIGURE_SHAPES[shape % RECONFIGURE_SHAPES.len()];
+    let mut observed = shape % RECONFIGURE_SHAPES.len();
+    let name = RECONFIGURE_SHAPES[observed];
     match name {
         "grow" => {
             if spares.is_empty() {
@@ -420,7 +431,12 @@ fn compose_reconfiguration(
     if next == current || next.len() < floor {
         return None;
     }
-    Some((name, next))
+    if RECONFIGURE_SHAPES[observed] == "rotate" && next.len() < current.len() {
+        // A ring no larger than the set in force cannot rotate it: what came
+        // out is the surviving members, one short — a shrink.
+        observed = SHRINK_SHAPE;
+    }
+    Some((observed, RECONFIGURE_SHAPES[observed], next))
 }
 
 /// The ids (ranks into `ips`) a reconfiguration may still draw from: every
@@ -1797,13 +1813,21 @@ impl Workload for ChainWorkload {
                                 leader_id,
                                 raw_payload,
                             )
-                            .map(|(name, next)| (shape, name, next))
+                            .map(|(observed, name, next)| (shape, observed, name, next))
                         })
                     });
-                    if let Some((shape, name, next)) = composed {
+                    if let Some((shape, observed, name, next)) = composed {
                         if shape != drawn {
                             assert_reachable!(
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
+                        if members
+                            .as_deref()
+                            .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)))
+                        {
+                            assert_reachable!(
+                                "reconfiguration: a successor acceptor set shares no member with its predecessor"
                             );
                         }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_request");
@@ -1819,7 +1843,7 @@ impl Workload for ChainWorkload {
                                     "reconfiguration: a deployment without matchmakers never accepts a reconfiguration",
                                     { "shape" => name }
                                 );
-                                self.adversarial.reconfigure_started[shape] = true;
+                                self.adversarial.reconfigure_started[observed] = true;
                                 Self::update_leader_hint(
                                     &mut leader_hint,
                                     &mut stale_leader_hint,
@@ -1883,18 +1907,37 @@ impl Workload for ChainWorkload {
                                     None,
                                     raw_payload,
                                 )
-                                .map(|(name, next)| (slot, name, next))
+                                .map(|(observed, name, next)| {
+                                    // The observed shape's own slot: a
+                                    // rotation that came out a shrink is
+                                    // gated as the shrink it is.
+                                    let observed_slot = MATCHMAKER_SHAPES
+                                        .iter()
+                                        .position(|s| *s == observed)
+                                        .unwrap_or(slot);
+                                    (slot, observed_slot, name, next)
+                                })
                             })
                         })
                     } else {
                         // Plain Multi-Paxos: the request is sent anyway, and
                         // the point is the refusal.
-                        current.is_some().then_some((drawn_slot, "plain", vec![0]))
+                        current
+                            .is_some()
+                            .then_some((drawn_slot, drawn_slot, "plain", vec![0]))
                     };
-                    if let Some((shape_slot, name, next)) = request {
+                    if let Some((shape_slot, observed_slot, name, next)) = request {
                         if shape_slot != drawn_slot {
                             assert_reachable!(
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
+                            );
+                        }
+                        if current
+                            .as_ref()
+                            .is_some_and(|(_, in_force)| in_force.iter().all(|m| !next.contains(m)))
+                        {
+                            assert_reachable!(
+                                "generation: a successor matchmaker set shares no member with its predecessor"
                             );
                         }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_matchmakers_request");
@@ -1918,7 +1961,8 @@ impl Workload for ChainWorkload {
                                     generation,
                                     "chain_reconfigure_matchmakers_started"
                                 );
-                                self.adversarial.reconfigure_matchmakers_started[shape_slot] = true;
+                                self.adversarial.reconfigure_matchmakers_started[observed_slot] =
+                                    true;
                             }
                             ReconfigureMatchmakersResult::Refused { refusal } => {
                                 assert_always!(
@@ -2415,9 +2459,9 @@ mod tests {
         let members = [1_u64, 2, 3];
         let pool5 = [0_u64, 1, 2, 3, 4];
         let grow = compose_reconfiguration(0, &members, &pool5, 3, Some(1), 7).unwrap();
-        assert_eq!(grow.0, "grow");
-        assert_eq!(grow.1.len(), 4);
-        assert!(grow.1.iter().all(|n| *n < 5));
+        assert_eq!(grow.1, "grow");
+        assert_eq!(grow.2.len(), 4);
+        assert!(grow.2.iter().all(|n| *n < 5));
         assert!(
             compose_reconfiguration(0, &[0, 1, 2], &[0, 1, 2], 3, None, 0).is_none(),
             "no spare"
@@ -2427,18 +2471,18 @@ mod tests {
             "at the floor"
         );
         let shrink = compose_reconfiguration(1, &[0, 1, 2, 3], &pool5, 3, None, 2).unwrap();
-        assert_eq!((shrink.0, shrink.1.len()), ("shrink", 3));
+        assert_eq!((shrink.1, shrink.2.len()), ("shrink", 3));
         let replace = compose_reconfiguration(2, &members, &pool5, 3, None, 1).unwrap();
-        assert_eq!(replace.0, "replace");
-        assert_eq!(replace.1.len(), 3);
-        assert_ne!(replace.1, members.to_vec());
+        assert_eq!(replace.1, "replace");
+        assert_eq!(replace.2.len(), 3);
+        assert_ne!(replace.2, members.to_vec());
         assert!(
             compose_reconfiguration(3, &members, &pool5, 3, Some(1), 0).is_none(),
             "removing the leader at the floor is refused"
         );
         let removed = compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, Some(2), 0).unwrap();
         assert_eq!(
-            (removed.0, removed.1.clone()),
+            (removed.1, removed.2.clone()),
             ("remove-leader", vec![0, 1, 3])
         );
         assert!(
@@ -2447,13 +2491,20 @@ mod tests {
         );
         let rotate =
             compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2, 3, 4, 5], 3, None, 2).unwrap();
-        assert_eq!((rotate.0, rotate.1.clone()), ("rotate", vec![3, 4, 5]));
+        assert_eq!((rotate.1, rotate.2.clone()), ("rotate", vec![3, 4, 5]));
+        // A rotation through a ring no larger than the set in force drops a
+        // member instead of replacing it: observed as the shrink it is.
+        let short_ring = compose_reconfiguration(4, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 1).unwrap();
+        assert_eq!(
+            (short_ring.1, short_ring.2.clone()),
+            ("shrink", vec![0, 2, 3])
+        );
         // A dead member (outside the candidates) is the first one moved out.
         let heal = compose_reconfiguration(2, &[0, 1, 2], &[0, 2, 3], 3, None, 0).unwrap();
-        assert_eq!((heal.0, heal.1.clone()), ("replace", vec![0, 2, 3]));
+        assert_eq!((heal.1, heal.2.clone()), ("replace", vec![0, 2, 3]));
         let drop_dead = compose_reconfiguration(1, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 5).unwrap();
         assert_eq!(
-            (drop_dead.0, drop_dead.1.clone()),
+            (drop_dead.1, drop_dead.2.clone()),
             ("shrink", vec![0, 2, 3])
         );
         assert!(
