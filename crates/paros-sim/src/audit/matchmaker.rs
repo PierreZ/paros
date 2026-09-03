@@ -119,9 +119,14 @@ struct Registry {
 }
 
 /// One candidate's matchmaking phase for one ballot, as the fold sees it.
-/// One `Registered` reply as sent: the history it names and the watermark it
-/// reports.
-type ReplyCopy = (Vec<(Ballot, Registration)>, Ballot);
+/// One `Registered` reply as sent: the history it names, the watermark it
+/// reports, and the effective configuration it holds durably (which the
+/// history need not still show — GC drops the record, never the scalar).
+type ReplyCopy = (
+    Vec<(Ballot, Registration)>,
+    Ballot,
+    Option<(Ballot, AcceptorConfig)>,
+);
 /// A frozen registry as a `Stopped` reply carried it: `(watermark, history)`.
 type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
 
@@ -351,7 +356,7 @@ fn check_folded_union(
     watermark: Ballot,
 ) -> BTreeSet<Vec<Ballot>> {
     let replies: Vec<&ReplyCopy> = campaign.folded.values().flatten().collect();
-    let max_watermark = replies.iter().map(|(_, w)| *w).max().unwrap_or_default();
+    let max_watermark = replies.iter().map(|(_, w, _)| *w).max().unwrap_or_default();
     assert_always!(
         watermark == max_watermark,
         "matchmaking: the watermark used is the maximum reported",
@@ -416,6 +421,41 @@ fn check_page_window(
             "expected" => expected.len()
         }
     );
+}
+
+/// The effective configuration the folded replies name, by the candidate's
+/// own rule (`Matchmaking::fold`): the maximum of what the histories
+/// **show** and the effective-configuration scalar the same replies
+/// **report**. A GC floor raised over the last reconfiguration record
+/// leaves the scalar as the only witness, so a check that read the
+/// histories alone called a correct campaign a violation (hunt seed
+/// 7700272418432384839).
+fn folded_effective(campaign: &Campaign) -> Option<(Ballot, AcceptorConfig)> {
+    let shown = campaign
+        .folded
+        .values()
+        .flatten()
+        .flat_map(|(history, _, _)| history.iter())
+        .filter(|(_, r)| r.kind.is_reconfiguration())
+        .max_by_key(|(b, _)| *b)
+        .map(|(b, r)| (*b, r.config.clone()));
+    let reported = campaign
+        .folded
+        .values()
+        .flatten()
+        .filter_map(|(_, _, effective)| effective.clone())
+        .max_by_key(|(b, _)| *b);
+    match (shown, reported) {
+        (Some((shown_at, shown_config)), Some((reported_at, reported_config))) => {
+            if reported_at > shown_at {
+                Some((reported_at, reported_config))
+            } else {
+                Some((shown_at, shown_config))
+            }
+        }
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    }
 }
 
 /// The digest of one history copy, computed exactly as the driver computes
@@ -502,7 +542,7 @@ fn union_above<'a>(
 ) -> (Vec<&'a AcceptorConfig>, BTreeSet<Vec<Ballot>>) {
     let mut expected: Vec<&AcceptorConfig> = Vec::new();
     let mut histories: BTreeSet<Vec<Ballot>> = BTreeSet::new();
-    for (history, _) in replies {
+    for (history, _, _) in replies {
         histories.insert(history.iter().map(|(b, _)| *b).collect());
         for (b, registration) in history {
             let config = &registration.config;
@@ -925,6 +965,7 @@ impl MatchmakerAudit {
             from_ballot,
             history,
             gc_watermark,
+            effective,
             ..
         } = page;
         let bootstrap_member = self
@@ -1031,6 +1072,7 @@ impl MatchmakerAudit {
             .push((
                 history.iter().map(|(b, r)| (*b, r.clone())).collect(),
                 gc_watermark,
+                effective.cloned(),
             ));
     }
 
@@ -1328,7 +1370,7 @@ impl MatchmakerAudit {
         let sent = campaign.replies.get(&matchmaker.0).and_then(|copies| {
             copies
                 .iter()
-                .find(|(history, w)| *w == watermark && history_digest(history) == history_hash)
+                .find(|(history, w, _)| *w == watermark && history_digest(history) == history_hash)
                 .cloned()
         });
         assert_always!(
@@ -1463,19 +1505,12 @@ impl MatchmakerAudit {
         // a stale belief must have aborted instead (`campaign_stale`), so a
         // superseded configuration is never reinstated by an election. A
         // reconfiguration campaign is exempt: it is the next one.
-        let effective = campaign
-            .folded
-            .values()
-            .flatten()
-            .flat_map(|(history, _)| history.iter())
-            .filter(|(_, r)| r.kind.is_reconfiguration())
-            .max_by_key(|(b, _)| *b)
-            .map(|(b, r)| (*b, &r.config));
+        let effective = folded_effective(campaign);
         if !campaign.kind.is_reconfiguration()
             && let Some((newest, config)) = effective
         {
             assert_always!(
-                campaign.config.as_ref() == Some(config),
+                campaign.config.as_ref() == Some(&config),
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
                 { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
             );

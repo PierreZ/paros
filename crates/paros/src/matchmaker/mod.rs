@@ -246,7 +246,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
             history,
             next_from_ballot,
             gc_watermark,
-            ..
+            effective,
         } => {
             audit.match_replied(
                 id,
@@ -258,6 +258,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                     history,
                     next_from_ballot: *next_from_ballot,
                     gc_watermark: *gc_watermark,
+                    effective: effective.as_ref(),
                 },
             );
             tracing::info!(

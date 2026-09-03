@@ -74,6 +74,11 @@ pub struct HistoryPage<'a> {
     pub next_from_ballot: Option<Ballot>,
     /// The durable watermark in force when the page was computed.
     pub gc_watermark: Ballot,
+    /// The matchmaker's durable effective configuration
+    /// (`MatchmakerHardState::effective`), reported beside the history: GC
+    /// drops the record, never the scalar, so a page whose window is empty
+    /// can still name the acceptor set in force.
+    pub effective: Option<&'a (Ballot, AcceptorConfig)>,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).
