@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::matchmaker::GcAck;
-use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
+use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::{Ballot, NodeId, Slot};
 
 /// What one GC ack did, returned by [`crate::RawNode::on_gc_ack`].
@@ -178,23 +178,25 @@ impl Collector {
     }
 
     /// Fold one matchmaker's GC ack at `ballot` over `config` (the
-    /// configuration in force, which decides what the floor retires), with
-    /// `quorum` the size of a matchmaker quorum of `generation`. An ack for
-    /// another generation, a lower floor, or one already counted is ignored
-    /// whole — wire input, never asserted.
+    /// configuration in force, which decides what the floor retires), against
+    /// `matchmakers` — the set whose generation this campaign addressed and
+    /// whose quorum makes the floor effective. An ack for another generation,
+    /// a lower floor, or one already counted is ignored whole — wire input,
+    /// never asserted.
     ///
     /// # Panics
     ///
-    /// If the quorum that makes the floor effective would retire an acceptor
-    /// the configuration in force still names.
+    /// If `matchmakers` is not well formed (the quorum tally's own
+    /// precondition), or if the quorum that makes the floor effective would
+    /// retire an acceptor the configuration in force still names.
     pub fn fold_ack(
         &mut self,
         ack: &GcAck,
-        quorum: usize,
-        generation: MatchmakerGeneration,
+        matchmakers: &MatchmakerSet,
         ballot: Ballot,
         config: &AcceptorConfig,
     ) -> GcStep {
+        let generation = matchmakers.generation;
         if !self.requested
             || self.effective.is_some()
             || ack.generation != generation
@@ -216,9 +218,11 @@ impl Collector {
         if !self.acked_by.insert(ack.matchmaker) {
             return GcStep::Ignored;
         }
-        if self.acked_by.len() < quorum {
+        if !matchmakers.has_quorum(&self.acked_by) {
             return GcStep::Acked {
-                remaining: quorum - self.acked_by.len(),
+                remaining: matchmakers
+                    .quorum_size()
+                    .saturating_sub(self.acked_by.len()),
             };
         }
         // Quorum intersection makes the floor effective for every future

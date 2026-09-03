@@ -564,17 +564,19 @@ impl AuditState {
         let Some(prior) = self.prior_of(ballot) else {
             return;
         };
-        let senders = self.promise_senders.get(&(ballot.round, ballot.node.0));
-        let uncovered = prior
-            .iter()
-            .filter(|c| {
-                let own = usize::from(c.contains(ballot.node));
-                let answered = senders.map_or(0, |s| {
-                    s.iter().filter(|n| c.contains(paros::NodeId(**n))).count()
-                });
-                own + answered < c.quorum_size()
-            })
-            .count();
+        // The promise quorum the candidate holds: every matchmaker-reported
+        // promise sender, plus its own (a candidate promises itself). Judged
+        // by each prior configuration's own quorum system — the same
+        // predicate the core's Phase-1 completion asks — rather than
+        // re-derived here as arithmetic; a sender outside a configuration
+        // never counts toward it.
+        let mut promised: BTreeSet<paros::NodeId> = self
+            .promise_senders
+            .get(&(ballot.round, ballot.node.0))
+            .map(|s| s.iter().map(|n| paros::NodeId(*n)).collect())
+            .unwrap_or_default();
+        promised.insert(ballot.node);
+        let uncovered = prior.iter().filter(|c| !c.has_quorum(&promised)).count();
         assert_always!(
             uncovered == 0,
             "reconfiguration: no Accept leaves before every prior configuration promised a quorum",
@@ -851,14 +853,8 @@ impl AuditState {
         let config = self.config_of(ballot).cloned();
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
-        let quorum = config.as_ref().map(AcceptorConfig::quorum_size);
-        let votes = config.as_ref().map_or(0, |c| {
-            holders
-                .iter()
-                .filter(|n| c.contains(paros::NodeId(**n)))
-                .count()
-        });
-        if quorum.is_some_and(|q| votes >= q) {
+        let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
+        if config.as_ref().is_some_and(|c| c.has_quorum(&voters)) {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -911,12 +907,13 @@ impl AuditState {
         let Some(config) = self.config_of(ballot).cloned() else {
             return;
         };
-        let majority = config.quorum_size();
-        let above = self
+        let above: BTreeSet<paros::NodeId> = self
             .promised
             .iter()
-            .filter(|(n, p)| config.contains(paros::NodeId(**n)) && **p > ballot)
-            .count();
+            .filter(|(_, p)| **p > ballot)
+            .map(|(n, _)| paros::NodeId(*n))
+            .collect();
+        let outvoted = config.has_quorum(&above);
         let entry = self.deposed_streaks.entry(node).or_default();
         if entry.round != ballot.round || entry.node != ballot.node.0 {
             *entry = DeposedStreak {
@@ -932,7 +929,7 @@ impl AuditState {
         }
         entry.seq = seq;
         entry.beatless_ticks = 0;
-        if above >= majority {
+        if outvoted {
             entry.deposed = true;
         } else {
             entry.deposed = false;

@@ -2257,7 +2257,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let noop = command_hash(&Command::Control(Control::Noop));
         let mut uncovered: Vec<String> = Vec::new();
         let covered = st.config_of(watermark).cloned().map(|config| {
-            let holders = config
+            let holders: BTreeSet<NodeId> = config
                 .members
                 .iter()
                 .filter(|m| {
@@ -2289,8 +2289,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                         }
                     }
                 })
-                .count();
-            holders >= config.quorum_size()
+                .copied()
+                .collect();
+            // Judged by the configuration's own quorum system, never by a
+            // count: the custody claim the leader's GC rests on is the same
+            // Phase-2 quorum question `Collector::covered` asks in the core.
+            config.has_quorum(&holders)
         });
         st.matchmaker
             .gc_requested(node, watermark, fence, covered, &uncovered.join(","));

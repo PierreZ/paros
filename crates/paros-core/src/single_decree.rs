@@ -26,6 +26,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::membership::QuorumSystem;
 use crate::types::Ballot;
 
 /// The P2c value-selection fold, shared by every Phase-1 tally in the crate:
@@ -144,16 +145,21 @@ pub enum DecreePhase<V> {
 /// **majority of the named acceptors**, derived here and nowhere else, so
 /// any two quorums intersect — the whole of the P2c argument. This kernel
 /// does not take a quorum *size*: a caller cannot instantiate a decree whose
-/// quorums fail to intersect, or one whose quorum exceeds its acceptors.
-/// Matchmaker Paxos generalizes matchmaker quorums to arbitrary systems;
-/// paros deliberately supports **majority matchmaker quorums only**
-/// (`MatchmakerSet::quorum_size` is the same rule), and the handover is
-/// safe exactly under that model.
+/// quorums fail to intersect, or one whose quorum exceeds its acceptors. It
+/// holds a [`QuorumSystem`] — [`QuorumSystem::Majority`], built here from the
+/// acceptor set — and asks it, so this tally crosses the same membership
+/// boundary as every other one in the core and never compares a count against
+/// a threshold on its own. Matchmaker Paxos generalizes matchmaker quorums to
+/// arbitrary systems; paros deliberately supports **majority matchmaker
+/// quorums only** ([`crate::MatchmakerSet::has_quorum`] is the same rule),
+/// and the handover is safe exactly under that model.
 #[derive(Clone, Debug)]
 pub struct DecreeProposer<A, V> {
     ballot: Ballot,
-    acceptors: BTreeSet<A>,
-    quorum: usize,
+    /// The acceptor set, sorted and deduplicated: the membership every tally
+    /// is judged over ([`QuorumSystem::is_quorum`] binary-searches it).
+    acceptors: Vec<A>,
+    quorum: QuorumSystem,
     proposal: V,
     promised_by: BTreeSet<A>,
     best: Option<(Ballot, V)>,
@@ -171,19 +177,21 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
     /// error.
     #[must_use]
     pub fn new(ballot: Ballot, acceptors: impl IntoIterator<Item = A>, proposal: V) -> Self {
-        let acceptors: BTreeSet<A> = acceptors.into_iter().collect();
+        let acceptors: Vec<A> = acceptors
+            .into_iter()
+            .collect::<BTreeSet<A>>()
+            .into_iter()
+            .collect();
         assert!(
             !acceptors.is_empty(),
             "a decree needs at least one acceptor"
         );
-        let quorum = acceptors.len() / 2 + 1;
+        let quorum = QuorumSystem::Majority;
+        let size = quorum.quorum_size(acceptors.len());
         // Postcondition: the quorum self-intersects over the acceptor set.
+        assert!(size * 2 > acceptors.len(), "a decree quorum is a majority");
         assert!(
-            quorum * 2 > acceptors.len(),
-            "a decree quorum is a majority"
-        );
-        assert!(
-            quorum <= acceptors.len(),
+            size <= acceptors.len(),
             "a decree quorum fits its acceptors"
         );
         Self {
@@ -226,16 +234,17 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
         self.value().is_some_and(|v| *v != self.proposal)
     }
 
-    /// The acceptor set this decree runs over.
+    /// The acceptor set this decree runs over, sorted.
     #[must_use]
-    pub fn acceptors(&self) -> &BTreeSet<A> {
+    pub fn acceptors(&self) -> &[A] {
         &self.acceptors
     }
 
-    /// The quorum size: a majority of the acceptors.
+    /// The size of a decree quorum: a majority of the acceptors. Reporting
+    /// only — whether a tally *holds* is [`QuorumSystem::is_quorum`]'s answer.
     #[must_use]
     pub fn quorum(&self) -> usize {
-        self.quorum
+        self.quorum.quorum_size(self.acceptors.len())
     }
 
     /// Acceptors that have not promised yet (Phase 1) or not accepted yet
@@ -263,7 +272,7 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
     /// protocol violation, never an operating condition.
     pub fn on_promise(&mut self, from: A, vote: Option<(Ballot, V)>) -> Option<V> {
         if self.phase != DecreePhase::Phase1
-            || !self.acceptors.contains(&from)
+            || self.acceptors.binary_search(&from).is_err()
             || !self.promised_by.insert(from)
         {
             return None;
@@ -275,7 +284,7 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
                 "two Phase-1 votes at one decree ballot agree on the value",
             );
         }
-        if self.promised_by.len() < self.quorum {
+        if !self.quorum.is_quorum(&self.acceptors, &self.promised_by) {
             return None;
         }
         let value = self
@@ -293,9 +302,9 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
             return None;
         };
         let value = value.clone();
-        if !self.acceptors.contains(&from)
+        if self.acceptors.binary_search(&from).is_err()
             || !self.accepted_by.insert(from)
-            || self.accepted_by.len() < self.quorum
+            || !self.quorum.is_quorum(&self.acceptors, &self.accepted_by)
         {
             return None;
         }

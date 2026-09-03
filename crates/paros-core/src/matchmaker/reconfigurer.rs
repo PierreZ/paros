@@ -530,10 +530,10 @@ impl MatchmakerReconfigurer {
                 }
                 acks.insert(from, (gc_watermark, history));
                 *decree_floor = (*decree_floor).max(decree_promised);
-                let quorum = old.quorum_size();
-                if acks.len() < quorum {
+                let frozen: BTreeSet<MatchmakerId> = acks.keys().copied().collect();
+                if !old.has_quorum(&frozen) {
                     return ReconfigurerStep::Stopped {
-                        remaining: quorum - acks.len(),
+                        remaining: old.quorum_size().saturating_sub(acks.len()),
                     };
                 }
                 // The reconstruction (§5): the maximum watermark, and the
@@ -718,8 +718,7 @@ impl MatchmakerReconfigurer {
                 if successor.contains(from) {
                     new_acks.insert(from);
                 }
-                if old_acks.len() >= old.quorum_size() && new_acks.len() >= successor.quorum_size()
-                {
+                if old.has_quorum(old_acks) && successor.has_quorum(new_acks) {
                     let successor = successor.clone();
                     self.phase = ReconfigurerPhase::Idle;
                     self.pending.clear();

@@ -228,15 +228,14 @@ impl RawNode {
         if self.role != NodeRole::Leader || !self.matchmakers.contains(ack.matchmaker) {
             return GcStep::Ignored;
         }
-        let quorum = self.matchmakers.quorum_size();
-        let generation = self.matchmakers.generation;
         let me = self.config.id;
         let acceptors = self.acceptors.clone();
         let ballot = self.ballot;
+        let matchmakers = &self.matchmakers;
         let Some(gc) = self.gc.as_mut() else {
             return GcStep::Ignored;
         };
-        let step = gc.fold_ack(ack, quorum, generation, ballot, &acceptors);
+        let step = gc.fold_ack(ack, matchmakers, ballot, &acceptors);
         if let GcStep::Effective { retired, .. } = &step {
             // The cross-role half of the retirement rule: this node's own
             // retirement, if its reconfiguration removed it, is the

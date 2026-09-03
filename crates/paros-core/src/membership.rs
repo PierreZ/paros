@@ -11,9 +11,10 @@
 //! new data in a configuration — never a rewrite of the tallies.
 //!
 //! Matchmaker quorums are deliberately **not** parameterized
-//! ([`MatchmakerSet::quorum_size`] is a majority by construction): the
+//! ([`MatchmakerSet::has_quorum`] is a majority by construction): the
 //! generation handover's safety argument is made under the majority model
-//! alone.
+//! alone. They still ask the same predicate — a matchmaker tally is not a
+//! count either.
 
 use std::collections::BTreeSet;
 
@@ -49,12 +50,19 @@ impl QuorumSystem {
     /// Whether `voters` form a quorum over the sorted membership `members`.
     /// The **one** predicate every tally asks — Phase-1 completion, a
     /// Phase-2 decision, a read-index confirmation, `CheckQuorum`, the GC
-    /// fence — so a quorum system that is not a cardinality (a grid, a
-    /// flexible split) answers here with set membership and no tally ever
-    /// compares a count against a threshold on its own. A voter outside
-    /// `members` never counts.
+    /// fence, and every matchmaker-side tally (registration, GC ack, freeze,
+    /// the successor decree, publication) — so a quorum system that is not a
+    /// cardinality (a grid, a flexible split) answers here with set
+    /// membership and no tally ever compares a count against a threshold on
+    /// its own. A voter outside `members` never counts.
+    ///
+    /// Generic over the identity so the matchmaker namespace
+    /// ([`MatchmakerId`]) and the decree kernel's own acceptor type ask the
+    /// same predicate as the acceptor pool: the body is a `binary_search`
+    /// over a sorted membership and a count, and neither depends on what an
+    /// identity *is*.
     #[must_use]
-    pub fn is_quorum(self, members: &[NodeId], voters: &BTreeSet<NodeId>) -> bool {
+    pub fn is_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
         match self {
             QuorumSystem::Majority => {
                 let counted = voters
@@ -214,8 +222,10 @@ impl MatchmakerSet {
         }
     }
 
-    /// The matchmaker quorum over this set: a majority, so any two
-    /// registration quorums (and any two stop / decree quorums) intersect.
+    /// The size of a matchmaker quorum over this set: a majority. Kept for
+    /// the one thing a predicate cannot answer — how many more acks a
+    /// pending tally still waits for (`remaining:`). Whether a tally *holds*
+    /// is always [`MatchmakerSet::has_quorum`].
     ///
     /// **Majority quorums only.** Matchmaker Paxos generalizes matchmaker
     /// quorums to arbitrary quorum systems; paros deliberately does not. Every
@@ -245,6 +255,26 @@ impl MatchmakerSet {
             "a matchmaker quorum is a majority"
         );
         quorum
+    }
+
+    /// Whether `voters` hold a matchmaker quorum of this set — the only way
+    /// a matchmaker-side tally is ever judged. Routes to
+    /// [`QuorumSystem::is_quorum`] under [`QuorumSystem::Majority`], the one
+    /// quorum model paros supports for matchmakers (see
+    /// [`MatchmakerSet::quorum_size`]); a voter outside the set never counts.
+    ///
+    /// # Panics
+    ///
+    /// If the set is not well formed (see [`MatchmakerSet::is_well_formed`]):
+    /// a tally over a set whose quorums do not intersect is meaningless and
+    /// must fail loudly.
+    #[must_use]
+    pub fn has_quorum(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
+        assert!(
+            self.is_well_formed(),
+            "a matchmaker quorum is drawn over a well-formed set"
+        );
+        QuorumSystem::Majority.is_quorum(&self.members, voters)
     }
 
     /// Whether `id` is a member.

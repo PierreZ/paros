@@ -399,11 +399,8 @@ impl RawNode {
         {
             return MatchStep::Ignored;
         }
-        let quorum = self.matchmakers.quorum_size();
         let step = match answer {
-            Ok((history, watermark)) => {
-                self.fold_registration(matchmaker, history, watermark, quorum)
-            }
+            Ok((history, watermark)) => self.fold_registration(matchmaker, history, watermark),
             Err(refusal) => self.fold_refusal(refusal),
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
@@ -448,8 +445,8 @@ impl RawNode {
         matchmaker: MatchmakerId,
         history: BTreeMap<Ballot, Registration>,
         watermark: Ballot,
-        quorum: usize,
     ) -> MatchStep {
+        let matchmakers = &self.matchmakers;
         let Some(m) = self.matchmaking.as_mut() else {
             return MatchStep::Ignored;
         };
@@ -457,9 +454,10 @@ impl RawNode {
             return MatchStep::Ignored;
         }
         let registered = m.registered_by.len();
-        if registered < quorum {
+        let quorum_held = matchmakers.has_quorum(&m.registered_by);
+        if !quorum_held {
             MatchStep::Registered {
-                remaining: quorum - registered,
+                remaining: self.matchmakers.quorum_size().saturating_sub(registered),
             }
         } else if let Some((newest, config)) = m.stale_belief() {
             // Stale belief: the quorum's histories name a
@@ -496,7 +494,7 @@ impl RawNode {
             // quorum is restated here, at the one place Phase 1
             // can open on a matchmaker deployment.
             assert!(
-                registered >= quorum,
+                quorum_held,
                 "Phase 1 opens only once a matchmaker quorum registered the ballot"
             );
             assert!(
