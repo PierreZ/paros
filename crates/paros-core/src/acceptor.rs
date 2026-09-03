@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 
 use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
-use crate::write::WriteOp;
+use crate::write::{AcceptorWrite, WriteOp};
 
 /// Maximum accepted records and faulty entries carried by one promise page —
 /// the bound this role enforces in [`Acceptor::promise_page`], and the reason
@@ -226,7 +226,7 @@ impl Acceptor {
 
     /// A candidate prepares `ballot` for every slot at or after `from_slot`.
     /// Promotes the promise when `ballot` is strictly higher (emitting the
-    /// [`WriteOp::SetPromise`]), re-affirms it for a same-ballot page
+    /// [`AcceptorWrite::SetPromise`]), re-affirms it for a same-ballot page
     /// continuation, and refuses below it — or below the floor, without
     /// touching the promise.
     ///
@@ -314,7 +314,7 @@ impl Acceptor {
     // ---- durable writes -----------------------------------------------------
 
     /// Raise (or re-affirm) the promised ballot to `ballot`, emitting a
-    /// [`WriteOp::SetPromise`] only when it actually changes.
+    /// [`AcceptorWrite::SetPromise`] only when it actually changes.
     ///
     /// # Panics
     ///
@@ -327,12 +327,12 @@ impl Acceptor {
         );
         if self.promised != ballot {
             self.promised = ballot;
-            writes.push(WriteOp::SetPromise(ballot));
+            writes.push(WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)));
         }
     }
 
     /// Record `(ballot, command)` as accepted for `slot` and emit the matching
-    /// [`WriteOp::AppendAccepted`]. An upsert-by-slot: a higher-ballot
+    /// [`AcceptorWrite::AppendAccepted`]. An upsert-by-slot: a higher-ballot
     /// re-accept, or a chosen value overwriting a stale accept. A fresh record
     /// over a faulty entry is the in-place repair (fill or
     /// replace-with-proven-identical, never delete).
@@ -378,11 +378,11 @@ impl Acceptor {
             );
         }
         self.records.insert(slot, (ballot, command.clone()));
-        writes.push(WriteOp::AppendAccepted {
+        writes.push(WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
             slot,
             ballot,
-            command,
-        });
+            value: command,
+        }));
         repaired
     }
 

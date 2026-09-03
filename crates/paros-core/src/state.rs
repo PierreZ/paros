@@ -16,7 +16,7 @@ use crate::types::{Ballot, ConfigId, NodeId, Slot};
 ///
 /// An acceptor must persist a raised `max_promised_ballot` before replying
 /// [`crate::Message::Promise`], and persist a new accepted entry (a
-/// [`crate::WriteOp::AppendAccepted`]) before replying
+/// [`crate::AcceptorWrite::AppendAccepted`]) before replying
 /// [`crate::Message::Accepted`]. Sending either reply before the corresponding
 /// write is durable violates Paxos safety: a crash could "un-promise" or
 /// "un-accept", letting two different values be chosen for one slot. The

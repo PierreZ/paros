@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::SimulationError;
 use paros_core::{
-    Ballot, Command, ConfigId, Control, GcRequest, MatchRequest, MatchmakerId, Message, NodeId,
-    NodeRole, RawNode, ReadState, SessionEntry, Slot, Value, WriteOp,
+    AcceptorWrite, Ballot, Command, ConfigId, Control, GcRequest, MatchRequest, MatchmakerId,
+    Message, NodeId, NodeRole, RawNode, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -494,17 +494,17 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     let mut promise_changed = false;
     for op in writes {
         match op {
-            WriteOp::SetPromise(ballot) => {
+            WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)) => {
                 storage
                     .persist_ballot(*ballot)
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 promise_changed = true;
             }
-            WriteOp::AppendAccepted {
+            WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
-                command,
-            } => {
+                value: command,
+            }) => {
                 storage
                     .append_accepted(*slot, *ballot, command.clone())
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
@@ -585,11 +585,11 @@ fn surface_persisted<A: Audit>(
     }
     for op in writes {
         match op {
-            WriteOp::AppendAccepted {
+            WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
-                command,
-            } => {
+                value: command,
+            }) => {
                 let vhash = command_hash(command);
                 audit.accepted(NodeId(self_id), *slot, *ballot, promised, vhash);
                 tracing::info!(
@@ -636,7 +636,7 @@ fn surface_persisted<A: Audit>(
                     "log_applied"
                 );
             }
-            WriteOp::SetPromise(_) => {}
+            WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) => {}
         }
     }
 }

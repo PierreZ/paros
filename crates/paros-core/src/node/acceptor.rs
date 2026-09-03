@@ -10,6 +10,7 @@ use super::{
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
 use crate::membership::AcceptorConfig;
+use crate::write::AcceptorWrite;
 
 impl RawNode {
     // ---- acceptor ---------------------------------------------------------
@@ -113,9 +114,10 @@ impl RawNode {
                 // scan of the batch, always-on by choice.
                 if raised {
                     assert!(
-                        self.pending_writes
-                            .iter()
-                            .any(|op| matches!(op, WriteOp::SetPromise(b) if *b == ballot)),
+                        self.pending_writes.iter().any(|op| matches!(
+                            op,
+                            WriteOp::Acceptor(AcceptorWrite::SetPromise(b)) if *b == ballot
+                        )),
                         "a promise reply ships with its durable raise in the batch"
                     );
                 }
@@ -216,9 +218,11 @@ impl RawNode {
                     "an accept lands with the promise at its ballot"
                 );
                 assert!(
-                    self.pending_writes.iter().any(
-                        |op| matches!(op, WriteOp::AppendAccepted { slot: s, .. } if *s == slot)
-                    ),
+                    self.pending_writes.iter().any(|op| matches!(
+                        op,
+                        WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot: s, .. })
+                            if *s == slot
+                    )),
                     "an accepted reply ships with its durable append in the batch"
                 );
                 self.pending_messages.push((

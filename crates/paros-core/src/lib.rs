@@ -79,4 +79,4 @@ pub use types::{
     Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Fingerprint, NodeId,
     SessionEntry, Slot, Value, command_fingerprint,
 };
-pub use write::{MustSync, WriteOp};
+pub use write::{AcceptorWrite, MustSync, WriteOp};
