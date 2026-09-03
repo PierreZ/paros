@@ -547,6 +547,7 @@ impl RawNode {
             // over exactly the configuration the ballot was registered with.
             self.acceptors = config;
             self.acceptors_since = ballot;
+            self.record_membership();
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();

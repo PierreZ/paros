@@ -256,8 +256,14 @@ matchmaker quorum acked** (`GcStep::Effective`), and only then does the leader n
 (per node: "these slots are gone here, recover from a snapshot") and the GC watermark (per
 matchmaker: "these configurations are never returned again") never need each other to move.
 Retirement is an operator act: "removed is not shut down" until GC says nobody will ask again,
-and the `Retire` RPC is honored only by a node that is neither a member of the configuration it
-believes in force nor the leader. The wrong rule (installed ⇒ deletable, `DPaxos` Appendix D) and
+and the `Retire` RPC **carries the evidence**. The operator reads the effective watermark from a
+leader's `Inspect` beside the retirable list and sends it in `RetireRequest.gc_watermark`; the
+node honors the request (`RawNode::may_retire`) only when it has matchmakers, is neither a member
+of the configuration it believes in force nor the leader, *and* that watermark sits strictly above
+`last_member_ballot` — the highest ballot a configuration naming this node was bound to. The first
+three are beliefs and the third one is volatile (a reboot regresses `acceptors` to the bootstrap
+configuration), so without the fourth "the cluster is done with me" would be the operator's
+assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The wrong rule (installed ⇒ deletable, `DPaxos` Appendix D) and
 its red→green evidence are recorded in the commit that landed the GC. Module doc:
 `crates/paros-core/src/node/gc.rs`; design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`.

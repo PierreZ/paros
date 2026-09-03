@@ -46,6 +46,20 @@ impl RawNode {
         }
         self.acceptors = config;
         self.acceptors_since = ballot;
+        self.record_membership();
+    }
+
+    /// Record that `acceptors`/`acceptors_since` just moved: if the new
+    /// configuration names this node, the ballot it is bound to is the newest
+    /// at which this node was a member. Called from every assignment to
+    /// `acceptors_since` — [`RawNode::learn_config`], `try_become_leader`, a
+    /// handoff install, and the adoption of an effective configuration — so
+    /// [`RawNode::may_retire`] never under-reports the membership it must
+    /// outlive.
+    pub(super) fn record_membership(&mut self) {
+        if self.is_acceptor() {
+            self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
+        }
     }
 
     /// Queue `msg` to every node of the pool except this one — the learner

@@ -430,6 +430,11 @@ pub(super) struct AuditState {
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
     pub(super) edge_rejected: bool,
+    /// A `Retire` refused because no effective GC floor sat above the target's
+    /// membership fence (#123's `not_collected` leg).
+    pub(super) retire_not_collected: bool,
+    /// A `Retire` refused because the target was the sitting leader.
+    pub(super) retire_leader: bool,
     pub(super) redirect_dropped: bool,
     pub(super) duplicated_any: bool,
     pub(super) duplicated_quorum_kind: bool,

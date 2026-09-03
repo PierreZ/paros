@@ -64,10 +64,10 @@ use moonpool_core::{
 };
 use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
-    AcceptorConfig, ClientId, ClientSeq, Control, GcAck, MatchRefusal, MatchReply, MatchStep,
-    MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, ProposeResult, QuorumSystem,
-    RawNode, ReadIndexResult, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Control, GcAck, MatchRefusal, MatchReply,
+    MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, ProposeResult,
+    QuorumSystem, RawNode, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -802,16 +802,32 @@ where
                     });
                 }
             }
-            Some((_req, reply)) = rpc.retire.recv() => {
+            Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
                 // the tick arm acts on, so it produces no `Ready` batch.
                 // Operator decommissioning (#123): a node a leader's GC named
-                // retirable is shut down for good. Refused while this node is
-                // a member of the configuration it believes in force, or
-                // leads: "retirable" is never "still needed".
-                let accepted = node.config().has_matchmakers() && !node.is_acceptor() && !node.is_leader();
-                audit.retire_acked(NodeId(self_id), accepted);
-                tracing::info!(node = self_id, accepted, "retire_acked");
+                // retirable is shut down for good. The decision is the core's
+                // (`RawNode::may_retire`), because the deciding condition is a
+                // protocol fact — an effective GC watermark strictly above
+                // every ballot a configuration naming this node was bound to —
+                // and not the operator's belief that it read a retirable list.
+                let watermark = req
+                    .gc_watermark
+                    .map(|b| Ballot { round: b.round, node: NodeId(b.node) });
+                let accepted = watermark.is_some_and(|w| node.may_retire(w));
+                let refusal = if accepted {
+                    ""
+                } else if !node.config().has_matchmakers() {
+                    "plain"
+                } else if node.is_leader() {
+                    "leader"
+                } else if node.is_acceptor() {
+                    "member"
+                } else {
+                    "not_collected"
+                };
+                audit.retire_acked(NodeId(self_id), accepted, refusal);
+                tracing::info!(node = self_id, accepted, refusal, "retire_acked");
                 if accepted {
                     retiring = true;
                 }
@@ -821,7 +837,7 @@ where
                 } else {
                     let _ = reply.send(RetireAck {
                         accepted,
-                        refusal: if accepted { String::new() } else { "member".to_string() },
+                        refusal: refusal.to_string(),
                     });
                 }
             }

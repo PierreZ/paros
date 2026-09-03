@@ -480,6 +480,7 @@ impl RawNode {
             // without anyone asking (review of #132).
             self.acceptors = config;
             self.acceptors_since = newest;
+            self.record_membership();
             self.become_follower(None);
             MatchStep::StaleConfiguration { newest }
         } else {

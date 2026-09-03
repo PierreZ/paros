@@ -208,6 +208,42 @@ impl RawNode {
                 .is_some_and(|gc| gc.requested() && gc.effective().is_none())
     }
 
+    /// Whether this node may honor an operator [`Retire`](crate::Message)
+    /// against the GC watermark the operator read from a leader's `Inspect`
+    /// **after** that floor became effective.
+    ///
+    /// Four conditions, and the fourth is the one that makes the other three
+    /// mean something:
+    ///
+    /// 1. the deployment names matchmakers — without them nothing is ever
+    ///    forgotten and no configuration can be retired;
+    /// 2. this node is not a member of the configuration it believes in force
+    ///    ("removed is not shut down" is only *begun* by a removal);
+    /// 3. it is not the leader — a sitting leader is needed whatever the
+    ///    floor says; and
+    /// 4. `watermark` is strictly above `last_member_ballot`: every
+    ///    configuration this node was ever a member of is bound to a ballot
+    ///    at or below that, so a floor above it means a matchmaker quorum
+    ///    durably refuses every campaign that could still name one. Only then
+    ///    is "no future leader can need this node's Phase-1 promise" a fact
+    ///    rather than an operator's belief.
+    ///
+    /// Condition 2 alone is a *belief* — `acceptors` is volatile and a
+    /// rebooted node regresses to its bootstrap configuration — so a node
+    /// that answered `Retire` on it could be shut down while a configuration
+    /// it is still needed for is alive. The watermark is the evidence that
+    /// turns the belief into a fact, and the operator can only obtain it from
+    /// a leader whose GC actually reached a matchmaker quorum
+    /// (`InspectReply::gc_watermark`, populated by
+    /// [`RawNode::gc_effective`]).
+    #[must_use]
+    pub fn may_retire(&self, watermark: Ballot) -> bool {
+        self.config.has_matchmakers()
+            && !self.is_acceptor()
+            && self.role != NodeRole::Leader
+            && watermark > self.last_member_ballot
+    }
+
     /// The floor this leadership made effective at a matchmaker quorum, and
     /// the acceptors it retired — `None` until then.
     #[must_use]

@@ -1989,20 +1989,22 @@ impl Workload for ChainWorkload {
                     // no-op.
                     let probe_target = leader_hint.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
-                    // The retirable list and the configuration in force come
-                    // from the *same* reply, so the world can hold the
-                    // protocol to "a retirable node is outside C_b".
-                    let (retirable, in_force): (Vec<u64>, Vec<u64>) = moonpool_sim::select! {
+                    // The retirable list, the configuration in force and the
+                    // effective GC watermark come from the *same* reply: the
+                    // world can hold the protocol to "a retirable node is
+                    // outside C_b", and the node itself refuses the request
+                    // unless the watermark proves every configuration it was
+                    // a member of is forgotten (#123).
+                    let inspected = moonpool_sim::select! {
                         response = probe.inspect(InspectRequest {}) => response
                             .ok()
-                            .map(|response| {
-                                let reply = response.into_inner();
-                                (reply.retirable, reply.members)
-                            })
-                            .unwrap_or_default(),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => (Vec::new(), Vec::new()),
-                        () = shutdown.cancelled() => (Vec::new(), Vec::new()),
+                            .map(tonic::Response::into_inner),
+                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
+                        () = shutdown.cancelled() => None,
                     };
+                    let (retirable, in_force, gc_watermark) = inspected
+                        .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
+                        .unwrap_or_default();
                     assert_always!(
                         retirable.is_empty() || has_matchmakers,
                         "gc: a deployment without matchmakers never names a retirable node"
@@ -2036,7 +2038,7 @@ impl Workload for ChainWorkload {
                             tracing::info!(node = victim as u64, "chain_retire_request");
                             let mut client = internal_clients[victim].clone();
                             let accepted: Option<bool> = moonpool_sim::select! {
-                                response = client.retire(RetireRequest {}) => response
+                                response = client.retire(RetireRequest { gc_watermark }) => response
                                     .ok()
                                     .map(|response| response.into_inner().accepted),
                                 _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
@@ -2047,13 +2049,14 @@ impl Workload for ChainWorkload {
                                 Some(true) => self.adversarial.retired = true,
                                 Some(false) => {
                                     // Refused means the node is a member of
-                                    // the configuration in force (or is the
-                                    // leader): it is still live, so the
-                                    // pre-emptive park must be undone or the
-                                    // harness has removed a member outside
-                                    // the protocol. Only ever on an explicit
-                                    // refusal — an ambiguous ack may have
-                                    // been honored.
+                                    // the configuration in force, is the
+                                    // leader, or no effective floor sits
+                                    // above its membership fence: it is still
+                                    // live, so the pre-emptive park must be
+                                    // undone or the harness has removed a
+                                    // member outside the protocol. Only ever
+                                    // on an explicit refusal — an ambiguous
+                                    // ack may have been honored.
                                     self.adversarial.retire_refused = true;
                                     let world = crate::world::storage_world(ctx.state());
                                     let released = world

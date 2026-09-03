@@ -157,6 +157,15 @@ pub struct RawNode {
     /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
     /// bootstrap configuration).
     acceptors_since: Ballot,
+    /// The highest ballot at which a configuration this node **belonged to**
+    /// was in force here: `acceptors_since` restricted to the assignments
+    /// that left this node inside `acceptors` (boot, `learn_config`,
+    /// `try_become_leader`, a handoff install, an adopted effective
+    /// configuration). Monotone, volatile, and the whole of what
+    /// [`RawNode::may_retire`] needs: a GC watermark strictly above it means
+    /// no surviving configuration can ask this node for a Phase-1 promise,
+    /// because every configuration it was ever a member of is forgotten.
+    last_member_ballot: Ballot,
     /// Durable identity of the cluster configuration this node belongs to.
     config_id: ConfigId,
     /// The **acceptor** component ([`crate::acceptor::Acceptor`]): the

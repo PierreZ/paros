@@ -91,6 +91,11 @@ impl RawNode {
             config,
             acceptors,
             acceptors_since: Ballot::zero(),
+            // The bootstrap configuration is bound to `Ballot::zero()`, so a
+            // node that boots inside it was a member at exactly that ballot —
+            // and a node that boots as a spare has not been a member of
+            // anything, which is the same starting value.
+            last_member_ballot: Ballot::zero(),
             config_id: hard_state.config_id,
             acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
             replica,

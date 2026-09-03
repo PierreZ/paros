@@ -379,6 +379,7 @@ impl RawNode {
         if self.config.has_matchmakers() {
             self.acceptors = outcome.config.clone();
             self.acceptors_since = outcome.ballot;
+            self.record_membership();
         } else {
             assert!(
                 self.acceptors == outcome.config,

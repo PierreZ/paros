@@ -107,6 +107,21 @@ impl RawNode {
             self.acceptors.members.iter().all(|m| self.in_pool(*m)),
             "the active configuration is drawn from the node pool"
         );
+        // The retirement fence (#123): `last_member_ballot` is
+        // `acceptors_since` restricted to the assignments that left this node
+        // a member, so it never runs ahead of it, and while this node *is* a
+        // member the two agree. Both halves matter: a value that ran ahead
+        // would refuse a legitimate retirement forever, and one that lagged
+        // behind while the node is a member would let `may_retire` accept a
+        // node the cluster still needs.
+        assert!(
+            self.last_member_ballot <= self.acceptors_since,
+            "the membership fence never runs ahead of the configuration"
+        );
+        assert!(
+            !self.is_acceptor() || self.last_member_ballot == self.acceptors_since,
+            "a member's fence is the ballot its configuration is bound to"
+        );
     }
 
     /// The per-role state machine: what a leader, a candidate and a follower

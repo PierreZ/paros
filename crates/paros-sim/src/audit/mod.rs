@@ -2380,8 +2380,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .successor_republished(node, successor);
     }
 
-    fn retire_acked(&self, _node: NodeId, accepted: bool) {
-        self.state().matchmaker.retire_acked(accepted);
+    fn retire_acked(&self, _node: NodeId, accepted: bool, refusal: &str) {
+        let mut st = self.state();
+        // The refusal legs the shared gate cannot tell apart. `not_collected`
+        // is the one #123's rule turns from a workload discipline into a
+        // protocol answer: the node is outside the configuration it believes
+        // in force, and still refuses, because nothing proves the cluster is
+        // done with the configurations it *was* in.
+        if !accepted {
+            match refusal {
+                "not_collected" => reach_once!(
+                    st.retire_not_collected,
+                    "gc: a retirement is refused for want of an effective floor"
+                ),
+                "leader" => reach_once!(
+                    st.retire_leader,
+                    "gc: a retirement is refused by the sitting leader"
+                ),
+                _ => {}
+            }
+        }
+        st.matchmaker.retire_acked(accepted);
     }
 
     fn retired(&self, node: NodeId) {
