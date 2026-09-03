@@ -7,13 +7,6 @@ use paros_core::{
     ReconfigureRequest, ReconfigurerStep, StartRefusal,
 };
 
-/// How many election timeouts a matchmaker-set handover may make no progress
-/// before this driver abandons it (`MatchmakerReconfigurer::abandon`): long
-/// enough for a slow matchmaker to answer a re-sent request, short enough that
-/// a dead one does not hold the `Busy` refusal for the rest of a run. Driver
-/// policy: the core reports the stall (`stalled_for`), the driver decides.
-pub const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
-
 /// The node driver's handover state: the sans-IO
 /// [`MatchmakerReconfigurer`] plus the two clocks the core deliberately does
 /// not own — how long since the running phase's step was last re-sent, and how

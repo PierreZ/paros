@@ -109,6 +109,38 @@ pub struct DriverTunables {
     /// the registry answers idempotently. The default is one election-timeout
     /// base, so a lost reply costs about one round trip before the retry.
     pub match_resend_ticks: u64,
+    /// Ticks between re-sends of an open GC request (`RawNode::resend_gc`),
+    /// on a deployment with matchmakers. Its own cadence, not matchmaking's:
+    /// the two pace unrelated round trips and a seed should be able to be
+    /// extreme in one and ordinary in the other. Floor 1 (a request per tick,
+    /// answered idempotently); the ceiling is unbounded and still safe — a
+    /// watermark that is never raised costs the matchmakers their retained
+    /// histories, never safety.
+    pub gc_resend_ticks: u64,
+    /// Ticks between re-sends of the running matchmaker-set handover's step
+    /// (`HandoverDriver::resend_due`). Floor 1; bounded above by the stall
+    /// budget below — a cadence longer than
+    /// `election_timeout * reconfigure_timeout_elections` would let the phase
+    /// be abandoned before it is ever re-sent, which is not a slower retry
+    /// but no retry at all.
+    pub reconfigurer_resend_ticks: u64,
+    /// How many election timeouts a matchmaker-set handover may make no
+    /// progress before the driver abandons it
+    /// (`MatchmakerReconfigurer::abandon`). Driver policy, never a constant
+    /// inside the state machine: the core only reports the stall
+    /// (`stalled_for`). Floor 1 election timeout — long enough for a slow
+    /// matchmaker to answer one re-sent request; below that a healthy
+    /// handover could not finish, which is not an extreme configuration but
+    /// a broken one.
+    pub reconfigure_timeout_elections: u64,
+    /// Upper bound on the jittered backoff a preempted successor decree waits
+    /// before it reopens at a higher ballot — the symmetry break between
+    /// dueling reconfigurers, drawn from `1..=reconfigure_backoff_max_ticks`.
+    /// Floor 1 (draw exactly one tick: no jitter, so two reconfigurers may
+    /// duel for a while — liveness, and the stall budget ends it). Its own
+    /// knob rather than a multiple of `election_timeout_base`, so a seed can
+    /// push the election clock and the decree's symmetry break independently.
+    pub reconfigure_backoff_max_ticks: u64,
 }
 
 impl Default for DriverTunables {
@@ -127,6 +159,10 @@ impl Default for DriverTunables {
             peer_queue_capacity: GRPC_PEER_QUEUE_CAPACITY,
             delivery_batch: GRPC_DELIVERY_BATCH,
             match_resend_ticks: ELECTION_TIMEOUT_BASE,
+            gc_resend_ticks: ELECTION_TIMEOUT_BASE,
+            reconfigurer_resend_ticks: ELECTION_TIMEOUT_BASE,
+            reconfigure_timeout_elections: RECONFIGURE_TIMEOUT_ELECTIONS,
+            reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
         }
     }
 }
@@ -205,6 +241,14 @@ const READ_RETRY_TICKS: u64 = 10;
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// Default stall budget for a matchmaker-set handover, in election timeouts:
+/// long enough for a slow matchmaker to answer a re-sent request, short enough
+/// that a dead one does not hold the `Busy` refusal for the rest of a run.
+/// Driver policy, not a protocol bound — the core reports the stall
+/// (`MatchmakerReconfigurer::stalled_for`), the driver decides — and a
+/// [`DriverTunables`] field rather than a constant the harness cannot move.
+const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 
 /// Parse an IP (which may lack a port) into a socket-address string, defaulting to
 /// port 4500 (the moonpool sim convention; production supplies a full address).

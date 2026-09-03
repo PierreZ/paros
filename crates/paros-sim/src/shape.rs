@@ -168,7 +168,49 @@ impl NodeShape {
             // every campaign that lost a reply; the election timeout still
             // bounds it.
             match_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
+            // The GC re-send cadence, its own location: the two round trips
+            // are unrelated, and a seed should be able to be extreme in one
+            // and ordinary in the next. Floor 1; the ceiling is unbounded and
+            // still winnable — a watermark that is never raised costs the
+            // matchmakers their retained histories, never safety.
+            gc_resend_ticks: buggify_knob!(5_u64, 1_u64..41_u64),
+            // The handover re-send cadence. Floor 1; bounded above by the
+            // stall budget drawn just below — a cadence past
+            // `election_timeout * reconfigure_timeout_elections` would let
+            // the phase be abandoned before it is ever re-sent, which is no
+            // retry rather than a slow one, so the ceiling stays under the
+            // smallest budget the next knob can draw (1 timeout × the
+            // election base's own floor).
+            reconfigurer_resend_ticks: buggify_knob!(5_u64, 1_u64..11_u64),
+            // The handover stall budget. Floor 1 election timeout: one
+            // re-sent request has time to be answered, and a phase nobody
+            // answers is abandoned within a timeout instead of holding the
+            // `Busy` refusal for the tail.
+            reconfigure_timeout_elections: buggify_knob!(4_u64, 1_u64..17_u64),
+            // The preempted decree's backoff ceiling, drawn independently of
+            // the election clock (it used to be `2 × election_timeout_base`,
+            // which correlated the two). Floor 1: a one-tick draw is no
+            // jitter at all, so dueling reconfigurers may keep preempting
+            // each other — a liveness cost the stall budget ends, never a
+            // safety one.
+            reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
         };
+        if tunables.gc_resend_ticks != 5 {
+            // BUGGIFY pairing: the GC cadence extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme GC re-send cadence");
+        }
+        if tunables.reconfigurer_resend_ticks != 5 {
+            // BUGGIFY pairing: the handover cadence extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme handover re-send cadence");
+        }
+        if tunables.reconfigure_timeout_elections != 4 {
+            // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme handover stall budget");
+        }
+        if tunables.reconfigure_backoff_max_ticks != 10 {
+            // BUGGIFY pairing: the decree backoff extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme decree backoff ceiling");
+        }
         // The crash bias is a plain multiplier with no floor to defend: at
         // its extreme the seams crash on one batch in three inside the
         // window, and the window still closes long before the tail does.

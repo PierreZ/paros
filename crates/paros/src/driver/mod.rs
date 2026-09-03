@@ -53,7 +53,6 @@ pub use events::{
     EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
     EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, command_hash,
 };
-pub use handover::RECONFIGURE_TIMEOUT_ELECTIONS;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -747,8 +746,9 @@ where
                     node.learn_matchmakers(successor);
                 }
                 if let ReconfigurerStep::Preempted { .. } = &step {
-                    let base = tunables.election_timeout_base.max(1);
-                    let ticks = providers.random().random_range(1..base * 2 + 1);
+                    let ticks = providers
+                        .random()
+                        .random_range(1..tunables.reconfigure_backoff_max_ticks.max(1) + 1);
                     handover.back_off(ticks);
                     audit.reconfigurer_backoff(NodeId(self_id), ticks);
                     tracing::info!(node = self_id, ticks, "reconfigurer_backoff");
@@ -1044,11 +1044,11 @@ where
                 } else {
                     match_resend_elapsed = 0;
                 }
-                // The open GC request's re-send (#123): the same cadence as
-                // matchmaking, its own BUGGIFY location.
+                // The open GC request's re-send (#123): its own cadence
+                // (`gc_resend_ticks`) and its own BUGGIFY location.
                 if node.gc_pending() {
                     gc_resend_elapsed += 1;
-                    if gc_resend_elapsed >= tunables.match_resend_ticks.max(1) {
+                    if gc_resend_elapsed >= tunables.gc_resend_ticks.max(1) {
                         gc_resend_elapsed = 0;
                         if hooks.skip_gc_resend() {
                             audit.gc_resend_skipped(NodeId(self_id));
@@ -1060,11 +1060,13 @@ where
                 } else {
                     gc_resend_elapsed = 0;
                 }
-                // The running handover's re-send (#125): the same cadence,
-                // its own location; a preempted decree reopens only here, so
-                // two dueling reconfigurers are paced by their drivers.
+                // The running handover's re-send (#125): its own cadence
+                // and its own location; a preempted decree reopens only here,
+                // so two dueling reconfigurers are paced by their drivers.
                 handover.tick();
-                let stall_budget = node.election_timeout().saturating_mul(RECONFIGURE_TIMEOUT_ELECTIONS);
+                let stall_budget = node
+                    .election_timeout()
+                    .saturating_mul(tunables.reconfigure_timeout_elections);
                 if handover.is_busy()
                     && stall_budget != 0
                     && handover.stalled_for() >= stall_budget
@@ -1077,7 +1079,7 @@ where
                     audit.reconfigurer_aborted(NodeId(self_id));
                     tracing::info!(node = self_id, "reconfigurer_aborted");
                 }
-                if handover.resend_due(tunables.match_resend_ticks) {
+                if handover.resend_due(tunables.reconfigurer_resend_ticks) {
                     if hooks.skip_reconfigurer_resend() {
                         audit.reconfigurer_resend_skipped(NodeId(self_id));
                         tracing::info!(node = self_id, "reconfigurer_resend_skipped");

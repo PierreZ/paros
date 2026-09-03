@@ -306,11 +306,15 @@ intersects it). Liveness rules: a frozen generation with no successor is a
 cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
 the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
 freeze — the only liveness it can vouch for); and a phase that makes no progress is
-**abandoned by the driver** after `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (the
-core only reports the stall, `MatchmakerReconfigurer::stalled_for`; the timeout is driver
-policy in `paros::driver`, never a constant inside the state machine; the reconfigurer holds
-no durable state, so the freeze, the bootstrap and the votes stay), so a dead proposed member
-never holds a `busy` refusal for the rest of a run. **A successor set must admit its quorum
+**abandoned by the driver** after `DriverTunables::reconfigure_timeout_elections` election
+timeouts (the core only reports the stall, `MatchmakerReconfigurer::stalled_for`; the budget is
+driver policy and, per prong 2, a workload-buggified tunable rather than a constant — neither
+inside the state machine nor hard-coded in the driver; the reconfigurer holds no durable state,
+so the freeze, the bootstrap and the votes stay), so a dead proposed member never holds a
+`busy` refusal for the rest of a run. The three matchmaker-plane cadences the driver owns —
+`match_resend_ticks`, `gc_resend_ticks`, `reconfigurer_resend_ticks` — and the preempted
+decree's backoff ceiling (`reconfigure_backoff_max_ticks`) are each their own knob with their
+own floor, so a seed can be extreme in one and ordinary in the next. **A successor set must admit its quorum
 system** (`MatchmakerSet::is_well_formed`): `start` refuses a malformed target, a matchmaker
 refuses a `Bootstrap` or `Chosen` naming one, and a `finish` proposes the members that answered
 the freeze — a quorum of the old set, never fewer. **`Chosen` is a learner notification, not an

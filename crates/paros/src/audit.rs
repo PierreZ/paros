@@ -534,7 +534,7 @@ pub trait Audit {
     fn reconfigurer_resend_skipped(&self, node: NodeId) {}
 
     /// This node abandoned a handover whose running phase made no progress
-    /// for `RECONFIGURE_TIMEOUT_ELECTIONS` election timeouts (a member that
+    /// for `reconfigure_timeout_elections` election timeouts (a member that
     /// never answers); the frozen generation stays for the next node that
     /// meets it to finish.
     fn reconfigurer_aborted(&self, node: NodeId) {}
