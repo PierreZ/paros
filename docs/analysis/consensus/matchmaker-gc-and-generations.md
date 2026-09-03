@@ -196,20 +196,38 @@ appears in the bootstrap history). A bootstrapped set becomes authoritative only
 `M_{g+1}` members activate their pending bootstrap as their registry
 (`MatchmakerWriteOp::InstallRegistry`).
 
-### Why a single-decree kernel beside `RawNode`, not extracted from it
+### Why the single-decree kernel is still beside `RawNode`, and what replaces it
 
 The successor is decided by classic single-decree Paxos, and the question was whether to
-carve that out of `RawNode`. The decision is a **separate, tiny kernel**
-(`single_decree.rs`: `DecreeAcceptor<V>` and `DecreeProposer<A, V>`), for one reason:
-`RawNode`'s Phase 1 is inseparable from what makes it Multi-Paxos — one `Prepare` per ballot
-over a log suffix, paged `Promise`s, the CTRL tri-state, the cross-configuration completion
-predicate, the no-op gap fill, the read fence, the bounded leader recovery. Extracting a
-`SingleDecree` from that would re-derive the proven core around a kernel it never had, for
-the benefit of one consumer that needs exactly "Paxos made simple" §2.2 and nothing of the
-above. The kernel's whole content is the value-selection rule (adopt the highest-ballot vote,
-else propose your own), unit-tested against the dueling-proposer case; the matchmaker embeds
-the acceptor half in its durable scalars and the reconfigurer drives the proposer half.
-Leadership, retries and transport stay with the caller.
+carve that out of `RawNode`. When the handover landed, `RawNode` *was* Multi-Paxos in one
+piece — one `Prepare` per ballot over a log suffix, paged `Promise`s, the CTRL tri-state,
+the cross-configuration completion predicate, the no-op gap fill, the read fence, the
+bounded leader recovery — and extracting a single decree from that would have re-derived
+the proven core around a kernel it never had. So the decree is a **separate, tiny kernel**
+(`single_decree.rs`: `DecreeAcceptor<V>` and `DecreeProposer<A, V>`) whose whole content is
+the value-selection rule (adopt the highest-ballot vote, else propose your own), unit-tested
+against the dueling-proposer case; the matchmaker embeds the acceptor half in its durable
+scalars and the reconfigurer drives the proposer half. Leadership, retries and transport
+stay with the caller.
+
+That reason no longer holds as stated. The core has since been decomposed into roles
+(`acceptor.rs`, `proposer.rs`, `replica.rs`, with `membership.rs` as the quorum boundary;
+AGENTS.md, *The core is composable*), and `RawNode` is the wiring that colocates them.
+A single decree is then the same `Proposer` + `Acceptor` over a one-slot log — the
+reconfigurer would drive the shared proposer against the matchmakers' shared acceptor, with
+no second value-selection rule to keep in agreement. Moving the kernel onto those roles is
+the next phase of that plan; until it lands, `single_decree.rs` stays the decree the
+handover runs, and the majority-only rule below binds both.
+
+### Quorum model: majorities only
+
+Matchmaker Paxos generalizes matchmaker quorums to arbitrary quorum systems (§4). paros does
+not: `MatchmakerSet::quorum_size` is a majority, every matchmaker-side quorum (registration,
+GC ack, freeze, decree, publication) uses it, and `DecreeProposer` takes the acceptor *set*
+and derives the same majority itself — it cannot be constructed with a quorum that fails to
+intersect or exceeds its acceptors, and a reply from an identity outside the set never counts.
+The handover's safety argument below is made under that model only; a flexible matchmaker
+quorum system would have to replace the set's rule and the kernel together.
 
 ### Invariant 1, and what proved it load-bearing
 

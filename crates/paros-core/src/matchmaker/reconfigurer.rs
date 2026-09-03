@@ -13,9 +13,11 @@
 //!   |             Bootstrap{g+1, target, w, H} -> every member of the target;
 //!   |             wait for ALL of them (a set is chosen only once fully initialized)
 //!   v
-//! Deciding        single-decree Paxos over M_g as acceptors (`DecreeProposer`):
-//!   |             Phase 1 at a fresh ballot, P2c adopts a competing proposal already
-//!   |             voted, Phase 2 with the selected value; a Nack reopens higher
+//! Deciding        single-decree Paxos over M_g as acceptors (`DecreeProposer`, a
+//!   |             majority of M_g for both phases — the only quorum model paros
+//!   |             supports for matchmakers): Phase 1 at a fresh ballot, P2c adopts a
+//!   |             competing proposal already voted, Phase 2 with the selected value;
+//!   |             a Nack reopens higher on the driver's next re-send
 //!   v
 //! Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of
 //!   |             each has learned it (stragglers are told again by any node that
@@ -355,14 +357,14 @@ impl MatchmakerReconfigurer {
                             round: self.round,
                             node: me,
                         },
-                        old.quorum_size(),
+                        old.members.iter().copied(),
                         bootstrap.set.members.clone(),
                     );
                 }
                 let ballot = proposer.ballot();
                 let generation = old.generation;
                 let value = proposer.value().cloned();
-                for m in proposer.unanswered(&old.members) {
+                for m in proposer.unanswered() {
                     queue.push((
                         m,
                         match &value {
@@ -539,8 +541,11 @@ impl MatchmakerReconfigurer {
                     round: self.round,
                     node: self.node,
                 };
-                let proposer =
-                    DecreeProposer::new(ballot, old.quorum_size(), bootstrap.set.members.clone());
+                let proposer = DecreeProposer::new(
+                    ballot,
+                    old.members.iter().copied(),
+                    bootstrap.set.members.clone(),
+                );
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),

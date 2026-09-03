@@ -29,10 +29,10 @@ impl RawNode {
             .has_matchmakers()
             .then(|| self.acceptors.clone());
         self.broadcast(&Message::Heartbeat {
-            config_id: self.hard_state.config_id,
+            config_id: self.config_id,
             from: self.config.id,
             ballot: self.ballot,
-            commit: self.hard_state.chosen_index,
+            commit: self.replica.chosen_index(),
             seq: self.heartbeat_seq,
             config,
         });
@@ -67,7 +67,7 @@ impl RawNode {
         }
         // Follower receiving the leader's beat: adopt its ballot / leadership only
         // if it is at or above our promise.
-        if ballot >= self.hard_state.max_promised_ballot {
+        if ballot >= self.acceptor.promised() {
             if self.role == NodeRole::Follower {
                 self.leader = Some(from);
                 self.election_elapsed = 0;
@@ -87,7 +87,7 @@ impl RawNode {
             // "my promise is at or below `ballot` right now", which is exactly
             // what this restates (and promise monotonicity preserves).
             assert!(
-                self.hard_state.max_promised_ballot <= ballot,
+                self.acceptor.promised() <= ballot,
                 "a beat ack never claims a promise above the acked ballot"
             );
             // The chosen index rides the ack on a matchmaker deployment only
@@ -95,12 +95,12 @@ impl RawNode {
             let chosen = self
                 .config
                 .has_matchmakers()
-                .then_some(self.hard_state.chosen_index)
+                .then_some(self.replica.chosen_index())
                 .flatten();
             self.pending_messages.push((
                 from,
                 Message::HeartbeatAck {
-                    config_id: self.hard_state.config_id,
+                    config_id: self.config_id,
                     from: me,
                     ballot,
                     seq,
@@ -121,7 +121,7 @@ impl RawNode {
         // point — those two states are genuinely different, and a wire encoding
         // that folded them together left a follower missing exactly slot 0 with no
         // way to notice (#56).
-        let ci = self.hard_state.chosen_index;
+        let ci = self.replica.chosen_index();
         if commit > ci {
             // We are behind: a `Commit` (and its `Accept`) for a decided slot never
             // reached us — the leader only re-sends `Accept`s for still-*pending*

@@ -136,16 +136,16 @@ impl RawNode {
         // application repair) is tied to the quorum that reported it, and a
         // leadership a higher `Prepare` already passed holds nothing worth
         // moving. The same narrowness as `can_relinquish`.
-        if self.leader_recovery.is_some()
-            || self.repair_probe.is_some()
-            || self.app_repair.is_some()
-            || self.ballot < self.hard_state.max_promised_ballot
+        if self.proposer.recovery().is_some()
+            || self.proposer.probe().is_some()
+            || self.replica.app_repair().is_some()
+            || self.ballot < self.acceptor.promised()
         {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unsettled);
         }
         let base_round = self
-            .hard_state
-            .max_promised_ballot
+            .acceptor
+            .promised()
             .round
             .max(self.ballot.round)
             .max(self.round_floor);
@@ -172,7 +172,7 @@ impl RawNode {
             "a reconfiguration registers the requested configuration"
         );
         assert!(
-            self.proposer.is_empty() && self.election.is_none(),
+            self.proposer.rounds().is_empty() && self.proposer.election().is_none(),
             "a reconfiguring leader abandons its old ballot's rounds"
         );
         self.assert_invariants();

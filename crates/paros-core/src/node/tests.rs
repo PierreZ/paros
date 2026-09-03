@@ -54,7 +54,7 @@ impl TestStorage {
     /// look, for building the "restart from durable storage" path in tests.
     fn from_node(n: &RawNode) -> Self {
         Self {
-            hard_state: n.hard_state().clone(),
+            hard_state: n.hard_state(),
             accepted: n.accepted().clone(),
             config: n.config().clone(),
             first_slot: n.first_slot(),
@@ -75,7 +75,7 @@ impl TestStorage {
 
 impl Storage for TestStorage {
     fn initial_state(&self) -> (HardState, Config) {
-        (self.hard_state.clone(), self.config.clone())
+        (self.hard_state, self.config.clone())
     }
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
         self.accepted.get(&slot).cloned()
@@ -203,7 +203,8 @@ fn drain(n: &mut RawNode) -> Vec<(NodeId, Message)> {
 /// The chosen client value at `slot` on this node, if any (a control command has
 /// no client value and reads back as `None`).
 fn chosen_at(n: &RawNode, slot: u64) -> Option<Value> {
-    n.chosen
+    n.replica
+        .chosen()
         .get(&Slot(slot))
         .and_then(Command::user)
         .map(|e| e.value.clone())

@@ -114,7 +114,7 @@ fn election_fills_a_hole_the_promise_quorum_never_reported() {
     );
     assert!(
         matches!(
-            nodes[1].accepted.get(&Slot(1)),
+            nodes[1].accepted().get(&Slot(1)),
             Some((_, Command::Control(Control::Noop)))
         ),
         "the hole was filled with a no-op, not a client value"
@@ -436,7 +436,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     });
 
     assert_eq!(n.role(), NodeRole::Follower);
-    assert!(n.election.is_none());
+    assert!(n.proposer.election().is_none());
     let out = drain(&mut n);
     assert!(matches!(out.as_slice(), [(_, Message::Promise { .. })]));
 }
@@ -495,7 +495,7 @@ fn leader_recovery_is_split_across_ready_batches() {
     let ready = n.ready();
     assert_eq!(ready.recovery_batch(), Some((2, 0, 0)));
     ready.advance();
-    assert!(n.leader_recovery.is_none());
+    assert!(n.proposer.recovery().is_none());
 }
 
 #[test]
@@ -647,7 +647,8 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let _ = drain(&mut x);
     assert_eq!(x.role, NodeRole::Candidate, "the campaign is untouched");
     assert_eq!(
-        x.hard_state.max_promised_ballot, b_prime,
+        x.hard_state().max_promised_ballot,
+        b_prime,
         "`mark_chosen` raised the promise to the choosing ballot"
     );
 
@@ -665,9 +666,12 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
         next_from_slot: None,
     });
     assert_eq!(x.role, NodeRole::Candidate, "the stale win is refused");
-    assert!(x.election.is_some(), "the refused campaign stays open");
     assert!(
-        x.proposer.is_empty(),
+        x.proposer.election().is_some(),
+        "the refused campaign stays open"
+    );
+    assert!(
+        x.proposer.rounds().is_empty(),
         "nothing is proposed at the stale ballot"
     );
     let _ = drain(&mut x);
@@ -696,15 +700,15 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     });
     assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
     assert!(
-        x.ballot >= x.hard_state.max_promised_ballot,
+        x.ballot >= x.hard_state().max_promised_ballot,
         "a leader's ballot covers its own promise"
     );
     assert!(
-        x.proposer.contains_key(&Slot(3)),
+        x.proposer.rounds().contains_key(&Slot(3)),
         "slot 3 is re-proposed (P2c)"
     );
     assert!(
-        x.accepted.contains_key(&Slot(3)),
+        x.accepted().contains_key(&Slot(3)),
         "and its self-accept was recorded"
     );
     assert_eq!(
@@ -748,7 +752,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         config: None,
     });
     let _ = drain(&mut p);
-    assert_eq!(p.hard_state.max_promised_ballot, b_prime);
+    assert_eq!(p.hard_state().max_promised_ballot, b_prime);
 
     // It rejects the stale leader's `Accept` …
     p.step(Message::Accept {
@@ -787,7 +791,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
 ///
 /// The route quorum intersection does **not** contain: a snapshot offer
 /// carries the **serving node's own promised ballot** (`serve_catchup` pushes
-/// `(to, ci, self.hard_state.max_promised_ballot)`), and a promise needs no
+/// `(to, ci, self.hard_state().max_promised_ballot)`), and a promise needs no
 /// quorum — one campaigning node mints it. Pre-guard, X won at `b` with
 /// `max_promised = m > b`: the self-accept skip left the recovered suffix out
 /// of `accepted`, `next_slot` and the fresh-leader read fence dropped below
@@ -828,9 +832,13 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         sessions: vec![],
     });
     let _ = drain(&mut x);
-    assert_eq!(x.hard_state.max_promised_ballot, m, "promise raised to m");
-    assert_eq!(x.hard_state.chosen_index, Some(Slot(5)));
-    assert_eq!(x.first_slot, Slot(6), "the log below the snapshot is gone");
+    assert_eq!(x.hard_state().max_promised_ballot, m, "promise raised to m");
+    assert_eq!(x.hard_state().chosen_index, Some(Slot(5)));
+    assert_eq!(
+        x.first_slot(),
+        Slot(6),
+        "the log below the snapshot is gone"
+    );
     assert_eq!(x.role, NodeRole::Candidate, "the campaign is untouched");
 
     // Node 1, still at round 4, promises `b` and reports slot 8 accepted: a
@@ -851,7 +859,10 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         NodeRole::Candidate,
         "no stale win below the minted promise"
     );
-    assert!(x.proposer.is_empty(), "no accept round opens at `b`");
+    assert!(
+        x.proposer.rounds().is_empty(),
+        "no accept round opens at `b`"
+    );
     assert_eq!(x.read_floor, None, "no fresh-leader read fence is set");
     let _ = drain(&mut x);
 
@@ -869,17 +880,17 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
         config_id: ConfigId::default(),
         from: NodeId(1),
         ballot: b2,
-        from_slot: x.first_slot,
+        from_slot: x.first_slot(),
         accepted: reported,
         next_from_slot: None,
     });
     assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
     assert!(
-        x.ballot >= x.hard_state.max_promised_ballot,
+        x.ballot >= x.hard_state().max_promised_ballot,
         "a leader's ballot covers its own promise"
     );
     assert!(
-        x.accepted.contains_key(&Slot(8)),
+        x.accepted().contains_key(&Slot(8)),
         "the recovered slot reached the log"
     );
     assert_eq!(x.next_slot, Slot(9), "the allocator covers the suffix");

@@ -179,7 +179,7 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
         "only slot 2 is retained in the accepted log"
     );
     assert_eq!(
-        leader.chosen.keys().copied().collect::<Vec<_>>(),
+        leader.replica.chosen().keys().copied().collect::<Vec<_>>(),
         vec![Slot(2)],
         "only slot 2 is retained in the chosen map"
     );
@@ -189,7 +189,7 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
     assert_eq!(floor, Slot(3), "clamped to chosen_index + 1");
     assert_eq!(leader.first_slot(), Slot(3));
     assert!(leader.accepted().is_empty());
-    assert!(leader.chosen.is_empty());
+    assert!(leader.replica.chosen().is_empty());
 }
 
 #[test]
@@ -471,8 +471,8 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
         command: ucmd(1, 1, 0xAA),
     });
     let _ = drain(&mut x);
-    assert_eq!(x.hard_state.chosen_index, None, "nothing contiguous yet");
-    assert!(x.chosen.contains_key(&Slot(10)));
+    assert_eq!(x.hard_state().chosen_index, None, "nothing contiguous yet");
+    assert!(x.replica.is_chosen(Slot(10)));
 
     // A peer answers the below-floor catch-up with a snapshot at boundary 9.
     x.step(Message::InstallSnapshot {
@@ -486,7 +486,7 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
     let _ = drain(&mut x);
 
     assert_eq!(
-        x.hard_state.chosen_index,
+        x.hard_state().chosen_index,
         Some(Slot(10)),
         "the walk resumed over the out-of-order chosen slot at the boundary"
     );

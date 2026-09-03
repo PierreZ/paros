@@ -171,9 +171,9 @@ impl RawNode {
         let Some(gc) = self.gc.as_ref() else {
             return false;
         };
-        if self.leader_recovery.is_some()
-            || self.repair_probe.is_some()
-            || self.app_repair.is_some()
+        if self.proposer.recovery().is_some()
+            || self.proposer.probe().is_some()
+            || self.replica.app_repair().is_some()
         {
             return false;
         }
@@ -181,18 +181,19 @@ impl RawNode {
             None => true,
             Some(fence) => chosen.is_some_and(|c| c >= fence),
         };
-        let mut holders = 0_usize;
-        if self.is_acceptor() && covered(self.hard_state.chosen_index) {
-            holders += 1;
+        let mut holders: BTreeSet<NodeId> = BTreeSet::new();
+        if self.is_acceptor() && covered(self.replica.chosen_index()) {
+            holders.insert(self.config.id);
         }
-        holders += self
-            .acceptors
-            .members
-            .iter()
-            .filter(|m| **m != self.config.id)
-            .filter(|m| covered(gc.peer_chosen.get(*m).copied()))
-            .count();
-        holders >= self.acceptors.quorum_size()
+        holders.extend(
+            self.acceptors
+                .members
+                .iter()
+                .filter(|m| **m != self.config.id)
+                .filter(|m| covered(gc.peer_chosen.get(*m).copied()))
+                .copied(),
+        );
+        self.acceptors.has_quorum(&holders)
     }
 
     /// Queue the GC requests once the condition holds. Idempotent; a no-op

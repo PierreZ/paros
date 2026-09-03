@@ -104,12 +104,24 @@ pub enum DecreePhase<V> {
     Preempted(Ballot),
 }
 
-/// The proposer half: one ballot, one quorum size, the own proposal, and the
-/// tallies. Every counting set is keyed by acceptor identity, so a duplicated
-/// reply never inflates a quorum.
+/// The proposer half: one ballot, one named acceptor set, the own proposal,
+/// and the tallies. Every counting set is keyed by acceptor identity, so a
+/// duplicated reply never inflates a quorum, and a reply from an identity
+/// outside the acceptor set never counts at all.
+///
+/// **Quorum model.** The decree's Phase-1 and Phase-2 quorums are both a
+/// **majority of the named acceptors**, derived here and nowhere else, so
+/// any two quorums intersect — the whole of the P2c argument. This kernel
+/// does not take a quorum *size*: a caller cannot instantiate a decree whose
+/// quorums fail to intersect, or one whose quorum exceeds its acceptors.
+/// Matchmaker Paxos generalizes matchmaker quorums to arbitrary systems;
+/// paros deliberately supports **majority matchmaker quorums only**
+/// (`MatchmakerSet::quorum_size` is the same rule), and the handover is
+/// safe exactly under that model.
 #[derive(Clone, Debug)]
 pub struct DecreeProposer<A, V> {
     ballot: Ballot,
+    acceptors: BTreeSet<A>,
     quorum: usize,
     proposal: V,
     promised_by: BTreeSet<A>,
@@ -119,17 +131,33 @@ pub struct DecreeProposer<A, V> {
 }
 
 impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
-    /// Open a proposal of `proposal` at `ballot` over a quorum of `quorum`
-    /// acceptors.
+    /// Open a proposal of `proposal` at `ballot` over `acceptors`, with a
+    /// majority of them as the quorum.
     ///
     /// # Panics
     ///
-    /// If `quorum` is zero: a decree with no acceptor is a programmer error.
+    /// If `acceptors` is empty: a decree with no acceptor is a programmer
+    /// error.
     #[must_use]
-    pub fn new(ballot: Ballot, quorum: usize, proposal: V) -> Self {
-        assert!(quorum >= 1, "a decree needs at least one acceptor");
+    pub fn new(ballot: Ballot, acceptors: impl IntoIterator<Item = A>, proposal: V) -> Self {
+        let acceptors: BTreeSet<A> = acceptors.into_iter().collect();
+        assert!(
+            !acceptors.is_empty(),
+            "a decree needs at least one acceptor"
+        );
+        let quorum = acceptors.len() / 2 + 1;
+        // Postcondition: the quorum self-intersects over the acceptor set.
+        assert!(
+            quorum * 2 > acceptors.len(),
+            "a decree quorum is a majority"
+        );
+        assert!(
+            quorum <= acceptors.len(),
+            "a decree quorum fits its acceptors"
+        );
         Self {
             ballot,
+            acceptors,
             quorum,
             proposal,
             promised_by: BTreeSet::new(),
@@ -167,14 +195,29 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
         self.value().is_some_and(|v| *v != self.proposal)
     }
 
+    /// The acceptor set this decree runs over.
+    #[must_use]
+    pub fn acceptors(&self) -> &BTreeSet<A> {
+        &self.acceptors
+    }
+
+    /// The quorum size: a majority of the acceptors.
+    #[must_use]
+    pub fn quorum(&self) -> usize {
+        self.quorum
+    }
+
     /// Acceptors that have not promised yet (Phase 1) or not accepted yet
-    /// (Phase 2), among `acceptors` — what a re-send targets.
-    pub fn unanswered<'a>(&'a self, acceptors: &'a [A]) -> impl Iterator<Item = A> + 'a {
-        acceptors.iter().copied().filter(move |a| match self.phase {
-            DecreePhase::Phase1 => !self.promised_by.contains(a),
-            DecreePhase::Phase2(_) => !self.accepted_by.contains(a),
-            DecreePhase::Chosen(_) | DecreePhase::Preempted(_) => false,
-        })
+    /// (Phase 2) — what a re-send targets.
+    pub fn unanswered(&self) -> impl Iterator<Item = A> + '_ {
+        self.acceptors
+            .iter()
+            .copied()
+            .filter(move |a| match self.phase {
+                DecreePhase::Phase1 => !self.promised_by.contains(a),
+                DecreePhase::Phase2(_) => !self.accepted_by.contains(a),
+                DecreePhase::Chosen(_) | DecreePhase::Preempted(_) => false,
+            })
     }
 
     /// Fold one Phase-1b promise. Returns the value to propose when this
@@ -182,7 +225,10 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
     /// else the own proposal); `None` otherwise, including duplicates and
     /// promises arriving outside Phase 1.
     pub fn on_promise(&mut self, from: A, vote: Option<(Ballot, V)>) -> Option<V> {
-        if self.phase != DecreePhase::Phase1 || !self.promised_by.insert(from) {
+        if self.phase != DecreePhase::Phase1
+            || !self.acceptors.contains(&from)
+            || !self.promised_by.insert(from)
+        {
             return None;
         }
         if let Some((b, v)) = vote
@@ -208,7 +254,10 @@ impl<A: Ord + Copy, V: Clone + PartialEq> DecreeProposer<A, V> {
             return None;
         };
         let value = value.clone();
-        if !self.accepted_by.insert(from) || self.accepted_by.len() < self.quorum {
+        if !self.acceptors.contains(&from)
+            || !self.accepted_by.insert(from)
+            || self.accepted_by.len() < self.quorum
+        {
             return None;
         }
         self.phase = DecreePhase::Chosen(value.clone());
@@ -240,9 +289,11 @@ mod tests {
 
     #[test]
     fn a_lone_proposal_is_chosen_by_a_quorum() {
-        let mut p: DecreeProposer<u8, &str> = DecreeProposer::new(ballot(1, 0), 2, "mine");
+        let mut p: DecreeProposer<u8, &str> = DecreeProposer::new(ballot(1, 0), [0, 1, 2], "mine");
+        assert_eq!(p.quorum(), 2);
         assert_eq!(p.on_promise(0, None), None);
         assert_eq!(p.on_promise(0, None), None, "a duplicate never counts");
+        assert_eq!(p.on_promise(7, None), None, "a stranger never counts");
         assert_eq!(p.on_promise(1, None), Some("mine"));
         assert_eq!(p.phase(), &DecreePhase::Phase2("mine"));
         assert!(!p.adopted_prior_vote());
@@ -250,7 +301,7 @@ mod tests {
         assert_eq!(p.on_accepted(0), None, "a duplicate never counts");
         assert_eq!(p.on_accepted(2), Some("mine"));
         assert_eq!(p.phase(), &DecreePhase::Chosen("mine"));
-        assert_eq!(p.unanswered(&[0, 1, 2]).count(), 0);
+        assert_eq!(p.unanswered().count(), 0);
     }
 
     /// P2c: the dueling proposers. R2's Phase 1 finds R1's vote and must
@@ -264,7 +315,7 @@ mod tests {
         }
         assert_eq!(acceptors[0].accept(ballot(1, 1), "r1"), Ok(()));
         // R2 at ballot 2 prepares 0 and 1.
-        let mut p: DecreeProposer<usize, &str> = DecreeProposer::new(ballot(2, 2), 2, "r2");
+        let mut p: DecreeProposer<usize, &str> = DecreeProposer::new(ballot(2, 2), [0, 1, 2], "r2");
         let v0 = acceptors[0].prepare(ballot(2, 2)).expect("promise");
         let v1 = acceptors[1].prepare(ballot(2, 2)).expect("promise");
         assert_eq!(p.on_promise(1, v1), None);
@@ -285,11 +336,11 @@ mod tests {
         assert_eq!(a.prepare(ballot(5, 1)), Ok(None));
         assert_eq!(a.prepare(ballot(3, 2)), Err(ballot(5, 1)));
         assert_eq!(a.prepare(ballot(5, 1)), Ok(None), "re-asking is idempotent");
-        let mut p: DecreeProposer<u8, u8> = DecreeProposer::new(ballot(3, 2), 1, 9);
+        let mut p: DecreeProposer<u8, u8> = DecreeProposer::new(ballot(3, 2), [0], 9);
         p.on_nack(ballot(5, 1));
         assert_eq!(p.phase(), &DecreePhase::Preempted(ballot(5, 1)));
         assert_eq!(p.on_promise(0, None), None, "a preempted proposal is dead");
-        assert_eq!(p.unanswered(&[0]).count(), 0);
+        assert_eq!(p.unanswered().count(), 0);
     }
 
     #[test]

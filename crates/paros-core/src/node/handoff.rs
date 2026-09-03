@@ -90,10 +90,9 @@
 //! the departed leader knew about is unreachable — resigns, and ordinary
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
-use super::{
-    BTreeMap, BTreeSet, Ballot, Command, LeaderRecovery, Message, NodeId, NodeRole, RawNode, Slot,
-};
+use super::{BTreeMap, BTreeSet, Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
 use crate::matchmaker::AcceptorConfig;
+use crate::proposer::RecoveryPolicy;
 
 /// Maximum slots one [`Message::Relinquish`] transfers (`decided` + `pending`).
 /// A leader whose own chosen prefix trails its allocator by more than this is
@@ -274,13 +273,13 @@ impl RawNode {
         self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
             && self.acceptors.members.len() > 1
-            && self.election.is_none()
+            && self.proposer.election().is_none()
             && self.matchmaking.is_none()
-            && self.leader_recovery.is_none()
-            && self.repair_probe.is_none()
-            && self.app_repair.is_none()
-            && self.faulty.is_empty()
-            && self.ballot >= self.hard_state.max_promised_ballot
+            && self.proposer.recovery().is_none()
+            && self.proposer.probe().is_none()
+            && self.replica.app_repair().is_none()
+            && self.acceptor.faulty().is_empty()
+            && self.ballot >= self.acceptor.promised()
             && self.next_slot.0.saturating_sub(self.first_unchosen().0) <= HANDOFF_BATCH as u64
     }
 
@@ -361,17 +360,18 @@ impl RawNode {
         let mut pending: BTreeMap<Slot, Command> = BTreeMap::new();
         for s in from_slot.0..next_slot.0 {
             let slot = Slot(s);
-            if self.chosen.contains_key(&slot) {
+            if self.replica.is_chosen(slot) {
                 // The authoritative accepted record of a chosen slot always
                 // exists beside it (`mark_chosen` asserts the coupling), and it
                 // carries the choosing ballot the successor must record.
                 let (b, command) = self
-                    .accepted
+                    .acceptor
+                    .records()
                     .get(&slot)
                     .expect("a chosen slot holds its authoritative accepted record");
                 decided.insert(slot, (*b, command.clone()));
-            } else if let Some(round) = self.proposer.get(&slot) {
-                pending.insert(slot, round.command.clone());
+            } else if let Some(round) = self.proposer.rounds().get(&slot) {
+                pending.insert(slot, round.command().clone());
             } else {
                 // A slot inside the allocated range that is neither chosen nor
                 // in flight cannot exist on a settled leader (recovery closed,
@@ -405,7 +405,7 @@ impl RawNode {
         self.pending_messages.push((
             target,
             Message::Relinquish {
-                config_id: self.hard_state.config_id,
+                config_id: self.config_id,
                 from: self.config.id,
                 to: target,
                 ballot,
@@ -428,7 +428,7 @@ impl RawNode {
             "relinquishing an authority demotes this node in the same call"
         );
         assert!(
-            self.proposer.is_empty(),
+            self.proposer.rounds().is_empty(),
             "a relinquished authority leaves no in-flight round behind"
         );
         assert!(
@@ -480,7 +480,7 @@ impl RawNode {
         // Stale authority: our own durable promise already dominates it,
         // so some node ran a Phase 1 past this ballot and this transfer is
         // dead. A delayed `Relinquish` must never resurrect it.
-        if ballot < self.hard_state.max_promised_ballot
+        if ballot < self.acceptor.promised()
             // Already held here: a re-delivered payload must not rewind the
             // allocator under an authority this node is actively exercising.
             || (self.role == NodeRole::Leader && self.ballot == ballot)
@@ -522,7 +522,7 @@ impl RawNode {
         // between nodes that are both in a position to keep it settled.
         // Refusing costs one ordinary election, which is precisely the
         // machinery the repair needs anyway.
-        if !self.faulty.is_empty() || self.app_repair.is_some() {
+        if !self.acceptor.faulty().is_empty() || self.replica.app_repair().is_some() {
             self.handoff.rejected_unfit = self.handoff.rejected_unfit.saturating_add(1);
             return;
         }
@@ -538,7 +538,7 @@ impl RawNode {
         // only persistence a handoff needs, and the `Ready` handshake flushes
         // it before any `Accept` this install starts can be sent — the same
         // persist-before-send edge an election's `Prepare` reply relies on.
-        self.set_promise(ballot);
+        self.acceptor.set_promise(ballot, &mut self.pending_writes);
         self.role = NodeRole::Leader;
         self.leader = Some(me);
         self.ballot = ballot;
@@ -549,10 +549,7 @@ impl RawNode {
             self.acceptors_since = ballot;
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
-        self.proposer.clear();
-        self.resend_cursor = None;
-        self.election = None;
-        self.repair_probe = None;
+        self.proposer.abandon();
         self.repair_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
@@ -585,13 +582,13 @@ impl RawNode {
         // shape check above guarantees the range is fully described, and this
         // flag is the second line of that defense.
         let cursor = from_slot.max(self.first_unchosen());
-        self.leader_recovery = Some(LeaderRecovery {
-            recovered: pending,
-            blocked: BTreeSet::new(),
+        self.proposer.open_recovery(
+            pending,
+            BTreeSet::new(),
             cursor,
-            end: next_slot,
-            gap_fill: false,
-        });
+            next_slot,
+            RecoveryPolicy::Inherited,
+        );
         // The inherited read fence: nothing the predecessor acked can sit above
         // `next_slot - 1`, so no read confirms here until the chosen prefix
         // covers it. Identical in meaning to a fresh leader's fence, and it is
@@ -601,10 +598,13 @@ impl RawNode {
 
         // Install postconditions, mirroring `try_become_leader`'s.
         assert!(
-            self.ballot >= self.hard_state.max_promised_ballot,
+            self.ballot >= self.acceptor.promised(),
             "a freshly installed authority is at or above this node's own promise"
         );
-        assert!(self.election.is_none(), "installing closes any campaign");
+        assert!(
+            self.proposer.election().is_none(),
+            "installing closes any campaign"
+        );
         assert!(
             self.next_slot >= self.first_unchosen(),
             "an inherited frontier sits at or past the chosen prefix"
@@ -613,7 +613,7 @@ impl RawNode {
         // stale-authority guard refused anything below the promise, and the
         // raise took it there.
         assert!(
-            self.hard_state.max_promised_ballot == ballot,
+            self.acceptor.promised() == ballot,
             "an installed authority sits exactly at this node's promise"
         );
         assert!(
@@ -642,7 +642,7 @@ impl RawNode {
         }
         let covered = self
             .read_floor
-            .is_none_or(|fence| self.hard_state.chosen_index.is_some_and(|ci| ci >= fence));
+            .is_none_or(|fence| self.replica.chosen_index().is_some_and(|ci| ci >= fence));
         if covered {
             self.handoff_fence_elapsed = 0;
             return;

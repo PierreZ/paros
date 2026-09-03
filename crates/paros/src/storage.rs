@@ -669,7 +669,7 @@ impl NodeStorage for MemStorage {
 
 impl Storage for MemStorage {
     fn initial_state(&self) -> (HardState, Config) {
-        (self.hard_state.clone(), self.config.clone())
+        (self.hard_state, self.config.clone())
     }
 
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {

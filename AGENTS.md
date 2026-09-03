@@ -127,6 +127,40 @@ holds the node's unique borrow, so a second `ready()` before `advance()` is a *c
 Persist-before-send durability ordering is documented on `Ready`/`HardState`. Contract reference:
 `docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`.
 
+**The core is composable: one file per role, `RawNode` is wiring.** `paros-core` is not one
+state machine but a small set of Paxos *roles*, each its own module and type, and `RawNode` is
+the one deployment that colocates them on a node — it holds the role transitions, the timers,
+the message construction and the persist-before-send batch, and **no protocol tally of its
+own**. The roles:
+
+- `acceptor.rs` — `Acceptor`: the durable promise, the accepted record log, the compaction
+  floor and the CTRL faulty set; it decides `prepare`/`admit` and emits the write ops.
+- `proposer.rs` — `Proposer`: the Phase-1 election (per-configuration completion, the P2c
+  merge), the CTRL repair probe, the Phase-2 rounds and their decision, the bounded recovery a
+  fresh leadership drains. Its policies are **explicit types, never flags**
+  (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
+  `gap_fill: bool` would not).
+- `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
+  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else.
+- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
+  every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum` and
+  the GC fence all ask `AcceptorConfig::has_quorum`, which asks `QuorumSystem::is_quorum`, and
+  no tally compares a count against a threshold on its own. Flexible and grid quorums are new
+  variants there, never a rewrite of a tally.
+- `matchmaker.rs` — `Matchmaker`: the registry and its generations; `matchmaker/reconfigurer.rs`
+  orchestrates the generation handover and *decides* it with a decree — a matchmaker is not an
+  acceptor and never becomes one.
+
+The rule that shapes every boundary: **a component must not acquire knowledge merely because
+the current deployment happens to colocate it.** The proposer builds no message and knows no
+role; the acceptor never reads the chosen prefix; the replica never sees a ballot tally; the
+caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
+"is this slot chosen" predicate when a probe closes). What this buys, in order: the single
+decree (`single_decree.rs`, today a separate kernel) becomes the same `Proposer` + `Acceptor`
+over a one-slot log; the matchmaker folds into the role system; flexible quorums and
+Compartmentalized Paxos become deployment data. Each of those is a later phase; the first
+phase extracted the three roles with the behaviour, the public API and the sweep unchanged.
+
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `RawNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
 code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
@@ -235,11 +269,16 @@ driven by the provider-generic node driver: **stop** (a quorum of `M_g` freezes 
 matchmaker registers nothing for `g` ever again but stays alive to vote and to point late
 proposers at its successor) → **reconstruct** (max watermark, union above it) → **bootstrap**
 (every proposed member holds it durably, pending) → **decide** (single-decree Paxos over `M_g`,
-the separate kernel in `crates/paros-core/src/single_decree.rs` — deliberately *not* extracted
-from `RawNode`, see the design note) → **publish** (`Chosen`: `M_g` records the chain link,
+the separate kernel in `crates/paros-core/src/single_decree.rs` — still its own kernel today;
+moving it onto the shared `Proposer` + `Acceptor` over a one-slot log is the next phase of the
+composable core, see *The core is composable* above and the design note) → **publish** (`Chosen`: `M_g` records the chain link,
 `M_{g+1}` activates its pending bootstrap). Invariant 1 — at most one set is authoritative per
 generation — rests on the decree (the loser adopts the winner's vote); reconstruction
-completeness is asserted in the audit. Liveness rules: a frozen generation with no successor is a
+completeness is asserted in the audit. **Matchmaker quorums are majorities only**
+(`MatchmakerSet::quorum_size`; the decree kernel derives the same majority from the acceptor
+set it is handed and cannot be built with any other quorum): the paper's flexible matchmaker
+quorums are deliberately unsupported, and the handover's safety argument is made under the
+majority model alone. Liveness rules: a frozen generation with no successor is a
 cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
 the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
 freeze — the only liveness it can vouch for); and a phase that makes no progress for
@@ -560,9 +599,11 @@ Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 `paros-core` has no deps; everything ultimately points into it.
 
-- `crates/paros-core/` — sans-IO Multi-Paxos state machine (`RawNode`, with its leader-side
-  matchmaking phase in `node/matchmaking.rs`, reconfiguration entry point in
-  `node/reconfigure.rs` and configuration GC in `node/gc.rs`) and, beside it, the sans-IO
+- `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
+  the membership boundary in `membership.rs`) and `RawNode`, the node that wires them
+  (`node.rs`; its `node/*.rs` submodules are named by *concern* — election, replication,
+  handoff, GC, matchmaking, reconfiguration — and hold the wiring for that concern, never a
+  role's state) and, beside it, the sans-IO
   matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
   the caller drives, never stepped by `RawNode`), its generation handover
   (`matchmaker/reconfigurer.rs`) and the single-decree kernel the handover decides with

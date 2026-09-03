@@ -1,6 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::matchmaker::MatchmakerId;
+pub use crate::membership::QuorumSystem;
 use crate::types::{Ballot, ConfigId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
@@ -21,7 +22,7 @@ use crate::types::{Ballot, ConfigId, NodeId, Slot};
 /// write is durable violates Paxos safety: a crash could "un-promise" or
 /// "un-accept", letting two different values be chosen for one slot. The
 /// [`crate::Ready`] handshake enforces *persist writes → then send messages*.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct HardState {
@@ -37,34 +38,6 @@ pub struct HardState {
     /// unambiguous: `None` is "nothing applied", `Some(Slot(0))` is "slot 0
     /// applied".
     pub chosen_index: Option<Slot>,
-}
-
-/// The quorum system a configuration uses: which sets of acceptors count as a
-/// quorum for Phase 1 (election) and Phase 2 (decide).
-///
-/// Carried as a *value* in [`Config`] from the start (even though there is only
-/// ever one variant today) so that Matchmaker reconfiguration (Stage 9) is a
-/// *data* change — a different quorum system per round — rather than a rewrite of
-/// the election/decide logic. Paxos safety rests on every Phase-1 quorum
-/// intersecting every Phase-2 quorum; a simple majority satisfies that trivially.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum QuorumSystem {
-    /// A simple majority of the membership: any `⌊n/2⌋ + 1` acceptors. Every two
-    /// majorities intersect, so Phase-1 and Phase-2 quorums always share an
-    /// acceptor.
-    #[default]
-    Majority,
-}
-
-impl QuorumSystem {
-    /// The number of acceptors that form a quorum over a membership of `members`.
-    #[must_use]
-    pub fn quorum_size(self, members: usize) -> usize {
-        match self {
-            QuorumSystem::Majority => members / 2 + 1,
-        }
-    }
 }
 
 /// Static, immutable-for-this-instance configuration: who *I* am, the

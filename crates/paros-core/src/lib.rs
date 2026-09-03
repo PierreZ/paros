@@ -39,10 +39,14 @@
 //! a cluster deployed without matchmakers never constructs one, and [`RawNode`]
 //! never steps a matchmaker message.
 
+pub mod acceptor;
 mod matchmaker;
+pub mod membership;
 mod message;
 mod node;
+pub mod proposer;
 mod ready;
+pub mod replica;
 mod single_decree;
 mod state;
 mod storage;

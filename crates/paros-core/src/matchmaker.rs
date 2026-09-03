@@ -117,151 +117,9 @@ pub use self::reconfigurer::{
     MatchmakerReconfigurer, RECONFIGURE_TIMEOUT_ELECTIONS, ReconfigurerPhase, ReconfigurerStep,
     StartRefusal,
 };
+pub use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::single_decree::DecreeAcceptor;
-use crate::state::QuorumSystem;
 use crate::types::{Ballot, NodeId};
-
-/// Stable identity of a matchmaker within the matchmaker pool. A distinct
-/// namespace from [`NodeId`]: a matchmaker is not an acceptor.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MatchmakerId(pub u64);
-
-/// A matchmaker-set **generation** (#125): which matchmaker set is
-/// authoritative. Distinct from a Paxos ballot (consensus leadership, and the
-/// acceptor configuration bound to it) and from [`crate::ConfigId`] (the
-/// durable cluster-configuration tag). Generation 0 is the bootstrap set.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MatchmakerGeneration(pub u64);
-
-impl MatchmakerGeneration {
-    /// The next generation.
-    #[must_use]
-    pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
-}
-
-/// A matchmaker set bound to its generation: the value the successor decree
-/// chooses, and what every matchmaking message is fenced by.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct MatchmakerSet {
-    /// The generation this set is authoritative for.
-    pub generation: MatchmakerGeneration,
-    /// The members, sorted and deduplicated.
-    pub members: Vec<MatchmakerId>,
-}
-
-impl MatchmakerSet {
-    /// A set of `members` (sorted and deduplicated here) for `generation`.
-    #[must_use]
-    pub fn new(generation: MatchmakerGeneration, mut members: Vec<MatchmakerId>) -> Self {
-        members.sort_unstable();
-        members.dedup();
-        Self {
-            generation,
-            members,
-        }
-    }
-
-    /// The matchmaker quorum over this set: a majority, so any two
-    /// registration quorums (and any two stop / decree quorums) intersect.
-    #[must_use]
-    pub fn quorum_size(&self) -> usize {
-        self.members.len() / 2 + 1
-    }
-
-    /// Whether `id` is a member.
-    #[must_use]
-    pub fn contains(&self, id: MatchmakerId) -> bool {
-        self.members.binary_search(&id).is_ok()
-    }
-}
-
-/// An acceptor configuration as registered with a matchmaker: a membership
-/// plus the quorum system in force over it — [`crate::Config`] minus the
-/// per-node `id`. The core never interprets it beyond storing and reporting it;
-/// the leader-side matchmaking phase is what runs Phase 1 against it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct AcceptorConfig {
-    /// The full membership, sorted and deduplicated (a [`Vec`] keeps iteration
-    /// deterministic without a map).
-    pub members: Vec<NodeId>,
-    /// The quorum system election and decide consult over `members`.
-    pub quorum_system: QuorumSystem,
-}
-
-impl AcceptorConfig {
-    /// A configuration over `members` (sorted and deduplicated here) under
-    /// `quorum_system`.
-    ///
-    /// # Panics
-    ///
-    /// If `members` is empty: a configuration with no acceptor can never form
-    /// a quorum, so registering one is a programmer error.
-    #[must_use]
-    pub fn new(mut members: Vec<NodeId>, quorum_system: QuorumSystem) -> Self {
-        members.sort_unstable();
-        members.dedup();
-        assert!(
-            !members.is_empty(),
-            "an acceptor configuration names at least one acceptor"
-        );
-        Self {
-            members,
-            quorum_system,
-        }
-    }
-
-    /// The number of acceptors that form a quorum over this configuration.
-    ///
-    /// # Panics
-    ///
-    /// If the quorum system cannot self-intersect over this membership: Paxos
-    /// safety rests on any two quorums of one configuration sharing an
-    /// acceptor (for the majority system, `2q > n`), and a configuration that
-    /// breaks it must fail loudly rather than let two values be chosen for
-    /// one slot.
-    #[must_use]
-    pub fn quorum_size(&self) -> usize {
-        let n = self.members.len();
-        let q = self.quorum_system.quorum_size(n);
-        assert!(q >= 1, "a quorum requires at least one acceptor");
-        assert!(2 * q > n, "any two quorums must intersect");
-        q
-    }
-
-    /// Whether this configuration can be run at all: at least one acceptor,
-    /// and a quorum system whose quorums all intersect (`2q > n`). The
-    /// operating-condition twin of [`AcceptorConfig::quorum_size`]'s hard
-    /// asserts: a boundary that takes a configuration from outside
-    /// (`RawNode::reconfigure`) refuses a malformed one here instead of
-    /// letting a later quorum tally panic on it.
-    #[must_use]
-    pub fn is_well_formed(&self) -> bool {
-        let n = self.members.len();
-        if n == 0 {
-            return false;
-        }
-        let q = self.quorum_system.quorum_size(n);
-        q >= 1 && 2 * q > n
-    }
-
-    /// Whether `node` is a member of this configuration.
-    #[must_use]
-    pub fn contains(&self, node: NodeId) -> bool {
-        self.members.binary_search(&node).is_ok()
-    }
-
-    /// How many of `nodes` are members of this configuration.
-    #[must_use]
-    pub fn count_members<'a>(&self, nodes: impl IntoIterator<Item = &'a NodeId>) -> usize {
-        nodes.into_iter().filter(|n| self.contains(**n)).count()
-    }
-}
 
 /// The phase of a matchmaker's current generation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1534,6 +1392,7 @@ impl Matchmaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::membership::QuorumSystem;
 
     /// The port over an in-memory registry, for the state-machine tests.
     #[derive(Default)]

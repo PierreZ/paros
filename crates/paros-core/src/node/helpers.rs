@@ -4,14 +4,6 @@ use crate::matchmaker::AcceptorConfig;
 impl RawNode {
     // ---- helpers ----------------------------------------------------------
 
-    /// The Phase-2 quorum of the active configuration ([`RawNode::acceptors`]):
-    /// what accept rounds, read rounds and `CheckQuorum` are counted against.
-    /// Intersection is asserted per configuration inside
-    /// [`AcceptorConfig::quorum_size`].
-    pub(super) fn phase2_quorum(&self) -> usize {
-        self.acceptors.quorum_size()
-    }
-
     /// Whether `node` is in the addressable pool — the wire-hygiene boundary
     /// every handler draws around a sender: a misrouted or misconfigured id
     /// is never followed, counted, or replied to. Membership of a
@@ -28,9 +20,9 @@ impl RawNode {
         if !self.config.has_matchmakers() {
             return None;
         }
-        self.election
-            .as_ref()
-            .map(|e| e.config.clone())
+        self.proposer
+            .election()
+            .map(|e| e.config().clone())
             .or_else(|| Some(self.acceptors.clone()))
     }
 
@@ -101,14 +93,10 @@ impl RawNode {
         // leader nor be counted as one by the invariants.
         self.leadership_origin = LeadershipOrigin::Elected;
         self.handoff_fence_elapsed = 0;
-        self.election = None;
+        self.proposer.abandon();
         self.matchmaking = None;
         self.gc = None;
-        self.leader_recovery = None;
-        self.repair_probe = None;
         self.repair_elapsed = 0;
-        self.resend_cursor = None;
-        self.proposer.clear();
         // Unconfirmed read rounds die with the leadership; already-confirmed
         // `pending_read_states` stay — they were valid at their linearization
         // point and the driver drains them this same batch.
@@ -128,9 +116,6 @@ impl RawNode {
 
     /// First slot not in the contiguous chosen prefix.
     pub(super) fn first_unchosen(&self) -> Slot {
-        match self.hard_state.chosen_index {
-            Some(s) => Slot(s.0 + 1),
-            None => Slot(0),
-        }
+        self.replica.first_unchosen()
     }
 }
