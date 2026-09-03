@@ -59,7 +59,7 @@
 //! is a permanent configuration, not a transitional one.
 
 use super::{NodeId, NodeRole, RawNode};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 use crate::types::Ballot;
 
 /// Why [`RawNode::reconfigure`] refused a request. Each is an operating

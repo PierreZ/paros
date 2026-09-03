@@ -28,7 +28,8 @@ use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
-use crate::matchmaker::{AcceptorConfig, GcRequest, MatchRequest, MatchmakerId, MatchmakerSet};
+use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use crate::message::Message;
 use crate::proposer::Proposer;
 use crate::ready::Ready;
@@ -840,7 +841,7 @@ impl RawNode {
                     // suffix.
                     (
                         probe.ballot(),
-                        probe.from_slot(),
+                        probe.suffix_start(),
                         probe.stragglers(self.config.id),
                     )
                 };

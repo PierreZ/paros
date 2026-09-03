@@ -1,7 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
-use crate::matchmaker::MatchmakerId;
-pub use crate::membership::QuorumSystem;
+use crate::membership::{MatchmakerId, QuorumSystem};
 use crate::types::{Ballot, ConfigId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has

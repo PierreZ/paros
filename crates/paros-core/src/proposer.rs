@@ -169,8 +169,6 @@ pub struct Phase1Outcome {
     pub config: AcceptorConfig,
     /// `H_b`: the prior configurations the election covered.
     pub prior: Vec<AcceptorConfig>,
-    /// First slot the election recovered.
-    pub from_slot: Slot,
     /// Every acceptor whose promise was counted.
     pub promised_by: BTreeSet<NodeId>,
     /// The highest-ballot report per slot (P2c), for the whole campaign
@@ -324,7 +322,7 @@ impl Proposer {
         assert!(
             self.recovery
                 .as_ref()
-                .is_none_or(|r| r.policy == RecoveryPolicy::Phase1Backed || r.blocked.is_empty()),
+                .is_none_or(|r| r.policy() == RecoveryPolicy::Phase1Backed || r.blocked.is_empty()),
             "an inherited recovery blocks no slot"
         );
     }
@@ -343,7 +341,7 @@ impl Proposer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::QuorumSystem;
+    use crate::membership::QuorumSystem;
     use crate::types::command_fingerprint;
     use crate::types::{ClientId, ClientSeq, Entry, Value};
 
@@ -554,7 +552,7 @@ mod tests {
         assert_eq!(
             p.probe()
                 .expect("the probe opens for the blocked slot")
-                .from_slot(),
+                .suffix_start(),
             Slot(0),
             "the probe inherits the election's first slot"
         );

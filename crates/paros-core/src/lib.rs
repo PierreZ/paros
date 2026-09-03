@@ -39,15 +39,15 @@
 //! a cluster deployed without matchmakers never constructs one, and [`RawNode`]
 //! never steps a matchmaker message.
 
-pub mod acceptor;
+pub(crate) mod acceptor;
 mod collector;
 mod matchmaker;
-pub mod membership;
+pub(crate) mod membership;
 mod message;
 mod node;
-pub mod proposer;
+pub(crate) mod proposer;
 mod ready;
-pub mod replica;
+pub(crate) mod replica;
 mod single_decree;
 mod state;
 mod storage;
@@ -55,11 +55,14 @@ mod types;
 mod write;
 
 pub use matchmaker::{
-    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
-    MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
-    MatchmakerWriteOp, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistryStorage, StartRefusal,
+    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerReady,
+    MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Registration, RegistryStorage,
+    StartRefusal,
+};
+pub use membership::{
+    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
 };
 pub use message::Message;
 pub use node::{
@@ -70,7 +73,7 @@ pub use node::{
 };
 pub use ready::Ready;
 pub use single_decree::{DecreeAcceptor, DecreePhase, DecreeProposer};
-pub use state::{Config, HardState, QuorumSystem};
+pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
     Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, SessionEntry, Slot,

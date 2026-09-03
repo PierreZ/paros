@@ -1,5 +1,5 @@
 use super::{Ballot, Message, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
 /// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader

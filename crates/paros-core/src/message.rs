@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
 
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected

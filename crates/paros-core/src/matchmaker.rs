@@ -151,7 +151,7 @@ pub use self::state::{
 };
 pub use self::storage::RegistryStorage;
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
-pub use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::types::Ballot;
 
 /// What a GC request did at this matchmaker.
@@ -584,7 +584,7 @@ impl Matchmaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::membership::QuorumSystem;
+    use crate::membership::{AcceptorConfig, QuorumSystem};
     use crate::single_decree::DecreeAcceptor;
     use crate::types::NodeId;
 

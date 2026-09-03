@@ -71,18 +71,6 @@ impl Election {
         &self.config
     }
 
-    /// `H_b`: the prior configurations whose quorums this election needs.
-    #[must_use]
-    pub fn prior(&self) -> &[AcceptorConfig] {
-        &self.prior
-    }
-
-    /// First slot this election recovers.
-    #[must_use]
-    pub fn from_slot(&self) -> Slot {
-        self.promises.from_slot
-    }
-
     /// Whether every prior configuration holds a Phase-1 quorum of promises —
     /// the completion predicate, in one readable place (see the type doc).
     #[must_use]
@@ -305,7 +293,6 @@ impl Proposer {
             ballot: e.promises.ballot,
             config: e.config,
             prior: e.prior,
-            from_slot: e.promises.from_slot,
             promised_by: e.promises.answered,
             recovered: e.recovered,
             blocked,

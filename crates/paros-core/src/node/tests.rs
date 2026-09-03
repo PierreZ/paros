@@ -9,9 +9,10 @@ use super::{
     ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, Registration,
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
+    Registration,
 };
+use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
 use crate::message::Message;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
@@ -39,7 +40,7 @@ impl TestStorage {
             config: Config {
                 id: NodeId(id),
                 peers: members.iter().copied().map(NodeId).collect(),
-                quorum_system: crate::state::QuorumSystem::Majority,
+                quorum_system: crate::membership::QuorumSystem::Majority,
                 nodes: Vec::new(),
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
@@ -164,7 +165,7 @@ impl crate::matchmaker::RegistryStorage for MemRegistry {
 fn cfg(members: &[u64]) -> AcceptorConfig {
     AcceptorConfig::new(
         members.iter().copied().map(NodeId).collect(),
-        crate::state::QuorumSystem::Majority,
+        crate::membership::QuorumSystem::Majority,
     )
 }
 

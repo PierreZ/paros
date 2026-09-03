@@ -378,7 +378,7 @@ fn restart_rebuilds_state_from_hard_state() {
         config: Config {
             id: NodeId(1),
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
-            quorum_system: crate::state::QuorumSystem::Majority,
+            quorum_system: crate::membership::QuorumSystem::Majority,
             nodes: Vec::new(),
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),

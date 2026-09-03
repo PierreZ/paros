@@ -10,7 +10,8 @@ use super::matchmaking::Matchmaking;
 use super::{
     BTreeMap, Ballot, Command, Control, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot,
 };
-use crate::matchmaker::{AcceptorConfig, MatchRequest};
+use crate::matchmaker::MatchRequest;
+use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 
 impl RawNode {

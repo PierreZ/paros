@@ -83,7 +83,8 @@
 
 use super::{Ballot, NodeId, NodeRole, RawNode, Slot};
 use crate::collector::{Collector, GcStep};
-use crate::matchmaker::{AcceptorConfig, GcAck, GcRequest, MatchmakerId};
+use crate::matchmaker::{GcAck, GcRequest};
+use crate::membership::{AcceptorConfig, MatchmakerId};
 
 impl RawNode {
     /// Open the GC campaign of a freshly won leadership over `prior` (`H_b`).

@@ -741,8 +741,9 @@ impl MatchmakerReconfigurer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matchmaker::MatchmakerPhase;
     use crate::matchmaker::{Matchmaker, MatchmakerConfig, MatchmakerHardState, RegistryStorage};
-    use crate::matchmaker::{MatchmakerGeneration, MatchmakerPhase};
+    use crate::membership::MatchmakerGeneration;
 
     struct Empty;
     impl RegistryStorage for Empty {

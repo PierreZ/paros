@@ -9,7 +9,7 @@ use super::{
     Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot, WriteOp, command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 
 impl RawNode {
     // ---- acceptor ---------------------------------------------------------

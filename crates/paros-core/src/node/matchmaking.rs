@@ -103,10 +103,8 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{BTreeMap, BTreeSet, Ballot, NodeId, NodeRole, RawNode};
-use crate::matchmaker::{
-    AcceptorConfig, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerId,
-    MatchmakerSet, Registration,
-};
+use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Registration};
+use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 
 /// Volatile per-ballot matchmaking state while a Candidate registers its
 /// configuration and collects the prior ones.

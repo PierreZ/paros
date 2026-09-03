@@ -1,5 +1,5 @@
 use super::{Ballot, LeadershipOrigin, Message, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 
 impl RawNode {
     // ---- helpers ----------------------------------------------------------

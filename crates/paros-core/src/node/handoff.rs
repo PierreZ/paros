@@ -91,7 +91,7 @@
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
 use super::{BTreeMap, BTreeSet, Ballot, Command, Message, NodeId, NodeRole, RawNode, Slot};
-use crate::matchmaker::AcceptorConfig;
+use crate::membership::AcceptorConfig;
 use crate::proposer::RecoveryPolicy;
 
 /// Maximum slots one [`Message::Relinquish`] transfers (`decided` + `pending`).

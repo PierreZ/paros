@@ -51,9 +51,10 @@ impl RepairProbe {
         self.promises.ballot
     }
 
-    /// First slot the original Phase 1 covered.
+    /// First slot the original Phase 1 covered — the cursor a re-sent
+    /// `Prepare` echoes.
     #[must_use]
-    pub fn from_slot(&self) -> Slot {
+    pub fn suffix_start(&self) -> Slot {
         self.promises.from_slot
     }
 

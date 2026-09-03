@@ -1,7 +1,8 @@
 //! The [`Ready`] borrow guard: one batch of work, and the compile-time gate that
 //! enforces "one batch in flight".
 
-use crate::matchmaker::{GcRequest, MatchRequest, MatchmakerId};
+use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::membership::MatchmakerId;
 use crate::message::Message;
 use crate::node::{RawNode, ReadState};
 use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
