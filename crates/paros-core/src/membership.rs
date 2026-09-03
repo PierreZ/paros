@@ -131,7 +131,7 @@ impl QuorumSystem {
     /// ([`crate::RawNode`]'s Phase-2 fan-out) already asks the boundary
     /// instead of iterating the membership itself.
     #[must_use]
-    pub fn phase2_addressees(self, members: &[NodeId]) -> &[NodeId] {
+    pub fn phase2_addressees<I>(self, members: &[I]) -> &[I] {
         match self {
             QuorumSystem::Majority => members,
         }
@@ -143,6 +143,13 @@ impl QuorumSystem {
 /// per-node `id`. The core never interprets it beyond storing and reporting it;
 /// the leader-side matchmaking phase is what runs Phase 1 against it.
 ///
+/// Generic over the **acceptor identity**, defaulting to [`NodeId`]: the
+/// acceptor pool of a paros cluster is named by node ids, and the one other
+/// deployment in the core — the matchmaker-set handover's single decree,
+/// whose acceptors are the matchmakers of `M_g` — is an
+/// `AcceptorConfig<MatchmakerId>`. Nothing here depends on what an identity
+/// *is*, only that it sorts.
+///
 /// **Both fields are private and [`AcceptorConfig::new`] is the only way to
 /// build one**, deserialisation included (see `SerdeAcceptorConfig`). The
 /// membership is a sorted, deduplicated [`Vec`] that
@@ -153,11 +160,20 @@ impl QuorumSystem {
 /// construct.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(from = "SerdeAcceptorConfig"))]
-pub struct AcceptorConfig {
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        from = "SerdeAcceptorConfig<Id>",
+        bound(
+            serialize = "Id: serde::Serialize",
+            deserialize = "Id: Copy + Ord + serde::Deserialize<'de>"
+        )
+    )
+)]
+pub struct AcceptorConfig<Id = NodeId> {
     /// The full membership, sorted and deduplicated (a [`Vec`] keeps iteration
     /// deterministic without a map).
-    members: Vec<NodeId>,
+    members: Vec<Id>,
     /// The quorum system election and decide consult over `members`.
     quorum_system: QuorumSystem,
 }
@@ -167,19 +183,19 @@ pub struct AcceptorConfig {
 /// constructed one and no path can produce an unsorted membership.
 #[cfg(feature = "serde")]
 #[derive(serde::Deserialize)]
-struct SerdeAcceptorConfig {
-    members: Vec<NodeId>,
+struct SerdeAcceptorConfig<Id> {
+    members: Vec<Id>,
     quorum_system: QuorumSystem,
 }
 
 #[cfg(feature = "serde")]
-impl From<SerdeAcceptorConfig> for AcceptorConfig {
-    fn from(wire: SerdeAcceptorConfig) -> Self {
+impl<Id: Copy + Ord> From<SerdeAcceptorConfig<Id>> for AcceptorConfig<Id> {
+    fn from(wire: SerdeAcceptorConfig<Id>) -> Self {
         Self::new(wire.members, wire.quorum_system)
     }
 }
 
-impl AcceptorConfig {
+impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// A configuration over `members` (sorted and deduplicated here) under
     /// `quorum_system`.
     ///
@@ -188,7 +204,7 @@ impl AcceptorConfig {
     /// If `members` is empty: a configuration with no acceptor can never form
     /// a quorum, so registering one is a programmer error.
     #[must_use]
-    pub fn new(mut members: Vec<NodeId>, quorum_system: QuorumSystem) -> Self {
+    pub fn new(mut members: Vec<Id>, quorum_system: QuorumSystem) -> Self {
         members.sort_unstable();
         members.dedup();
         assert!(
@@ -237,7 +253,7 @@ impl AcceptorConfig {
     /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
     /// whose phases do not intersect is meaningless and must fail loudly.
     #[must_use]
-    pub fn has_phase1_quorum(&self, voters: &BTreeSet<NodeId>) -> bool {
+    pub fn has_phase1_quorum(&self, voters: &BTreeSet<Id>) -> bool {
         assert!(
             self.is_well_formed(),
             "a quorum tally runs over a well-formed configuration"
@@ -257,7 +273,7 @@ impl AcceptorConfig {
     /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
     /// whose phases do not intersect is meaningless and must fail loudly.
     #[must_use]
-    pub fn has_phase2_quorum(&self, voters: &BTreeSet<NodeId>) -> bool {
+    pub fn has_phase2_quorum(&self, voters: &BTreeSet<Id>) -> bool {
         assert!(
             self.is_well_formed(),
             "a quorum tally runs over a well-formed configuration"
@@ -268,13 +284,13 @@ impl AcceptorConfig {
     /// The acceptors a Phase-2 message addresses, out of this membership —
     /// [`QuorumSystem::phase2_addressees`] over it.
     #[must_use]
-    pub fn phase2_addressees(&self) -> &[NodeId] {
+    pub fn phase2_addressees(&self) -> &[Id] {
         self.quorum_system.phase2_addressees(&self.members)
     }
 
     /// The membership, sorted and deduplicated.
     #[must_use]
-    pub fn members(&self) -> &[NodeId] {
+    pub fn members(&self) -> &[Id] {
         &self.members
     }
 
@@ -286,7 +302,7 @@ impl AcceptorConfig {
 
     /// Whether `node` is a member of this configuration.
     #[must_use]
-    pub fn contains(&self, node: NodeId) -> bool {
+    pub fn contains(&self, node: Id) -> bool {
         self.members.binary_search(&node).is_ok()
     }
 }

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Proposer;
-use crate::types::{Command, Slot};
+use crate::types::Slot;
 
 /// What licenses a fresh leadership to fill a slot its recovery does not
 /// name: an explicit policy, never a flag, because the two answers rest on
@@ -26,9 +26,9 @@ pub enum RecoveryPolicy {
 
 /// Bounded continuation for a leadership's recovered suffix.
 #[derive(Clone, Debug)]
-pub struct Recovery {
+pub struct Recovery<V> {
     /// Highest-ballot command reported for each retained slot.
-    pub(super) recovered: BTreeMap<Slot, Command>,
+    pub(super) recovered: BTreeMap<Slot, V>,
     /// Slots the Phase-1 tally could not decide (Case 3: wait): neither
     /// re-proposed nor no-op-filled by the pump; the open [`RepairProbe`]
     /// resolves them as stragglers answer.
@@ -41,7 +41,7 @@ pub struct Recovery {
     pub(super) policy: RecoveryPolicy,
 }
 
-impl Recovery {
+impl<V> Recovery<V> {
     /// The policy this recovery runs under.
     #[must_use]
     pub fn policy(&self) -> RecoveryPolicy {
@@ -63,9 +63,9 @@ impl Recovery {
 
 /// One step of a recovery pump ([`Proposer::recovery_next`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RecoveryStep {
+pub enum RecoveryStep<V> {
     /// The recovery names a command for this slot: re-propose it (P2c).
-    Recovered(Command),
+    Recovered(V),
     /// Nobody reported the slot and the policy is [`RecoveryPolicy::Phase1Backed`]:
     /// fill it with a [`Control::Noop`].
     Fill,
@@ -74,12 +74,12 @@ pub enum RecoveryStep {
     Undescribed,
 }
 
-impl Proposer {
+impl<Id: Copy + Ord, V> Proposer<Id, V> {
     // ---- recovery -----------------------------------------------------------
 
     /// The open recovery continuation, if any.
     #[must_use]
-    pub fn recovery(&self) -> Option<&Recovery> {
+    pub fn recovery(&self) -> Option<&Recovery<V>> {
         self.recovery.as_ref()
     }
 
@@ -93,7 +93,7 @@ impl Proposer {
     /// (a handoff ran no Phase 1, so nothing could have been blocked by one).
     pub fn open_recovery(
         &mut self,
-        recovered: BTreeMap<Slot, Command>,
+        recovered: BTreeMap<Slot, V>,
         blocked: BTreeSet<Slot>,
         cursor: Slot,
         end: Slot,
@@ -118,7 +118,7 @@ impl Proposer {
 
     /// Advance the recovery cursor one slot and say what the pump does with
     /// it. `None` when no recovery is open or its range is drained.
-    pub fn recovery_next(&mut self) -> Option<(Slot, RecoveryStep)> {
+    pub fn recovery_next(&mut self) -> Option<(Slot, RecoveryStep<V>)> {
         let recovery = self.recovery.as_mut()?;
         if recovery.cursor >= recovery.end {
             return None;
@@ -148,7 +148,7 @@ impl Proposer {
     /// How many slots the open recovery has still to sweep (0 when none).
     #[must_use]
     pub fn recovery_remaining(&self) -> usize {
-        self.recovery.as_ref().map_or(0, Recovery::remaining)
+        self.recovery.as_ref().map_or(0, Recovery::<V>::remaining)
     }
 
     /// Close the recovery once its cursor swept the whole range.

@@ -12,7 +12,7 @@ use super::{
     slot_decidable,
 };
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, Slot};
 
 /// Volatile per-ballot Phase-1 state while a candidate recovers the log
 /// suffix.
@@ -34,31 +34,31 @@ use crate::types::{Ballot, Command, NodeId, Slot};
 /// On a plain deployment `prior` is the one static configuration, so the
 /// predicate is today's single quorum comparison.
 #[derive(Clone, Debug)]
-pub struct Election {
+pub struct Election<Id, V> {
     /// The paging half: the ballot, the first slot, who answered completely,
     /// and each non-terminal answerer's next cursor.
-    pub(super) promises: PromiseTally,
+    pub(super) promises: PromiseTally<Id>,
     /// `C_b`: the configuration this ballot runs Phase 2 with once won —
     /// registered with the matchmakers before this election opened, or the
     /// static configuration on a plain deployment.
-    pub(super) config: AcceptorConfig,
+    pub(super) config: AcceptorConfig<Id>,
     /// `H_b`: every distinct prior configuration whose Phase-1 quorum this
     /// election must independently obtain. Empty means nothing below this
     /// ballot survives the matchmakers' watermark, so Phase 1 is trivially
     /// complete (an explicit, gated case, never an accident).
-    pub(super) prior: Vec<AcceptorConfig>,
+    pub(super) prior: Vec<AcceptorConfig<Id>>,
     /// Highest-ballot accepted command per slot seen across the promise quorum,
     /// for slots `>= from_slot`. Drives gap-fill re-proposal once leader.
-    pub(super) recovered: BTreeMap<Slot, (Ballot, Command)>,
+    pub(super) recovered: BTreeMap<Slot, (Ballot, V)>,
     /// The tri-state's third answer, per slot: which acceptor reported its copy
     /// **faulty** (value lost, identity known) at what accepted ballot. A
     /// faulty report is silence toward the none-tally, never denial: it blocks
     /// the no-op gap fill at its slot until [`slot_decidable`] finds a full Q1
     /// of qualifying reports (Stage 8, CTRL restatement R2/R3).
-    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
+    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<Id, Ballot>>,
 }
 
-impl Election {
+impl<Id: Copy + Ord, V> Election<Id, V> {
     /// The ballot this election runs under.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
@@ -67,7 +67,7 @@ impl Election {
 
     /// `C_b`: the configuration a won election runs Phase 2 with.
     #[must_use]
-    pub fn config(&self) -> &AcceptorConfig {
+    pub fn config(&self) -> &AcceptorConfig<Id> {
         &self.config
     }
 
@@ -86,8 +86,8 @@ impl Election {
     /// learn the configuration) before Phase 2 reaches them. `me` is never
     /// addressed (the candidate is its own first acceptor).
     #[must_use]
-    pub fn targets(&self, me: NodeId) -> Vec<NodeId> {
-        let mut targets: Vec<NodeId> = self
+    pub fn targets(&self, me: Id) -> Vec<Id> {
+        let mut targets: Vec<Id> = self
             .prior
             .iter()
             .chain(std::iter::once(&self.config))
@@ -100,12 +100,12 @@ impl Election {
     }
 }
 
-impl Proposer {
+impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     // ---- Phase 1 ------------------------------------------------------------
 
     /// The open Phase 1, if any.
     #[must_use]
-    pub fn election(&self) -> Option<&Election> {
+    pub fn election(&self) -> Option<&Election<Id, V>> {
         self.election.as_ref()
     }
 
@@ -123,10 +123,10 @@ impl Proposer {
     /// campaign opens on a node that holds no leadership).
     pub fn open_phase1(
         &mut self,
-        campaign: Campaign,
-        own_records: &BTreeMap<Slot, (Ballot, Command)>,
+        campaign: Campaign<Id>,
+        own_records: &BTreeMap<Slot, (Ballot, V)>,
         own_faulty: &BTreeMap<Slot, Ballot>,
-    ) -> Vec<NodeId> {
+    ) -> Vec<Id> {
         assert!(self.election.is_none(), "one Phase 1 per ballot");
         assert!(
             self.rounds.is_empty(),
@@ -139,11 +139,11 @@ impl Proposer {
             prior,
             from_slot,
         } = campaign;
-        let recovered: BTreeMap<Slot, (Ballot, Command)> = own_records
+        let recovered: BTreeMap<Slot, (Ballot, V)> = own_records
             .range(from_slot..)
             .map(|(s, v)| (*s, v.clone()))
             .collect();
-        let mut faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
+        let mut faulty_reports: BTreeMap<Slot, BTreeMap<Id, Ballot>> = BTreeMap::new();
         for (slot, ballot) in own_faulty.range(from_slot..) {
             faulty_reports.entry(*slot).or_default().insert(me, *ballot);
         }
@@ -176,10 +176,10 @@ impl Proposer {
     /// refused as wire input ([`PromiseFold::Ignored`]).
     pub fn fold_promise(
         &mut self,
-        from: NodeId,
+        from: Id,
         ballot: Ballot,
         from_slot: Slot,
-        accepted: BTreeMap<Slot, (Ballot, Command)>,
+        accepted: BTreeMap<Slot, (Ballot, V)>,
         faulty: BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) -> PromiseFold {
@@ -227,7 +227,7 @@ impl Proposer {
     ///
     /// If no Phase 1 is open, if it is not covered, or if a probe is
     /// already open (a candidate holds none).
-    pub fn close_phase1(&mut self, is_chosen: impl Fn(Slot) -> bool) -> Phase1Outcome {
+    pub fn close_phase1(&mut self, is_chosen: impl Fn(Slot) -> bool) -> Phase1Outcome<Id, V> {
         let e = self
             .election
             .take()
@@ -249,8 +249,8 @@ impl Proposer {
         // no-op fills normally. Anything else is **blocked** — Case 3: wait —
         // and moves to the repair probe, which keeps querying stragglers.
         let mut blocked: BTreeSet<Slot> = BTreeSet::new();
-        let mut probe_have: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
-        let mut probe_faulty: BTreeMap<Slot, BTreeMap<NodeId, Ballot>> = BTreeMap::new();
+        let mut probe_have: BTreeMap<Slot, (Ballot, V)> = BTreeMap::new();
+        let mut probe_faulty: BTreeMap<Slot, BTreeMap<Id, Ballot>> = BTreeMap::new();
         for (slot, reporters) in &e.faulty_reports {
             if is_chosen(*slot) {
                 continue;

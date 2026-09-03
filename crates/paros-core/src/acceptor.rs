@@ -13,6 +13,16 @@
 //!   ([`Acceptor::admit`]); the record itself lands through
 //!   [`Acceptor::record_accepted`].
 //!
+//! It is generic over the value its log carries — to an acceptor a value has
+//! identity and nothing else — so the one-slot decree of the matchmaker-set
+//! handover and the unbounded Multi-Paxos log are the same role over
+//! different `V`. Its two durable ops are named by [`AcceptorWrite`]; the
+//! caller's batch type only has to say where they sit (`W: From<_>`). The
+//! two *retention* ops, [`WriteOp::Truncate`] and [`WriteOp::InstallSnapshot`],
+//! still speak the node batch's own language: a log that compacts is the
+//! multi-slot deployment's concern, and giving retention its own role is a
+//! later phase.
+//!
 //! It knows nothing about leadership, elections, replicas, matchmakers, the
 //! network, timers, randomness, or *why* a `Prepare` arrived — the
 //! [`crate::RawNode`] wiring owns those couplings (a `Prepare` that deposes a
@@ -29,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
+use crate::types::{Ballot, SessionEntry, Slot, Value};
 use crate::write::{AcceptorWrite, WriteOp};
 
 /// Maximum accepted records and faulty entries carried by one promise page —
@@ -69,26 +79,27 @@ pub enum AcceptOutcome {
 /// One page of a `Promise`: the readable records and the faulty entries at
 /// or after the requested slot, bounded, disjoint, and the continuation
 /// cursor when the suffix did not fit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PromisePage {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromisePage<V> {
     /// Readable records, by slot.
-    pub accepted: BTreeMap<Slot, (Ballot, Command)>,
+    pub accepted: BTreeMap<Slot, (Ballot, V)>,
     /// Faulty entries (identity known, value lost), by slot.
     pub faulty: BTreeMap<Slot, Ballot>,
     /// Where the next page starts, when this one was full.
     pub next_from_slot: Option<Slot>,
 }
 
-/// The acceptor: promise, records, floor, tri-state. See the module doc.
+/// The acceptor: promise, records, floor, tri-state, over the value `V` its
+/// log carries. See the module doc.
 #[derive(Clone, Debug)]
-pub struct Acceptor {
+pub struct Acceptor<V> {
     /// The highest ballot promised. Monotone for the node's whole lifetime —
     /// the durable safety hinge.
     promised: Ballot,
     /// The working per-slot accepted log (rebuilt from durable storage on
     /// boot): the highest-ballot record per slot, or the chosen value once
     /// learned.
-    records: BTreeMap<Slot, (Ballot, Command)>,
+    records: BTreeMap<Slot, (Ballot, V)>,
     /// The compaction floor: the first slot still retained.
     first_slot: Slot,
     /// Slots this acceptor accepted but can no longer read, at the ballot
@@ -98,7 +109,7 @@ pub struct Acceptor {
     faulty_repaired: u64,
 }
 
-impl Acceptor {
+impl<V: Clone + PartialEq> Acceptor<V> {
     /// An acceptor over the durable state a boot scan read back.
     ///
     /// # Panics
@@ -110,7 +121,7 @@ impl Acceptor {
     #[must_use]
     pub fn new(
         promised: Ballot,
-        records: BTreeMap<Slot, (Ballot, Command)>,
+        records: BTreeMap<Slot, (Ballot, V)>,
         first_slot: Slot,
         faulty: BTreeMap<Slot, Ballot>,
     ) -> Self {
@@ -183,13 +194,13 @@ impl Acceptor {
 
     /// The working accepted log.
     #[must_use]
-    pub fn records(&self) -> &BTreeMap<Slot, (Ballot, Command)> {
+    pub fn records(&self) -> &BTreeMap<Slot, (Ballot, V)> {
         &self.records
     }
 
     /// The record at `slot`, if readable.
     #[must_use]
-    pub fn record(&self, slot: Slot) -> Option<&(Ballot, Command)> {
+    pub fn record(&self, slot: Slot) -> Option<&(Ballot, V)> {
         self.records.get(&slot)
     }
 
@@ -234,11 +245,11 @@ impl Acceptor {
     ///
     /// If the promise does not land exactly on the prepared ballot (a
     /// programmer error).
-    pub fn prepare(
+    pub fn prepare<W: From<AcceptorWrite<V>>>(
         &mut self,
         ballot: Ballot,
         from_slot: Slot,
-        writes: &mut Vec<WriteOp>,
+        writes: &mut Vec<W>,
     ) -> PrepareOutcome {
         if from_slot < self.first_slot {
             return PrepareOutcome::BelowFloor;
@@ -268,10 +279,14 @@ impl Acceptor {
     /// Never in practice: the peeked cursors are advanced only after a
     /// successful peek.
     #[must_use]
-    pub fn promise_page(&self, from_slot: Slot) -> PromisePage {
+    pub fn promise_page(&self, from_slot: Slot) -> PromisePage<V> {
         let mut readable = self.records.range(from_slot..).peekable();
         let mut rotted = self.faulty.range(from_slot..).peekable();
-        let mut page = PromisePage::default();
+        let mut page = PromisePage {
+            accepted: BTreeMap::new(),
+            faulty: BTreeMap::new(),
+            next_from_slot: None,
+        };
         while page.accepted.len() + page.faulty.len() < PROMISE_BATCH {
             let take_readable = match (readable.peek(), rotted.peek()) {
                 (None, None) => break,
@@ -320,14 +335,14 @@ impl Acceptor {
     ///
     /// If `ballot` is below the promise held: a promise is never lowered,
     /// across the node's whole lifetime.
-    pub fn set_promise(&mut self, ballot: Ballot, writes: &mut Vec<WriteOp>) {
+    pub fn set_promise<W: From<AcceptorWrite<V>>>(&mut self, ballot: Ballot, writes: &mut Vec<W>) {
         assert!(
             ballot >= self.promised,
             "a node's promised ballot never decreases"
         );
         if self.promised != ballot {
             self.promised = ballot;
-            writes.push(WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)));
+            writes.push(AcceptorWrite::SetPromise(ballot).into());
         }
     }
 
@@ -350,12 +365,12 @@ impl Acceptor {
     /// at-or-below the recorded ballot only by the *chosen* value, which P2c
     /// makes identical to whatever was accepted here at any ballot at or
     /// above the choosing one; and one ballot has one proposer (P2b).
-    pub fn record_accepted(
+    pub fn record_accepted<W: From<AcceptorWrite<V>>>(
         &mut self,
         slot: Slot,
         ballot: Ballot,
-        command: Command,
-        writes: &mut Vec<WriteOp>,
+        command: V,
+        writes: &mut Vec<W>,
     ) -> bool {
         assert!(
             slot >= self.first_slot,
@@ -378,11 +393,14 @@ impl Acceptor {
             );
         }
         self.records.insert(slot, (ballot, command.clone()));
-        writes.push(WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
-            slot,
-            ballot,
-            value: command,
-        }));
+        writes.push(
+            AcceptorWrite::AppendAccepted {
+                slot,
+                ballot,
+                value: command,
+            }
+            .into(),
+        );
         repaired
     }
 
@@ -455,7 +473,7 @@ impl Acceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ClientId, ClientSeq, Entry, NodeId};
+    use crate::types::{ClientId, ClientSeq, Command, Entry, NodeId};
 
     fn ballot(round: u64) -> Ballot {
         Ballot {

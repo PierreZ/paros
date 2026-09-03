@@ -5,20 +5,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Proposer, RESEND_BATCH};
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, Fingerprint, NodeId, Slot};
+use crate::types::{Ballot, Fingerprint, Slot};
 
 /// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
 #[derive(Clone, Debug)]
-pub struct Round {
+pub struct Round<Id, V> {
     /// The ballot this slot is being accepted under.
     pub(super) ballot: Ballot,
     /// The command being accepted for this slot.
-    pub(super) command: Command,
+    pub(super) command: V,
     /// Acceptors (incl. self) that have accepted this slot's command at `ballot`.
-    pub(super) accepted_by: BTreeSet<NodeId>,
+    pub(super) accepted_by: BTreeSet<Id>,
 }
 
-impl Round {
+impl<Id, V> Round<Id, V> {
     /// The ballot this slot is being accepted under.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
@@ -27,17 +27,17 @@ impl Round {
 
     /// The command being accepted for this slot.
     #[must_use]
-    pub fn command(&self) -> &Command {
+    pub fn command(&self) -> &V {
         &self.command
     }
 }
 
-impl Proposer {
+impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     // ---- Phase 2 ------------------------------------------------------------
 
     /// Every in-flight Phase-2 round, keyed by slot.
     #[must_use]
-    pub fn rounds(&self) -> &BTreeMap<Slot, Round> {
+    pub fn rounds(&self) -> &BTreeMap<Slot, Round<Id, V>> {
         &self.rounds
     }
 
@@ -52,13 +52,7 @@ impl Proposer {
     /// visits each inherited slot once, and a blocked slot is opened only by
     /// the probe that resolves it. A second round would let one
     /// `(slot, ballot)` carry two commands.
-    pub fn open_round(
-        &mut self,
-        slot: Slot,
-        ballot: Ballot,
-        command: Command,
-        own_vote: Option<NodeId>,
-    ) {
+    pub fn open_round(&mut self, slot: Slot, ballot: Ballot, command: V, own_vote: Option<Id>) {
         assert!(
             !self.rounds.contains_key(&slot),
             "a slot has at most one open Phase-2 round"
@@ -81,7 +75,7 @@ impl Proposer {
     /// for the round's own ballot and command fingerprint. Whether it
     /// counted. Which configurations `from` belongs to is the caller's
     /// guard; the decision ([`Proposer::decided`]) counts members only.
-    pub fn fold_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot, vhash: u64) -> bool {
+    pub fn fold_accepted(&mut self, from: Id, ballot: Ballot, slot: Slot, vhash: u64) -> bool {
         let Some(round) = self.rounds.get_mut(&slot) else {
             return false;
         };
@@ -101,7 +95,7 @@ impl Proposer {
     /// guard refuses any other sender, restated here so the quorum arithmetic
     /// is never fed an id that could not have made a durable promise.
     #[must_use]
-    pub fn decided(&self, slot: Slot, config: &AcceptorConfig) -> Option<(Ballot, Command)> {
+    pub fn decided(&self, slot: Slot, config: &AcceptorConfig<Id>) -> Option<(Ballot, V)> {
         let round = self.rounds.get(&slot)?;
         if !config.has_phase2_quorum(&round.accepted_by) {
             return None;
@@ -129,12 +123,12 @@ impl Proposer {
     /// most [`RESEND_BATCH`] rounds from the cursor up, wrapping
     /// around from the lowest round held, and the cursor advances past the
     /// page.
-    pub fn resend_page(&mut self) -> Vec<(Slot, Ballot, Command)> {
+    pub fn resend_page(&mut self) -> Vec<(Slot, Ballot, V)> {
         // No round survives below the compaction floor (the cross-role
         // invariant `RawNode::assert_invariants` pins), so a fresh cursor
         // starts at the bottom of the map and needs no floor handed in.
         let start = self.resend_cursor.unwrap_or(Slot(0));
-        let mut pending: Vec<(Slot, Ballot, Command)> = self
+        let mut pending: Vec<(Slot, Ballot, V)> = self
             .rounds
             .range(start..)
             .take(RESEND_BATCH)

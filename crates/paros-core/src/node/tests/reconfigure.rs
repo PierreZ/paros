@@ -229,7 +229,7 @@ fn a_reconfiguration_waits_for_a_settled_leadership() {
 #[test]
 #[should_panic(expected = "an acceptor configuration names at least one acceptor")]
 fn a_malformed_configuration_cannot_be_built() {
-    let _ = AcceptorConfig::new(Vec::new(), QuorumSystem::Majority);
+    let _ = AcceptorConfig::new(Vec::<NodeId>::new(), QuorumSystem::Majority);
 }
 
 /// The positive half: a configuration `new` produced is always well formed,

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ProbeDecision, PromiseFold, PromiseTally, Proposer, merge_report, slot_decidable};
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, Slot};
 
 /// The leader's open **distributed commitment determination** (Stage 8): the
 /// faulty slots its winning promise quorum resolved neither as Case 1 (some
@@ -21,19 +21,19 @@ use crate::types::{Ballot, Command, NodeId, Slot};
 /// each blocked slot the moment the tally allows; a probe that stays blocked
 /// for a full recovery timeout resigns the leadership (CTRL §4.2).
 #[derive(Clone, Debug)]
-pub struct RepairProbe {
+pub struct RepairProbe<Id, V> {
     /// The paging half, shared with [`Election`]: the ballot, the first slot,
     /// the stragglers that answered completely, and their next cursors.
-    pub(super) promises: PromiseTally,
+    pub(super) promises: PromiseTally<Id>,
     /// The prior configurations the election covered: a blocked slot is
     /// decidable only once a full Q1 of qualifying answers holds in **every**
     /// one of them (the same predicate as the election's), and the
     /// straggler re-query fans out to their union.
-    pub(super) prior: Vec<AcceptorConfig>,
+    pub(super) prior: Vec<AcceptorConfig<Id>>,
     /// Faulty reports per still-blocked slot: reporter → accepted ballot.
-    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<NodeId, Ballot>>,
+    pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<Id, Ballot>>,
     /// Highest-ballot `have` seen per still-blocked slot.
-    pub(super) best_have: BTreeMap<Slot, (Ballot, Command)>,
+    pub(super) best_have: BTreeMap<Slot, (Ballot, V)>,
     /// Slots still undecidable (Case 3: wait).
     pub(super) blocked: BTreeSet<Slot>,
     /// Driver ticks this probe has been open (the caller's resign clock).
@@ -44,7 +44,7 @@ pub struct RepairProbe {
     pub(super) elapsed: u64,
 }
 
-impl RepairProbe {
+impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     /// The leadership ballot the probe queries at.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
@@ -68,8 +68,8 @@ impl RepairProbe {
     /// the election covered — the Phase-1 addressee union — that have not
     /// answered their full suffix. `me` is never a straggler.
     #[must_use]
-    pub fn stragglers(&self, me: NodeId) -> Vec<NodeId> {
-        let mut unanswered: Vec<NodeId> = self
+    pub fn stragglers(&self, me: Id) -> Vec<Id> {
+        let mut unanswered: Vec<Id> = self
             .prior
             .iter()
             .flat_map(|c| c.members().iter().copied())
@@ -81,12 +81,12 @@ impl RepairProbe {
     }
 }
 
-impl Proposer {
+impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     // ---- repair probe -------------------------------------------------------
 
     /// The open repair probe, if any.
     #[must_use]
-    pub fn probe(&self) -> Option<&RepairProbe> {
+    pub fn probe(&self) -> Option<&RepairProbe<Id, V>> {
         self.probe.as_ref()
     }
 
@@ -117,10 +117,10 @@ impl Proposer {
     /// never asserted.
     pub fn fold_probe_promise(
         &mut self,
-        from: NodeId,
+        from: Id,
         ballot: Ballot,
         from_slot: Slot,
-        accepted: &BTreeMap<Slot, (Ballot, Command)>,
+        accepted: &BTreeMap<Slot, (Ballot, V)>,
         faulty: &BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) -> PromiseFold {
@@ -156,7 +156,7 @@ impl Proposer {
     /// answers with no `have`, reported as no value for the caller to fill).
     /// Closes the probe when nothing stays blocked. Empty when no probe is
     /// open.
-    pub fn resolve_probe(&mut self) -> Vec<ProbeDecision> {
+    pub fn resolve_probe(&mut self) -> Vec<ProbeDecision<V>> {
         let mut decisions = Vec::new();
         let Some(probe) = self.probe.as_mut() else {
             return decisions;

@@ -25,6 +25,13 @@
 //! deployment colocates it — the same [`Proposer`] runs a single decree over
 //! a one-slot log and a Multi-Paxos leadership over an unbounded one.
 //!
+//! Which is why it is generic over both halves of what a deployment brings:
+//! `Id`, the identity its quorums are counted in (node ids for the acceptor
+//! pool, matchmaker ids for the handover's decree over `M_g`), and `V`, the
+//! value its rounds carry — of which it needs only
+//! [`Fingerprint`](crate::Fingerprint), the "which value is this" an
+//! `Accepted` reports. The node deployment is `Proposer<NodeId, Command>`.
+//!
 //! [`RawNode`](crate::RawNode) is the wiring: it opens the phases, feeds the
 //! folds, turns the outcomes into messages and role transitions, and pumps
 //! the recovery one bounded page at a time.
@@ -43,7 +50,7 @@ pub use self::rounds::Round;
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::single_decree::select_highest;
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Ballot, Slot};
 
 /// The paging half every Phase-1 tally shares: which ballot it counts for,
 /// where its `Prepare` started, who has answered **completely**, and where
@@ -58,22 +65,22 @@ use crate::types::{Ballot, Command, NodeId, Slot};
 /// the probe only its still-blocked ones), so the merge stays with them and
 /// the rest lives here.
 #[derive(Clone, Debug)]
-struct PromiseTally {
+struct PromiseTally<Id> {
     /// The ballot this tally counts promises for.
     ballot: Ballot,
     /// First slot the `Prepare` covered; the cursor a first page must carry.
     from_slot: Slot,
     /// Acceptors (incl. self) whose complete suffix answer has been merged.
-    answered: BTreeSet<NodeId>,
+    answered: BTreeSet<Id>,
     /// Next suffix-page cursor expected from each non-terminal answerer.
-    promise_next: BTreeMap<NodeId, Slot>,
+    promise_next: BTreeMap<Id, Slot>,
 }
 
-impl PromiseTally {
+impl<Id: Copy + Ord> PromiseTally<Id> {
     /// A tally at `ballot` from `from_slot`, with `answered` already holding
     /// whoever answered before it opened (the candidate itself, or the
     /// election's promise quorum when a probe inherits it).
-    fn new(ballot: Ballot, from_slot: Slot, answered: BTreeSet<NodeId>) -> Self {
+    fn new(ballot: Ballot, from_slot: Slot, answered: BTreeSet<Id>) -> Self {
         Self {
             ballot,
             from_slot,
@@ -86,12 +93,12 @@ impl PromiseTally {
     /// ballot, a sender not already done, and a page whose shape and cursor
     /// are what this sender owes next. Wire input, so a refusal is a `false`,
     /// never an assert.
-    fn accepts(
+    fn accepts<V>(
         &self,
-        from: NodeId,
+        from: Id,
         ballot: Ballot,
         from_slot: Slot,
-        accepted: &BTreeMap<Slot, (Ballot, Command)>,
+        accepted: &BTreeMap<Slot, (Ballot, V)>,
         faulty: &BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) -> bool {
@@ -108,7 +115,7 @@ impl PromiseTally {
 
     /// Steps 5 and 6: a page that carries a continuation cursor leaves the
     /// sender mid-suffix; a terminal page marks it answered.
-    fn close_page(&mut self, from: NodeId, next_from_slot: Option<Slot>) -> PromiseFold {
+    fn close_page(&mut self, from: Id, next_from_slot: Option<Slot>) -> PromiseFold {
         if let Some(next) = next_from_slot {
             self.promise_next.insert(from, next);
             PromiseFold::Continue(next)
@@ -134,22 +141,22 @@ pub enum PromiseFold {
 
 /// The campaign a Phase 1 opens for ([`Proposer::open_phase1`]).
 #[derive(Clone, Debug)]
-pub struct Campaign {
+pub struct Campaign<Id> {
     /// The candidate: its own first acceptor.
-    pub me: NodeId,
+    pub me: Id,
     /// The ballot the campaign runs at.
     pub ballot: Ballot,
     /// `C_b`: the configuration Phase 2 runs under once won.
-    pub config: AcceptorConfig,
+    pub config: AcceptorConfig<Id>,
     /// `H_b`: the prior configurations whose quorums Phase 1 needs.
-    pub prior: Vec<AcceptorConfig>,
+    pub prior: Vec<AcceptorConfig<Id>>,
     /// First slot the campaign recovers.
     pub from_slot: Slot,
 }
 
 /// A blocked slot the probe tally resolved ([`Proposer::resolve_probe`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProbeDecision {
+pub struct ProbeDecision<V> {
     /// The slot.
     pub slot: Slot,
     /// The value to re-propose: the best reported `have` (Case 1), or `None`
@@ -157,25 +164,25 @@ pub struct ProbeDecision {
     /// caller fills the slot itself. The proposer never *invents* a value —
     /// what a "nothing here" filler is belongs to the deployment, exactly as
     /// it does for [`RecoveryStep::Fill`].
-    pub command: Option<Command>,
+    pub command: Option<V>,
 }
 
 /// What a closed, won Phase 1 hands the leadership
 /// ([`Proposer::close_phase1`]).
 #[derive(Clone, Debug)]
-pub struct Phase1Outcome {
+pub struct Phase1Outcome<Id, V> {
     /// The won ballot.
     pub ballot: Ballot,
     /// `C_b`: the configuration Phase 2 runs under.
-    pub config: AcceptorConfig,
+    pub config: AcceptorConfig<Id>,
     /// `H_b`: the prior configurations the election covered.
-    pub prior: Vec<AcceptorConfig>,
+    pub prior: Vec<AcceptorConfig<Id>>,
     /// Every acceptor whose promise was counted.
-    pub promised_by: BTreeSet<NodeId>,
+    pub promised_by: BTreeSet<Id>,
     /// The highest-ballot report per slot (P2c), for the whole campaign
     /// range — including slots below the caller's chosen prefix, which a
     /// faulty chosen record can pull the range down to.
-    pub recovered: BTreeMap<Slot, (Ballot, Command)>,
+    pub recovered: BTreeMap<Slot, (Ballot, V)>,
     /// The faulty-reported slots the tally could not decide (Case 3): they
     /// went to the repair probe, which is open iff this is non-empty.
     pub blocked: BTreeSet<Slot>,
@@ -192,11 +199,11 @@ pub struct Phase1Outcome {
 /// ballot `> threshold` on some member of every Q2 — so an acceptor's answer
 /// qualifies when it reported either nothing (`none`) or a record at ballot
 /// `<= threshold`.
-fn qualifying_answers(
-    answered: &BTreeSet<NodeId>,
-    reporters: Option<&BTreeMap<NodeId, Ballot>>,
+fn qualifying_answers<Id: Copy + Ord>(
+    answered: &BTreeSet<Id>,
+    reporters: Option<&BTreeMap<Id, Ballot>>,
     threshold: Option<Ballot>,
-) -> BTreeSet<NodeId> {
+) -> BTreeSet<Id> {
     answered
         .iter()
         .filter(|node| {
@@ -215,10 +222,10 @@ fn qualifying_answers(
 /// `none` per configuration). Anything less is Case 3: wait. With no prior
 /// configuration at all nothing could have been chosen below this ballot, so
 /// the slot is decidable outright.
-fn slot_decidable(
-    prior: &[AcceptorConfig],
-    answered: &BTreeSet<NodeId>,
-    reporters: Option<&BTreeMap<NodeId, Ballot>>,
+fn slot_decidable<Id: Copy + Ord>(
+    prior: &[AcceptorConfig<Id>],
+    answered: &BTreeSet<Id>,
+    reporters: Option<&BTreeMap<Id, Ballot>>,
     threshold: Option<Ballot>,
 ) -> bool {
     let qualifying = qualifying_answers(answered, reporters, threshold);
@@ -230,9 +237,9 @@ fn slot_decidable(
 /// A `Promise` page is useful only at the exact requested cursor, carries at
 /// most the advertised bound across both tri-state maps, keeps them disjoint,
 /// and advances its continuation past everything it reported.
-fn promise_page_shape_valid(
+fn promise_page_shape_valid<V>(
     expected: Slot,
-    accepted: &BTreeMap<Slot, (Ballot, Command)>,
+    accepted: &BTreeMap<Slot, (Ballot, V)>,
     faulty: &BTreeMap<Slot, Ballot>,
     from_slot: Slot,
     next_from_slot: Option<Slot>,
@@ -257,11 +264,11 @@ fn promise_page_shape_valid(
 /// kernel), at the merge. A lower report never replaces the recorded one, and
 /// two reports at one ballot are the same command (one proposer per ballot,
 /// P2b) — a disagreement is a protocol violation, not a tie.
-fn merge_report(
-    tally: &mut BTreeMap<Slot, (Ballot, Command)>,
+fn merge_report<V: PartialEq>(
+    tally: &mut BTreeMap<Slot, (Ballot, V)>,
     slot: Slot,
     ballot: Ballot,
-    command: Command,
+    command: V,
 ) {
     let mut best = tally.remove(&slot);
     select_highest(
@@ -283,22 +290,35 @@ pub const RECOVERY_BATCH: usize = 64;
 /// role enforces in [`Proposer::resend_page`].
 pub const RESEND_BATCH: usize = 64;
 
-/// The proposer component (see the module doc).
-#[derive(Clone, Debug, Default)]
-pub struct Proposer {
+/// The proposer component (see the module doc), over the acceptor identity
+/// `Id` its tallies count and the value `V` its rounds carry.
+#[derive(Clone, Debug)]
+pub struct Proposer<Id, V> {
     /// The open Phase 1 while a candidate. `None` once leader.
-    election: Option<Election>,
+    election: Option<Election<Id, V>>,
     /// The leader's open repair probe (Stage 8, CTRL).
-    probe: Option<RepairProbe>,
+    probe: Option<RepairProbe<Id, V>>,
     /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
-    rounds: BTreeMap<Slot, Round>,
+    rounds: BTreeMap<Slot, Round<Id, V>>,
     /// Remaining bounded recovery work for the current leadership.
-    recovery: Option<Recovery>,
+    recovery: Option<Recovery<V>>,
     /// Fair cursor for bounded pending-Accept re-sends.
     resend_cursor: Option<Slot>,
 }
 
-impl Proposer {
+impl<Id, V> Default for Proposer<Id, V> {
+    fn default() -> Self {
+        Self {
+            election: None,
+            probe: None,
+            rounds: BTreeMap::new(),
+            recovery: None,
+            resend_cursor: None,
+        }
+    }
+}
+
+impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// A proposer with nothing open.
     #[must_use]
     pub fn new() -> Self {
@@ -345,8 +365,7 @@ impl Proposer {
 mod tests {
     use super::*;
     use crate::membership::QuorumSystem;
-    use crate::types::command_fingerprint;
-    use crate::types::{ClientId, ClientSeq, Entry, Value};
+    use crate::types::{ClientId, ClientSeq, Command, Entry, NodeId, Value, command_fingerprint};
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {
@@ -370,7 +389,7 @@ mod tests {
         )
     }
 
-    fn opened(prior: Vec<AcceptorConfig>) -> Proposer {
+    fn opened(prior: Vec<AcceptorConfig>) -> Proposer<NodeId, Command> {
         let mut p = Proposer::new();
         let mut expected: Vec<NodeId> = prior
             .iter()
@@ -701,7 +720,7 @@ mod tests {
     /// policy.
     #[test]
     fn recovery_policy_decides_the_fill() {
-        let mut p = Proposer::new();
+        let mut p: Proposer<NodeId, Command> = Proposer::new();
         let mut recovered = BTreeMap::new();
         recovered.insert(Slot(1), cmd(1));
         p.open_recovery(

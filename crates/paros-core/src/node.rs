@@ -173,7 +173,7 @@ pub struct RawNode {
     /// the CTRL tri-state's faulty entries. Rebuilt on boot from the durable
     /// log (see [`RawNode::new`]); persisted one delta at a time through the
     /// [`WriteOp`]s it emits into this node's batch.
-    acceptor: Acceptor,
+    acceptor: Acceptor<Command>,
     /// The **replica** component ([`crate::replica::Replica`]): the chosen
     /// log, the durable chosen index, the contiguous apply walk, the
     /// at-most-once ledger and the application repair cursor.
@@ -253,7 +253,7 @@ pub struct RawNode {
     /// in-flight Phase-2 rounds and the bounded recovery of the current
     /// leadership ([`crate::proposer`]). Volatile; dies whole with the
     /// leadership.
-    proposer: Proposer,
+    proposer: Proposer<NodeId, Command>,
     /// The **matchmaking phase** while a Candidate registers its ballot's
     /// configuration with the matchmakers (#120) — the campaign state that
     /// precedes `election`, and never coexists with it. `None` on a plain

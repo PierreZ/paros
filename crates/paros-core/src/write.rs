@@ -107,6 +107,12 @@ pub enum WriteOp {
     },
 }
 
+impl From<AcceptorWrite<Command>> for WriteOp {
+    fn from(write: AcceptorWrite<Command>) -> Self {
+        WriteOp::Acceptor(write)
+    }
+}
+
 /// Whether a [`crate::Ready`] batch must be flushed to stable storage (fsync'd)
 /// **before** its messages are sent.
 ///
