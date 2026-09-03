@@ -376,6 +376,24 @@ impl StorageWorld {
         true
     }
 
+    /// Release a retirement the node **refused** (#123): the RETIRE step parks
+    /// the identity before it asks, so a refusal — which by construction means
+    /// the node is still a member of the configuration in force, or is the
+    /// leader — must hand the budget slot back. Only ever called on an
+    /// explicit `accepted: false`: an ambiguous ack may have been honored, and
+    /// bringing such an identity back would resurrect a node the cluster has
+    /// already shut down. Returns whether the key was actually held.
+    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
+    pub(crate) fn release_retirement(&mut self, key: &str, node: u64) -> bool {
+        if !self.retired.remove(key) {
+            return false;
+        }
+        self.parked.remove(key);
+        self.parked_ids.remove(&node);
+        tracing::info!(node, "node_retirement_released");
+        true
+    }
+
     /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
     /// run, and only where the deployment's bootstrap matchmaker set holds
     /// three or more members — the smallest set that keeps a quorum without

@@ -485,6 +485,8 @@ struct AdversarialCoverage {
     /// A node refused a retirement (it was a member again by the time the
     /// request landed).
     retire_refused: bool,
+    /// A refused retirement handed the parked identity back to the world.
+    retire_released: bool,
 }
 
 struct OnDrop<F: FnOnce()> {
@@ -1910,7 +1912,26 @@ impl Workload for ChainWorkload {
                             tracing::info!(node = victim as u64, accepted = ?accepted, "chain_retire_outcome");
                             match accepted {
                                 Some(true) => self.adversarial.retired = true,
-                                Some(false) => self.adversarial.retire_refused = true,
+                                Some(false) => {
+                                    // Refused means the node is a member of
+                                    // the configuration in force (or is the
+                                    // leader): it is still live, so the
+                                    // pre-emptive park must be undone or the
+                                    // harness has removed a member outside
+                                    // the protocol. Only ever on an explicit
+                                    // refusal — an ambiguous ack may have
+                                    // been honored.
+                                    self.adversarial.retire_refused = true;
+                                    let world = crate::world::storage_world(ctx.state());
+                                    let released = world
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .release_retirement(
+                                            &servers[victim],
+                                            u64::try_from(victim).unwrap_or(u64::MAX),
+                                        );
+                                    self.adversarial.retire_released |= released;
+                                }
                                 None => {}
                             }
                         }
@@ -1970,6 +1991,9 @@ impl Workload for ChainWorkload {
         }
         if self.adversarial.retire_refused {
             assert_reachable!("gc: a retirement is refused by a node that is a member again");
+        }
+        if self.adversarial.retire_released {
+            assert_reachable!("gc: a refused retirement releases the parked identity");
         }
         if self.adversarial.compact_storm_modes[0] {
             assert_reachable!("chain: compact-storm overask is exercised");
