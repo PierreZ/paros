@@ -62,7 +62,7 @@ pub use storage::{
 pub use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, ConfigId, Control,
     DecreeAcceptor, DecreePhase, DecreeProposer, Entry, GcAck, GcOutcome, GcRequest, GcStep,
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, HardState,
+    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
     MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,

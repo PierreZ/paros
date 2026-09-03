@@ -66,7 +66,7 @@ pub use membership::{
 };
 pub use message::Message;
 pub use node::{
-    GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters,
+    GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
     REPAIR_TIMEOUT_ELECTIONS, RawNode, ReadIndexResult, ReadState, ReconfigureRefusal,
     ReconfigureResult,

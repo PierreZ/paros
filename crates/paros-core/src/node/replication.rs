@@ -4,7 +4,12 @@ use crate::membership::AcceptorConfig;
 /// Leader heartbeat interval, in ticks. The driver always supplies an election
 /// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
 /// always beats before any follower's election clock fires.
-pub(super) const HEARTBEAT_TICKS: u64 = 1;
+///
+/// Public because an observer that judges "this leader is still beating" has
+/// to know the period a beat is expected in: an oracle counting beatless
+/// ticks against a hard-coded 1 silently stops being right the moment this
+/// changes.
+pub const HEARTBEAT_TICKS: u64 = 1;
 
 impl RawNode {
     /// Broadcast one leader beat at a fresh, monotonically increasing

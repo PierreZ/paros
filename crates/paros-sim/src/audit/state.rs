@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -44,9 +44,13 @@ pub(super) struct DeposedStreak {
     pub(super) deposed: bool,
     /// Ticks this node has run while `deposed` held.
     pub(super) ticks: u64,
-    /// Whether a beat at this ballot was seen since the last tick: a leader
-    /// beats every tick, so a tick with no beat means it stepped down.
-    pub(super) beat_since_tick: bool,
+    /// Consecutive ticks with no beat observed at this ballot. A leader beats
+    /// every [`paros::HEARTBEAT_TICKS`] ticks, so more than one whole beat
+    /// period of silence means it stepped down — but *one* period of silence
+    /// does not: the send seam's `drop_outgoing` skips `Audit::sent`, so a
+    /// fully dropped beat is invisible here, and a single beatless tick used
+    /// to close the streak and hand a zombie leader a fresh budget.
+    pub(super) beatless_ticks: u64,
 }
 
 /// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
@@ -921,13 +925,13 @@ impl AuditState {
                 seq,
                 deposed: false,
                 ticks: 0,
-                beat_since_tick: false,
+                beatless_ticks: 0,
             };
         } else if entry.seq == seq {
             return;
         }
         entry.seq = seq;
-        entry.beat_since_tick = true;
+        entry.beatless_ticks = 0;
         if above >= majority {
             entry.deposed = true;
         } else {
@@ -942,13 +946,15 @@ impl AuditState {
         let Some(entry) = self.deposed_streaks.get_mut(&node) else {
             return;
         };
-        if !entry.beat_since_tick {
-            // No beat this tick: the leadership is over (a leader beats every
-            // tick), so the streak is closed.
+        entry.beatless_ticks += 1;
+        if entry.beatless_ticks > HEARTBEAT_TICKS {
+            // More than one whole beat period without a beat: the leadership
+            // is over, so the streak is closed. Exactly one period of silence
+            // is tolerated because a beat can be lost at the send seam
+            // without the audit ever seeing it.
             self.deposed_streaks.remove(&node);
             return;
         }
-        entry.beat_since_tick = false;
         if !entry.deposed {
             return;
         }

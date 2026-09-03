@@ -24,7 +24,7 @@ pub use self::matchmaking::MatchStep;
 use self::matchmaking::Matchmaking;
 use self::reads::{READ_ROUND_TTL_TICKS, ReadRound};
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
-use self::replication::HEARTBEAT_TICKS;
+pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
