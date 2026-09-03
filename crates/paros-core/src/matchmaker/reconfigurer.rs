@@ -63,8 +63,15 @@ pub enum StartRefusal {
     Busy,
     /// The target names no matchmaker.
     Empty,
-    /// The target does not admit the matchmaker quorum system
-    /// ([`MatchmakerSet::is_well_formed`]).
+    /// A set in the request does not admit the matchmaker quorum system
+    /// ([`MatchmakerSet::is_well_formed`]) — the generation being replaced,
+    /// or the target. Under the majority system only the *current* set can
+    /// reach it in practice: [`MatchmakerSet::new`] sorts and deduplicates
+    /// the target, and every non-empty sorted set admits a majority. The
+    /// current set is not normalized here — it is what the caller believes
+    /// authoritative — and a malformed one would install a `Stopping` phase
+    /// whose quorum can never complete (an empty one panics the first time
+    /// a quorum is drawn).
     Malformed,
 }
 
@@ -250,7 +257,8 @@ impl MatchmakerReconfigurer {
     /// # Errors
     ///
     /// [`StartRefusal::Busy`] while a handover runs; [`StartRefusal::Empty`]
-    /// for an empty target.
+    /// for an empty target; [`StartRefusal::Malformed`] when `current` or the
+    /// target does not admit the matchmaker quorum system.
     pub fn start(
         &mut self,
         current: &MatchmakerSet,
@@ -258,6 +266,11 @@ impl MatchmakerReconfigurer {
     ) -> Result<(), StartRefusal> {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
+        }
+        // The generation being replaced is a quorum system too: every freeze
+        // and every decree quorum is drawn over it.
+        if !current.is_well_formed() {
+            return Err(StartRefusal::Malformed);
         }
         let target = MatchmakerSet::new(current.generation.next(), target);
         if target.members.is_empty() {
@@ -291,10 +304,15 @@ impl MatchmakerReconfigurer {
     ///
     /// # Errors
     ///
-    /// [`StartRefusal::Busy`] while a handover runs.
+    /// [`StartRefusal::Busy`] while a handover runs;
+    /// [`StartRefusal::Malformed`] when `current` does not admit the
+    /// matchmaker quorum system.
     pub fn finish(&mut self, current: &MatchmakerSet) -> Result<(), StartRefusal> {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
+        }
+        if !current.is_well_formed() {
+            return Err(StartRefusal::Malformed);
         }
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
@@ -741,6 +759,38 @@ mod tests {
 
     fn ids(v: &[u64]) -> Vec<MatchmakerId> {
         v.iter().copied().map(MatchmakerId).collect()
+    }
+
+    /// Review finding P10: `start` and `finish` validated the target but not
+    /// the set being replaced. An empty or unsorted `current` installed a
+    /// `Stopping` phase whose quorum can never complete — and whose first
+    /// quorum draw panics — from a value the caller believes authoritative.
+    #[test]
+    fn a_malformed_current_set_is_refused_by_start_and_finish() {
+        let mut r = MatchmakerReconfigurer::new(NodeId(0));
+        let empty = MatchmakerSet {
+            generation: MatchmakerGeneration(0),
+            members: Vec::new(),
+        };
+        assert_eq!(
+            r.start(&empty, ids(&[0, 1, 2])),
+            Err(StartRefusal::Malformed)
+        );
+        assert_eq!(r.finish(&empty), Err(StartRefusal::Malformed));
+        let unsorted = MatchmakerSet {
+            generation: MatchmakerGeneration(0),
+            members: ids(&[2, 1, 0]),
+        };
+        assert_eq!(
+            r.start(&unsorted, ids(&[0, 1, 2])),
+            Err(StartRefusal::Malformed)
+        );
+        assert_eq!(r.finish(&unsorted), Err(StartRefusal::Malformed));
+        assert!(!r.is_busy(), "a refusal starts nothing");
+        // The same call over a well-formed current runs.
+        let current = MatchmakerSet::new(MatchmakerGeneration(0), ids(&[0, 1, 2]));
+        assert_eq!(r.start(&current, ids(&[0, 1, 3])), Ok(()));
+        assert!(r.is_busy());
     }
 
     /// A pool of matchmakers, `0..n`, bootstrapped on `bootstrap`.
