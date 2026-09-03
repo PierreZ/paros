@@ -776,6 +776,54 @@ fn a_stale_candidate_adopts_the_effective_configuration_after_gc() {
     );
 }
 
+/// An honored reconfiguration may bind a node to an *older* ballot than the
+/// one it holds: a reconfiguration campaign at 4 whose registration reached
+/// a quorum after an ordinary leader at 9 was elected is still adopted by
+/// every later campaign. The adoption rolls `acceptors_since` back to 4, and
+/// the membership fence keeps the 9 it already recorded — the fence is the
+/// maximum over every membership, never the current binding (seeds
+/// 15760233921517076726 and 15615437002394963727: the sweep panicked on a
+/// fence asserted to never run ahead of the configuration).
+#[test]
+fn an_honored_reconfiguration_may_bind_an_older_ballot_than_the_fence() {
+    let mut n = deployed_node(2, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    // A leader at 9 taught this node the membership it holds.
+    let learned = ballot(9, 1);
+    n.step(Message::Prepare {
+        config_id: n.hard_state().config_id,
+        from: NodeId(1),
+        ballot: learned,
+        from_slot: Slot(0),
+        config: Some(cfg(&[1, 2, 3])),
+    });
+    n.ready().advance();
+    assert_eq!(n.acceptors_since(), learned);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // The quorum reports a reconfiguration at 4 that names this node.
+    let step = n.on_match_reply(registered_effective(
+        0,
+        b,
+        BTreeMap::new(),
+        Ballot::zero(),
+        Some((ballot(4, 1), cfg(&[2, 3, 4]))),
+    ));
+    assert_eq!(
+        step,
+        MatchStep::StaleConfiguration {
+            newest: ballot(4, 1)
+        }
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[2, 3, 4]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    // The fence did not follow the binding down: this node is a member of
+    // the adopted configuration, so it refuses to retire at any watermark.
+    assert!(!n.may_retire(ballot(9, 1)));
+    assert!(!n.may_retire(ballot(10, 1)));
+}
+
 /// The reported scalar and the histories are folded together, maximum wins:
 /// a matchmaker whose floor collected the newest record still reports it,
 /// and a matchmaker still holding an older record does not outrank it.

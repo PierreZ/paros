@@ -623,6 +623,14 @@ impl RawNode {
             // reconfiguration could be elected under the
             // superseded configuration, rolling the cluster back
             // without anyone asking (review of #132).
+            // The adoption binds this node to the reconfiguration's own
+            // ballot, which may be *older* than the one it holds: a
+            // reconfiguration campaign at 8 can complete its registration
+            // after an ordinary leader at 10 was elected, and it is honored
+            // by every later campaign regardless (intersection hands its
+            // record to them). `acceptors_since` is therefore not monotone
+            // here, unlike `learn_config`, and the membership fence keeps
+            // the higher ballot it already recorded.
             self.acceptors = config;
             self.acceptors_since = newest;
             self.record_membership();
