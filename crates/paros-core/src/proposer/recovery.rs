@@ -15,7 +15,7 @@ pub enum RecoveryPolicy {
     /// The recovery came out of a won Phase 1. Quorum intersection guarantees
     /// a value already chosen at an unreported slot would have been reported,
     /// so an unreported slot is genuinely free and is filled with a
-    /// [`Control::Noop`] (the election gap fill).
+    /// [`Control::Noop`](crate::Control::Noop) (the election gap fill).
     Phase1Backed,
     /// The recovery was inherited through a cooperative handoff, which ran
     /// **no** Phase 1: there is no quorum report behind it, so a slot the
@@ -67,7 +67,7 @@ pub enum RecoveryStep<V> {
     /// The recovery names a command for this slot: re-propose it (P2c).
     Recovered(V),
     /// Nobody reported the slot and the policy is [`RecoveryPolicy::Phase1Backed`]:
-    /// fill it with a [`Control::Noop`].
+    /// fill it with a [`Control::Noop`](crate::Control::Noop).
     Fill,
     /// Nobody described the slot and the policy is [`RecoveryPolicy::Inherited`]:
     /// skip it.

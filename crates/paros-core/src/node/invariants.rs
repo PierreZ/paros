@@ -213,7 +213,7 @@ impl ColocatedNode {
                 assert!(
                     self.matchmaking
                         .as_ref()
-                        .is_none_or(|m| m.ballot == self.ballot),
+                        .is_none_or(|m| m.ballot() == self.ballot),
                     "a candidate's matchmaking runs at its own operating ballot"
                 );
                 assert!(

@@ -65,7 +65,7 @@ impl<'a> Ready<'a> {
         write::classify(self.node.pending_writes())
     }
 
-    /// Outbound messages to send **after** [`Ready::hard_state`] is durable
+    /// Outbound messages to send **after** [`Ready::writes`] are durable
     /// (step 2). Each entry is `(audience, message)`: the core decides *who*
     /// every message is for in protocol terms (`Promise`/`Accepted`/`Nack`
     /// answer the address the request named; an `Accept` is for the acceptors

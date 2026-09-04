@@ -21,7 +21,6 @@ pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
 pub use self::matchmaking::MatchStep;
-use self::matchmaking::Matchmaking;
 use self::reads::READ_ROUND_TTL_TICKS;
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
@@ -29,6 +28,7 @@ use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::matchmaking::Matchmaking;
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use crate::message::{Audience, Message};
 use crate::proposer::Proposer;
@@ -148,7 +148,7 @@ pub struct ReadState {
 /// - the **persist-before-send batch**: one ordered [`WriteOp`] sequence per
 ///   [`Ready`], the roles' writes and the node's retention ops in one place,
 /// - and the **cross-role invariants** no single role can state
-///   ([`ColocatedNode::assert_invariants`]).
+///   (`ColocatedNode::assert_invariants`).
 ///
 /// It holds **no protocol tally of its own**: every quorum question goes to a
 /// role, and every role's answer comes back as data. A second deployment —
@@ -522,7 +522,7 @@ impl ColocatedNode {
     /// acceptors' point of view (they store it opaquely, exactly like a client
     /// entry). Its *effect* — for [`Control::Truncate`], dropping the log prefix —
     /// is applied lazily by every node when the slot enters its contiguous chosen
-    /// prefix (see [`ColocatedNode::advance_chosen_index`]).
+    /// prefix (see `ColocatedNode::advance_chosen_index`).
     ///
     /// # Panics
     ///

@@ -362,7 +362,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// The component's own cross-field invariants. The proposer holds no
     /// durable state and no floor of its own: "no in-flight round survives
     /// below the compaction floor" couples two roles, so it is asserted by
-    /// the wiring that owns both ([`crate::ColocatedNode::assert_invariants`]).
+    /// the wiring that owns both (`ColocatedNode::assert_invariants`).
     ///
     /// # Panics
     ///

@@ -39,7 +39,7 @@ use super::reconfigurer::{MatchmakerReconfigurer, ReconfigurerPhase, Reconfigure
 use super::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
-    MatchmakerWriteOp, ReconfigureReply, ReconfigureRequest, Registration, RegistryStorage,
+    MatchmakerWriteOp, MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
 };
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{Ballot, NodeId};
@@ -91,54 +91,10 @@ impl Rng {
     }
 }
 
-/// A matchmaker's disk: what a restart boots from. Applies every
-/// [`MatchmakerWriteOp`] exactly as the library's storage does.
-#[derive(Clone, Default)]
-struct Disk {
-    hard_state: MatchmakerHardState,
-    registry: BTreeMap<Ballot, Registration>,
-}
-
-impl Disk {
-    fn apply(&mut self, op: &MatchmakerWriteOp) {
-        match op {
-            MatchmakerWriteOp::Register {
-                ballot,
-                registration,
-            } => {
-                self.registry.insert(*ballot, registration.clone());
-            }
-            MatchmakerWriteOp::SetGcWatermark(watermark) => {
-                self.hard_state.gc_watermark = *watermark;
-                self.registry = self.registry.split_off(watermark);
-            }
-            MatchmakerWriteOp::SetScalars(scalars) => {
-                self.hard_state = scalars.clone();
-            }
-            MatchmakerWriteOp::InstallRegistry {
-                scalars,
-                registrations,
-            } => {
-                self.hard_state = scalars.clone();
-                self.registry = registrations.clone();
-            }
-        }
-    }
-}
-
-impl RegistryStorage for Disk {
-    fn initial_state(&self) -> MatchmakerHardState {
-        self.hard_state.clone()
-    }
-
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.registry.get(&ballot).cloned()
-    }
-
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.registry.keys().copied().collect()
-    }
-}
+/// A matchmaker's disk: what a restart boots from. The library's own
+/// reference registry, so every write lands with the semantics the driver's
+/// storage gives it.
+type Disk = MemRegistry;
 
 /// One matchmaker: its disk, and the live state machine when it is up.
 struct Site {
@@ -151,7 +107,7 @@ struct Site {
 
 impl Site {
     fn boot(&mut self) {
-        if self.live.is_none() && self.disk.hard_state != MatchmakerHardState::default() {
+        if self.live.is_none() && *self.disk.hard_state() != MatchmakerHardState::default() {
             self.restarted = true;
         }
         self.live = Some(Matchmaker::new(&self.config, &self.disk));
@@ -495,7 +451,7 @@ impl World {
     fn settled_pending(&self, id: MatchmakerId, successor: &MatchmakerSet) -> usize {
         self.sites[usize::try_from(id.0).expect("index")]
             .disk
-            .hard_state
+            .hard_state()
             .pending
             .iter()
             .filter(|p| p.set.generation <= successor.generation && p.set != *successor)
@@ -540,7 +496,7 @@ impl World {
             // disk knows which was which.
             let local_floor_won = match op {
                 MatchmakerWriteOp::InstallRegistry { scalars, .. } => {
-                    let disk = &self.site(id).disk.hard_state;
+                    let disk = self.site(id).disk.hard_state();
                     disk.pending
                         .iter()
                         .find(|p| p.set.generation == scalars.generation)
@@ -616,8 +572,8 @@ impl World {
         let site = self.site(id);
         let set = site.disk_set();
         let phase = site.disk_phase();
-        let successor = site.disk.hard_state.successor.clone();
-        let effective = site.disk.hard_state.effective.clone();
+        let successor = site.disk.hard_state().successor.clone();
+        let effective = site.disk.hard_state().effective.clone();
         if let Some((ballot, _)) = effective {
             self.ledger
                 .effectives
@@ -1101,7 +1057,7 @@ impl World {
     fn dump(&self) -> String {
         let mut out = String::new();
         for (i, site) in self.sites.iter().enumerate() {
-            let hs = &site.disk.hard_state;
+            let hs = site.disk.hard_state();
             let _ = write!(
                 out,
                 "\n  mm{i}: live={} phase={:?} gen={} members={:?} successor={:?} decree=(promised={:?}, vote={:?}) pending={:?} watermark={:?} registry={}",
@@ -1119,7 +1075,7 @@ impl World {
                     .map(|p| (p.set.generation.0, p.set.members.clone()))
                     .collect::<Vec<_>>(),
                 hs.gc_watermark,
-                site.disk.registry.len(),
+                site.disk.registrations().len(),
             );
         }
         for (i, node) in self.nodes.iter().enumerate() {
@@ -1315,12 +1271,12 @@ impl Site {
     /// What a boot from this disk would resolve to — the core's own rule
     /// ([`super::resolved_set`]), not a second copy of it.
     fn disk_set(&self) -> MatchmakerSet {
-        super::resolved_set(&self.disk.hard_state, &self.config.bootstrap)
+        super::resolved_set(self.disk.hard_state(), &self.config.bootstrap)
     }
 
     fn disk_phase(&self) -> MatchmakerPhase {
         super::resolved_phase(
-            &self.disk.hard_state,
+            self.disk.hard_state(),
             self.config.id,
             &self.config.bootstrap,
         )
@@ -1584,7 +1540,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         vec![a, b],
         "finish proposes the members that answered the freeze"
     );
-    let activated = &world.sites[0].disk.registry;
+    let activated = world.sites[0].disk.registrations();
     assert!(
         activated.contains_key(&Ballot { round: 1, node })
             && activated.contains_key(&Ballot { round: 2, node }),

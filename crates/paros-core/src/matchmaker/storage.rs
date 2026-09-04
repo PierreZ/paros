@@ -1,7 +1,9 @@
 //! The matchmaker's **read-only recovery port**: how a boot reads the durable
 //! registry back, one record at a time.
 
-use super::{MatchmakerHardState, Registration};
+use std::collections::BTreeMap;
+
+use super::{MatchmakerHardState, MatchmakerWriteOp, Registration};
 use crate::types::Ballot;
 
 /// The read-only recovery port of a matchmaker — the registry's
@@ -35,7 +37,7 @@ use crate::types::Ballot;
 ///   reconfiguration (the module doc's *Generations*), reconstructed from the
 ///   surviving quorum — never repaired in place.
 /// - **Per-record writes are what make the seams honest.** The driver applies
-///   one [`MatchmakerWriteOp`] per record and fsyncs the batch before the
+///   one [`MatchmakerWriteOp`](crate::MatchmakerWriteOp) per record and fsyncs the batch before the
 ///   reply leaves; a boot that reads records back one by one is the read-side
 ///   pair of that write ordering, and the audit compares the two.
 ///
@@ -55,4 +57,104 @@ pub trait RegistryStorage {
     /// identities, the twin of the `first_slot..=last_slot` walk. Each names a
     /// record [`Self::registration`] serves.
     fn registered_ballots(&self) -> Vec<Ballot>;
+}
+
+/// The reference in-memory registry: the durable scalars and the per-ballot
+/// registration records, stored separately (never one blob), with the
+/// library's semantics for each [`MatchmakerWriteOp`] — what a driver's
+/// storage must do, written once so tests, model checkers and examples reboot
+/// a [`Matchmaker`](super::Matchmaker) from the writes it actually staged
+/// rather than from a snapshot of its live state.
+///
+/// It is the read port ([`RegistryStorage`]) plus [`MemRegistry::apply`], the
+/// write side. It is *not* a storage engine: nothing rots, nothing tears, and
+/// [`MemRegistry::apply`] never fails. The `paros` crate's
+/// `MemMatchmakerStorage` mirrors it method for method behind the driver's
+/// fallible write extension.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemRegistry {
+    hard_state: MatchmakerHardState,
+    registry: BTreeMap<Ballot, Registration>,
+}
+
+impl MemRegistry {
+    /// A registry holding `hard_state` and `registrations` — a boot image.
+    #[must_use]
+    pub fn new(
+        hard_state: MatchmakerHardState,
+        registrations: BTreeMap<Ballot, Registration>,
+    ) -> Self {
+        Self {
+            hard_state,
+            registry: registrations,
+        }
+    }
+
+    /// The durable scalars as they stand.
+    #[must_use]
+    pub fn hard_state(&self) -> &MatchmakerHardState {
+        &self.hard_state
+    }
+
+    /// The registration records as they stand, in ballot order.
+    #[must_use]
+    pub fn registrations(&self) -> &BTreeMap<Ballot, Registration> {
+        &self.registry
+    }
+
+    /// Apply one staged write, with the semantics the op documents:
+    /// [`Register`](MatchmakerWriteOp::Register) appends the record;
+    /// [`SetGcWatermark`](MatchmakerWriteOp::SetGcWatermark) raises the
+    /// watermark (never lowers it) and drops every record below it;
+    /// [`SetScalars`](MatchmakerWriteOp::SetScalars) replaces the scalars,
+    /// keeping the higher of the two watermarks and dropping below it;
+    /// [`InstallRegistry`](MatchmakerWriteOp::InstallRegistry) replaces both,
+    /// the records filtered at the installed watermark.
+    pub fn apply(&mut self, op: &MatchmakerWriteOp) {
+        match op {
+            MatchmakerWriteOp::Register {
+                ballot,
+                registration,
+            } => {
+                self.registry.insert(*ballot, registration.clone());
+            }
+            MatchmakerWriteOp::SetGcWatermark(watermark) => {
+                if *watermark > self.hard_state.gc_watermark {
+                    self.hard_state.gc_watermark = *watermark;
+                    self.registry = self.registry.split_off(watermark);
+                }
+            }
+            MatchmakerWriteOp::SetScalars(scalars) => {
+                let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
+                self.hard_state = scalars.clone();
+                self.hard_state.gc_watermark = watermark;
+                self.registry = self.registry.split_off(&watermark);
+            }
+            MatchmakerWriteOp::InstallRegistry {
+                scalars,
+                registrations,
+            } => {
+                self.hard_state = scalars.clone();
+                self.registry = registrations
+                    .iter()
+                    .filter(|(b, _)| **b >= scalars.gc_watermark)
+                    .map(|(b, r)| (*b, r.clone()))
+                    .collect();
+            }
+        }
+    }
+}
+
+impl RegistryStorage for MemRegistry {
+    fn initial_state(&self) -> MatchmakerHardState {
+        self.hard_state.clone()
+    }
+
+    fn registration(&self, ballot: Ballot) -> Option<Registration> {
+        self.registry.get(&ballot).cloned()
+    }
+
+    fn registered_ballots(&self) -> Vec<Ballot> {
+        self.registry.keys().copied().collect()
+    }
 }

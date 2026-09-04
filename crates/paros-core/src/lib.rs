@@ -38,10 +38,28 @@
 //! through the same `step` → `ready` → `advance` shape. It is a separate handle:
 //! a cluster deployed without matchmakers never constructs one, and [`ColocatedNode`]
 //! never steps a matchmaker message.
+//!
+//! # Learning Paxos with paros-core
+//!
+//! [`ColocatedNode`] is one deployment of a few composable **roles** —
+//! [`proposer::Proposer`], [`acceptor::Acceptor`], [`replica::Replica`] — and
+//! the roles can be driven by hand. Three runnable examples in this crate's
+//! `examples/` directory do exactly that, in order, each with a printed trace
+//! and assertions on the property it teaches:
+//!
+//! 1. `single_decree.rs` — Phase 1, P2c, Phase 2: one value
+//!    (`cargo run -p paros-core --example single_decree`).
+//! 2. `multi_paxos.rs` — slots versus ballots, one Phase 1 amortized over many
+//!    slots, leader recovery as P2c per slot.
+//! 3. `matchmaker.rs` — configuration discovery through the [`Matchmaker`]
+//!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
+//!    matchmaker set itself chosen by the same single-decree Paxos over
+//!    `Vec<MatchmakerId>`, persisted through a [`MemRegistry`].
 
 pub mod acceptor;
 mod collector;
 mod matchmaker;
+pub mod matchmaking;
 pub mod membership;
 mod message;
 mod node;
@@ -57,9 +75,10 @@ mod write;
 pub use matchmaker::{
     Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
     MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
-    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep,
-    Reconstruction, Registration, RegistrationKind, RegistryStorage, StartRefusal,
+    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
+    REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
+    ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
+    StartRefusal,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,

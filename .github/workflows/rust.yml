@@ -25,6 +25,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo clippy
         run: nix develop --command cargo clippy -- --deny warnings
+      - name: Check the core's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
 
   fmt:
     runs-on: ubuntu-latest
@@ -43,6 +45,25 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
+
+  # The teaching examples (`crates/paros-core/examples/`) drive the composable roles
+  # by hand and assert the property each one teaches, so running them is a test of
+  # the public API's shape as much as of the protocol. They are linted under the
+  # same pedantic clippy as the crate (the root clippy job does not cover examples).
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Lint the examples
+        run: nix develop --command cargo clippy -p paros-core --examples -- --deny warnings
+      - name: Run single_decree
+        run: nix develop --command cargo run -p paros-core --example single_decree
+      - name: Run multi_paxos
+        run: nix develop --command cargo run -p paros-core --example multi_paxos
+      - name: Run matchmaker
+        run: nix develop --command cargo run -p paros-core --example matchmaker
 
   # The sans-IO core and the library driver stay portable to wasm32: paros-core is
   # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The
