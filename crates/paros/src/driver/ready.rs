@@ -35,7 +35,7 @@ pub(crate) struct ClientWaiters {
 /// describe exactly the application prefix named by the protocol message, so
 /// this runs only after the batch's committed entries are durably applied.
 #[tracing::instrument(level = "debug", skip_all, fields(offers = snapshot_offers.len()))]
-fn send_snapshot_offers<S, H, A>(
+async fn send_snapshot_offers<S, H, A>(
     storage: &mut S,
     out: &Outbound,
     hooks: &H,
@@ -92,7 +92,7 @@ fn send_snapshot_offers<S, H, A>(
             from: NodeId(out.self_id),
             ballot,
             chosen_index: offered_index,
-            snapshot: Value(storage.snapshot()),
+            snapshot: Value(storage.snapshot().await),
             // The at-most-once ledger travels beside the opaque bytes (#94):
             // the receiver seals it so its duplicate-suppression decisions for
             // the folded prefix match every peer's.
@@ -215,7 +215,7 @@ fn ack_committed_waiters<S, H, A>(
 // it into helpers would scatter the ordering contract this function *is*.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
-pub(crate) fn drain_ready<S, H, A>(
+pub(crate) async fn drain_ready<S, H, A>(
     node: &mut ColocatedNode,
     storage: &mut S,
     out: &Outbound,
@@ -288,7 +288,7 @@ where
     //    surface the persisted state for the safety + recovery oracles. The
     //    `BeforeSync` crash seam lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit)?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit).await?;
 
     if let Some((started, gap_fills, remaining)) = recovery_batch {
         let started = u64::try_from(started).unwrap_or(u64::MAX);
@@ -361,6 +361,7 @@ where
         })?;
         storage
             .apply(chosen_index, *slot, command)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // A decided snapshot point (#101): the marker's boundary state is the
         // application state at exactly this instant of the contiguous walk,
@@ -380,6 +381,7 @@ where
             }
             storage
                 .record_snapshot(*slot)
+                .await
                 .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             snap_markers.push(*slot);
         }
@@ -418,6 +420,7 @@ where
         }
         storage
             .sync(paros_core::MustSync::Sync)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
 
@@ -442,12 +445,13 @@ where
             self_id,
             hooks,
             audit,
-        )?;
+        )
+        .await?;
     }
 
     if !snapshot_offers.is_empty() {
         let sessions = node.session_ledger();
-        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions);
+        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions).await;
     }
 
     ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
@@ -498,7 +502,7 @@ where
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
-fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
+async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
@@ -513,6 +517,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)) => {
                 storage
                     .persist_ballot(*ballot)
+                    .await
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 promise_changed = true;
             }
@@ -523,16 +528,19 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             }) => {
                 storage
                     .append_accepted(*slot, *ballot, command.clone())
+                    .await
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::SetChosenIndex(slot) => {
                 storage
                     .set_chosen_index(*slot)
+                    .await
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::Truncate { first, sealed } => {
                 storage
                     .truncate(*first, sealed)
+                    .await
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
             WriteOp::InstallSnapshot {
@@ -543,6 +551,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             } => {
                 storage
                     .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
+                    .await
                     .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
         }
@@ -561,6 +570,7 @@ fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     if !writes.is_empty() {
         storage
             .sync(must_sync)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // Durability marker: whether this batch was fsync'd (a promise-raise or
         // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only

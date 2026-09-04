@@ -41,11 +41,19 @@ use paros_core::{
     RegistryStorage,
 };
 use std::collections::BTreeMap;
+use std::future::Future;
 
 use crate::storage::StorageError;
 
 /// The write side of matchmaker storage: **semantic per-record ops**, the
 /// [`NodeStorage`](crate::NodeStorage) twin over the [`RegistryStorage`] port.
+///
+/// The seam is **async** exactly as the node's is (see *Async seam* on
+/// [`NodeStorage`](crate::NodeStorage)): every method here may touch the
+/// device, so every one returns a `Send` future the driver awaits in
+/// persist-before-reply order; an implementation writes plain `async fn`s.
+/// The [`RegistryStorage`] read port stays synchronous, answered from what
+/// [`boot_scan`](MatchmakerStorage::boot_scan) loaded.
 pub trait MatchmakerStorage: RegistryStorage {
     /// Boot-time integrity scan, run once per incarnation **before** the core
     /// reads the store (the [`NodeStorage::boot_scan`](crate::NodeStorage::boot_scan)
@@ -59,8 +67,8 @@ pub trait MatchmakerStorage: RegistryStorage {
     /// # Errors
     /// Returns the first classified [`StorageError`] whose verdict requires a
     /// crash.
-    fn boot_scan(&mut self) -> Result<(), StorageError> {
-        Ok(())
+    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send {
+        async { Ok(()) }
     }
 
     /// Persist `registration` under `ballot` as one record. Append-only: the
@@ -69,15 +77,21 @@ pub trait MatchmakerStorage: RegistryStorage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn register(&mut self, ballot: Ballot, registration: &Registration)
-    -> Result<(), StorageError>;
+    fn register(
+        &mut self,
+        ballot: Ballot,
+        registration: &Registration,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist a raised GC watermark and drop every registration record below
     /// it. Monotone: a store never lowers its watermark.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError>;
+    fn set_gc_watermark(
+        &mut self,
+        watermark: Ballot,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist the durable scalars whole (#125: the generation state, the
     /// freeze, the successor link, the decree record, the pending
@@ -85,7 +99,10 @@ pub trait MatchmakerStorage: RegistryStorage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError>;
+    fn set_scalars(
+        &mut self,
+        scalars: &MatchmakerHardState,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Replace the registry whole — a successor generation's activation:
     /// every record dropped, `registrations` written, and `scalars` (whose
@@ -97,7 +114,7 @@ pub trait MatchmakerStorage: RegistryStorage {
         &mut self,
         scalars: &MatchmakerHardState,
         registrations: &BTreeMap<Ballot, Registration>,
-    ) -> Result<(), StorageError>;
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Flush this batch's writes to stable storage. Every matchmaker write is
     /// safety-critical, so this is always an fsync: the batch must be durable
@@ -105,7 +122,7 @@ pub trait MatchmakerStorage: RegistryStorage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the flush fails.
-    fn sync(&mut self) -> Result<(), StorageError>;
+    fn sync(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
 
 /// The library's default in-memory matchmaker storage: the scalars and the
@@ -140,7 +157,7 @@ impl RegistryStorage for MemMatchmakerStorage {
 
 impl MatchmakerStorage for MemMatchmakerStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
-    fn register(
+    async fn register(
         &mut self,
         ballot: Ballot,
         registration: &Registration,
@@ -150,7 +167,7 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
+    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
         if watermark > self.hard_state.gc_watermark {
             self.hard_state.gc_watermark = watermark;
             self.registry = self.registry.split_off(&watermark);
@@ -159,7 +176,7 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
-    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
+    async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
         let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
         self.hard_state = scalars.clone();
         self.hard_state.gc_watermark = watermark;
@@ -168,7 +185,7 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
-    fn install_registry(
+    async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
         registrations: &BTreeMap<Ballot, Registration>,
@@ -183,7 +200,7 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn sync(&mut self) -> Result<(), StorageError> {
+    async fn sync(&mut self) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
         Ok(())
     }
@@ -224,7 +241,7 @@ fn suite_belief(n: u64) -> Registration {
 #[doc(hidden)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all)]
-pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
+pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,
 ) {
@@ -285,10 +302,12 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     consistent(&s);
     let mut s = reopen(s);
     s.register(suite_ballot(1), &suite_belief(3))
+        .await
         .expect("register 1");
     s.register(suite_ballot(2), &suite_belief(4))
+        .await
         .expect("register 2");
-    s.sync().expect("sync");
+    s.sync().await.expect("sync");
     let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
@@ -307,9 +326,10 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
 
     // A raised watermark is durable and drops the collected records.
     s.register(suite_ballot(3), &suite_belief(5))
+        .await
         .expect("register 3");
-    s.set_gc_watermark(suite_ballot(2)).expect("raise");
-    s.sync().expect("sync raise");
+    s.set_gc_watermark(suite_ballot(2)).await.expect("raise");
+    s.sync().await.expect("sync raise");
     let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
@@ -329,8 +349,10 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     );
 
     // The watermark never lowers.
-    s.set_gc_watermark(suite_ballot(1)).expect("re-raise lower");
-    s.sync().expect("sync no-op");
+    s.set_gc_watermark(suite_ballot(1))
+        .await
+        .expect("re-raise lower");
+    s.sync().await.expect("sync no-op");
     let mut s = reopen(s);
     consistent(&s);
     assert_eq!(
@@ -349,8 +371,8 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         vec![MatchmakerId(0), MatchmakerId(1)],
     ));
     scalars.gc_watermark = suite_ballot(1);
-    s.set_scalars(&scalars).expect("scalars");
-    s.sync().expect("sync scalars");
+    s.set_scalars(&scalars).await.expect("scalars");
+    s.sync().await.expect("sync scalars");
     let mut s = reopen(s);
     consistent(&s);
     let read_back = s.initial_state();
@@ -382,8 +404,9 @@ pub fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     reconstructed.insert(suite_ballot(4), suite_belief(6));
     reconstructed.insert(suite_ballot(7), suite_belief(7));
     s.install_registry(&activated, &reconstructed)
+        .await
         .expect("install");
-    s.sync().expect("sync install");
+    s.sync().await.expect("sync install");
     let s = reopen(s);
     consistent(&s);
     assert_eq!(
@@ -411,6 +434,9 @@ mod tests {
     fn mem_matchmaker_storage_passes_the_contract_suite() {
         // In-memory writes are immediately visible: a reboot is the same
         // handle.
-        matchmaker_storage_contract_suite(MemMatchmakerStorage::new, |s| s);
+        futures::executor::block_on(matchmaker_storage_contract_suite(
+            MemMatchmakerStorage::new,
+            |s| s,
+        ));
     }
 }

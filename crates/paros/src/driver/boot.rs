@@ -29,7 +29,7 @@ use super::ready::storage_fault_crash;
 // the ordering contract between the three.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     node: &mut ColocatedNode,
     storage: &mut S,
     self_id: u64,
@@ -146,6 +146,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
                 if applied_slot.is_none_or(|applied| slot > applied) {
                     storage
                         .apply(ci, slot, command)
+                        .await
                         .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                     // A freshly replayed `Snap` marker re-captures its decided
                     // point (#101): the application state at this walk instant
@@ -155,6 +156,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
                     if let Command::Control(Control::Snap { .. }) = command {
                         storage
                             .record_snapshot(slot)
+                            .await
                             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                         replayed_snap_points.push(slot);
                     }
@@ -197,6 +199,7 @@ pub(crate) fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         }
         storage
             .sync(paros_core::MustSync::Sync)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
     for at in &replayed_snap_points {

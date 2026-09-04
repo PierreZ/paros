@@ -41,6 +41,11 @@ tokio = { version = "1", features = ["sync"] }
 # hands back in sim; production constructs its own).
 tokio-util = "0.7"
 
+[dev-dependencies]
+# `block_on`, to drive the async storage seam's contract suites against the
+# in-memory stores from plain unit tests (the sim awaits them in a workload).
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 

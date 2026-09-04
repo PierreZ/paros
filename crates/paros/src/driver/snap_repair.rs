@@ -53,7 +53,7 @@ pub(crate) struct SnapRepair {
 // would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0, to = to.0, at = at.0, chunks = chunks.len()))]
-pub(crate) fn handle_snap_chunk_request<S, H, A>(
+pub(crate) async fn handle_snap_chunk_request<S, H, A>(
     node: &ColocatedNode,
     storage: &S,
     out: &Outbound,
@@ -70,22 +70,22 @@ pub(crate) fn handle_snap_chunk_request<S, H, A>(
     let me = NodeId(out.self_id);
     match storage.latest_snap_point() {
         Some(point) if point == at => {
-            let served: Vec<(u32, Value)> = chunks
-                .iter()
-                .filter_map(|chunk| {
-                    let bytes = storage.read_snap_chunk(at, *chunk)?;
-                    // Silence about a chunk this node holds is the same
-                    // answer as silence about one it lacks; the requester
-                    // re-asks every tick. Consulted only for a chunk that
-                    // would otherwise be served.
-                    if hooks.withhold_snap_chunk(to) {
-                        audit.snap_chunk_withheld(me, to);
-                        tracing::info!(node = me.0, at = at.0, chunk, "snap_chunk_withheld");
-                        return None;
-                    }
-                    Some((*chunk, Value(bytes)))
-                })
-                .collect();
+            let mut served: Vec<(u32, Value)> = Vec::with_capacity(chunks.len());
+            for &chunk in chunks {
+                let Some(bytes) = storage.read_snap_chunk(at, chunk).await else {
+                    continue;
+                };
+                // Silence about a chunk this node holds is the same
+                // answer as silence about one it lacks; the requester
+                // re-asks every tick. Consulted only for a chunk that
+                // would otherwise be served.
+                if hooks.withhold_snap_chunk(to) {
+                    audit.snap_chunk_withheld(me, to);
+                    tracing::info!(node = me.0, at = at.0, chunk, "snap_chunk_withheld");
+                    continue;
+                }
+                served.push((chunk, Value(bytes)));
+            }
             if !served.is_empty() {
                 send_messages(
                     out,
@@ -132,7 +132,7 @@ pub(crate) fn handle_snap_chunk_request<S, H, A>(
                         from: me,
                         ballot,
                         chosen_index: ci,
-                        snapshot: Value(storage.snapshot()),
+                        snapshot: Value(storage.snapshot().await),
                         sessions: node.session_ledger(),
                     },
                 )],
@@ -153,7 +153,7 @@ pub(crate) fn handle_snap_chunk_request<S, H, A>(
 // `handle_snap_chunk_request`); bundling them would only rename them.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id, at = at.0, chunks = chunks.len()))]
-pub(crate) fn handle_snap_chunk_response<S, H, A>(
+pub(crate) async fn handle_snap_chunk_response<S, H, A>(
     node: &mut ColocatedNode,
     storage: &mut S,
     snap: &mut SnapRepair,
@@ -186,6 +186,7 @@ where
         }
         clean = storage
             .write_snap_chunk(at, *chunk, &payload.0)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         installed += 1;
         bytes += u64::try_from(payload.0.len()).unwrap_or(u64::MAX);
@@ -206,6 +207,7 @@ where
     // restore below stages the recovered application state).
     storage
         .sync(paros_core::MustSync::Sync)
+        .await
         .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     let blob_bytes = storage.snap_chunk_count(at).map_or(0, |count| {
         u64::from(count) * crate::storage::SNAP_CHUNK_BYTES as u64
@@ -253,6 +255,7 @@ where
     if complete
         && let Some(point) = storage
             .restore_from_snap_point()
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?
     {
         // Crash seam: the application restore is staged (the chunks above are
@@ -270,6 +273,7 @@ where
         }
         storage
             .sync(paros_core::MustSync::Sync)
+            .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         audit.snap_point_restored(NodeId(self_id), point);
         tracing::info!(node = self_id, at = point.0, "snap_point_restored");

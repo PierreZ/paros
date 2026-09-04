@@ -120,14 +120,14 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     ///
     /// Propagates the drain's typed exit ([`RunError`]): a durability-seam
     /// crash or a storage fault the driver decided to crash on.
-    fn settle<S: NodeStorage>(
+    async fn settle<S: NodeStorage>(
         &self,
         node: &mut ColocatedNode,
         storage: &mut S,
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
-        let outbox = drain_ready(node, storage, self.out, waiters, self.hooks, self.audit)?;
+        let outbox = drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
         surface_matchmaking(node, &mut last.matchmaking, self.audit, self.self_id);
         send_outbox(self.providers, self.links, self.audit, self.self_id, outbox);
         maintain(
@@ -231,6 +231,7 @@ where
     let boot_id = storage.initial_state().1.id.0;
     storage
         .boot_scan()
+        .await
         .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
 
     // Every task spawned by this incarnation must stop when `run_node` exits,
@@ -249,7 +250,7 @@ where
     let mut node = ColocatedNode::new(&storage);
     let self_id = node.config().id.0;
 
-    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit)?;
+    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
 
     // Tonic handlers run as h2 request tasks and forward into these typed
     // queues. The loop remains the sole owner of ColocatedNode. The edge's
@@ -495,7 +496,7 @@ where
                         }
                     }
                 }
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some((req, reply)) = rpc.read.recv() => {
                 // A client read via read-index: the leader captures its applied
@@ -519,7 +520,7 @@ where
                         next_read_ctx += 1;
                     }
                 }
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some((msg, reply)) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -607,7 +608,8 @@ where
                         if *config_id == node.hard_state().config_id {
                             handle_snap_chunk_request(
                                 &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
-                            );
+                            )
+                            .await;
                         }
                         true
                     }
@@ -634,7 +636,8 @@ where
                                 self_id,
                                 at,
                                 &chunks,
-                            )?;
+                            )
+                            .await?;
                         }
                         true
                     }
@@ -643,7 +646,7 @@ where
                 if !snap_handled {
                     node.step(msg);
                 }
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 let _ = reply.send(());
             }
             Some(reply) = match_replies.recv() => {
@@ -720,7 +723,7 @@ where
                     }
                     _ => {}
                 }
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some(ack) = gc_acks.recv() => {
                 // A matchmaker's answer to this leader's GC request (#123):
@@ -741,7 +744,7 @@ where
                     step = ?step,
                     "gc_ack_received"
                 );
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some(reply) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step (#125).
@@ -778,7 +781,7 @@ where
                     tracing::info!(node = self_id, ticks, "reconfigurer_backoff");
                 }
                 send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
                 // No settle tail: this arm drives the reconfigurer, never the
@@ -900,7 +903,7 @@ where
                     round = round.unwrap_or(0),
                     "reconfigure_acked"
                 );
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
@@ -989,7 +992,7 @@ where
                     }
                 };
                 audit.compact_acked(NodeId(self_id), ack.accepted);
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
                 if hooks.drop_client_reply(Reply::Compact) {
@@ -1013,7 +1016,7 @@ where
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.acceptor().first_slot().0,
-                    snapshot: storage.snapshot(),
+                    snapshot: storage.snapshot().await,
                     members: node.acceptors().members().iter().map(|n| n.0).collect(),
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
@@ -1223,7 +1226,7 @@ where
                         }
                     }
                 }
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last)?;
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so
                 // a hole below a chosen slot is otherwise invisible from outside the
