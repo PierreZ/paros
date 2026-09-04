@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 
 use paros_core::{
     Ballot, Command, Config, ConfigId, HardState, MustSync, SessionEntry, Slot, Storage,
@@ -241,12 +242,39 @@ impl std::error::Error for StorageError {}
 /// through the matching method here, then [`sync`](NodeStorage::sync)s the batch
 /// **before** sending its messages (the persist-before-send rule). Every write
 /// returns [`Result`] so faults are injectable from the start.
+///
+/// # Async seam
+///
+/// Every method that may touch the device is **async**: the writes, the
+/// flush, the boot scan, producing or reading snapshot bytes, restoring the
+/// application. The driver awaits each one in the order the persist-before-send
+/// pipeline dictates, so a disk-backed implementation blocks nothing but its
+/// own node loop while the device works — the same provider-generic loop
+/// runs over a simulated disk and a real one. The futures are `Send`
+/// (declared as `impl Future + Send`, the moonpool provider convention), so
+/// the loop that awaits them can be spawned on any executor; an
+/// implementation writes plain `async fn`s.
+///
+/// The few accessors that report what the store already **knows about
+/// itself** — [`applied_slot`](NodeStorage::applied_slot),
+/// [`latest_snap_point`](NodeStorage::latest_snap_point),
+/// [`snap_chunk_count`](NodeStorage::snap_chunk_count),
+/// [`faulty_snap_chunks`](NodeStorage::faulty_snap_chunks) — stay
+/// synchronous, exactly like the core's [`Storage`] recovery port they sit
+/// beside: they are answered from the index the boot scan built, never by a
+/// device read. That is the contract a disk-backed store meets in
+/// [`boot_scan`](NodeStorage::boot_scan): it is the one place a store
+/// loads and verifies its records, and everything the synchronous ports
+/// answer afterwards is served from memory.
 pub trait NodeStorage: Storage {
     /// Boot-time integrity scan (Stage 7): verify every durable record and
     /// classify every mismatch **before** any byte reaches
     /// [`paros_core::ColocatedNode`]. The driver calls this once per incarnation,
     /// before constructing the core, so no corrupted bytes ever cross into
     /// protocol logic — the caller sees the typed outcome, never the bytes.
+    /// It is also where a disk-backed store *loads*: the synchronous read
+    /// ports ([`Storage`] and the accessors below) are answered from what
+    /// this scan brought into memory.
     ///
     /// The durable-record contract this scan assumes (the CLStore-equivalent
     /// design; see `docs/analysis/storage/clstore-record-contract.md`):
@@ -291,21 +319,27 @@ pub trait NodeStorage: Storage {
     /// # Errors
     /// Returns the first classified [`StorageError`] whose verdict requires a
     /// crash.
-    fn boot_scan(&mut self) -> Result<(), StorageError> {
-        Ok(())
+    fn boot_scan(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send {
+        async { Ok(()) }
     }
 
     /// Persist the durable cluster configuration identity.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError>;
+    fn persist_config_id(
+        &mut self,
+        config_id: ConfigId,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist a raised promised ballot (Phase 1).
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError>;
+    fn persist_ballot(
+        &mut self,
+        ballot: Ballot,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist the `(ballot, command)` accepted for `slot` (Phase 2). An
     /// upsert-by-slot (a chosen value overwrites a stale accept).
@@ -317,13 +351,16 @@ pub trait NodeStorage: Storage {
         slot: Slot,
         ballot: Ballot,
         command: Command,
-    ) -> Result<(), StorageError>;
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Advance the durable chosen index (commit index) to `slot`.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError>;
+    fn set_chosen_index(
+        &mut self,
+        slot: Slot,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch
     /// (promise-raise / accepted-append) must be fsync-durable on return; a
@@ -332,7 +369,10 @@ pub trait NodeStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the flush fails.
-    fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError>;
+    fn sync(
+        &mut self,
+        must_sync: MustSync,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor (returned by
@@ -346,7 +386,11 @@ pub trait NodeStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError>;
+    fn truncate(
+        &mut self,
+        first: Slot,
+        sealed: &[SessionEntry],
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// The opaque application snapshot at this node's chosen prefix, for serving a
     /// below-floor peer. The **application** owns its meaning; paros only transfers
@@ -360,7 +404,7 @@ pub trait NodeStorage: Storage {
     /// byte-identical snapshots. Decided snapshot points
     /// ([`Control::Snap`](paros_core::Control::Snap)) rely on exactly this:
     /// identical bytes are what make chunk-level repair from any peer sound.
-    fn snapshot(&self) -> Vec<u8>;
+    fn snapshot(&self) -> impl Future<Output = Vec<u8>> + Send;
 
     // ---- decided snapshot points (#101, CTRL §3.5) --------------------------
 
@@ -374,9 +418,12 @@ pub trait NodeStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
+    fn record_snapshot(
+        &mut self,
+        at: Slot,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send {
         let _ = at;
-        Ok(())
+        async { Ok(()) }
     }
 
     /// The latest decided snapshot point this store retains, if any.
@@ -394,9 +441,13 @@ pub trait NodeStorage: Storage {
     /// Read one clean chunk of the retained point at `at`. `None` means this
     /// store cannot serve it — wrong point, out of range, or the chunk is
     /// rotted — and per CTRL Box B the caller stays silent about it.
-    fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
+    fn read_snap_chunk(
+        &self,
+        at: Slot,
+        chunk: u32,
+    ) -> impl Future<Output = Option<Vec<u8>>> + Send {
         let _ = (at, chunk);
-        None
+        async { None }
     }
 
     /// Install one repaired chunk of the retained point at `at`, verifying and
@@ -410,9 +461,9 @@ pub trait NodeStorage: Storage {
         at: Slot,
         chunk: u32,
         bytes: &[u8],
-    ) -> Result<bool, StorageError> {
+    ) -> impl Future<Output = Result<bool, StorageError>> + Send {
         let _ = (at, chunk, bytes);
-        Ok(false)
+        async { Ok(false) }
     }
 
     /// The retained point's chunks the boot scan classified rotted — value
@@ -431,8 +482,10 @@ pub trait NodeStorage: Storage {
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
-        Ok(None)
+    fn restore_from_snap_point(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<Slot>, StorageError>> + Send {
+        async { Ok(None) }
     }
 
     /// Install an opaque application snapshot at `chosen_index`: set the durable
@@ -451,7 +504,7 @@ pub trait NodeStorage: Storage {
         ballot: Ballot,
         snapshot: Vec<u8>,
         sessions: &[SessionEntry],
-    ) -> Result<(), StorageError>;
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Stage one newly chosen command for durable application. Implementations
     /// must be idempotent by `slot`: a reboot may replay retained chosen records
@@ -470,10 +523,11 @@ pub trait NodeStorage: Storage {
         chosen_index: Slot,
         slot: Slot,
         command: &Command,
-    ) -> Result<(), StorageError>;
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Highest slot durably reflected in the application snapshot, if the
     /// application tracks one. Used only to make reboot replay idempotent.
+    /// Synchronous: answered from what the store knows, never a device read.
     fn applied_slot(&self) -> Option<Slot>;
 }
 
@@ -514,6 +568,37 @@ impl MemStorage {
         }
     }
 
+    /// A storage rebuilt from durable records already read back: the scalars,
+    /// the compaction floor, the retained accepted log and the sealed ledger.
+    /// Synchronous by design — this is the in-memory index a boot loads, the
+    /// one the core's read-only [`Storage`] port is answered from once the
+    /// async [`NodeStorage::boot_scan`] has brought the records in. Records
+    /// below `first` are dropped, exactly as a durable [`truncate`](NodeStorage::truncate)
+    /// would have left them.
+    #[must_use]
+    pub fn from_records(
+        config: Config,
+        hard_state: HardState,
+        first: Slot,
+        accepted: impl IntoIterator<Item = (Slot, Ballot, Command)>,
+        sealed: &[SessionEntry],
+    ) -> Self {
+        let mut storage = Self {
+            hard_state,
+            accepted: accepted
+                .into_iter()
+                .filter(|(slot, _, _)| *slot >= first)
+                .map(|(slot, ballot, command)| (slot, (ballot, command)))
+                .collect(),
+            config,
+            first,
+            sealed: BTreeMap::new(),
+            snap_point: None,
+        };
+        storage.seal(sealed);
+        storage
+    }
+
     fn seal(&mut self, sealed: &[SessionEntry]) {
         for &(client, seq, slot) in sealed {
             self.sealed.entry((client, seq)).or_insert(slot);
@@ -523,19 +608,19 @@ impl MemStorage {
 
 impl NodeStorage for MemStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(config_id = config_id.0))]
-    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
+    async fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
         self.hard_state.config_id = config_id;
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
-    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+    async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.hard_state.max_promised_ballot = ballot;
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn append_accepted(
+    async fn append_accepted(
         &mut self,
         slot: Slot,
         ballot: Ballot,
@@ -546,26 +631,26 @@ impl NodeStorage for MemStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(slot = slot.0))]
-    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
+    async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         self.hard_state.chosen_index = Some(slot);
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
+    async fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
-    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
         self.seal(sealed);
         self.first = self.first.max(first);
         self.accepted.retain(|slot, _| *slot >= self.first);
         Ok(())
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    async fn snapshot(&self) -> Vec<u8> {
         // The default in-memory storage has no application state machine, so its
         // opaque "snapshot" is a deterministic marker of the chosen prefix. A real
         // application supplies a NodeStorage whose snapshot() folds its own state.
@@ -575,7 +660,7 @@ impl NodeStorage for MemStorage {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn install_snapshot(
+    async fn install_snapshot(
         &mut self,
         chosen_index: Slot,
         ballot: Ballot,
@@ -592,7 +677,7 @@ impl NodeStorage for MemStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn apply(
+    async fn apply(
         &mut self,
         _chosen_index: Slot,
         _slot: Slot,
@@ -606,8 +691,8 @@ impl NodeStorage for MemStorage {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
-    fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
-        self.snap_point = Some((at, self.snapshot()));
+    async fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
+        self.snap_point = Some((at, self.snapshot().await));
         Ok(())
     }
 
@@ -622,7 +707,7 @@ impl NodeStorage for MemStorage {
             .map(|(_, blob)| snap_chunk_count(blob.len()))
     }
 
-    fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
+    async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
         let (point, blob) = self.snap_point.as_ref()?;
         if *point != at {
             return None;
@@ -636,7 +721,7 @@ impl NodeStorage for MemStorage {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn write_snap_chunk(
+    async fn write_snap_chunk(
         &mut self,
         at: Slot,
         chunk: u32,
@@ -713,7 +798,7 @@ impl Storage for MemStorage {
 // One linear behavioral walk; splitting it would scatter the contract.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all)]
-pub fn storage_contract_suite<S: NodeStorage>(
+pub async fn storage_contract_suite<S: NodeStorage>(
     mut fresh: impl FnMut() -> S,
     mut reopen: impl FnMut(S) -> S,
 ) {
@@ -732,14 +817,16 @@ pub fn storage_contract_suite<S: NodeStorage>(
 
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh();
-    s.persist_config_id(ConfigId(3)).expect("config id");
-    s.persist_ballot(ballot(4)).expect("ballot");
+    s.persist_config_id(ConfigId(3)).await.expect("config id");
+    s.persist_ballot(ballot(4)).await.expect("ballot");
     s.append_accepted(Slot(0), ballot(4), user(1, 0xa))
+        .await
         .expect("append 0");
     s.append_accepted(Slot(1), ballot(4), user(2, 0xb))
+        .await
         .expect("append 1");
-    s.set_chosen_index(Slot(1)).expect("chosen index");
-    s.sync(MustSync::Sync).expect("sync");
+    s.set_chosen_index(Slot(1)).await.expect("chosen index");
+    s.sync(MustSync::Sync).await.expect("sync");
     let mut s = reopen(s);
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.config_id, ConfigId(3), "config id round-trips");
@@ -759,8 +846,9 @@ pub fn storage_contract_suite<S: NodeStorage>(
 
     // An append is an upsert-by-slot: the newer record replaces the older.
     s.append_accepted(Slot(1), ballot(5), user(3, 0xc))
+        .await
         .expect("re-append 1");
-    s.sync(MustSync::Sync).expect("sync upsert");
+    s.sync(MustSync::Sync).await.expect("sync upsert");
     let mut s = reopen(s);
     assert_eq!(
         s.accepted(Slot(1)).map(|(b, _)| b),
@@ -770,8 +858,9 @@ pub fn storage_contract_suite<S: NodeStorage>(
 
     // Truncation raises the floor, drops the prefix, and seals the ledger.
     s.truncate(Slot(1), &[(ClientId(7), ClientSeq(1), Slot(0))])
+        .await
         .expect("truncate");
-    s.sync(MustSync::Sync).expect("sync truncate");
+    s.sync(MustSync::Sync).await.expect("sync truncate");
     let mut s = reopen(s);
     assert_eq!(s.first_slot(), Slot(1), "the floor rose");
     assert!(
@@ -784,8 +873,8 @@ pub fn storage_contract_suite<S: NodeStorage>(
         "the sealed ledger survives the truncation"
     );
     // A floor never moves backward.
-    s.truncate(Slot(0), &[]).expect("re-truncate lower");
-    s.sync(MustSync::Sync).expect("sync no-op truncate");
+    s.truncate(Slot(0), &[]).await.expect("re-truncate lower");
+    s.sync(MustSync::Sync).await.expect("sync no-op truncate");
     let s = reopen(s);
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
 
@@ -797,28 +886,34 @@ pub fn storage_contract_suite<S: NodeStorage>(
     for s in 0..=4u64 {
         source
             .append_accepted(Slot(s), ballot(1), user(10 + s, 0x40))
+            .await
             .expect("source append");
     }
-    source.set_chosen_index(Slot(4)).expect("source index");
+    source
+        .set_chosen_index(Slot(4))
+        .await
+        .expect("source index");
     for s in 0..=4u64 {
         source
             .apply(Slot(4), Slot(s), &user(10 + s, 0x40))
+            .await
             .expect("source apply");
     }
-    source.sync(MustSync::Sync).expect("source sync");
-    let blob = source.snapshot();
+    source.sync(MustSync::Sync).await.expect("source sync");
+    let blob = source.snapshot().await;
 
     let mut s = fresh();
-    s.persist_ballot(ballot(9)).expect("high promise");
-    s.sync(MustSync::Sync).expect("sync promise");
+    s.persist_ballot(ballot(9)).await.expect("high promise");
+    s.sync(MustSync::Sync).await.expect("sync promise");
     s.install_snapshot(
         Slot(4),
         ballot(2),
         blob,
         &[(ClientId(7), ClientSeq(2), Slot(3))],
     )
+    .await
     .expect("install");
-    s.sync(MustSync::Sync).expect("sync install");
+    s.sync(MustSync::Sync).await.expect("sync install");
     let s = reopen(s);
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.chosen_index, Some(Slot(4)), "the install set the index");
@@ -844,16 +939,18 @@ pub fn storage_contract_suite<S: NodeStorage>(
     let mut s = fresh();
     for slot in 0..=2u64 {
         s.append_accepted(Slot(slot), ballot(1), user(20 + slot, 0x50))
+            .await
             .expect("point append");
     }
-    s.set_chosen_index(Slot(2)).expect("point index");
+    s.set_chosen_index(Slot(2)).await.expect("point index");
     for slot in 0..=2u64 {
         s.apply(Slot(2), Slot(slot), &user(20 + slot, 0x50))
+            .await
             .expect("point apply");
     }
-    let blob = s.snapshot();
-    s.record_snapshot(Slot(2)).expect("record point");
-    s.sync(MustSync::Sync).expect("sync point");
+    let blob = s.snapshot().await;
+    s.record_snapshot(Slot(2)).await.expect("record point");
+    s.sync(MustSync::Sync).await.expect("sync point");
     let mut s = reopen(s);
     assert_eq!(
         s.latest_snap_point(),
@@ -872,22 +969,24 @@ pub fn storage_contract_suite<S: NodeStorage>(
     for chunk in 0..chunks {
         reassembled.extend(
             s.read_snap_chunk(Slot(2), chunk)
+                .await
                 .expect("a clean chunk reads back"),
         );
     }
     assert_eq!(reassembled, blob, "chunks reassemble the exact blob");
     assert!(
-        s.read_snap_chunk(Slot(3), 0).is_none(),
+        s.read_snap_chunk(Slot(3), 0).await.is_none(),
         "a point this store does not retain answers nothing"
     );
     // A chunk write round-trips (repair installs the identical bytes).
-    let first = s.read_snap_chunk(Slot(2), 0).expect("first chunk");
+    let first = s.read_snap_chunk(Slot(2), 0).await.expect("first chunk");
     s.write_snap_chunk(Slot(2), 0, &first)
+        .await
         .expect("chunk write succeeds");
-    s.sync(MustSync::Sync).expect("sync chunk write");
+    s.sync(MustSync::Sync).await.expect("sync chunk write");
     let s = reopen(s);
     assert_eq!(
-        s.read_snap_chunk(Slot(2), 0),
+        s.read_snap_chunk(Slot(2), 0).await,
         Some(first),
         "a written chunk reads back identically"
     );
@@ -906,12 +1005,16 @@ mod tests {
             ..Config::default()
         });
 
-        storage
-            .persist_config_id(ConfigId(17))
-            .expect("persist configuration identity");
-        storage
-            .sync(MustSync::Sync)
-            .expect("sync configuration identity");
+        futures::executor::block_on(async {
+            storage
+                .persist_config_id(ConfigId(17))
+                .await
+                .expect("persist configuration identity");
+            storage
+                .sync(MustSync::Sync)
+                .await
+                .expect("sync configuration identity");
+        });
 
         assert_eq!(storage.initial_state().0.config_id, ConfigId(17));
     }
@@ -920,7 +1023,7 @@ mod tests {
     /// The simulation runs the same suite against its world-backed storage.
     #[test]
     fn mem_storage_passes_the_contract_suite() {
-        storage_contract_suite(
+        futures::executor::block_on(storage_contract_suite(
             || {
                 MemStorage::new(Config {
                     id: NodeId(0),
@@ -931,6 +1034,6 @@ mod tests {
             // In-memory writes are immediately visible: a reboot is the same
             // handle.
             |s| s,
-        );
+        ));
     }
 }

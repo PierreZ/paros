@@ -641,7 +641,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 checker,
             )
         };
-        paros::storage_contract_suite(fresh, reopen);
+        Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
         // The matchmaker registry's contract, against its world-backed store.
         let mut registry_instance = 0_u64;
         let fresh_registry = || {
@@ -658,7 +658,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             drop(old);
             DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0)
         };
-        paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry);
+        paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry).await;
         // The crash half the shared suite cannot express (an in-memory store
         // has no un-synced stage): a registration or a watermark raise that
         // was staged but never fsynced does not survive the incarnation, so a
@@ -683,13 +683,18 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 faults.clone(),
                 0,
             );
-            store.register(ballot(1), &config).expect("register 1");
-            store.sync().expect("sync 1");
+            store
+                .register(ballot(1), &config)
+                .await
+                .expect("register 1");
+            store.sync().await.expect("sync 1");
             store
                 .register(ballot(2), &config)
+                .await
                 .expect("register 2 (never synced)");
             store
                 .set_gc_watermark(ballot(1))
+                .await
                 .expect("raise (never synced)");
             drop(store);
             let rebooted =

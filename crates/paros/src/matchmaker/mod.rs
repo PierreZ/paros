@@ -98,7 +98,7 @@ struct Drained {
 /// is, a decree promise or vote only once the decree record is.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.id().0))]
-fn drain<S, H, A>(
+async fn drain<S, H, A>(
     matchmaker: &mut Matchmaker,
     storage: &mut S,
     hooks: &H,
@@ -124,18 +124,22 @@ where
                 registration,
             } => storage
                 .register(*ballot, registration)
+                .await
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
             MatchmakerWriteOp::SetGcWatermark(watermark) => storage
                 .set_gc_watermark(*watermark)
+                .await
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
             MatchmakerWriteOp::SetScalars(scalars) => storage
                 .set_scalars(scalars)
+                .await
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
             MatchmakerWriteOp::InstallRegistry {
                 scalars,
                 registrations,
             } => storage
                 .install_registry(scalars, registrations)
+                .await
                 .map_err(|e| storage_fault_crash(audit, id, e))?,
         }
     }
@@ -153,6 +157,7 @@ where
         }
         storage
             .sync()
+            .await
             .map_err(|e| storage_fault_crash(audit, id, e))?;
         // Durable now — report the truthful persisted state.
         for op in &writes {
@@ -344,6 +349,7 @@ where
     // Verify the store before the core reads it (the node driver's rule).
     storage
         .boot_scan()
+        .await
         .map_err(|e| storage_fault_crash(audit, id, e))?;
 
     let incarnation_shutdown = CancellationToken::new();
@@ -402,7 +408,7 @@ where
                 // request it is stepped, and the drain hands the reply out
                 // only once the batch is durable.
                 matchmaker.step(request);
-                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
                 let answer = drained.replies.pop();
                 assert!(
                     answer.is_some() && drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
@@ -437,7 +443,7 @@ where
                     outcome = ?outcome,
                     "garbage_collect_requested"
                 );
-                let drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                let drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
                 assert!(
                     drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
                     "a garbage-collect request yields no match reply"
@@ -468,7 +474,7 @@ where
                     "reconfigure_requested"
                 );
                 matchmaker.step_reconfigure(request.clone());
-                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit)?;
+                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
                 let answer = drained.reconfigure_replies.pop();
                 assert!(
                     answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),

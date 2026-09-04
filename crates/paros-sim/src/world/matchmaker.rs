@@ -176,7 +176,7 @@ impl<T: TimeProvider> RegistryStorage for DurableMatchmakerStorage<T> {
 
 impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
-    fn register(
+    async fn register(
         &mut self,
         ballot: Ballot,
         registration: &Registration,
@@ -187,19 +187,19 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
+    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
         self.staged.push(Staged::Watermark(watermark));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
-    fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
+    async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
         self.staged.push(Staged::Scalars(scalars.clone()));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
-    fn install_registry(
+    async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
         registrations: &BTreeMap<Ballot, Registration>,
@@ -213,7 +213,7 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     /// core wrote it, so a flushed floor is applied over the records it
     /// prunes exactly as the core applied them.
     #[tracing::instrument(level = "trace", skip_all)]
-    fn sync(&mut self) -> Result<(), StorageError> {
+    async fn sync(&mut self) -> Result<(), StorageError> {
         let staged = std::mem::take(&mut self.staged);
         if staged.is_empty() {
             return Ok(());

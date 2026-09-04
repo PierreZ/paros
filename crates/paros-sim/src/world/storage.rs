@@ -355,7 +355,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         faults: StorageFaults<T>,
         checker: Arc<AuditWorld>,
     ) -> Self {
-        let mut boot = MemStorage::new(config);
+        let mut boot = MemStorage::new(config.clone());
         let mut application = ChainState::default();
         let mut evidence = BootEvidence::default();
         if let Some(strong) = world.upgrade() {
@@ -399,31 +399,30 @@ impl<T: TimeProvider> DurableStorage<T> {
                 // Collect this boot's integrity evidence for the scan the
                 // driver runs before anything reads the store.
                 evidence = BootEvidence::collect(disk);
-                // Seed the read view through the semantic ops (records, not a blob).
-                // Set the floor first so first_slot() reads it back on boot; the
-                // sealed ledger rides on the same op, exactly as a truncate
-                // persisted it.
+                // Seed the read view from the records (never a blob): the
+                // floor so first_slot() reads it back on boot, the sealed
+                // ledger exactly as a truncate persisted it, the scalars, and
+                // the retained log. The detector withholds bytes: only clean,
+                // witnessed records enter the read view. Anything else either
+                // crashes the scan (so the view is never consulted) or is a
+                // crash-truncatable tail the scan discards.
                 let sealed: Vec<SessionEntry> = disk
                     .sealed
                     .iter()
                     .map(|(&(client, seq), &slot)| (client, seq, slot))
                     .collect();
-                let _ = boot.truncate(disk.first_slot, &sealed);
-                let _ = boot.persist_config_id(disk.hard_state.config_id);
-                let _ = boot.persist_ballot(disk.hard_state.max_promised_ballot);
-                for (slot, (ballot, command)) in &disk.accepted {
-                    // The detector withholds bytes: only clean, witnessed
-                    // records enter the read view. Anything else either
-                    // crashes the scan (so the view is never consulted) or is
-                    // a crash-truncatable tail the scan discards.
-                    if disk.slot_health(*slot).clean() {
-                        let _ = boot.append_accepted(*slot, *ballot, command.clone());
-                    }
-                }
-                if let Some(ci) = disk.hard_state.chosen_index {
-                    let _ = boot.set_chosen_index(ci);
-                }
-                let _ = boot.sync(MustSync::Sync);
+                let accepted = disk
+                    .accepted
+                    .iter()
+                    .filter(|(slot, _)| disk.slot_health(**slot).clean())
+                    .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()));
+                boot = MemStorage::from_records(
+                    config,
+                    disk.hard_state,
+                    disk.first_slot,
+                    accepted,
+                    &sealed,
+                );
             }
         }
         Self {
@@ -928,7 +927,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     /// the only thing a scan may ever discard.
     #[allow(clippy::too_many_lines)] // one linear scan: metadata → scalars → log
     #[tracing::instrument(level = "debug", skip_all)]
-    fn boot_scan(&mut self) -> Result<(), StorageError> {
+    async fn boot_scan(&mut self) -> Result<(), StorageError> {
         let evidence = std::mem::take(&mut self.evidence);
         let key = self.key.clone();
         let node = self.node_id;
@@ -1288,19 +1287,19 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         Ok(())
     }
 
-    fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
+    async fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
         self.write_record(StorageRecord::ConfigId, |s| {
             s.staged_config_id = Some(config_id);
         })
     }
 
-    fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+    async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.write_record(StorageRecord::Promise, |s| {
             s.staged_ballot = Some(ballot);
         })
     }
 
-    fn append_accepted(
+    async fn append_accepted(
         &mut self,
         slot: Slot,
         ballot: Ballot,
@@ -1311,14 +1310,14 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
-    fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
+    async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         self.write_record(StorageRecord::ChosenIndex, |s| {
             s.staged_chosen = Some(slot);
         })
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(must_sync = ?must_sync))]
-    fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
+    async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         // A relaxed (chosen-index-only) batch keeps its stage un-flushed: it is
         // durable only once a later Sync flushes it, and lost on a crash before
         // then. A Sync batch flushes the whole stage through to the world.
@@ -1380,7 +1379,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
-    fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
         // Stage the floor like every other write: it reaches the durable world
         // only on the next Sync flush (Truncate classifies as MustSync::Sync).
         // The sealed ledger records ride in the same staged batch.
@@ -1391,12 +1390,12 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    async fn snapshot(&self) -> Vec<u8> {
         self.application.encode()
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn install_snapshot(
+    async fn install_snapshot(
         &mut self,
         chosen_index: Slot,
         ballot: Ballot,
@@ -1437,7 +1436,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn apply(
+    async fn apply(
         &mut self,
         chosen_index: Slot,
         slot: Slot,
@@ -1478,7 +1477,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
-    fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
+    async fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
         // Captured at the apply seam, when the staged application state IS the
         // marker's boundary state; durable with the batch's application fsync.
         self.staged_snap_point = Some((at, self.application));
@@ -1510,7 +1509,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         .flatten()
     }
 
-    fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
+    async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
         let key = self.key.clone();
         self.with_world(|w| {
             let disk = w.disks.get(&key)?;
@@ -1540,7 +1539,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn write_snap_chunk(
+    async fn write_snap_chunk(
         &mut self,
         at: Slot,
         chunk: u32,
@@ -1611,7 +1610,7 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
+    async fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
         let key = self.key.clone();
         let candidate = self.with_world(|w| {
             let disk = w.disks.get(&key)?;

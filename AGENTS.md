@@ -350,7 +350,19 @@ what paros needs. The storage seam stays the high-level `NodeStorage` trait (app
 truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
 production we will later search for and adopt an existing high-level storage engine rather than
 building on moonpool's primitives. (Moonpool's *storage chaos* still applies in simulation — it
-perturbs the environment, not the abstraction we code against.)
+perturbs the environment, not the abstraction we code against.) **The seam is async.** Every
+`NodeStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
+the boot scan, producing or reading snapshot bytes, restoring the application — returns a `Send`
+future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
+write plain `async fn`s), and the driver awaits each one in persist-before-send order. The core's
+read-only recovery ports (`paros_core::Storage`, `RegistryStorage`) and the accessors that
+report what a store already knows about itself (`applied_slot`, `latest_snap_point`,
+`snap_chunk_count`, `faulty_snap_chunks`) stay synchronous: `boot_scan` is where a store loads
+and verifies its records, and everything the synchronous ports answer afterwards is served from
+memory (`MemStorage::from_records` is that in-memory index). The sim's world-backed disks complete
+every operation on the poll that started it, so the async seam moves no seed's draw schedule;
+modelling device latency through the time provider is a future knob, not something the seam
+implies.
 
 **Where each kind of turbulence lives.** Three layers, and nothing crosses them (this is the FDB
 separation; #81 removed the message-class nemesis, which mixed them):

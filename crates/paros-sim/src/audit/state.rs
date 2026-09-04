@@ -51,6 +51,16 @@ pub(super) struct DeposedStreak {
     /// fully dropped beat is invisible here, and a single beatless tick used
     /// to close the streak and hand a zombie leader a fresh budget.
     pub(super) beatless_ticks: u64,
+    /// The election timeout (the `CheckQuorum` window, in ticks) the leader
+    /// was running under at its last beat. Read at the beat, never at the
+    /// tick: a leader never redraws its timeout, but the step-down that ends
+    /// the streak draws a fresh *follower* timeout in the same driver tick,
+    /// and it is reported (`election_timeout_set`) before that tick's
+    /// `ticked` — so a budget read from the live map at the tick would judge
+    /// the leader's windows by a timeout it never ran under (a leader whose
+    /// timeout was 8 stepped down within 15 ticks — two windows and the
+    /// slack — and was measured against the 5 it drew as it stepped down).
+    pub(super) timeout: u64,
 }
 
 /// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
@@ -934,6 +944,7 @@ impl AuditState {
             .map(|(n, _)| paros::NodeId(*n))
             .collect();
         let outvoted = config.has_phase1_quorum(&above);
+        let timeout = self.election_timeouts.get(&node).copied().unwrap_or(0);
         let entry = self.deposed_streaks.entry(node).or_default();
         if entry.round != ballot.round || entry.node != ballot.node.0 {
             *entry = DeposedStreak {
@@ -943,12 +954,14 @@ impl AuditState {
                 deposed: false,
                 ticks: 0,
                 beatless_ticks: 0,
+                timeout,
             };
         } else if entry.seq == seq {
             return;
         }
         entry.seq = seq;
         entry.beatless_ticks = 0;
+        entry.timeout = timeout;
         if outvoted {
             entry.deposed = true;
         } else {
@@ -976,7 +989,7 @@ impl AuditState {
             return;
         }
         entry.ticks += 1;
-        let timeout = self.election_timeouts.get(&node).copied().unwrap_or(0);
+        let timeout = entry.timeout;
         let budget = timeout.saturating_mul(2).saturating_add(DEPOSED_TICK_SLACK);
         let streak = entry.ticks;
         let round = entry.round;
