@@ -29,11 +29,13 @@
 //! A **slot** is a *position* in the replicated log (`Slot(4)`: the fifth
 //! command). A **ballot** is an *attempt at leadership* (`Ballot { round:
 //! 11, node: 2 }`: node 2's eleventh-round campaign). They are orthogonal
-//! axes. One ballot chooses many slots; one slot may see several ballots
-//! before it is chosen. In the recovery below, the value at slot 4 is
-//! chosen under ballot 11 although it was first accepted under ballot 10:
-//! the *slot* is what the value is bound to, the *ballot* is only which
-//! leadership got it there.
+//! axes. One ballot chooses many slots; one slot may see several ballots.
+//! In the recovery below, E at slot 4 is first accepted *and chosen* under
+//! ballot 10 (only the dying leader knows), then **recovered** by ballot
+//! 11's Phase 1 and **re-proposed and re-accepted** under ballot 11, where a
+//! quorum chooses it again — the same value, as Paxos guarantees. The *slot*
+//! is what the value is bound to; the *ballot* only says which leadership
+//! got it there.
 //!
 //! # Who is who
 //!
@@ -158,10 +160,12 @@ impl Node {
     /// The learner: `command` was chosen at `slot` (decided by this node's
     /// own tally, or told by a `Commit`). The chosen value becomes the
     /// acceptor's *authoritative* record for the slot — an upsert, so a stale
-    /// lower-ballot accept from a failed ballot is overwritten and can never
-    /// be resurrected by a restart — and the replica walks the contiguous
-    /// prefix forward. Chosen is not applied: the walk applies in slot
-    /// order, and a slot chosen ahead of a hole waits.
+    /// lower-ballot accept from a failed ballot is replaced and this node's
+    /// durable record agrees with the log it serves (catch-up and a boot both
+    /// read it back). That is local repair, not what keeps Paxos safe; part 4
+    /// says which is which. Then the replica walks the contiguous prefix
+    /// forward. Chosen is not applied: the walk applies in slot order, and a
+    /// slot chosen ahead of a hole waits.
     fn learn_chosen(&mut self, slot: Slot, at: Ballot, command: &Command) {
         if let Some(known) = self.replica.chosen_at(slot) {
             // Agreement, locally: relearning a slot brings the same value.
@@ -508,8 +512,9 @@ fn main() {
         ],
         "slot 3 is a hole to fill, slot 4 is a value to preserve"
     );
-    // The value chosen at slot 4 is E — which *was* chosen under ballot 10,
-    // unknown to everyone but the dead leader. Recovery preserved it.
+    // Slot 4 holds E: it was chosen under ballot 10, unknown to everyone
+    // but the dead leader; ballot 11 recovered it through Phase 1,
+    // re-proposed it, and a quorum chose it again. Recovery preserved it.
     for id in [N2, N3] {
         assert_eq!(
             node(&mut cluster, id).replica.chosen_at(s4),
@@ -518,9 +523,10 @@ fn main() {
         assert_eq!(node(&mut cluster, id).replica.chosen_at(s3), Some(&noop()));
     }
     // Slot versus ballot, on node 2's disk: slot 0 was chosen under ballot
-    // 10 and stays there; slot 4's record now carries ballot 11 with the
-    // same value E. The value belongs to the slot; the ballot is only which
-    // leadership got it there.
+    // 10 and its record stays there; slot 4's record now carries ballot 11
+    // — the re-accept — with the same value E it first accepted under 10.
+    // The value belongs to the slot; the ballot is only which leadership
+    // got it there.
     assert_eq!(
         node(&mut cluster, N2).acceptor.record(s0),
         Some(&(b10, command("A", 0)))
@@ -555,9 +561,18 @@ fn main() {
     n1.proposer = Proposer::new();
     assert_eq!(n1.acceptor.record(s3), Some(&(b10, command("D", 3))));
     // Catch-up: the leader replays the decided slots. Learning slot 3 as
-    // Noop at ballot 11 overwrites the stale (10, D) record — an accepted
-    // value that was never chosen is not history, and keeping it would let
-    // a restart resurrect it.
+    // Noop at ballot 11 replaces the stale (10, D) record. Two things to
+    // keep apart here:
+    //
+    // - *Paxos safety* does not depend on that replacement. Noop is chosen
+    //   at ballot 11 by a quorum, every future leader's Phase-1 quorum
+    //   intersects that quorum, and a promise for a ballot above 11 reports
+    //   (11, Noop) ahead of (10, D) — so P2c can never select D again, even
+    //   if node 1 kept it forever.
+    // - *Implementation repair* is what the replacement is: node 1's
+    //   durable record for slot 3 is made to agree with the decided log it
+    //   will serve to catch-up requests and read back at its next boot,
+    //   rather than carrying an accepted-but-unchosen value beside it.
     for (slot, command) in [(s3, noop()), (s4, command("E", 4)), (s5, command("F", 5))] {
         commit(&mut cluster, slot, b11, &command, &[N1]);
     }

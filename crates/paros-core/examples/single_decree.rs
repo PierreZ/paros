@@ -268,7 +268,7 @@ fn phase1(
         show(my_value)
     );
 
-    // ---- Steps 3 and 4: collect promises until a quorum holds ------------
+    // ---- Steps 3 and 4: collect promises; note when a quorum holds -------
     let mut quorum = false;
     for id in targets {
         if !reach.contains(&id) {
@@ -302,9 +302,15 @@ fn phase1(
                 );
             }
             Err(promised) => {
-                // A refusal means some proposer holds a higher ballot. The
-                // only correct move is to give up this ballot and retry
-                // higher later; pressing on could never assemble a quorum.
+                // A refusal means some acceptor already promised a higher
+                // ballot. This proposer gives up at once — paros's node does
+                // the same on a `Nack`: it steps down and re-campaigns above
+                // the refuser after a randomized timeout. Safety does not
+                // demand that: the remaining acceptors might still form a
+                // Phase-1 quorum for this ballot ({B, C} is a majority even
+                // if A refused). Aborting is a liveness policy: work at this
+                // ballot is likely to be preempted by the higher one, and
+                // retrying above it is what ends a duel between proposers.
                 println!(
                     "  {} -> nack, already promised ballot {}: giving up",
                     name(id),
@@ -315,9 +321,20 @@ fn phase1(
         }
         // `phase1_won` takes the proposer's own promise so a candidate that
         // is also an acceptor cannot win below a promise it made meanwhile;
-        // a proposer that is not an acceptor has only its own ballot. The
-        // Prepare was sent to everyone at once, so late promises still
-        // arrive after the quorum; they are counted and change nothing.
+        // a proposer that is not an acceptor has only its own ballot.
+        //
+        // A quorum means Phase 1 *may* close: there are enough answers to
+        // run P2c safely. It does not mean later promises are meaningless.
+        // The Prepare went to everyone at once, and a promise that arrives
+        // after the quorum can report an accepted value at a *higher*
+        // ballot than any seen so far; folded before P2c runs, it changes
+        // the value P2c selects (P2c takes the highest ballot reported).
+        // This proposer keeps folding every promise that reaches it and
+        // runs P2c only after the loop; paros's `ColocatedNode` instead
+        // closes Phase 1 on the very fold that completes the quorum. Both
+        // are safe — a value that is actually chosen is reported by some
+        // member of *every* quorum — and once Phase 1 is closed, further
+        // promises are irrelevant to this campaign.
         if !quorum && proposer.phase1_won(ballot) {
             println!("  phase 1 quorum reached");
             quorum = true;
