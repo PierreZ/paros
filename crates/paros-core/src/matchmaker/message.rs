@@ -157,7 +157,7 @@ pub enum MatchRefusal {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MatchOutcome {
     /// The configuration is registered (durably, once the driver has flushed
-    /// the batch this reply travels in — see [`MatchmakerReady`]) and this is
+    /// the batch this reply travels in — see [`MatchmakerReady`](crate::MatchmakerReady)) and this is
     /// the paper's `MatchB`: every configuration registered at a ballot
     /// **strictly below** the request's and at or above the watermark.
     Registered {

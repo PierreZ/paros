@@ -154,7 +154,7 @@ pub use self::state::{
     Registration, RegistrationKind,
 };
 pub(crate) use self::state::{resolved_phase, resolved_set};
-pub use self::storage::RegistryStorage;
+pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
@@ -768,7 +768,7 @@ mod tests {
             expected
         );
         // The restart reads back exactly that.
-        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
+        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm));
         assert_eq!(*rebooted.set(), successor);
         assert_eq!(rebooted.hard_state().gc_watermark, ballot(5, 1));
         assert_eq!(
@@ -778,35 +778,12 @@ mod tests {
         assert_eq!(rebooted.phase(), MatchmakerPhase::Active);
     }
 
-    /// The port over an in-memory registry, for the state-machine tests.
-    #[derive(Default)]
-    struct TestRegistry {
-        hard_state: MatchmakerHardState,
-        registry: BTreeMap<Ballot, Registration>,
-    }
-
-    impl TestRegistry {
-        /// What a reboot of `mm` reads back: its durable scalars and records.
-        fn of(mm: &Matchmaker) -> Self {
-            Self {
-                hard_state: mm.hard_state().clone(),
-                registry: mm.registry().clone(),
-            }
-        }
-    }
-
-    impl RegistryStorage for TestRegistry {
-        fn initial_state(&self) -> MatchmakerHardState {
-            self.hard_state.clone()
-        }
-
-        fn registration(&self, ballot: Ballot) -> Option<Registration> {
-            self.registry.get(&ballot).cloned()
-        }
-
-        fn registered_ballots(&self) -> Vec<Ballot> {
-            self.registry.keys().copied().collect()
-        }
+    /// What a reboot of `mm` reads back: its durable scalars and records,
+    /// as a [`MemRegistry`] image (the core applies each write the instant
+    /// it decides it, so after `advance` the live state *is* the durable
+    /// state).
+    fn image(mm: &Matchmaker) -> MemRegistry {
+        MemRegistry::new(mm.hard_state().clone(), mm.registry().clone())
     }
 
     const G0: MatchmakerGeneration = MatchmakerGeneration(0);
@@ -819,7 +796,7 @@ mod tests {
     }
 
     fn fresh(id: u64) -> Matchmaker {
-        Matchmaker::new(&mmconfig(id, &[0, 1, 2]), &TestRegistry::default())
+        Matchmaker::new(&mmconfig(id, &[0, 1, 2]), &MemRegistry::default())
     }
 
     fn ballot(round: u64, node: u64) -> Ballot {
@@ -935,7 +912,7 @@ mod tests {
     fn a_losing_bootstrap_is_dropped_when_the_successor_is_learned() {
         // Matchmaker 3 is a spare of M_0 = {0, 1, 2}: it is a member of the
         // proposed {0, 1, 3} and of nothing else.
-        let mut mm = Matchmaker::new(&mmconfig(3, &[0, 1, 2]), &TestRegistry::default());
+        let mut mm = Matchmaker::new(&mmconfig(3, &[0, 1, 2]), &MemRegistry::default());
         assert_eq!(mm.phase(), MatchmakerPhase::Inactive);
         let losing = set(1, &[0, 1, 3]);
         let mut history = BTreeMap::new();
@@ -1225,7 +1202,7 @@ mod tests {
         mm.step(request(2, ballot(2, 2), &[0, 1, 2, 3]));
         drain(&mut mm);
         // A reboot walks the durable records back through the port.
-        let mut rebooted = Matchmaker::new(&mmconfig(2, &[0, 1, 2]), &TestRegistry::of(&mm));
+        let mut rebooted = Matchmaker::new(&mmconfig(2, &[0, 1, 2]), &image(&mm));
         rebooted.step(request(1, ballot(3, 1), &[1, 2, 3]));
         mm.step(request(1, ballot(3, 1), &[1, 2, 3]));
         let (_, expected) = drain(&mut mm);
@@ -1236,11 +1213,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "no registration survives below the gc watermark")]
     fn a_registry_below_its_watermark_refuses_to_boot() {
-        let mut store = TestRegistry::default();
-        store
-            .registry
-            .insert(ballot(1, 1), Registration::belief(config(&[0])));
-        store.hard_state.gc_watermark = ballot(2, 0);
+        let scalars = MatchmakerHardState {
+            gc_watermark: ballot(2, 0),
+            ..Default::default()
+        };
+        let store = MemRegistry::new(
+            scalars,
+            BTreeMap::from([(ballot(1, 1), Registration::belief(config(&[0])))]),
+        );
         let _ = Matchmaker::new(&mmconfig(0, &[0]), &store);
     }
 
@@ -1267,7 +1247,7 @@ mod tests {
         let member = fresh(0);
         assert_eq!(member.phase(), MatchmakerPhase::Active);
         assert_eq!(*member.set(), set(0, &[0, 1, 2]));
-        let mut spare = Matchmaker::new(&mmconfig(7, &[0, 1, 2]), &TestRegistry::default());
+        let mut spare = Matchmaker::new(&mmconfig(7, &[0, 1, 2]), &MemRegistry::default());
         assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
         spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut spare);
@@ -1338,7 +1318,7 @@ mod tests {
         // Frozen, and still frozen after a reboot.
         for mm in [
             &mut mm.clone(),
-            &mut Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm)),
+            &mut Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm)),
         ] {
             mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
             let (writes, replies) = drain(mm);
@@ -1502,7 +1482,7 @@ mod tests {
         );
         // A reboot lands in generation 1 with the installed registry (plus
         // the one registration generation 1 took above).
-        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &TestRegistry::of(&mm));
+        let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm));
         assert_eq!(*rebooted.set(), successor);
         assert_eq!(rebooted.registry().len(), 3);
     }

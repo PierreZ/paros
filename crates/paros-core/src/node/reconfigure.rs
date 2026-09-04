@@ -169,7 +169,7 @@ impl ColocatedNode {
         assert!(
             self.matchmaking
                 .as_ref()
-                .is_some_and(|m| m.config == *config && m.kind.is_reconfiguration()),
+                .is_some_and(|m| *m.config() == *config && m.kind().is_reconfiguration()),
             "a reconfiguration registers the requested configuration"
         );
         assert!(

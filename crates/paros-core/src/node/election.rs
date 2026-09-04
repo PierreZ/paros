@@ -6,12 +6,12 @@
 //! builds the `Prepare`s, moves the role, fixes the allocator and the read
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
-use super::matchmaking::Matchmaking;
 use super::{
     Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId,
     NodeRole, Slot,
 };
 use crate::matchmaker::{MatchRequest, RegistrationKind};
+use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
 

@@ -43,7 +43,7 @@ pub struct Value(pub Vec<u8>);
 /// truncation drops the log records it was derived from, and it travels beside
 /// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
 /// every restart — reproduces the identical duplicate-suppression decision at
-/// the apply seam (see [`crate::ColocatedNode::advance_chosen_index`]'s doc).
+/// the apply seam (see `ColocatedNode::advance_chosen_index`'s doc).
 pub type SessionEntry = (ClientId, ClientSeq, Slot);
 
 /// A log entry: the [`Value`] chosen for a slot, tagged with the client request
@@ -110,7 +110,7 @@ pub enum Control {
     /// old leader accepted alone, below a later slot that did reach the quorum —
     /// would otherwise never be proposed by anyone again, freezing the contiguous
     /// chosen prefix one below it forever (see
-    /// [`ColocatedNode::chosen_gap`](crate::ColocatedNode::chosen_gap)). Deciding a `Noop`
+    /// [`Replica::chosen_gap`](crate::replica::Replica::chosen_gap)). Deciding a `Noop`
     /// there is safe for the ordinary Phase-1 reason: quorum intersection
     /// guarantees a value already chosen at that slot would have been reported, so
     /// the slot is genuinely free.

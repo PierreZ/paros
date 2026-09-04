@@ -25,6 +25,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo clippy
         run: nix develop --command cargo clippy -- --deny warnings
+      - name: Check the core's rustdoc links
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
 
   fmt:
     runs-on: ubuntu-latest

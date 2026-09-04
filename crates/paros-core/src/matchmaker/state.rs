@@ -79,15 +79,15 @@ pub struct PendingBootstrap {
 ///
 /// The per-ballot registrations are deliberately **not** here: they are
 /// persisted one record at a time and read back one record at a time through
-/// [`RegistryStorage`], exactly as the accepted log is split from
-/// [`crate::HardState`]. See [`RegistryStorage`] for why.
+/// [`RegistryStorage`](crate::RegistryStorage), exactly as the accepted log is split from
+/// [`crate::HardState`]. See [`RegistryStorage`](crate::RegistryStorage) for why.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MatchmakerHardState {
     /// The GC watermark (§3.4): a monotone floor below which no request may
     /// register and below which registrations have been dropped. Raised only
-    /// by [`Matchmaker::advance_gc_watermark`] — the leader's GC protocol
+    /// by [`Matchmaker::advance_gc_watermark`](crate::Matchmaker::advance_gc_watermark) — the leader's GC protocol
     /// (`node/gc.rs`) owns the §3.5 preconditions — and carried forward into
     /// every successor generation. [`Ballot::zero`] is the "nothing
     /// collected" floor.
@@ -122,7 +122,7 @@ pub struct MatchmakerHardState {
     /// configuration says "this is the acceptor set in force". A leader's
     /// GC raises the floor to its own ballot, and an *ordinary* leader
     /// registers only a belief, so the floor routinely rises above the last
-    /// reconfiguration record and [`Matchmaker::advance_gc_watermark`]
+    /// reconfiguration record and [`Matchmaker::advance_gc_watermark`](crate::Matchmaker::advance_gc_watermark)
     /// dropped it — after which no campaign's histories named a
     /// reconfiguration at all, `Matchmaking::stale_belief` could never fire
     /// again, and a node that rebooted to its bootstrap belief was elected

@@ -936,23 +936,8 @@ impl MatchmakerReconfigurer {
 mod tests {
     use super::*;
     use crate::matchmaker::MatchmakerPhase;
-    use crate::matchmaker::{
-        MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, RegistryStorage,
-    };
+    use crate::matchmaker::{MatchRequest, Matchmaker, MatchmakerConfig, MemRegistry};
     use crate::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
-
-    struct Empty;
-    impl RegistryStorage for Empty {
-        fn initial_state(&self) -> MatchmakerHardState {
-            MatchmakerHardState::default()
-        }
-        fn registration(&self, _ballot: Ballot) -> Option<Registration> {
-            None
-        }
-        fn registered_ballots(&self) -> Vec<Ballot> {
-            Vec::new()
-        }
-    }
 
     fn ids(v: &[u64]) -> Vec<MatchmakerId> {
         v.iter().copied().map(MatchmakerId).collect()
@@ -999,7 +984,7 @@ mod tests {
                         id: MatchmakerId(i),
                         bootstrap: ids(bootstrap),
                     },
-                    &Empty,
+                    &MemRegistry::default(),
                 )
             })
             .collect()

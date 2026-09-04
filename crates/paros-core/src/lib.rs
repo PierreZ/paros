@@ -51,13 +51,15 @@
 //!    (`cargo run -p paros-core --example single_decree`).
 //! 2. `multi_paxos.rs` — slots versus ballots, one Phase 1 amortized over many
 //!    slots, leader recovery as P2c per slot.
-//! 3. `matchmaker.rs` — configuration discovery and reconfiguration through
-//!    the [`Matchmaker`], and the matchmaker set itself chosen by the same
-//!    single-decree Paxos over `Vec<MatchmakerId>`.
+//! 3. `matchmaker.rs` — configuration discovery through the [`Matchmaker`]
+//!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
+//!    matchmaker set itself chosen by the same single-decree Paxos over
+//!    `Vec<MatchmakerId>`, persisted through a [`MemRegistry`].
 
 pub mod acceptor;
 mod collector;
 mod matchmaker;
+pub mod matchmaking;
 pub mod membership;
 mod message;
 mod node;
@@ -73,9 +75,10 @@ mod write;
 pub use matchmaker::{
     Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
     MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
-    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep,
-    Reconstruction, Registration, RegistrationKind, RegistryStorage, StartRefusal,
+    MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
+    REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
+    ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
+    StartRefusal,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,

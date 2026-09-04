@@ -237,7 +237,7 @@ pub enum Message {
 
     // ---- Snapshot transfer (below-floor recovery) ----
     /// An up-to-date peer → a requester whose needed prefix sits **below the
-    /// server's compaction floor** (it was truncated, so no [`CatchUpResponse`]
+    /// server's compaction floor** (it was truncated, so no [`CatchUpResponse`](Message::CatchUpResponse)
     /// could replay it). Carries an **opaque application snapshot** at
     /// `chosen_index` (the core never interprets `snapshot`; the application
     /// produced it). The requester jumps its chosen prefix to `chosen_index`,

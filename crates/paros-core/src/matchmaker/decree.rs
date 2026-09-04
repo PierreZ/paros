@@ -70,10 +70,10 @@ pub(super) enum AcceptFold {
 /// One proposal of one successor set, at one ballot, over one generation's
 /// matchmakers.
 ///
-/// Opaque from outside the crate: it appears in
-/// [`ReconfigurerPhase::Deciding`](super::ReconfigurerPhase) so a driver can
-/// see *that* a decree is running, and everything it does is the
-/// reconfigurer's to drive.
+/// It appears in [`ReconfigurerPhase::Deciding`](super::ReconfigurerPhase)
+/// so a driver can see *where* the decree stands — its ballot, the value in
+/// flight, whether P2c adopted a prior vote, the promise that preempted it —
+/// and everything it *does* is the reconfigurer's to drive.
 #[derive(Clone, Debug)]
 pub struct Decree {
     ballot: Ballot,
@@ -124,25 +124,30 @@ impl Decree {
     }
 
     /// The ballot this proposal runs at.
-    pub(super) fn ballot(&self) -> Ballot {
+    #[must_use]
+    pub fn ballot(&self) -> Ballot {
         self.ballot
     }
 
-    /// The value proposed once Phase 2 has opened.
-    pub(super) fn value(&self) -> Option<&Vec<MatchmakerId>> {
+    /// The value proposed once Phase 2 has opened: the reconfigurer's own
+    /// proposal, or the prior vote P2c made it adopt.
+    #[must_use]
+    pub fn value(&self) -> Option<&Vec<MatchmakerId>> {
         self.proposer.rounds().get(&DECREE_SLOT).map(Round::command)
     }
 
     /// Whether Phase 1 adopted a prior vote instead of this reconfigurer's
     /// own proposal (the P2c rule fired) — observability for the caller's
     /// audit.
-    pub(super) fn adopted_prior_vote(&self) -> bool {
+    #[must_use]
+    pub fn adopted_prior_vote(&self) -> bool {
         self.value().is_some_and(|v| *v != self.proposal)
     }
 
     /// The promise that refused this ballot, once one has: the caller reopens
     /// strictly above it.
-    pub(super) fn preempted(&self) -> Option<Ballot> {
+    #[must_use]
+    pub fn preempted(&self) -> Option<Ballot> {
         self.preempted
     }
 

@@ -56,17 +56,17 @@
 //! after the reconfiguration. Matchmaker pool: `m0..=m3`, bootstrap set
 //! `M_0 = {m0, m1, m2}`, `m3` a spare that `M_1 = {m0, m1, m3}` pulls in.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Entry, Fingerprint,
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
-    MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase,
-    MatchmakerReconfigurer, MatchmakerSet, MatchmakerWriteOp, NodeId, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Registration, RegistrationKind,
-    RegistryStorage, Slot, Value,
+    MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerSet,
+    MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Slot, Value,
 };
 
 const N1: NodeId = NodeId(1);
@@ -186,21 +186,20 @@ fn acceptor(pool: &mut [AcceptorNode], id: NodeId) -> &mut AcceptorNode {
 // The matchmakers: the real state machine, driven through its Ready batch.
 // ---------------------------------------------------------------------------
 
-/// A matchmaker's disk: the durable scalars and the per-ballot registration
-/// records, stored separately (never one blob), exactly as the library's
-/// in-memory `MemMatchmakerStorage` keeps them.
+/// A matchmaker's disk: the library's reference [`MemRegistry`] — the
+/// durable scalars and the per-ballot registration records, stored
+/// separately, with the library's semantics for each
+/// [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) — plus the two
+/// counters that make the fsync ordering observable.
 ///
-/// Two halves. The **write** half applies each [`MatchmakerWriteOp`] the role
-/// stages — the four ops are the registry's whole durable surface, and the
-/// semantics of each are the library's, not this example's. The **read**
-/// half is the core's own recovery port, [`RegistryStorage`]: a
-/// [`Matchmaker`] is *constructed from* a disk, reading the scalars once and
-/// the registry record by record, so a reboot is `Matchmaker::new(config,
-/// &disk)` and nothing else.
+/// The **write** half is [`MemRegistry::apply`]; the **read** half is the
+/// core's own recovery port, [`RegistryStorage`], which `MemRegistry`
+/// implements: a [`Matchmaker`] is *constructed from* a disk, reading the
+/// scalars once and the registry record by record, so a reboot is
+/// `Matchmaker::new(config, &disk)` and nothing else.
 #[derive(Clone, Debug, Default)]
 struct Disk {
-    hard_state: MatchmakerHardState,
-    registry: BTreeMap<Ballot, Registration>,
+    store: MemRegistry,
     /// Writes applied so far.
     writes: usize,
     /// Writes covered by an fsync so far: a reply may leave only while this
@@ -209,61 +208,12 @@ struct Disk {
 }
 
 impl Disk {
-    /// Apply one staged write. Mirrors `MemMatchmakerStorage` in the `paros`
-    /// crate method for method.
-    fn apply(&mut self, op: &MatchmakerWriteOp) {
-        self.writes += 1;
-        match op {
-            MatchmakerWriteOp::Register {
-                ballot,
-                registration,
-            } => {
-                self.registry.insert(*ballot, registration.clone());
-            }
-            MatchmakerWriteOp::SetGcWatermark(watermark) => {
-                if *watermark > self.hard_state.gc_watermark {
-                    self.hard_state.gc_watermark = *watermark;
-                    self.registry = self.registry.split_off(watermark);
-                }
-            }
-            MatchmakerWriteOp::SetScalars(scalars) => {
-                let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
-                self.hard_state = scalars.clone();
-                self.hard_state.gc_watermark = watermark;
-                self.registry = self.registry.split_off(&watermark);
-            }
-            MatchmakerWriteOp::InstallRegistry {
-                scalars,
-                registrations,
-            } => {
-                self.hard_state = scalars.clone();
-                self.registry = registrations
-                    .iter()
-                    .filter(|(b, _)| **b >= scalars.gc_watermark)
-                    .map(|(b, r)| (*b, r.clone()))
-                    .collect();
-            }
-        }
-    }
-
     /// The fsync. Memory has nothing to flush, so all it does is record that
     /// every write so far is covered; what matters is *where* it is called —
     /// after every write of a batch and before that batch's reply leaves —
     /// and the delivery helpers assert exactly that.
     fn sync(&mut self) {
         self.synced = self.writes;
-    }
-}
-
-impl RegistryStorage for Disk {
-    fn initial_state(&self) -> MatchmakerHardState {
-        self.hard_state.clone()
-    }
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.registry.get(&ballot).cloned()
-    }
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.registry.keys().copied().collect()
     }
 }
 
@@ -293,7 +243,7 @@ impl MatchmakerNode {
         };
         let disk = Disk::default();
         Self {
-            role: Matchmaker::new(&config, &disk),
+            role: Matchmaker::new(&config, &disk.store),
             config,
             disk,
         }
@@ -307,7 +257,8 @@ impl MatchmakerNode {
         let ready = self.role.ready();
         let writes = ready.writes().len();
         for op in ready.writes() {
-            self.disk.apply(op);
+            self.disk.store.apply(op);
+            self.disk.writes += 1;
         }
         self.disk.sync();
         assert_eq!(
@@ -344,7 +295,7 @@ impl MatchmakerNode {
     /// built from the disk through the core's recovery port. Whatever the
     /// old role knew that the disk did not is gone — which is the point.
     fn reboot(&mut self) {
-        self.role = Matchmaker::new(&self.config, &self.disk);
+        self.role = Matchmaker::new(&self.config, &self.disk.store);
     }
 }
 
@@ -366,10 +317,8 @@ fn matchmaker(pool: &mut [MatchmakerNode], id: MatchmakerId) -> &mut MatchmakerN
 // ---------------------------------------------------------------------------
 
 /// What a candidate learns from the matchmakers before it may send a single
-/// `Prepare`. Inside paros this fold lives in `ColocatedNode`
-/// (`node/matchmaking.rs`) and is not a public role, so the example spells
-/// the ten lines out — which is no bad thing, because they *are* the
-/// algorithm:
+/// `Prepare` is the [`Matchmaking`] role's business — the same type
+/// `ColocatedNode` holds beside its Phase 1. Its rule, in three lines:
 ///
 /// - take the **union** of every history a quorum of matchmakers returns;
 /// - keep only the entries at or above the **maximum** reported watermark
@@ -381,71 +330,6 @@ fn matchmaker(pool: &mut [MatchmakerNode], id: MatchmakerId) -> &mut MatchmakerN
 /// at least one of our answerers holds its record. Under-reporting is
 /// impossible; over-reporting (a configuration that never got anywhere) only
 /// costs Phase 1 a few extra promises.
-#[derive(Debug)]
-struct Matchmaking {
-    ballot: Ballot,
-    registered: BTreeSet<MatchmakerId>,
-    history: BTreeMap<Ballot, Registration>,
-    watermark: Ballot,
-    effective: Option<(Ballot, AcceptorConfig)>,
-}
-
-impl Matchmaking {
-    fn new(ballot: Ballot) -> Self {
-        Self {
-            ballot,
-            registered: BTreeSet::new(),
-            history: BTreeMap::new(),
-            watermark: Ballot::zero(),
-            effective: None,
-        }
-    }
-
-    fn fold(&mut self, reply: &MatchReply) -> Result<(), MatchRefusal> {
-        assert_eq!(
-            reply.ballot, self.ballot,
-            "a reply echoes its request's ballot"
-        );
-        match &reply.outcome {
-            MatchOutcome::Registered {
-                history,
-                next_from_ballot,
-                gc_watermark,
-                effective,
-                ..
-            } => {
-                assert!(
-                    next_from_ballot.is_none(),
-                    "a tiny registry fits in one page"
-                );
-                for (ballot, registration) in history {
-                    self.history.insert(*ballot, registration.clone());
-                }
-                self.watermark = self.watermark.max(*gc_watermark);
-                if let Some((at, config)) = effective
-                    && self.effective.as_ref().is_none_or(|(held, _)| at > held)
-                {
-                    self.effective = Some((*at, config.clone()));
-                }
-                self.registered.insert(reply.matchmaker);
-                Ok(())
-            }
-            MatchOutcome::Refused(refusal) => Err(refusal.clone()),
-        }
-    }
-
-    /// `H_b`.
-    fn prior(&self) -> Vec<AcceptorConfig> {
-        let mut prior: Vec<AcceptorConfig> = Vec::new();
-        for registration in self.history.range(self.watermark..).map(|(_, r)| r) {
-            if !prior.contains(&registration.config) {
-                prior.push(registration.config.clone());
-            }
-        }
-        prior
-    }
-}
-
 /// Register `request` with every member of `set`, fold the answers, and
 /// return the phase once a matchmaker quorum has answered — or the first
 /// refusal, which abandons the campaign.
@@ -466,18 +350,30 @@ fn matchmake(
         set.generation.0,
         show_set(&set.members)
     );
-    let mut phase = Matchmaking::new(request.ballot);
+    let mut phase = Matchmaking::new(request.ballot, request.config.clone(), request.kind);
     for id in &set.members {
         let (reply, writes) = matchmaker(pool, *id).deliver_match(request.clone());
-        match phase.fold(&reply) {
-            Ok(()) => {
-                let known: Vec<String> = match &reply.outcome {
-                    MatchOutcome::Registered { history, .. } => history
-                        .iter()
-                        .map(|(b, r)| format!("{} @{}", show_config(&r.config), show_ballot(*b)))
-                        .collect(),
-                    MatchOutcome::Refused(_) => unreachable!(),
-                };
+        // The wiring's guards come first: the reply answers this request.
+        assert_eq!(reply.to, request.from);
+        assert_eq!(
+            reply.ballot,
+            phase.ballot(),
+            "a reply echoes its request's ballot"
+        );
+        let (from, answer) = RegisteredPage::from_reply(reply);
+        match answer {
+            Ok(page) => {
+                assert!(
+                    page.next_from_ballot.is_none(),
+                    "a tiny registry fits in one page"
+                );
+                let known: Vec<String> = page
+                    .history
+                    .iter()
+                    .map(|(b, r)| format!("{} @{}", show_config(&r.config), show_ballot(*b)))
+                    .collect();
+                let fold = phase.fold(from, page);
+                assert_eq!(fold, MatchFold::Registered, "a complete answer counts once");
                 println!(
                     "  m{} -> registered ({writes} write(s) persisted before the reply); history below: [{}]",
                     id.0,
@@ -489,12 +385,12 @@ fn matchmake(
                 return Err(refusal);
             }
         }
-        if set.has_quorum(&phase.registered) {
+        if phase.quorum_held(set) {
             println!("  matchmaker quorum reached");
             break;
         }
     }
-    assert!(set.has_quorum(&phase.registered));
+    assert!(phase.quorum_held(set));
     let prior: Vec<String> = phase.prior().iter().map(show_config).collect();
     println!("  H_b = [{}]", prior.join(", "));
     Ok(phase)
@@ -665,7 +561,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     // reply that acknowledged it in part 1 left only after the write.
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
-        m0.disk.registration(b1),
+        m0.disk.store.registration(b1),
         Some(Registration::belief(c0())),
         "the disk holds what the reply promised"
     );
@@ -677,7 +573,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
         m0.role.registry(),
-        &m0.disk.registry,
+        m0.disk.store.registrations(),
         "the rebooted role is exactly what the disk described"
     );
     // The same request again is answered from the durable record with no
@@ -725,7 +621,7 @@ fn part_reconfigure(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmake
     // reconfiguration was registered below 2.1, so none is reported. The
     // one just registered becomes the effective configuration every later
     // campaign is told about (part 4 checks it).
-    assert_eq!(phase.effective, None);
+    assert_eq!(phase.effective(), None);
     // Phase 1 fans out to `H_b ∪ C_b` = {2, 3, 4, 5} (node 1 is the
     // candidate). It is complete only with a quorum of **every** prior
     // configuration — here `C0`. Node 1's own promise counts toward `C0`.
@@ -772,14 +668,19 @@ fn part_cover_every_configuration(
     println!("== 4. a later campaign must cover every configuration in H_b ==");
     // Node 3 (a member of both) campaigns with the belief `C1` — the
     // effective configuration, which the replies now name. Had it believed
-    // `C0`, the histories would have named the reconfiguration at 2.1 and a
-    // real node would abandon the campaign and adopt `C1`
+    // `C0`, `Matchmaking::stale_belief` would name the reconfiguration at
+    // 2.1 and a real node would abandon the campaign and adopt `C1`
     // (`MatchStep::StaleConfiguration`).
     let b3 = ballot(3, N3);
     let phase =
         matchmake(matchmakers, &m_0(), &MatchRequest::new(N3, b3, c1(), G0)).expect("registered");
     assert_eq!(phase.prior(), vec![c0(), c1()]);
-    assert_eq!(phase.effective, Some((ballot(2, N1), c1())));
+    assert_eq!(phase.effective(), Some(&(ballot(2, N1), c1())));
+    assert_eq!(
+        phase.stale_belief(),
+        None,
+        "the belief matches the effective configuration"
+    );
     let mut proposer: Proposer<NodeId, Command> = Proposer::new();
     let campaign = Campaign {
         me: Some(N3),
@@ -1119,6 +1020,25 @@ fn beat(
             show_ballot(reconstruction.bootstrap.gc_watermark)
         );
     }
+    if let ReconfigurerPhase::Deciding { decree, .. } = reconfigurer.phase() {
+        // The decree is the roles of part 5 in flight: its ballot and, once
+        // Phase 1 closed, the value P2c selected for Phase 2.
+        println!(
+            "  decree at ballot {}: {}",
+            show_ballot(decree.ballot()),
+            decree
+                .value()
+                .map_or("phase 1 open".to_string(), |v| format!(
+                    "phase 2 proposing {}{}",
+                    show_set(v),
+                    if decree.adopted_prior_vote() {
+                        " (adopted a prior vote)"
+                    } else {
+                        " (own proposal)"
+                    }
+                ))
+        );
+    }
     steps
 }
 
@@ -1281,7 +1201,7 @@ fn part_after_handover(matchmakers: &mut [MatchmakerNode]) {
     // spare m3 answers from a registry it was bootstrapped with — so `H_b`
     // still names both configurations, and the effective one survived too.
     assert_eq!(phase.prior(), vec![c0(), c1()]);
-    assert_eq!(phase.effective, Some((ballot(2, N1), c1())));
+    assert_eq!(phase.effective(), Some(&(ballot(2, N1), c1())));
     println!();
 }
 

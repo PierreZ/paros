@@ -13,11 +13,14 @@
 //! came from an intersecting matchmaker quorum, so no configuration that could
 //! still hold a chosen-but-unlearned value is missing from it.
 //!
-//! The phase is deliberately its own state ([`Matchmaking`]) beside
-//! [`super::election::Election`], never folded into it: a reader must be able
-//! to point at the matchmaking state, the Phase-1 state, and the boundary
-//! between them ([`super::ColocatedNode::start_phase1`]). A candidate holds exactly
-//! one of the two, and `ColocatedNode::assert_invariants` says so.
+//! The phase is its own **role** ([`crate::matchmaking::Matchmaking`] — the
+//! tally, the union, `H_b` and the stale-belief signal), held beside
+//! [`crate::proposer::Election`] and never folded into it: a reader must be
+//! able to point at the matchmaking state, the Phase-1 state, and the
+//! boundary between them (`ColocatedNode::start_phase1`). A candidate holds
+//! exactly one of the two, and `ColocatedNode::assert_invariants` says so.
+//! This module is the wiring: it builds the requests, guards the replies,
+//! and turns the role's answers into role transitions.
 //!
 //! # Plain Multi-Paxos never comes here
 //!
@@ -112,50 +115,10 @@
 //!   request idempotently from its retained history, and a campaign that never
 //!   completes is simply abandoned at the next election timeout.
 
-use super::{BTreeMap, BTreeSet, Ballot, ColocatedNode, NodeId, NodeRole};
-use crate::matchmaker::{
-    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, REGISTRY_PAGE, Registration,
-    RegistrationKind,
-};
+use super::{Ballot, ColocatedNode, NodeId, NodeRole};
+use crate::matchmaker::{MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
+use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
-
-/// Volatile per-ballot matchmaking state while a Candidate registers its
-/// configuration and collects the prior ones.
-pub(super) struct Matchmaking {
-    /// The ballot being registered.
-    pub(super) ballot: Ballot,
-    /// `C_b`: the configuration this ballot will run with once registered.
-    pub(super) config: AcceptorConfig,
-    /// What this campaign registers: an operator's deliberate change
-    /// ([`super::ColocatedNode::reconfigure`]) or this node's belief about the
-    /// configuration in force (the election clock). Only a
-    /// [`RegistrationKind::Belief`] campaign is subject to the
-    /// stale-configuration abort.
-    pub(super) kind: RegistrationKind,
-    /// Matchmakers whose **complete** answer has been folded — a paged one
-    /// counts only once its last page arrived.
-    registered_by: BTreeSet<MatchmakerId>,
-    /// Next history-page cursor expected from each matchmaker still
-    /// mid-answer, exactly as the log's Phase 1 tracks its promise pages.
-    pub(super) page_next: BTreeMap<MatchmakerId, Ballot>,
-    /// The union of every reported history so far, ballot by ballot. A ballot
-    /// normally maps to one configuration (one proposer per ballot, write-once
-    /// per matchmaker); two matchmakers disagreeing would be a registry bug,
-    /// and rather than assert on wire input the union keeps *both* — Phase 1
-    /// then needs a quorum of each, which is always safe.
-    pub(super) history: BTreeMap<Ballot, Vec<AcceptorConfig>>,
-    /// The highest-ballot **reconfiguration** registration any reply named:
-    /// the effective configuration below this ballot (see
-    /// [`crate::Registration`]). `None` when no reply named one — the
-    /// bootstrap configuration is then the only one ever in force.
-    pub(super) effective: Option<(Ballot, AcceptorConfig)>,
-    /// The **maximum** reported GC watermark (§3.2's `w = max(w, ...)`):
-    /// entries below it are excluded from `H_b`.
-    pub(super) watermark: Ballot,
-    /// Distinct disagreements seen while unioning (two configurations at one
-    /// ballot) — observability for the driver's audit report.
-    pub(super) disagreements: u64,
-}
 
 /// What one matchmaker reply did to an open campaign, returned by
 /// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition
@@ -209,227 +172,18 @@ pub enum MatchStep {
     },
 }
 
-impl Matchmaking {
-    /// Open the phase for `ballot` with `config` as `C_b`.
-    pub(super) fn new(ballot: Ballot, config: AcceptorConfig, kind: RegistrationKind) -> Self {
-        Self {
-            ballot,
-            config,
-            kind,
-            registered_by: BTreeSet::new(),
-            page_next: BTreeMap::new(),
-            history: BTreeMap::new(),
-            effective: None,
-            watermark: Ballot::zero(),
-            disagreements: 0,
-        }
-    }
-
-    /// Whether this page counts at all: a matchmaker not already done, and
-    /// a page whose shape and cursor are what that matchmaker owes next.
-    /// Wire input, so a refusal is a `false`, never an assert — the twin of
-    /// the log's own `PromiseTally::accepts`.
-    fn accepts(
-        &self,
-        matchmaker: MatchmakerId,
-        from_ballot: Ballot,
-        history: &BTreeMap<Ballot, Registration>,
-        next_from_ballot: Option<Ballot>,
-    ) -> bool {
-        if self.registered_by.contains(&matchmaker) {
-            return false;
-        }
-        // The first page starts wherever the matchmaker's own watermark is,
-        // which the candidate cannot know; every later one must start at the
-        // cursor that page named.
-        if self
-            .page_next
-            .get(&matchmaker)
-            .is_some_and(|expected| *expected != from_ballot)
-        {
-            return false;
-        }
-        // Only the lower bound, exactly as `promise_page_shape_valid` checks
-        // its page: an entry above the request's ballot would merely add a
-        // configuration to `H_b`, which Phase 1 covering more than it must
-        // is always safe.
-        history.len() <= REGISTRY_PAGE
-            && history.keys().all(|b| *b >= from_ballot)
-            && next_from_ballot.is_none_or(|next| {
-                history.len() == REGISTRY_PAGE
-                    && next > from_ballot
-                    && history.keys().next_back().is_none_or(|last| next > *last)
-            })
-    }
-
-    /// Fold one `Registered` page's history, watermark and reported
-    /// effective configuration. Returns the cursor the next page starts at
-    /// when the answer is still incomplete, `Ok(None)` when this page
-    /// completed it, and `Err(())` when the page does not count (a
-    /// duplicate, or one whose cursor or shape is not what this matchmaker
-    /// owed).
-    pub(super) fn fold(
-        &mut self,
-        matchmaker: MatchmakerId,
-        from_ballot: Ballot,
-        history: BTreeMap<Ballot, Registration>,
-        next_from_ballot: Option<Ballot>,
-        watermark: Ballot,
-        reported: Option<(Ballot, AcceptorConfig)>,
-    ) -> Result<Option<Ballot>, ()> {
-        if !self.accepts(matchmaker, from_ballot, &history, next_from_ballot) {
-            return Err(());
-        }
-        for (ballot, registration) in history {
-            let Registration { config, kind } = registration;
-            if kind.is_reconfiguration() {
-                self.raise_effective(ballot, &config);
-            }
-            let entry = self.history.entry(ballot).or_default();
-            if !entry.contains(&config) {
-                if !entry.is_empty() {
-                    self.disagreements = self.disagreements.saturating_add(1);
-                }
-                entry.push(config);
-            }
-        }
-        // The effective configuration is the maximum of what the histories
-        // *show* and what the matchmakers *hold*: GC drops the record but
-        // never the scalar, so a floor raised over the last reconfiguration
-        // leaves the reported scalar as the only witness of the acceptor set
-        // in force (see `MatchmakerHardState::effective`).
-        if let Some((ballot, config)) = reported {
-            self.raise_effective(ballot, &config);
-        }
-        // The watermark is the maximum reported, never the minimum and never
-        // a per-reply filter (§3.2): the union is filtered once, at closure.
-        self.watermark = self.watermark.max(watermark);
-        if let Some(next) = next_from_ballot {
-            self.page_next.insert(matchmaker, next);
-        } else {
-            self.page_next.remove(&matchmaker);
-            self.registered_by.insert(matchmaker);
-        }
-        Ok(next_from_ballot)
-    }
-
-    /// Raise the effective configuration to `(ballot, config)` when it is
-    /// newer than the one held (monotone in the ballot).
-    fn raise_effective(&mut self, ballot: Ballot, config: &AcceptorConfig) {
-        if self
-            .effective
-            .as_ref()
-            .is_none_or(|(newest, _)| ballot > *newest)
-        {
-            self.effective = Some((ballot, config.clone()));
-        }
-    }
-
-    /// `H_b`: every distinct configuration reported at a ballot at or above
-    /// the maximum watermark, in ballot order.
-    /// Whether a matchmaker quorum of `matchmakers` has answered completely
-    /// — the phase's own completion predicate, asked at the membership
-    /// boundary and never as a count.
-    pub(super) fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_quorum(&self.registered_by)
-    }
-
-    /// How many more complete answers the phase still waits for. The one
-    /// thing a predicate cannot report, and the only place a matchmaker
-    /// quorum is ever spelled as a number.
-    pub(super) fn remaining(&self, matchmakers: &MatchmakerSet) -> usize {
-        matchmakers
-            .quorum_size()
-            .saturating_sub(self.registered_by.len())
-    }
-
-    /// The matchmakers that have not answered completely, with the page
-    /// cursor each owes next — whom a re-send addresses, and from where.
-    pub(super) fn unanswered(
-        &self,
-        matchmakers: &MatchmakerSet,
-    ) -> Vec<(MatchmakerId, Option<Ballot>)> {
-        matchmakers
-            .members
-            .iter()
-            .copied()
-            .filter(|mm| !self.registered_by.contains(mm))
-            .map(|mm| (mm, self.page_next.get(&mm).copied()))
-            .collect()
-    }
-
-    /// How many matchmakers have answered completely.
-    pub(super) fn registered(&self) -> usize {
-        self.registered_by.len()
-    }
-
-    pub(super) fn prior(&self) -> Vec<AcceptorConfig> {
-        let mut prior: Vec<AcceptorConfig> = Vec::new();
-        for configs in self.history.range(self.watermark..).map(|(_, c)| c) {
-            for config in configs {
-                if !prior.contains(config) {
-                    prior.push(config.clone());
-                }
-            }
-        }
-        prior
-    }
-
-    /// The stale-belief signal: the effective configuration the quorum's
-    /// histories name, when this is an ordinary campaign that registered
-    /// something else. A reconfiguration campaign is exempt — it *is* the
-    /// next effective configuration. `None` when no reconfiguration was ever
-    /// registered below this ballot, or the belief already matches it.
-    pub(super) fn stale_belief(&self) -> Option<(Ballot, AcceptorConfig)> {
-        if self.kind.is_reconfiguration() {
-            return None;
-        }
-        let (newest, config) = self.effective.as_ref()?;
-        if *config == self.config {
-            return None;
-        }
-        Some((*newest, config.clone()))
-    }
-}
-
-/// What one matchmaker answered: the history, watermark and effective
-/// configuration of a registration, or the refusal.
-pub(super) type MatchAnswer = Result<RegisteredPage, MatchRefusal>;
-
-/// One `MatchB` page as the campaign folds it.
-pub(super) struct RegisteredPage {
-    pub(super) from_ballot: Ballot,
-    pub(super) history: BTreeMap<Ballot, Registration>,
-    pub(super) next_from_ballot: Option<Ballot>,
-    pub(super) gc_watermark: Ballot,
-    pub(super) effective: Option<(Ballot, AcceptorConfig)>,
-}
-
 /// Decode one reply into the answer the campaign folds.
-pub(super) fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, MatchAnswer) {
-    let MatchReply {
-        matchmaker,
-        to,
-        ballot,
-        outcome,
-        generation: _,
-    } = reply;
-    let answer = match outcome {
-        MatchOutcome::Registered {
-            from_ballot,
-            history,
-            next_from_ballot,
-            gc_watermark,
-            effective,
-        } => Ok(RegisteredPage {
-            from_ballot,
-            history,
-            next_from_ballot,
-            gc_watermark,
-            effective,
-        }),
-        MatchOutcome::Refused(refusal) => Err(refusal),
-    };
+fn split_reply(
+    reply: MatchReply,
+) -> (
+    MatchmakerId,
+    NodeId,
+    Ballot,
+    Result<RegisteredPage, MatchRefusal>,
+) {
+    let to = reply.to;
+    let ballot = reply.ballot;
+    let (matchmaker, answer) = RegisteredPage::from_reply(reply);
     (matchmaker, to, ballot, answer)
 }
 
@@ -460,12 +214,15 @@ impl ColocatedNode {
             return;
         };
         let generation = self.matchmakers.generation;
-        let request = match m.kind {
-            RegistrationKind::Reconfiguration => {
-                MatchRequest::reconfigure(self.config.id, m.ballot, m.config.clone(), generation)
-            }
+        let request = match m.kind() {
+            RegistrationKind::Reconfiguration => MatchRequest::reconfigure(
+                self.config.id,
+                m.ballot(),
+                m.config().clone(),
+                generation,
+            ),
             RegistrationKind::Belief => {
-                MatchRequest::new(self.config.id, m.ballot, m.config.clone(), generation)
+                MatchRequest::new(self.config.id, m.ballot(), m.config().clone(), generation)
             }
         };
         let unanswered = m.unanswered(&self.matchmakers);
@@ -498,7 +255,7 @@ impl ColocatedNode {
     pub fn matchmaking(&self) -> Option<(Ballot, &AcceptorConfig, RegistrationKind)> {
         self.matchmaking
             .as_ref()
-            .map(|m| (m.ballot, &m.config, m.kind))
+            .map(|m| (m.ballot(), m.config(), m.kind()))
     }
 
     /// Fold one matchmaker's answer into the open matchmaking phase — the
@@ -511,7 +268,7 @@ impl ColocatedNode {
     /// - `Registered`: the history is unioned and the watermark maxed; once a
     ///   **quorum of matchmakers** has registered the ballot, `H_b` is
     ///   computed (the union, filtered by the maximum watermark) and handed to
-    ///   Phase 1 through [`ColocatedNode::start_phase1`] — no `Prepare` ever leaves
+    ///   Phase 1 through `ColocatedNode::start_phase1` — no `Prepare` ever leaves
     ///   before that instant (invariant 1). An ordinary campaign whose
     ///   histories name a **reconfiguration** to a configuration other than
     ///   the one it registered abandons the campaign and adopts that
@@ -540,7 +297,10 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         if generation != self.matchmakers.generation
-            || self.matchmaking.as_ref().is_none_or(|m| m.ballot != ballot)
+            || self
+                .matchmaking
+                .as_ref()
+                .is_none_or(|m| m.ballot() != ballot)
         {
             return MatchStep::Ignored;
         }
@@ -590,29 +350,17 @@ impl ColocatedNode {
         let Some(m) = self.matchmaking.as_mut() else {
             return MatchStep::Ignored;
         };
-        let RegisteredPage {
-            from_ballot,
-            history,
-            next_from_ballot,
-            gc_watermark,
-            effective,
-        } = page;
-        let Ok(next) = m.fold(
-            matchmaker,
-            from_ballot,
-            history,
-            next_from_ballot,
-            gc_watermark,
-            effective,
-        ) else {
-            return MatchStep::Ignored;
+        let next = match m.fold(matchmaker, page) {
+            MatchFold::Ignored => return MatchStep::Ignored,
+            MatchFold::Paged(next) => Some(next),
+            MatchFold::Registered => None,
         };
         if let Some(next) = next {
             // The answer is still paged: ask this matchmaker for the rest.
             // Nothing counts toward the quorum until its last page lands.
-            let ballot = m.ballot;
-            let config = m.config.clone();
-            let kind = m.kind;
+            let ballot = m.ballot();
+            let config = m.config().clone();
+            let kind = m.kind();
             let generation = self.matchmakers.generation;
             let request = match kind {
                 RegistrationKind::Reconfiguration => {
@@ -670,8 +418,8 @@ impl ColocatedNode {
             // configuration (or predates any reconfiguration)
             // runs the leadership under what it registered.
             let prior = m.prior();
-            let watermark = m.watermark;
-            let config = m.config.clone();
+            let watermark = m.watermark();
+            let config = m.config().clone();
             // The matchmaking → Phase 1 boundary. The registered
             // quorum is restated here, at the one place Phase 1
             // can open on a matchmaker deployment.
@@ -740,7 +488,9 @@ impl ColocatedNode {
     /// depends on the count.
     #[must_use]
     pub fn matchmaking_disagreements(&self) -> u64 {
-        self.matchmaking.as_ref().map_or(0, |m| m.disagreements)
+        self.matchmaking
+            .as_ref()
+            .map_or(0, Matchmaking::disagreements)
     }
 
     /// The matchmaker set this node believes authoritative (#125): the

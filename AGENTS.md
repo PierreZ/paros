@@ -160,9 +160,14 @@ own**. The roles:
   variants there — never a rewrite of a tally or of a fan-out. `AcceptorConfig`'s fields are
   private and `new` is its only constructor (deserialisation included): the membership is
   binary-searched, so an unsorted one would silently miscount rather than fail.
+- `matchmaking.rs` — `Matchmaking`: the candidate's matchmaking phase — the registration tally
+  over a matchmaker set, the union of the histories above the maximum watermark (`H_b`), the
+  effective configuration and the stale-belief signal. It reads no wire and knows no role; the
+  node's `node/matchmaking.rs` is the wiring that feeds it and acts on its answers.
 - `matchmaker.rs` — `Matchmaker`: the registry and its generations; `matchmaker/reconfigurer.rs`
   orchestrates the generation handover and *decides* it with a decree — a matchmaker is not an
-  acceptor and never becomes one.
+  acceptor and never becomes one. `MemRegistry` is the reference in-memory registry every test,
+  the handover model and the examples reboot a matchmaker from.
 
 The rule that shapes every boundary: **a component must not acquire knowledge merely because
 the current deployment happens to colocate it.** The proposer builds no message and knows no
@@ -252,7 +257,7 @@ puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchma
 bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
 whole pool on a plain one. That floor, not the bootstrap size, is what the storage world's copy
 budget is computed over: a budget keeping a clean quorum of the smallest configuration keeps one
-of every larger configuration too. Module docs: `crates/paros-core/src/node/matchmaking.rs`, `crates/paros-core/src/node/reconfigure.rs`.
+of every larger configuration too. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
