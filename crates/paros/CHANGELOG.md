@@ -5,38 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [unreleased]
-
 ## [0.2.0] - 2026-09-05
 
 ### 🚀 Features
 
+- **paros**: Make the NodeStorage and MatchmakerStorage seams async ([#136](https://github.com/PierreZ/paros/pull/136))
 - **core**: Cooperative leader handoff (DPaxos "Leader Handoff") ([#118](https://github.com/PierreZ/paros/pull/118))
 - Stage 8 — disk faults C: protocol-aware recovery (CTRL) ([#21](https://github.com/PierreZ/paros/pull/21)) ([#112](https://github.com/PierreZ/paros/pull/112))
+- **storage**: Stage 7 disk faults B — corruption detection (CLStore) ([#111](https://github.com/PierreZ/paros/pull/111))
+- **storage**: Stage 6 disk faults A — fail-stop ([#19](https://github.com/PierreZ/paros/pull/19)) ([#110](https://github.com/PierreZ/paros/pull/110))
 - **core**: Plumb configuration identities ([#109](https://github.com/PierreZ/paros/pull/109))
-- TigerBeetle-style assertions in the core; moonpool assertions at the sim storage seam
 - **core**: CheckQuorum — a leader without an ack quorum for an election timeout steps down
+- **sim**: Widen the BUGGIFY surface; drift-immune gap-wedge detection
+- **sim**: Make the #88 mid-election snapshot window reachable
+- **sim**: Raise the odds of the #88/#80/#60 scenarios per seed
+- **sim**: Saturate guided chain exploration
+- **sim**: Add chain state-machine campaign
 
 ### 🐛 Bug Fixes
 
 - **core**: Bound promise and recovery batches ([#106](https://github.com/PierreZ/paros/pull/106))
+- **paros**: Ack-on-commit verifies the decided command is the waiter's own
+- **paros**: A durable compaction floor never outruns the durable application state
 - **core**: #94 at-most-once — session ledger travels with truncation and snapshots; duplicates suppress at the apply seam
 - **core**: Land the adversarial review's findings; arm the at-most-once oracle
-- **core**: Chosen acks require an executed seq, never seq <= latest
-- **core**: A candidate refuses an election win below its own promise
+- **paros**: The tick deadline is absolute, not a fresh sleep per select pass
+- **sim**: Drive the mid-election snapshot gate from the driver's role check
+- Close grpc channels on shutdown
 
 ### 📚 Documentation
 
 - **core**: Three runnable teaching examples for the composable roles ([#135](https://github.com/PierreZ/paros/pull/135))
+- Add project logo and README quick reference
 
 ### 🚜 Refactor
 
 - Delete the inert wire plumbing, settle the open judgment calls, advance the moonpool pin ([#137](https://github.com/PierreZ/paros/pull/137))
-- **core**: Split node into protocol modules ([#108](https://github.com/PierreZ/paros/pull/108))
+- **sim**: Move correctness checking from trace scanning to an audit port
+- **rpc**: Encode consensus traffic with protobuf
 
 ### 🧪 Testing
 
-- **core**: Adapt the unit corpus to CheckQuorum; pin its contract
+- **sim**: Compare external replica digests
 - **sim**: Pin the #94/#95-arc regression seeds; clippy/doc polish
 
 ### ⚙️ Miscellaneous Tasks
@@ -45,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📦 Other
 
+- Advance moonpool to the single-stream canary and put the campaign under it ([#138](https://github.com/PierreZ/paros/pull/138))
 - Review of #133: protocol fixes, the composable core, the driver, and the simulation's reach ([#134](https://github.com/PierreZ/paros/pull/134))
 - Matchmaker GC, reconfiguration under the full fault matrix, matchmaker-set generations (#123, #124, #125) ([#133](https://github.com/PierreZ/paros/pull/133))
 - Leader matchmaking phase, cross-configuration Phase 1, online reconfiguration (#120, #121, #122) ([#132](https://github.com/PierreZ/paros/pull/132))
@@ -53,42 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sim harness: node shape survives restarts, frontier-tied convergence, hook coverage; core: local protocol assertions ([#129](https://github.com/PierreZ/paros/pull/129))
 - One workload, one audit, everything knobbed — the paros-sim simplification ([#128](https://github.com/PierreZ/paros/pull/128))
 - Retire the red demos and every pinned seed; widen the BUGGIFY surface ([#127](https://github.com/PierreZ/paros/pull/127))
+- Unify network chaos into the main campaign (moonpool 43304d8); driver: per-kind keep-newest peer mailbox ([#126](https://github.com/PierreZ/paros/pull/126))
 - Audit follow-up, randomness half: repair-plane chaos, chunk-repair seams, born-buggified knobs ([#117](https://github.com/PierreZ/paros/pull/117))
 - Audit follow-up: strengthen core asserts, audit oracles, and the BUGGIFY surface ([#116](https://github.com/PierreZ/paros/pull/116))
 - M3 finishing batch: CTRL evaluation corpus ([#113](https://github.com/PierreZ/paros/pull/113)) + Control::Snap chunked snapshot repair ([#101](https://github.com/PierreZ/paros/pull/101)) ([#114](https://github.com/PierreZ/paros/pull/114))
 
-
-### 🚀 Features
-
-- **core**: the candidate's matchmaking phase is a public role,
-  `paros_core::matchmaking::Matchmaking` — the registration tally, the union
-  of histories above the maximum watermark (`H_b`), the effective
-  configuration and the stale-belief signal — folded page by page
-  (`RegisteredPage`, `MatchFold`) exactly as `ColocatedNode` drives it. The
-  node keeps the wiring; the role can now be composed by hand.
-- **core**: `MemRegistry`, the reference in-memory `RegistryStorage` with the
-  library's semantics for every `MatchmakerWriteOp`, replaces the four ad-hoc
-  test registries; the handover model checker now reboots matchmakers from it.
-- **core**: `Decree::ballot`, `value`, `adopted_prior_vote` and `preempted`
-  are public, so a driver can observe a running decree through
-  `ReconfigurerPhase::Deciding`.
-
-### 📚 Documentation
-
-- **core**: three runnable, deterministic examples that drive the composable
-  roles by hand — `single_decree` (Phase 1, P2c, Phase 2), `multi_paxos`
-  (slots versus ballots, amortized Phase 1, per-slot recovery) and
-  `matchmaker` (configuration discovery, reconfiguration, and the matchmaker
-  set chosen by the same single-decree Paxos over `Vec<MatchmakerId>`). Run
-  with `cargo run -p paros-core --example <name>`.
-- **core**: every intra-doc link in the crate resolves; CI builds the docs
-  with warnings denied.
-
-### 🚜 Refactor
-
-- **core**: `RawNode` is renamed `ColocatedNode`. The type is not a "raw"
-  anything: it is the deployment that colocates the `Acceptor`, `Proposer`
-  and `Replica` roles on one node and wires them together. The driver half of
-  the etcd-raft split it mirrors keeps its name, `paros::run_node`, so only
-  the type and its methods are affected — a caller renames the type and
-  nothing else.
