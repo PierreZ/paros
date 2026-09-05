@@ -1,4 +1,5 @@
-//! The nextest smoke: seed-replay determinism, one seed through the main
+//! The nextest smoke: seed-replay determinism (the audit digest across two
+//! runs, and moonpool's draw-by-draw canary), one seed through the main
 //! campaign, the storage contract suite, and a handful of random seeds through
 //! the safety checks under the combined swarm campaign.
 //!
@@ -8,7 +9,9 @@
 //! determinism proof — never a farmed reproduction anything is expected to keep
 //! reproducing.
 
-use paros_sim::{SMOKE_ITERATIONS, chain_seed_digest, chain_smoke, run_chain_seed};
+use paros_sim::{
+    SMOKE_ITERATIONS, chain_seed_canary, chain_seed_digest, chain_smoke, run_chain_seed,
+};
 
 /// One arbitrary seed through the Chain campaign, as a fast smoke: every seed
 /// must satisfy this, so the value is a sample rather than a pin.
@@ -50,6 +53,27 @@ fn same_seed_replays_identically() {
             chain_seed_digest(seed),
             chain_seed_digest(seed),
             "seed {seed} must replay bit-identically"
+        );
+    }
+}
+
+/// The determinism proof, draw by draw: moonpool's canary runs the seed twice
+/// and fingerprints every draw on the simulation stream against the first
+/// run's, then requires the whole record consumed. Where the digest above
+/// says the two runs *ended* the same, this says they never differed — and
+/// on a divergence it names the draw. Everything the campaign has — swarmed
+/// network faults, attrition of both process groups, buggify knobs, the
+/// operation swarm, the driver hooks and the storage world's coins — is under
+/// it. The seeds are arbitrary samples, as above.
+#[test]
+fn same_seed_replays_under_the_canary() {
+    for seed in [7_u64, 4_242] {
+        let report = chain_seed_canary(seed);
+        assert_eq!(report.failed_runs, 0, "seed {seed} must replay identically");
+        assert!(
+            report.assertion_violations.is_empty(),
+            "seed {seed}: {:?}",
+            report.assertion_violations
         );
     }
 }

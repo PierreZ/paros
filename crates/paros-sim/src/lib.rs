@@ -311,6 +311,38 @@ pub fn chain_seed_digest(seed: u64) -> u64 {
     digest.expect("the chain workload published its audit digest")
 }
 
+/// Run one seed of the main campaign under moonpool's determinism canary:
+/// the seed runs twice, the second run's every draw on the simulation stream
+/// is fingerprinted against the first's (generator state after the draw
+/// mixed with the logical clock), and the whole record must be consumed. A
+/// process-wide static, a wall-clock read, a `HashMap` iterated in its
+/// randomized order — anything paros or its harness keeps outside the seed —
+/// fails the seed with the always-assertion the canary evaluates, naming the
+/// first diverging draw. Stronger than [`chain_seed_digest`], which compares
+/// end states: this compares the whole run, draw by draw.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_seed_canary(seed: u64) -> SimulationReport {
+    chain_builder(None)
+        .check_determinism()
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+}
+
+/// The canary at volume: `iterations` random seeds of the main campaign, each
+/// run twice under moonpool's determinism canary (see [`chain_seed_canary`]).
+/// The hunt axis for entropy leaks — a seed that fails here names the first
+/// draw at which paros or its harness stopped being a function of the seed.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
+    chain_builder(None)
+        .check_determinism()
+        .set_iterations(iterations)
+        .run()
+}
+
 /// Fast random-seed Chain smoke with no adaptive saturation or branch
 /// exploration. This is the only Chain sweep used by nextest.
 #[must_use]

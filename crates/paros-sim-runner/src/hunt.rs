@@ -3,9 +3,13 @@
 //! saturation gate), a hunt never stops at a coverage plateau and treats
 //! coverage gates as irrelevant — its only deliverable is failing seeds.
 //!
-//! Usage: `sim-paros-hunt [main|corpus|corpus-chunks] [iterations]`
+//! Usage: `sim-paros-hunt [main|canary|corpus|corpus-chunks] [iterations]`
 //!        `sim-paros-hunt replay-main <seed>` — deterministic single-seed
 //!        replay on the main campaign (the red→green witness command).
+//!        `sim-paros-hunt canary [iterations]` — the main campaign under
+//!        moonpool's determinism canary: every seed runs twice and the replay
+//!        must reproduce the first run's draw fingerprints, all of them. Its
+//!        deliverable is an entropy leak, named by the first diverging draw.
 //!        `sim-paros-hunt explore-main <seed>` — root + explored continuation
 //!        timelines, for failures that live only on explorer branches.
 //!        `sim-paros-hunt corpus [iterations]` — the E1 mask corpus: each seed
@@ -22,18 +26,18 @@
 //!        departed-straggler case (#124).
 
 use paros_sim::{
-    EXPLORATION_TIMELINES_PER_SEED, chain_smoke, chunk_corpus_hunt, corpus_hunt,
-    explore_chain_seed, run_bare_quorum_case, run_chain_seed, run_chunk_corpus_seed,
-    run_chunk_mask, run_corpus_mask, run_corpus_seed, run_departed_straggler_case,
-    run_snapshot_lifecycle_case,
+    EXPLORATION_TIMELINES_PER_SEED, chain_canary_hunt, chain_seed_canary, chain_smoke,
+    chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case, run_chain_seed,
+    run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
+    run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
-    if let "replay-main" | "explore-main" | "replay-corpus" | "replay-corpus-mask"
-    | "replay-bare-quorum" | "replay-lifecycle" | "replay-departed" | "replay-chunk-mask"
-    | "replay-chunk-seed" = axis.as_str()
+    if let "replay-main" | "replay-canary" | "explore-main" | "replay-corpus"
+    | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle" | "replay-departed"
+    | "replay-chunk-mask" | "replay-chunk-seed" = axis.as_str()
     {
         let seed = std::env::args()
             .nth(2)
@@ -41,6 +45,7 @@ fn main() {
             .expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
         let report = match axis.as_str() {
+            "replay-canary" => chain_seed_canary(seed),
             "explore-main" => explore_chain_seed(seed, EXPLORATION_TIMELINES_PER_SEED),
             "replay-corpus" => run_corpus_seed(seed),
             "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
@@ -73,10 +78,13 @@ fn main() {
     println!("--- hunt: {axis} axis, {iterations} seeds ---");
     let report = match axis.as_str() {
         "main" => chain_smoke(iterations),
+        "canary" => chain_canary_hunt(iterations),
         "corpus" => corpus_hunt(iterations),
         "corpus-chunks" => chunk_corpus_hunt(iterations),
         other => {
-            eprintln!("unknown axis: {other} (expected 'main', 'corpus', or 'corpus-chunks')");
+            eprintln!(
+                "unknown axis: {other} (expected 'main', 'canary', 'corpus', or 'corpus-chunks')"
+            );
             std::process::exit(2);
         }
     };
