@@ -337,9 +337,16 @@ so the freeze, the bootstrap and the votes stay), so a dead proposed member neve
 `match_resend_ticks`, `gc_resend_ticks`, `reconfigurer_resend_ticks` — and the preempted
 decree's backoff ceiling (`reconfigure_backoff_max_ticks`) are each their own knob with their
 own floor, so a seed can be extreme in one and ordinary in the next. **A successor set must admit its quorum
-system** (`MatchmakerSet::is_well_formed`): `start` refuses a malformed target, a matchmaker
-refuses a `Bootstrap` or `Chosen` naming one, and a `finish` proposes the members that answered
-the freeze — a quorum of the old set, never fewer. **`Chosen` is a learner notification, not an
+system** (`MatchmakerSet::is_well_formed`), and it does so by construction: like
+`AcceptorConfig`, `MatchmakerSet` has a private membership and `new` — which normalizes and
+asserts well-formedness once — is its only constructor, deserialisation and the wire included,
+so no `start`, `Bootstrap` or `Chosen` can name a malformed set and none of them checks for one
+(the old `Malformed` refusals were unreachable and are gone); a `finish` proposes the members
+that answered the freeze — a quorum of the old set, never fewer. A plain deployment holds no
+`MatchmakerSet` at all (`ColocatedNode::matchmaker_set` is `None`), never an empty one. A
+re-sent `Chosen` is **idempotent at a member that already activated** the successor: it answers
+`Learned` again, so a lost ack is recovered by the re-send instead of aborting the publication
+as *superseded*. **`Chosen` is a learner notification, not an
 acceptor decision**: a matchmaker records or activates the successor it is told without
 re-deriving the decree, on the protocol precondition that only a reconfigurer holding the
 Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable

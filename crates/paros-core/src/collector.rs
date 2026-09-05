@@ -116,10 +116,9 @@ impl Collector {
         self.acked_by.contains(&matchmaker)
     }
 
-    /// Record that the requests for `generation` are out.
-    pub fn request(&mut self, generation: MatchmakerGeneration) {
+    /// Record that the requests for this generation are out.
+    pub fn request(&mut self) {
         self.requested = true;
-        self.generation = generation;
     }
 
     /// Start the ack tally over at `generation`: acks from a replaced

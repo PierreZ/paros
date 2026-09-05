@@ -7,6 +7,8 @@ import "common.proto";
 // Cluster-internal consensus traffic. This surface is not part of the public
 // journal API and may evolve with the replication protocol.
 service ParosInternal {
+  // Hand a batch of consensus messages to a peer. The ack means every message
+  // entered the peer's bounded inbox — not that its node loop processed them.
   rpc Deliver(.paros.internal.v1.Deliver) returns (.paros.internal.v1.DeliverAck);
   // Private replica inspection used by deterministic workloads and future
   // operational tooling. The application bytes remain opaque to paros.
@@ -119,10 +121,10 @@ message Prepare {
   // The configuration the candidate registered for `ballot` (absent on plain
   // Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 5;
-  // The node running the campaign — the owner of `ballot`. Absent means "the
-  // reply address is the campaigner", which is every deployment paros ships
-  // today, so this field is never on the wire and the encoding is unchanged.
-  optional uint64 leader = 6;
+  // was `leader`: Phase 1 is always run by the ballot's owner (proxy leaders
+  // take over Phase 2 only), so the campaigner is `ballot.node` and the field
+  // was redundant.
+  reserved 6;
 }
 
 message Promise {

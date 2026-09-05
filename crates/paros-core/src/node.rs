@@ -241,10 +241,6 @@ pub struct ColocatedNode {
     /// reads it to feed a fresh randomized `election_timeout`. Jitter is drawn in
     /// the driver, never here (the core stays zero-dep).
     needs_election_timeout: bool,
-    /// Ticks since the leader last beat. Leader-only.
-    heartbeat_elapsed: u64,
-    /// Fixed heartbeat interval in ticks (not randomized).
-    heartbeat_timeout: u64,
     /// Monotone per-ballot beat sequence, bumped at each broadcast
     /// ([`ColocatedNode::broadcast_heartbeat`]); reset on winning an election. Acks
     /// echo it, so a read round knows which beats prove leadership *after* it
@@ -280,8 +276,9 @@ pub struct ColocatedNode {
     /// naming a successor, by a matchmaker-set reconfiguration this node
     /// drove, or by a reply from a later generation. Volatile: a fresh
     /// incarnation walks the successor chain from the bootstrap set again.
-    /// Empty members on plain Multi-Paxos, always.
-    matchmakers: MatchmakerSet,
+    /// `None` on plain Multi-Paxos, always — the static-membership case is
+    /// the `None` arm of the same state machine, never an empty set.
+    matchmakers: Option<MatchmakerSet>,
     /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
     /// Leader-only, volatile, `None` on plain Multi-Paxos.
     gc: Option<Collector>,
@@ -346,12 +343,11 @@ impl ColocatedNode {
         match msg {
             Message::Prepare {
                 reply_to,
-                leader,
                 ballot,
                 from_slot,
                 config,
                 ..
-            } => self.on_prepare(reply_to, leader, ballot, from_slot, config),
+            } => self.on_prepare(reply_to, ballot, from_slot, config),
             Message::Promise {
                 from,
                 ballot,
@@ -679,15 +675,12 @@ impl ColocatedNode {
         self.tick_count += 1;
         let me = self.config.id;
         if self.role == NodeRole::Leader {
-            self.heartbeat_elapsed += 1;
-            if self.heartbeat_elapsed >= self.heartbeat_timeout {
-                self.heartbeat_elapsed = 0;
-                // Re-sending the un-acked `Accept`s is a *separate* decision the
-                // driver makes on the same cadence — see
-                // [`ColocatedNode::resend_pending`].
-                self.broadcast_heartbeat();
-                self.assert_invariants();
-            }
+            // A leader beats on every tick ([`HEARTBEAT_TICKS`] is the
+            // cadence the audit's oracle assumes, not a tunable). Re-sending
+            // the un-acked `Accept`s is a *separate* decision the driver
+            // makes on the same cadence — see [`ColocatedNode::resend_pending`].
+            self.broadcast_heartbeat();
+            self.assert_invariants();
             // GC read rounds that outlived their TTL (lost acks, an unreachable
             // quorum). No re-broadcast logic is needed for the live ones: every
             // leader tick already broadcasts a fresh, higher-seq beat whose acks
@@ -822,7 +815,6 @@ impl ColocatedNode {
                         Audience::Node(to),
                         Message::Prepare {
                             reply_to: self.config.id,
-                            leader: self.config.id,
                             ballot,
                             from_slot,
                             config: config.clone(),

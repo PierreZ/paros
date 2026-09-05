@@ -235,7 +235,7 @@ pub(crate) fn surface_matchmaking<A: Audit>(
         && *last_matchmaking != Some(ballot)
     {
         *last_matchmaking = Some(ballot);
-        let generation = node.matchmaker_set().generation.0;
+        let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
         audit.matchmaking_started(NodeId(self_id), ballot, config, kind, generation);
         tracing::info!(
             node = self_id,
@@ -402,7 +402,7 @@ pub(crate) fn report_match_step<A: Audit>(
                 matchmaker = matchmaker.0,
                 round = ballot.round,
                 generation = set.generation.0,
-                members = set.members.len() as u64,
+                members = set.members().len() as u64,
                 "matchmakers_learned"
             );
         }

@@ -77,7 +77,6 @@ fn promise_suffix_and_leader_recovery_are_paged() {
     loop {
         acceptor.step(Message::Prepare {
             reply_to: NodeId(1),
-            leader: NodeId(1),
             ballot,
             from_slot: cursor,
             config: None,
@@ -248,7 +247,6 @@ fn a_same_ballot_continuation_closes_a_stale_campaign() {
     let _ = take_ready(&mut stale);
     stale.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(1),
         config: None,

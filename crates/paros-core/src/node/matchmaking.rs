@@ -213,7 +213,8 @@ impl ColocatedNode {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
-        let generation = self.matchmakers.generation;
+        let matchmakers = self.deployment_matchmakers();
+        let generation = matchmakers.generation;
         let request = match m.kind() {
             RegistrationKind::Reconfiguration => MatchRequest::reconfigure(
                 self.config.id,
@@ -225,7 +226,7 @@ impl ColocatedNode {
                 MatchRequest::new(self.config.id, m.ballot(), m.config().clone(), generation)
             }
         };
-        let unanswered = m.unanswered(&self.matchmakers);
+        let unanswered = m.unanswered(matchmakers);
         for (matchmaker, cursor) in unanswered {
             // A matchmaker mid-answer is re-asked from where its last page
             // stopped, never from the start: the pages already folded stay
@@ -292,10 +293,13 @@ impl ColocatedNode {
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
         let generation = reply.generation;
         let (matchmaker, to, ballot, answer) = split_reply(reply);
-        if to != self.config.id || !self.matchmakers.contains(matchmaker) {
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return MatchStep::Ignored;
+        };
+        if to != self.config.id || !matchmakers.contains(matchmaker) {
             return MatchStep::Ignored;
         }
-        if generation != self.matchmakers.generation
+        if generation != matchmakers.generation
             || self
                 .matchmaking
                 .as_ref()
@@ -345,7 +349,9 @@ impl ColocatedNode {
     /// If Phase 1 would open without the quorum, or on a prior configuration
     /// naming a node outside the pool.
     fn fold_registration(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchStep {
-        let matchmakers = &self.matchmakers;
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return MatchStep::Ignored;
+        };
         let Some(m) = self.matchmaking.as_mut() else {
             return MatchStep::Ignored;
         };
@@ -360,7 +366,7 @@ impl ColocatedNode {
             let ballot = m.ballot();
             let config = m.config().clone();
             let kind = m.kind();
-            let generation = self.matchmakers.generation;
+            let generation = matchmakers.generation;
             let request = match kind {
                 RegistrationKind::Reconfiguration => {
                     MatchRequest::reconfigure(self.config.id, ballot, config, generation)
@@ -461,15 +467,15 @@ impl ColocatedNode {
             }
             MatchRefusal::Stopped { .. }
             | MatchRefusal::Generation { .. }
-            | MatchRefusal::Inactive
-            | MatchRefusal::Malformed => {}
+            | MatchRefusal::Inactive => {}
         }
+        let believed = self.matchmakers.as_ref().map(|set| set.generation);
         let successor = match &refusal {
             MatchRefusal::Stopped {
                 successor: Some(set),
             } => Some(set.clone()),
             MatchRefusal::Generation { current }
-                if current.generation > self.matchmakers.generation =>
+                if believed.is_some_and(|believed| current.generation > believed) =>
             {
                 Some(current.clone())
             }
@@ -493,11 +499,26 @@ impl ColocatedNode {
     }
 
     /// The matchmaker set this node believes authoritative (#125): the
-    /// bootstrap set at generation 0 until a later one is learned. Empty on
-    /// plain Multi-Paxos.
+    /// bootstrap set at generation 0 until a later one is learned. `None` on
+    /// plain Multi-Paxos, which names no matchmakers at all.
     #[must_use]
-    pub fn matchmaker_set(&self) -> &MatchmakerSet {
-        &self.matchmakers
+    pub fn matchmaker_set(&self) -> Option<&MatchmakerSet> {
+        self.matchmakers.as_ref()
+    }
+
+    /// The matchmaker set of a matchmaker deployment, for the matchmaker-plane
+    /// paths — a campaign's registration, a GC campaign, a match reply — that
+    /// only ever open where [`Config::has_matchmakers`] holds
+    /// (`assert_deployment_invariants` couples the two).
+    ///
+    /// # Panics
+    ///
+    /// On a plain deployment: reaching a matchmaker-plane path there is a
+    /// programmer error.
+    pub(super) fn deployment_matchmakers(&self) -> &MatchmakerSet {
+        self.matchmakers
+            .as_ref()
+            .expect("the matchmaker plane runs only on a matchmaker deployment")
     }
 
     /// Adopt `set` as the authoritative matchmaker set if it is a strictly
@@ -514,22 +535,22 @@ impl ColocatedNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, generation = set.generation.0)))]
     pub fn learn_matchmakers(&mut self, set: &MatchmakerSet) -> bool {
-        if !self.config.has_matchmakers()
-            || set.generation <= self.matchmakers.generation
-            || set.members.is_empty()
-        {
+        let Some(believed) = self.matchmakers.as_ref() else {
+            return false;
+        };
+        if set.generation <= believed.generation {
             return false;
         }
         // Wire hygiene: a set naming a matchmaker outside the pool is not one
         // this deployment can reach; ignore it whole.
         if !set
-            .members
+            .members()
             .iter()
             .all(|m| self.config.matchmaker_pool().binary_search(m).is_ok())
         {
             return false;
         }
-        self.matchmakers = MatchmakerSet::new(set.generation, set.members.clone());
+        self.matchmakers = Some(set.clone());
         if self.matchmaking.is_some() {
             // The registrations collected so far were for a replaced
             // generation; a stopped quorum will never complete them.

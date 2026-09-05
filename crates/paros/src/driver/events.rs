@@ -76,8 +76,12 @@ where
 }
 
 /// A short, stable label for a [`Message`] variant, for observability: the `kind`
-/// field on the `msg_sent` / `msg_received` events.
-pub(crate) fn message_kind(m: &Message) -> &'static str {
+/// field on the `msg_sent` / `msg_received` events. Public so an [`Audit`]
+/// implementation can tally by the same labels the driver traces with.
+///
+/// [`Audit`]: crate::Audit
+#[must_use]
+pub fn message_kind(m: &Message) -> &'static str {
     match m {
         Message::Prepare { .. } => "prepare",
         Message::Promise { .. } => "promise",

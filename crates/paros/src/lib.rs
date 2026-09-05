@@ -25,51 +25,32 @@ mod storage;
 
 pub use audit::{Audit, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
 pub use corruption::{
-    CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
-    classify_log, decide,
+    CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
 pub use driver::{
-    DriverTunables, RunError, command_hash, parse_addr, registration_history_hash, run_node,
+    DriverTunables, RunError, command_hash, message_kind, parse_addr, registration_history_hash,
+    run_node,
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck, Reconfigure,
-    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
-    WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
-    WireReconfigureReply, WireReconfigureRequest, garbage_collect_ack_from_wire,
-    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire,
-    reconfigure_reply_from_wire, reconfigure_request_from_wire, wire_garbage_collect,
-    wire_garbage_collect_ack, wire_match_reply, wire_match_request, wire_reconfigure_reply,
-    wire_reconfigure_request,
+    ParosInternalClient, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
+    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{
-    MatchmakerStorage, MemMatchmakerStorage, config_hash, matchmaker_storage_contract_suite,
-    reconfigure_kind, reconfigure_reply_kind, run_matchmaker,
+    MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
-pub use paros_core::acceptor::Acceptor;
-pub use paros_core::proposer::Proposer;
-pub use paros_core::replica::Replica;
-pub use paros_core::{
-    AcceptorConfig, AcceptorWrite, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command,
-    Config, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
-    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
-    MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
-    ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult, ReadState, Ready,
-    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
-    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
-};
-
-pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
+// The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
+// `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the
+// matchmaker, and every message, record and scalar type they exchange. No core
+// name collides with a name `paros` defines itself, so a user reaches both
+// through one path.
+pub use paros_core::*;
 
 #[cfg(test)]
 mod tests {
@@ -105,7 +86,6 @@ mod tests {
         vec![
             Message::Prepare {
                 reply_to: NodeId(1),
-                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: None,
@@ -114,7 +94,6 @@ mod tests {
             // configuration; the plain one above carries none.
             Message::Prepare {
                 reply_to: NodeId(1),
-                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: Some(paros_core::AcceptorConfig::new(
@@ -540,35 +519,25 @@ mod tests {
         }
     }
 
-    /// The `leader` field of a `Prepare`/`Accept` is absent from the wire
-    /// whenever it would merely repeat the reply address — which is every
-    /// message paros sends today, on a plain deployment and on a matchmaker
-    /// one alike. This pins the encoding against the day a proxied Phase 2
-    /// starts populating it.
+    /// The `leader` field of an `Accept` is absent from the wire whenever it
+    /// would merely repeat the reply address — which is every message paros
+    /// sends today, on a plain deployment and on a matchmaker one alike. This
+    /// pins the encoding against the day a proxied Phase 2 starts populating
+    /// it. (A `Prepare` has no such field: Phase 1 is never proxied.)
     #[test]
     fn a_leader_that_is_the_reply_address_stays_off_the_wire() {
         use crate::grpc::internal::consensus_message::Kind;
 
         for msg in every_variant() {
             let wire = crate::grpc::message_to_proto(&msg).expect("encode protobuf DTO");
-            match (msg, wire.kind) {
-                (
-                    Message::Prepare {
-                        reply_to, leader, ..
-                    },
-                    Some(Kind::Prepare(wire)),
-                ) => {
-                    assert_eq!(wire.leader.is_none(), reply_to == leader);
-                }
-                (
-                    Message::Accept {
-                        reply_to, leader, ..
-                    },
-                    Some(Kind::Accept(wire)),
-                ) => {
-                    assert_eq!(wire.leader.is_none(), reply_to == leader);
-                }
-                _ => {}
+            if let (
+                Message::Accept {
+                    reply_to, leader, ..
+                },
+                Some(Kind::Accept(wire)),
+            ) = (msg, wire.kind)
+            {
+                assert_eq!(wire.leader.is_none(), reply_to == leader);
             }
         }
     }

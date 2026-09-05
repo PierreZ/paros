@@ -77,14 +77,12 @@ pub enum Message {
         /// Where the `Promise` (or `Nack`) is addressed. The **reply address**
         /// alone: it says nothing about who owns the ballot.
         reply_to: NodeId,
-        /// The node running this campaign — the owner of `ballot`, which an
-        /// acceptor checks against [`Ballot::node`](crate::Ballot::node) before
-        /// promising. Equal to `reply_to` on every deployment paros ships
-        /// today; the two are separate fields so a later compartmentalized
-        /// deployment can put a proxy on the reply path without the acceptor's
-        /// ballot-ownership guard reading the proxy's id.
-        leader: NodeId,
-        /// The ballot being prepared.
+        /// The ballot being prepared. Its [`Ballot::node`](crate::Ballot::node)
+        /// is the candidate running this campaign, and there is deliberately
+        /// no separate `leader` field beside it: Phase 1 is always run by the
+        /// ballot's owner — Compartmentalized Paxos's proxy leaders take over
+        /// Phase 2 only (§3.1 of the paper) — so the owner is fully determined
+        /// by the ballot and an acceptor checks ownership against it.
         ballot: Ballot,
         /// First slot this prepare covers (the candidate's `chosen_index + 1`).
         from_slot: Slot,
@@ -141,10 +139,13 @@ pub enum Message {
         /// hint** an acceptor adopts and a client is redirected to. It is
         /// deliberately not [`Ballot::node`](crate::Ballot::node): after a
         /// cooperative handoff the ballot keeps naming the node that won it
-        /// while a different node drives Phase 2. Equal to `reply_to` on every
-        /// deployment paros ships today; the two are separate fields so a
-        /// later compartmentalized deployment can interpose a proxy leader
-        /// without an acceptor adopting the proxy as its leader.
+        /// while a different node drives Phase 2 (so `leader != ballot.node`
+        /// already happens). It is also deliberately not `reply_to`: a
+        /// compartmentalized deployment's proxy leaders run Phase 2 on the
+        /// leader's behalf and collect the `Accepted`s themselves, so the
+        /// reply address names the proxy while this field still names the
+        /// leader an acceptor adopts — proxy leaders are the reason the two
+        /// are separate fields. Today they are equal on every deployment.
         leader: NodeId,
         /// The ballot under which the command is proposed.
         ballot: Ballot,

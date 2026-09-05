@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use super::{MatchmakerId, MatchmakerSet};
 use crate::membership::{AcceptorConfig, QuorumSystem};
-use crate::proposer::{Campaign, PromiseFold as PageFold, Proposer, Round};
+use crate::proposer::{Campaign, PromiseFold, Proposer, Round};
 use crate::types::{Ballot, Fingerprint, Slot};
 
 /// The one slot a decree runs over: a matchmaker set is a single value,
@@ -43,7 +43,7 @@ const DECREE_SLOT: Slot = Slot(0);
 /// driver abandon a decree that was progressing, while duplicates reported as
 /// progress kept resetting its clock).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum PromiseFold {
+pub(super) enum DecreePromise {
     /// Not folded: no matching phase, a sender already counted, or one
     /// outside the acceptor set.
     Ignored,
@@ -55,7 +55,7 @@ pub(super) enum PromiseFold {
 }
 
 /// What one Phase-2b accept did to a [`Decree`]. The twin of
-/// [`PromiseFold`], counted the same way.
+/// [`DecreePromise`], counted the same way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum AcceptFold {
     /// Not folded: not in Phase 2, a sender already counted, or one outside
@@ -94,10 +94,9 @@ impl Decree {
     /// # Panics
     ///
     /// If `old` names no matchmaker (a decree with no acceptor is a
-    /// programmer error; the reconfigurer refuses a malformed set at
-    /// `start`).
+    /// programmer error; [`MatchmakerSet::new`] never builds one).
     pub(super) fn new(ballot: Ballot, old: &MatchmakerSet, proposal: Vec<MatchmakerId>) -> Self {
-        let acceptors = AcceptorConfig::new(old.members.clone(), QuorumSystem::Majority);
+        let acceptors = AcceptorConfig::new(old.members().to_vec(), QuorumSystem::Majority);
         let mut proposer = Proposer::new();
         // A one-slot log, from slot zero, over one configuration: the decree
         // has no prior configuration to cover but the acceptors themselves,
@@ -186,9 +185,9 @@ impl Decree {
         &mut self,
         from: MatchmakerId,
         vote: Option<(Ballot, Vec<MatchmakerId>)>,
-    ) -> PromiseFold {
+    ) -> DecreePromise {
         if !self.acceptors.contains(from) || self.preempted.is_some() {
-            return PromiseFold::Ignored;
+            return DecreePromise::Ignored;
         }
         let accepted = vote
             .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
@@ -202,12 +201,12 @@ impl Decree {
             accepted,
             BTreeMap::new(),
             None,
-        ) != PageFold::Answered
+        ) != PromiseFold::Answered
         {
-            return PromiseFold::Ignored;
+            return DecreePromise::Ignored;
         }
         if !self.proposer.phase1_won(self.ballot) {
-            return PromiseFold::Counted {
+            return DecreePromise::Counted {
                 remaining: self.remaining(self.promised()),
             };
         }
@@ -220,7 +219,7 @@ impl Decree {
             .map_or_else(|| self.proposal.clone(), |(_, v)| v.clone());
         self.proposer
             .open_round(DECREE_SLOT, self.ballot, value.clone(), None);
-        PromiseFold::Quorum(value)
+        DecreePromise::Quorum(value)
     }
 
     /// Fold one Phase-2b accept, reporting the chosen value when it completes
@@ -286,7 +285,7 @@ impl Decree {
 
 #[cfg(test)]
 mod tests {
-    use super::{AcceptFold, Decree, PromiseFold};
+    use super::{AcceptFold, Decree, DecreePromise};
     use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
     use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
     use crate::types::{Ballot, NodeId, Slot};
@@ -353,21 +352,21 @@ mod tests {
         let mut d = Decree::new(ballot(1, 0), &old, ids(&[3, 4, 5]));
         assert_eq!(
             d.on_promise(MatchmakerId(0), None),
-            PromiseFold::Counted { remaining: 1 }
+            DecreePromise::Counted { remaining: 1 }
         );
         assert_eq!(
             d.on_promise(MatchmakerId(0), None),
-            PromiseFold::Ignored,
+            DecreePromise::Ignored,
             "a duplicate never counts"
         );
         assert_eq!(
             d.on_promise(MatchmakerId(7), None),
-            PromiseFold::Ignored,
+            DecreePromise::Ignored,
             "a stranger never counts"
         );
         assert_eq!(
             d.on_promise(MatchmakerId(1), None),
-            PromiseFold::Quorum(ids(&[3, 4, 5]))
+            DecreePromise::Quorum(ids(&[3, 4, 5]))
         );
         assert!(!d.adopted_prior_vote());
         assert_eq!(
@@ -407,11 +406,11 @@ mod tests {
         let v1 = voters[1].prepare(ballot(2, 2)).expect("promise");
         assert_eq!(
             d.on_promise(MatchmakerId(1), v1),
-            PromiseFold::Counted { remaining: 1 }
+            DecreePromise::Counted { remaining: 1 }
         );
         assert_eq!(
             d.on_promise(MatchmakerId(0), v0),
-            PromiseFold::Quorum(ids(&[9])),
+            DecreePromise::Quorum(ids(&[9])),
             "the prior vote wins"
         );
         assert!(d.adopted_prior_vote());
@@ -431,7 +430,7 @@ mod tests {
         assert_eq!(d.preempted(), Some(ballot(5, 1)));
         assert_eq!(
             d.on_promise(MatchmakerId(0), None),
-            PromiseFold::Ignored,
+            DecreePromise::Ignored,
             "a preempted proposal is dead"
         );
         assert!(d.unanswered().is_empty());
@@ -450,7 +449,7 @@ mod tests {
         let mut d = Decree::new(ballot(2, 0), &old, ids(&[8]));
         assert_eq!(
             d.on_promise(MatchmakerId(0), Some((ballot(1, 0), ids(&[1])))),
-            PromiseFold::Counted { remaining: 1 }
+            DecreePromise::Counted { remaining: 1 }
         );
         let _ = d.on_promise(MatchmakerId(1), Some((ballot(1, 0), ids(&[2]))));
     }

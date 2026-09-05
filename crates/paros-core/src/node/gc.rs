@@ -115,7 +115,7 @@ impl ColocatedNode {
             "only a matchmaker deployment collects configurations"
         );
         self.gc = Some(Collector::new(
-            self.matchmakers.generation,
+            self.deployment_matchmakers().generation,
             self.proposer.read_floor(),
             prior,
         ));
@@ -161,9 +161,8 @@ impl ColocatedNode {
         if self.gc.as_ref().is_none_or(Collector::requested) || !self.gc_covered() {
             return;
         }
-        let generation = self.matchmakers.generation;
         if let Some(gc) = self.gc.as_mut() {
-            gc.request(generation);
+            gc.request();
         }
         self.queue_gc_requests();
     }
@@ -174,14 +173,14 @@ impl ColocatedNode {
         let Some(gc) = self.gc.as_ref() else {
             return;
         };
+        let matchmakers = self.deployment_matchmakers();
         let request = GcRequest {
             from: self.config.id,
-            generation: self.matchmakers.generation,
+            generation: matchmakers.generation,
             watermark: self.ballot,
         };
-        let targets: Vec<MatchmakerId> = self
-            .matchmakers
-            .members
+        let targets: Vec<MatchmakerId> = matchmakers
+            .members()
             .iter()
             .copied()
             .filter(|m| !gc.acked(*m))
@@ -276,13 +275,15 @@ impl ColocatedNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = ack.matchmaker.0)))]
     pub fn on_gc_ack(&mut self, ack: &GcAck) -> GcStep {
-        if self.role != NodeRole::Leader || !self.matchmakers.contains(ack.matchmaker) {
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return GcStep::Ignored;
+        };
+        if self.role != NodeRole::Leader || !matchmakers.contains(ack.matchmaker) {
             return GcStep::Ignored;
         }
         let me = self.config.id;
         let acceptors = self.acceptors.clone();
         let ballot = self.ballot;
-        let matchmakers = &self.matchmakers;
         let Some(gc) = self.gc.as_mut() else {
             return GcStep::Ignored;
         };
@@ -303,7 +304,7 @@ impl ColocatedNode {
     /// The GC tally starts over at a newer matchmaker generation: acks from
     /// a replaced generation say nothing about the new one's quorum.
     pub(super) fn reset_gc_for_generation(&mut self) {
-        let generation = self.matchmakers.generation;
+        let generation = self.deployment_matchmakers().generation;
         if let Some(gc) = self.gc.as_mut() {
             gc.reset_for_generation(generation);
         }

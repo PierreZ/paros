@@ -566,7 +566,6 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     let leader_ballot = ballot(5, 3);
     let prepare = Message::Prepare {
         reply_to: NodeId(3),
-        leader: NodeId(3),
         ballot: leader_ballot,
         from_slot: Slot(0),
         config: Some(cfg(&[3])),
@@ -591,7 +590,6 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     let mut plain = node(1, &[0, 1, 2]);
     plain.step(Message::Prepare {
         reply_to: NodeId(0),
-        leader: NodeId(0),
         ballot: ballot(5, 0),
         from_slot: Slot(0),
         config: Some(cfg(&[0])),
@@ -788,7 +786,6 @@ fn an_honored_reconfiguration_may_bind_an_older_ballot_than_the_fence() {
     let learned = ballot(9, 1);
     n.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: learned,
         from_slot: Slot(0),
         config: Some(cfg(&[1, 2, 3])),

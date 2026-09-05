@@ -80,10 +80,11 @@ message RefusedStopped {
 
 message RefusedInactive {}
 
-// The request's configuration does not admit its own quorum system.
-message RefusedMalformed {}
-
 message Refused {
+  // was `malformed` (6): an acceptor configuration is normalized and checked
+  // by its only constructor on both sides of the wire, so the refusal was
+  // unreachable.
+  reserved 6;
   oneof reason {
     .paros.common.v1.Ballot stale_highest = 1;
     .paros.common.v1.Ballot below_watermark = 2;
@@ -91,7 +92,6 @@ message Refused {
     // Active for another generation: the set this matchmaker serves.
     MatchmakerSet generation = 4;
     RefusedInactive inactive = 5;
-    RefusedMalformed malformed = 6;
   }
 }
 

@@ -312,7 +312,11 @@ impl Outbound {
 
 /// Feed bounded unary batches over one reconnecting h2 channel per peer. While
 /// a batch is in flight, new protocol messages accumulate for the next batch;
-/// on failure Paxos heartbeats/resends repair anything lost with that RPC.
+/// on failure Paxos heartbeats/resends repair anything lost with that RPC. A
+/// batch is "in flight" only until the peer has *enqueued* it (its `Deliver`
+/// acks on inbox entry, not after its loop stepped the messages), so the
+/// `delivery_timeout` below races the connection and the peer's inbox
+/// capacity — never the peer's persist-and-step time.
 // The parameters are one delivery lane's complete wiring (client, clocks,
 // lifecycle, queue, batch shape, and the audit identity for drop reports);
 // a bundle would only rename the same eight things.

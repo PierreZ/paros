@@ -99,7 +99,6 @@ fn a_nacked_accept_leaves_the_accepted_log_and_the_batch_untouched() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,

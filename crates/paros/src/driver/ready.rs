@@ -17,8 +17,8 @@ use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 use super::config::RunError;
-use super::events::{command_hash, message_kind};
-use super::transport::{Outbound, send_messages, trace_send_drop};
+use super::events::command_hash;
+use super::transport::{Outbound, send_messages};
 
 /// The client replies this node is holding open: proposals wait on their
 /// slot's commit (ack-on-commit), reads wait on their read-index round's
@@ -47,6 +47,7 @@ async fn send_snapshot_offers<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
+    let mut offers: Vec<(NodeId, Message)> = Vec::with_capacity(snapshot_offers.len());
     for &(to, offered_index, ballot) in snapshot_offers {
         // The mismatch skip below, taken spuriously: the requester re-asks
         // every tick and any other custodian may answer, so an unserved beat
@@ -87,32 +88,24 @@ async fn send_snapshot_offers<S, H, A>(
             );
             continue;
         }
-        let message = Message::InstallSnapshot {
-            from: NodeId(out.self_id),
-            ballot,
-            chosen_index: offered_index,
-            snapshot: Value(storage.snapshot().await),
-            // The at-most-once ledger travels beside the opaque bytes (#94):
-            // the receiver seals it so its duplicate-suppression decisions for
-            // the folded prefix match every peer's.
-            sessions: sessions.to_vec(),
-        };
-        if hooks.drop_outgoing(to, &message) {
-            trace_send_drop(audit, out.self_id, to, &message);
-            continue;
-        }
-        out.transmit(hooks, audit, to, &message);
-        if hooks.duplicate_outgoing(to, &message) {
-            audit.duplicated_at_send(NodeId(out.self_id), to, &message);
-            tracing::info!(
-                node = out.self_id,
-                to = to.0,
-                kind = message_kind(&message),
-                "msg_duplicated_at_send"
-            );
-            out.transmit(hooks, audit, to, &message);
-        }
+        offers.push((
+            to,
+            Message::InstallSnapshot {
+                from: NodeId(out.self_id),
+                ballot,
+                chosen_index: offered_index,
+                snapshot: Value(storage.snapshot().await),
+                // The at-most-once ledger travels beside the opaque bytes (#94):
+                // the receiver seals it so its duplicate-suppression decisions
+                // for the folded prefix match every peer's.
+                sessions: sessions.to_vec(),
+            },
+        ));
     }
+    // The offers that survived the per-offer checks go out through the one
+    // send seam every other message uses (drop hook → transmit → duplicate
+    // hook, in that order per message).
+    send_messages(out, hooks, audit, offers);
 }
 
 /// Surface the #88 window: a snapshot install persisted while this node's own

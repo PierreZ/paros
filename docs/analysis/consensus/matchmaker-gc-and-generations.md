@@ -182,8 +182,9 @@ Deciding        single-decree Paxos over M_g as acceptors: Phase 1 at a fresh ba
   |             selected value; a Nack reopens higher
   v
 Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of each
-  |             learned it (stragglers are told again by any node that meets them)
-  v
+  |             learned it; re-sent to whoever has not answered, and a member that
+  |             already activated answers `Learned` again, so a lost ack is recovered
+  v             (stragglers are told again by any node that meets them)
 Idle
 ```
 
@@ -194,7 +195,13 @@ registration a matchmaker quorum holds for `g` at or above the reconstructed wat
 appears in the bootstrap history). A bootstrapped set becomes authoritative only at
 `Chosen`: `M_g` members record the successor link (the discovery chain for late proposers),
 `M_{g+1}` members activate their pending bootstrap as their registry
-(`MatchmakerWriteOp::InstallRegistry`).
+(`MatchmakerWriteOp::InstallRegistry`). `Chosen` is **idempotent at an activated member**: a
+member already at `M_{g+1}` answers `Learned { activated: false, at: g + 1 }` again instead
+of refusing with its new `current`. That refusal named a generation above the one being
+replaced, which the reconfigurer reads as *superseded* — so before the arm existed, a single
+lost `Learned` from an activated member aborted the publication and `Done` was unreachable
+(the handover model checker counts these as `superseded`; the arm is what makes a re-sent
+`Chosen` the recovery for a lost ack rather than the end of the handover).
 
 ### Why the single-decree kernel is still beside `ColocatedNode`, and what replaces it
 

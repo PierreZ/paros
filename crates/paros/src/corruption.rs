@@ -117,7 +117,7 @@ pub enum WitnessStatus {
 
 /// The evidence booleans one log entry's read-back reduces to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EntryEvidence {
+struct EntryEvidence {
     /// The entry record failed its integrity check (checksum mismatch, lost
     /// write against the reserved-record contract, misdirected identity, or
     /// `EIO` — all one detection channel).
@@ -216,7 +216,7 @@ impl RecoveryCase {
 /// the simulation still owns end-to-end correctness.
 #[must_use]
 #[tracing::instrument(level = "trace", skip_all)]
-pub fn decide(evidence: EntryEvidence) -> RecoveryCase {
+fn decide(evidence: EntryEvidence) -> RecoveryCase {
     match (evidence.entry_faulty, evidence.identifier) {
         (false, WitnessStatus::Present) => RecoveryCase::Intact,
         (false, WitnessStatus::Faulty) => RecoveryCase::IdentifierFaulty,
@@ -258,7 +258,7 @@ pub struct SlotRecord {
 }
 
 /// Classify a node's retained log at boot: derive each record's successor
-/// evidence, run [`decide`] per record, and apply the batching rule plus the
+/// evidence, run `decide` per record, and apply the batching rule plus the
 /// `TigerBeetle` hardening on the resulting crash-truncatable tail.
 ///
 /// `records` must be in ascending slot order (the storage sanity backstop —

@@ -36,28 +36,6 @@ mod client;
 mod matchmaker;
 mod state;
 
-/// A stable label per message kind, for the failure print's send tally.
-fn message_kind(msg: &Message) -> &'static str {
-    match msg {
-        Message::Prepare { .. } => "prepare",
-        Message::Promise { .. } => "promise",
-        Message::Accept { .. } => "accept",
-        Message::Accepted { .. } => "accepted",
-        Message::Commit { .. } => "commit",
-        Message::Nack { .. } => "nack",
-        Message::Heartbeat { .. } => "heartbeat",
-        Message::HeartbeatAck { .. } => "heartbeat_ack",
-        Message::CatchUpRequest { .. } => "catch_up_request",
-        Message::CatchUpResponse { .. } => "catch_up_response",
-        Message::InstallSnapshot { .. } => "install_snapshot",
-        Message::Relinquish { .. } => "relinquish",
-        Message::SnapAck { .. } => "snap_ack",
-        Message::SnapChunkRequest { .. } => "snap_chunk_request",
-        Message::SnapChunkResponse { .. } => "snap_chunk_response",
-        _ => "other",
-    }
-}
-
 pub(crate) use client::ClientHistory;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,7 +48,7 @@ use paros::{
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
     RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
-    StorageRecord, command_hash,
+    StorageRecord, command_hash, message_kind,
 };
 
 use self::state::AuditState;

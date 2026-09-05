@@ -67,7 +67,7 @@ impl ColocatedNode {
         // runs Phase 2 under a configuration drawn from the pool.
         if self.config.has_matchmakers() {
             assert!(
-                !self.matchmakers.members.is_empty(),
+                self.matchmakers.is_some(),
                 "a matchmaker deployment always believes in a matchmaker set"
             );
         } else {
@@ -84,7 +84,7 @@ impl ColocatedNode {
                 "a plain deployment's configuration is bound to no ballot"
             );
             assert!(
-                self.matchmakers.members.is_empty(),
+                self.matchmakers.is_none(),
                 "a plain deployment names no matchmaker set"
             );
             assert!(

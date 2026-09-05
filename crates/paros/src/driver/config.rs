@@ -74,9 +74,11 @@ pub struct DriverTunables {
     /// How long a peer connect attempt may take before it is retried. Floor:
     /// non-zero (a reconnecting channel retries forever).
     pub connection_timeout: Duration,
-    /// How long one peer-delivery RPC may take before its batch is written
-    /// off as lost (the mailbox is lossy by contract; resends repair it).
-    /// Floor: non-zero.
+    /// How long one peer-delivery RPC may take to get its batch *into the
+    /// peer's inbox* before the batch is written off as lost (the mailbox is
+    /// lossy by contract; resends repair it). The peer acks on enqueue, not
+    /// after processing, so this races the connection and the peer's
+    /// `peer_inbox_capacity`, never its loop. Floor: non-zero.
     pub delivery_timeout: Duration,
     /// Ticks a parked read may wait for its read-index confirmation before
     /// the driver answers a retry redirect. Floor: the confirmation is one

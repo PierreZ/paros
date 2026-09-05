@@ -54,7 +54,6 @@ fn promise_reports_faulty_tristate_never_none() {
     // prepare from slot 0 to cover the whole log instead.
     n.step(Message::Prepare {
         reply_to: NodeId(2),
-        leader: NodeId(2),
         ballot: ballot(9, 2),
         from_slot: Slot(0),
         config: None,

@@ -373,10 +373,16 @@ fn scripted_builder(
         .chaos_duration(CORPUS_CHAOS)
 }
 
-/// The E1 mask corpus builder (see `crate::corpus`).
-fn corpus_builder(source: corpus::MaskSource) -> SimulationBuilder {
-    scripted_builder(corpus::CORPUS_NODES, None, 0)
-        .workload_factory(move || Box::new(corpus::E1MaskWorkload::new(source)))
+/// The E1 mask corpus builder (see `crate::corpus`). `non_vacuous` is where
+/// the workload publishes whether its run judged its analytic outcome (see
+/// [`corpus_mask_case`]); the hunt axes pass `None`.
+fn corpus_builder(
+    source: corpus::MaskSource,
+    non_vacuous: Option<NonVacuousSink>,
+) -> SimulationBuilder {
+    scripted_builder(corpus::CORPUS_NODES, None, 0).workload_factory(move || {
+        Box::new(corpus::E1MaskWorkload::new(source, non_vacuous.clone()))
+    })
 }
 
 /// The canonical E1 mask cases the nextest corpus runner enumerates: the
@@ -415,10 +421,27 @@ pub fn corpus_canonical_masks() -> Vec<u16> {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_corpus_mask(mask: u16) -> SimulationReport {
-    corpus_builder(corpus::MaskSource::Fixed(mask))
+    corpus_mask_case(mask).0
+}
+
+/// The same run, reporting whether it was **non-vacuous**: `true` means the
+/// workload judged its analytically derived outcome (a recoverable mask
+/// converged intact, or an unrecoverable one waited without fabricating);
+/// `false` means a late write healed a masked record before the cluster died,
+/// so the run was released unjudged and observed nothing (see
+/// `E1MaskWorkload`). Its `sometimes` gates are recorded, never asserted, by
+/// nextest, so a caller that enumerates masks must require a minimum number of
+/// `true`s or the corpus passes on vacuous runs alone.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn corpus_mask_case(mask: u16) -> (SimulationReport, bool) {
+    let sink: NonVacuousSink = Arc::new(Mutex::new(false));
+    let report = corpus_builder(corpus::MaskSource::Fixed(mask), Some(sink.clone()))
         .set_iterations(1)
         .set_debug_seeds(vec![u64::from(mask)])
-        .run()
+        .run();
+    let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
+    (report, non_vacuous)
 }
 
 /// Raw-volume E1 sampling: each seed draws its mask from the seeded RNG, so a
@@ -427,7 +450,7 @@ pub fn run_corpus_mask(mask: u16) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn corpus_hunt(iterations: usize) -> SimulationReport {
-    corpus_builder(corpus::MaskSource::Seeded)
+    corpus_builder(corpus::MaskSource::Seeded, None)
         .set_iterations(iterations)
         .run()
 }
@@ -436,7 +459,7 @@ pub fn corpus_hunt(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_corpus_seed(seed: u64) -> SimulationReport {
-    corpus_builder(corpus::MaskSource::Seeded)
+    corpus_builder(corpus::MaskSource::Seeded, None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()

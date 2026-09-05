@@ -240,19 +240,23 @@ impl Matchmaker {
         let mut bootstrap = config.bootstrap.clone();
         bootstrap.sort_unstable();
         bootstrap.dedup();
-        let mut matchmaker = Self {
+        assert!(
+            !bootstrap.is_empty(),
+            "a matchmaker deployment bootstraps at least one matchmaker"
+        );
+        let set = resolved_set(&hard_state, &bootstrap);
+        let matchmaker = Self {
             config: MatchmakerConfig {
                 id: config.id,
                 bootstrap,
             },
             hard_state,
-            set: MatchmakerSet::new(MatchmakerGeneration(0), Vec::new()),
+            set,
             registry: RetainedWindow::new(registry, hard_state_watermark),
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
         };
-        matchmaker.refresh_set();
         matchmaker.assert_invariants();
         matchmaker
     }
@@ -357,15 +361,7 @@ impl Matchmaker {
             from_ballot,
         } = request;
         let registration = Registration { config, kind };
-        let outcome = if !registration.config.is_well_formed() {
-            // Wire hygiene, before anything is touched: a configuration
-            // that does not admit its own quorum system is refused whole. A
-            // registry that stored one would make every later tally over it
-            // miscount, and the boot-time `assert_invariants` would crash
-            // the process on the way back in — an assert on external input,
-            // which is exactly what the doctrine forbids.
-            MatchOutcome::Refused(MatchRefusal::Malformed)
-        } else if let Some(refusal) = self.generation_refusal(generation) {
+        let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
         } else if self.registry.below_floor(ballot) {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
@@ -1380,7 +1376,7 @@ mod tests {
             from: NodeId(5),
             generation: G0,
             ballot: ballot(1, 5),
-            members: successor.members.clone(),
+            members: successor.members().to_vec(),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert_eq!(writes.len(), 1, "a vote is durable");
@@ -1403,7 +1399,7 @@ mod tests {
         });
         let (_, replies) = drain_reconfigure(&mut mm);
         assert!(
-            matches!(&replies[0], ReconfigureReply::Promised { vote: Some((b, m)), .. } if *b == ballot(1, 5) && *m == successor.members)
+            matches!(&replies[0], ReconfigureReply::Promised { vote: Some((b, m)), .. } if *b == ballot(1, 5) && *m == successor.members())
         );
         // Chosen: the successor is recorded for generation 0 and, being a
         // member holding the bootstrap, this matchmaker activates it.

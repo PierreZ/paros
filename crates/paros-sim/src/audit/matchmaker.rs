@@ -308,7 +308,6 @@ pub(super) struct MatchmakerAudit {
     refused_stopped_with_successor: bool,
     refused_generation: bool,
     refused_inactive: bool,
-    refused_malformed: bool,
     set_learned: bool,
     reconfigurer_started_flag: bool,
     reconfigurer_finishing: bool,
@@ -661,7 +660,7 @@ impl MatchmakerAudit {
 
     /// Whether `set` is the chosen (authoritative) set of its generation.
     fn is_chosen(&self, set: &MatchmakerSet) -> bool {
-        let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
+        let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
         self.sets.get(&set.generation.0) == Some(&members)
     }
 
@@ -772,7 +771,7 @@ impl MatchmakerAudit {
         // A booted matchmaker names an authoritative set for its generation
         // (a spare names the bootstrap set it is outside of).
         if phase != MatchmakerPhase::Inactive {
-            let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
+            let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
             self.bind_set(set.generation.0, &members, "recovered");
         }
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1091,7 +1090,6 @@ impl MatchmakerAudit {
             MatchRefusal::Stopped { .. } => "stopped",
             MatchRefusal::Generation { .. } => "generation",
             MatchRefusal::Inactive => "inactive",
-            MatchRefusal::Malformed => "malformed",
         };
         *self.refusal_counts.entry(kind).or_default() += 1;
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1169,12 +1167,6 @@ impl MatchmakerAudit {
                 reach_once!(
                     self.refused_inactive,
                     "generation: an inactive matchmaker refuses a proposer"
-                );
-            }
-            MatchRefusal::Malformed => {
-                reach_once!(
-                    self.refused_malformed,
-                    "matchmaker: a malformed configuration is refused"
                 );
             }
         }
@@ -1912,7 +1904,7 @@ impl MatchmakerAudit {
         // folded a different subset, and the reconstruction is judged
         // against exactly the quorum this attempt reconstructs from.
         self.stop_acks.remove(&(node.0, old.generation.0));
-        let members: Vec<u64> = old.members.iter().map(|m| m.0).collect();
+        let members: Vec<u64> = old.members().iter().map(|m| m.0).collect();
         if target.iter().map(|m| m.0).collect::<Vec<_>>() == members {
             reach_once!(
                 self.reconfigurer_finishing,
@@ -1999,7 +1991,7 @@ impl MatchmakerAudit {
             ReconfigurerStep::Deciding { .. } => {
                 // Invariant 7: every proposed member holds the bootstrap.
                 if let ReconfigureReply::Bootstrapped { set, .. } = reply {
-                    let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
+                    let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
                     let holders = self
                         .bootstrapped
                         .get(&(set.generation.0, members.clone()))
@@ -2055,7 +2047,7 @@ impl MatchmakerAudit {
                 );
             }
             ReconfigurerStep::Chosen { successor } => {
-                let members: Vec<u64> = successor.members.iter().map(|m| m.0).collect();
+                let members: Vec<u64> = successor.members().iter().map(|m| m.0).collect();
                 self.bind_set(successor.generation.0, &members, "chosen");
                 // The decree itself, from the wire: the set published is the
                 // value this node put to the vote, and a majority of the old
@@ -2209,7 +2201,7 @@ impl MatchmakerAudit {
         // matchmaker reported, so a truncated activated copy would
         // otherwise be invisible and every later check would compare
         // against the corrupted state.
-        let proposed: Vec<u64> = bootstrap.set.members.iter().map(|m| m.0).collect();
+        let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
         let candidates = self
             .bootstrap_histories
             .entry((bootstrap.set.generation.0, proposed))
@@ -2249,7 +2241,7 @@ impl MatchmakerAudit {
                 scalars
                     .pending
                     .iter()
-                    .map(|p| (p.set.generation.0, p.set.members.len()))
+                    .map(|p| (p.set.generation.0, p.set.members().len()))
                     .collect::<Vec<_>>(),
                 scalars.successor.as_ref().map(|s| s.generation.0),
                 scalars.decree.promised.round
@@ -2270,7 +2262,7 @@ impl MatchmakerAudit {
             );
         }
         for pending in &scalars.pending {
-            let members: Vec<u64> = pending.set.members.iter().map(|m| m.0).collect();
+            let members: Vec<u64> = pending.set.members().iter().map(|m| m.0).collect();
             self.bootstrapped
                 .entry((pending.set.generation.0, members))
                 .or_default()
@@ -2315,7 +2307,7 @@ impl MatchmakerAudit {
         effective: Option<&(Ballot, AcceptorConfig)>,
         registry: &BTreeMap<Ballot, Registration>,
     ) {
-        let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
+        let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
         self.bind_set(set.generation.0, &members, "activated");
         let entry = self.registries.entry(matchmaker.0).or_default();
         // Invariant 4: the watermark never regresses across a generation.
@@ -2439,7 +2431,7 @@ impl MatchmakerAudit {
                 );
             }
             ReconfigureReply::Bootstrapped { set, .. } => {
-                let members: Vec<u64> = set.members.iter().map(|m| m.0).collect();
+                let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
                 let held = self
                     .bootstrapped
                     .get(&(set.generation.0, members))

@@ -559,7 +559,6 @@ impl ColocatedNode {
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();
-        self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;
         self.election_gap_fills = 0;

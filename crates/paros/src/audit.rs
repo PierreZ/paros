@@ -397,10 +397,16 @@ pub trait Audit {
     /// transient under an open application repair); the requester re-asks.
     fn snapshot_offer_skipped(&self, node: NodeId, offered: Slot) {}
 
-    /// One peer-delivery RPC toward `to` failed or timed out; every message
-    /// of that batch is lost at the transport. Reported from the delivery
-    /// task (the audit handle is cloned into it), so implementations must
-    /// stay observation-only here as everywhere.
+    /// One peer-delivery RPC toward `to` failed or timed out, so the batch
+    /// never (provably) entered the peer's inbox: the connection was down, or
+    /// the peer's bounded inbox stayed full for the whole `delivery_timeout`.
+    /// The peer acknowledges a batch as soon as its messages are *enqueued*,
+    /// never after it has stepped them, so a slow peer loop is not a failed
+    /// delivery — only an unreachable or saturated peer is. A timed-out batch
+    /// may still have been partly enqueued; the protocol's heartbeats and
+    /// resends repair whichever messages were lost. Reported from the
+    /// delivery task (the audit handle is cloned into it), so implementations
+    /// must stay observation-only here as everywhere.
     fn delivery_failed(&self, node: NodeId, to: NodeId) {}
 
     /// This node lost its leadership with client replies still parked:

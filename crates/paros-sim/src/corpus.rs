@@ -594,14 +594,22 @@ pub(crate) struct E1MaskWorkload {
     source: MaskSource,
     recovered_intact: bool,
     waited_unrecoverable: bool,
+    /// Where a non-vacuous verdict is published (the mirror of
+    /// [`DepartedStragglerWorkload`]'s sink): `true` once the run judged its
+    /// analytically derived outcome — `Correct` or `CorrectlyUnavailable` — rather
+    /// than being superseded by a late write before the cluster died. The
+    /// nextest runner requires a minimum number of `true`s per quarter, so a
+    /// quarter whose every mask healed early cannot pass on vacuous runs.
+    non_vacuous: Option<crate::NonVacuousSink>,
 }
 
 impl E1MaskWorkload {
-    pub(crate) fn new(source: MaskSource) -> Self {
+    pub(crate) fn new(source: MaskSource, non_vacuous: Option<crate::NonVacuousSink>) -> Self {
         Self {
             source,
             recovered_intact: false,
             waited_unrecoverable: false,
+            non_vacuous,
         }
     }
 }
@@ -721,6 +729,7 @@ impl Workload for E1MaskWorkload {
         }
         if !mask_held {
             tracing::info!(mask, "corpus_mask_superseded_by_late_write");
+            assert_reachable!("corpus: an E1 mask is superseded by a late write");
             drop(clients);
             return Ok(());
         }
@@ -796,6 +805,14 @@ impl Workload for E1MaskWorkload {
             self.waited_unrecoverable,
             "corpus: an unrecoverable corruption mask waits without fabricating"
         );
+        // Non-vacuous iff the run judged its analytic outcome — either leg.
+        // A run whose mask healed before the cluster died set neither flag and
+        // proved nothing; the nextest runner counts these per quarter.
+        if (self.recovered_intact || self.waited_unrecoverable)
+            && let Some(sink) = &self.non_vacuous
+        {
+            *sink.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        }
         Ok(())
     }
 }

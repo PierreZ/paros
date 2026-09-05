@@ -5,49 +5,73 @@
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    chunk_corpus_canonical_masks, corpus_canonical_masks, departed_straggler_case,
-    run_bare_quorum_case, run_chunk_mask, run_corpus_mask, run_snapshot_lifecycle_case,
+    chunk_corpus_canonical_masks, corpus_canonical_masks, corpus_mask_case,
+    departed_straggler_case, run_bare_quorum_case, run_chunk_mask, run_snapshot_lifecycle_case,
 };
 
-fn assert_mask_green(mask: u16) {
-    let report = run_corpus_mask(mask);
+/// Run one E1 mask, require it green, and report whether it was non-vacuous
+/// (it judged its analytic outcome rather than being released after a late
+/// write healed the mask).
+fn assert_mask_green(mask: u16) -> bool {
+    let (report, non_vacuous) = corpus_mask_case(mask);
     assert_eq!(report.failed_runs, 0, "corpus mask {mask:#011b} completed");
     assert!(
         report.assertion_violations.is_empty(),
         "corpus mask {mask:#011b} asserted its analytic outcome: {:?}",
         report.assertion_violations
     );
+    non_vacuous
 }
 
 /// Split the canonical case list into quarters so nextest runs them in
 /// parallel; together the four tests enumerate the exhaustive 2-slot × 3-node
 /// sub-grid plus the full-grid corner cases.
-fn canonical_quarter(quarter: usize) {
+///
+/// A mask whose injection raced a late re-write is released unjudged (its
+/// `sometimes` gates are recorded, never asserted, by nextest), so every mask
+/// being green is not enough: each quarter must also have *judged* at least
+/// `min_non_vacuous` of its masks, or the whole quarter could pass having
+/// observed nothing. The floors below are half the count observed when the
+/// gate landed — every mask judged its outcome then (18/18 in quarter 0,
+/// 17/17 in quarters 1–3), so 9 and 8 leave headroom for the seed schedule
+/// shifting under a harness change (a mask's seed *is* the mask, but the
+/// late-write race it loses is a draw-schedule fact) while still refusing a
+/// quarter that went mostly vacuous.
+fn canonical_quarter(quarter: usize, min_non_vacuous: usize) {
+    let mut masks = 0;
+    let mut non_vacuous = 0;
     for (i, mask) in corpus_canonical_masks().into_iter().enumerate() {
         if i % 4 == quarter {
-            assert_mask_green(mask);
+            masks += 1;
+            non_vacuous += usize::from(assert_mask_green(mask));
         }
     }
+    eprintln!("E1 quarter {quarter}: {non_vacuous} of {masks} masks judged their outcome");
+    assert!(
+        non_vacuous >= min_non_vacuous,
+        "E1 quarter {quarter}: only {non_vacuous} of {masks} masks judged their analytic \
+         outcome (floor {min_non_vacuous}); the rest were superseded by a late write"
+    );
 }
 
 #[test]
 fn e1_canonical_masks_quarter_0() {
-    canonical_quarter(0);
+    canonical_quarter(0, 9);
 }
 
 #[test]
 fn e1_canonical_masks_quarter_1() {
-    canonical_quarter(1);
+    canonical_quarter(1, 8);
 }
 
 #[test]
 fn e1_canonical_masks_quarter_2() {
-    canonical_quarter(2);
+    canonical_quarter(2, 8);
 }
 
 #[test]
 fn e1_canonical_masks_quarter_3() {
-    canonical_quarter(3);
+    canonical_quarter(3, 8);
 }
 
 /// The bare-quorum lost slot: decided by two of three, then both copies (and

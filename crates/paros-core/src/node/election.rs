@@ -89,18 +89,19 @@ impl ColocatedNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        if self.config.has_matchmakers() {
+        if let Some(matchmakers) = &self.matchmakers {
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`).
+            let generation = matchmakers.generation;
+            let members = matchmakers.members().to_vec();
             self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
-            let generation = self.matchmakers.generation;
             let request = match kind {
                 RegistrationKind::Reconfiguration => {
                     MatchRequest::reconfigure(me, self.ballot, config, generation)
                 }
                 RegistrationKind::Belief => MatchRequest::new(me, self.ballot, config, generation),
             };
-            for matchmaker in self.matchmakers.members.clone() {
+            for matchmaker in members {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
             }
@@ -178,7 +179,6 @@ impl ColocatedNode {
         );
         let prepare = Message::Prepare {
             reply_to: me,
-            leader: me,
             ballot: self.ballot,
             from_slot,
             config: wire_config,
@@ -254,7 +254,6 @@ impl ColocatedNode {
             Audience::Node(from),
             Message::Prepare {
                 reply_to: self.config.id,
-                leader: self.config.id,
                 ballot,
                 from_slot: next,
                 config,
@@ -392,7 +391,6 @@ impl ColocatedNode {
                 "a plain campaign runs Phase 1 for its static configuration"
             );
         }
-        self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
 
         // Fix the allocator/read fence from the complete Phase-1 result before

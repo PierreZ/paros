@@ -202,7 +202,11 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// # Panics
     ///
     /// If `members` is empty: a configuration with no acceptor can never form
-    /// a quorum, so registering one is a programmer error.
+    /// a quorum, so registering one is a programmer error. Also if the
+    /// normalized configuration is not well formed
+    /// ([`AcceptorConfig::is_well_formed`]) — the cross-intersection claim
+    /// every quorum tally rests on is asserted here, once, at the only
+    /// construction site, never per tally.
     #[must_use]
     pub fn new(mut members: Vec<Id>, quorum_system: QuorumSystem) -> Self {
         members.sort_unstable();
@@ -211,19 +215,25 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             !members.is_empty(),
             "an acceptor configuration names at least one acceptor"
         );
-        Self {
+        let config = Self {
             members,
             quorum_system,
-        }
+        };
+        assert!(
+            config.is_well_formed(),
+            "an acceptor configuration admits its quorum system"
+        );
+        config
     }
 
     /// Whether this configuration can be run at all: at least one acceptor, a
     /// membership that is sorted and deduplicated, and a quorum system whose
     /// Phase-1 and Phase-2 quorums always intersect
-    /// ([`QuorumSystem::cross_intersects`]). Asserted by both quorum
-    /// predicates; a boundary that takes a configuration from outside
-    /// (`ColocatedNode::reconfigure`) refuses a malformed one here instead of
-    /// letting a later quorum tally panic on it.
+    /// ([`QuorumSystem::cross_intersects`]). This is the invariant
+    /// [`AcceptorConfig::new`] establishes — asserted there, once, since it
+    /// is the only constructor (deserialisation included) — and every quorum
+    /// predicate relies on it without re-checking; it is public so a reader
+    /// can see exactly what a constructed configuration guarantees.
     ///
     /// The ordering clause is not cosmetic and matches
     /// [`MatchmakerSet::is_well_formed`]: [`AcceptorConfig::contains`]
@@ -246,18 +256,8 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// the promises an election or a CTRL repair probe must gather before it
     /// concludes anything about what an earlier ballot could have chosen. A
     /// voter outside the membership never counts.
-    ///
-    /// # Panics
-    ///
-    /// If the configuration is not well formed (see
-    /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
-    /// whose phases do not intersect is meaningless and must fail loudly.
     #[must_use]
     pub fn has_phase1_quorum(&self, voters: &BTreeSet<Id>) -> bool {
-        assert!(
-            self.is_well_formed(),
-            "a quorum tally runs over a well-formed configuration"
-        );
         self.quorum_system.is_phase1_quorum(&self.members, voters)
     }
 
@@ -266,18 +266,8 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// leader's standing authority (`CheckQuorum`), a read's confirmation,
     /// the GC fence's custody claim. A voter outside the membership never
     /// counts.
-    ///
-    /// # Panics
-    ///
-    /// If the configuration is not well formed (see
-    /// [`AcceptorConfig::is_well_formed`]): a tally over a configuration
-    /// whose phases do not intersect is meaningless and must fail loudly.
     #[must_use]
     pub fn has_phase2_quorum(&self, voters: &BTreeSet<Id>) -> bool {
-        assert!(
-            self.is_well_formed(),
-            "a quorum tally runs over a well-formed configuration"
-        );
         self.quorum_system.is_phase2_quorum(&self.members, voters)
     }
 
@@ -348,25 +338,76 @@ impl MatchmakerGeneration {
 
 /// A matchmaker set bound to its generation: the value the successor decree
 /// chooses, and what every matchmaking message is fenced by.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// **The membership is private and [`MatchmakerSet::new`] is the only way to
+/// build one**, deserialisation included (see `SerdeMatchmakerSet`), for the
+/// reason [`AcceptorConfig`] gives: [`MatchmakerSet::contains`] and every
+/// quorum tally binary-search the membership, so an unsorted, duplicated or
+/// empty vector would not fail, it would make a tally *silently miscount*.
+/// Only `new` normalizes and asserts [`MatchmakerSet::is_well_formed`], so
+/// only `new` may construct — and a deployment with no matchmakers holds no
+/// `MatchmakerSet` at all (`ColocatedNode::matchmaker_set` is `None` there)
+/// rather than an empty one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "SerdeMatchmakerSet"))]
 pub struct MatchmakerSet {
     /// The generation this set is authoritative for.
     pub generation: MatchmakerGeneration,
     /// The members, sorted and deduplicated.
-    pub members: Vec<MatchmakerId>,
+    members: Vec<MatchmakerId>,
+}
+
+/// The wire shape [`MatchmakerSet`] deserialises through, so a serialized set
+/// is normalized and checked by [`MatchmakerSet::new`] exactly like a
+/// constructed one.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct SerdeMatchmakerSet {
+    generation: MatchmakerGeneration,
+    members: Vec<MatchmakerId>,
+}
+
+#[cfg(feature = "serde")]
+impl From<SerdeMatchmakerSet> for MatchmakerSet {
+    fn from(wire: SerdeMatchmakerSet) -> Self {
+        Self::new(wire.generation, wire.members)
+    }
 }
 
 impl MatchmakerSet {
     /// A set of `members` (sorted and deduplicated here) for `generation`.
+    ///
+    /// # Panics
+    ///
+    /// If `members` is empty: a set with no matchmaker can never form a
+    /// quorum, so a generation naming one is a programmer error. Also if the
+    /// normalized set is not well formed ([`MatchmakerSet::is_well_formed`])
+    /// — asserted here, once, at the only construction site, never per
+    /// tally.
     #[must_use]
     pub fn new(generation: MatchmakerGeneration, mut members: Vec<MatchmakerId>) -> Self {
         members.sort_unstable();
         members.dedup();
-        Self {
+        assert!(
+            !members.is_empty(),
+            "a matchmaker set names at least one matchmaker"
+        );
+        let set = Self {
             generation,
             members,
-        }
+        };
+        assert!(
+            set.is_well_formed(),
+            "a matchmaker set admits the matchmaker quorum system"
+        );
+        set
+    }
+
+    /// The members, sorted and deduplicated.
+    #[must_use]
+    pub fn members(&self) -> &[MatchmakerId] {
+        &self.members
     }
 
     /// The size of a matchmaker quorum over this set: a majority. Kept for
@@ -391,10 +432,6 @@ impl MatchmakerSet {
     /// programmer error: the arithmetic guarantees it).
     #[must_use]
     pub fn quorum_size(&self) -> usize {
-        assert!(
-            self.is_well_formed(),
-            "a matchmaker quorum is drawn over a well-formed set"
-        );
         let quorum = self.members.len() / 2 + 1;
         // Postcondition: self-intersecting over the membership.
         assert!(
@@ -409,18 +446,8 @@ impl MatchmakerSet {
     /// [`QuorumSystem::is_quorum`] under [`QuorumSystem::Majority`], the one
     /// quorum model paros supports for matchmakers (see
     /// [`MatchmakerSet::quorum_size`]); a voter outside the set never counts.
-    ///
-    /// # Panics
-    ///
-    /// If the set is not well formed (see [`MatchmakerSet::is_well_formed`]):
-    /// a tally over a set whose quorums do not intersect is meaningless and
-    /// must fail loudly.
     #[must_use]
     pub fn has_quorum(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
-        assert!(
-            self.is_well_formed(),
-            "a matchmaker quorum is drawn over a well-formed set"
-        );
         QuorumSystem::Majority.is_quorum(&self.members, voters)
     }
 
@@ -431,19 +458,16 @@ impl MatchmakerSet {
     }
 
     /// Whether this set can serve as a matchmaker configuration at all: it
-    /// names at least one matchmaker and admits the quorum system every
-    /// matchmaker-side quorum is drawn from (majority: any two quorums
-    /// intersect, `2q > n`). **A chosen `MatchmakerSet` must itself admit
-    /// the required quorum system** — the protocol boundaries that take a
-    /// set from outside refuse one that does not ([`MatchmakerReconfigurer::start`]
-    /// refuses the target, a matchmaker refuses a `Bootstrap` or `Chosen`
-    /// naming it), and the boundaries that *produce* one assert it (a
-    /// `finish` proposes the members that answered the freeze — at least a
-    /// quorum of the old set, never fewer). Under the majority system every
-    /// non-empty set qualifies; the check is the explicit invariant a
-    /// flexible matchmaker quorum system would have to satisfy too.
-    ///
-    /// [`MatchmakerReconfigurer::start`]: crate::MatchmakerReconfigurer::start
+    /// names at least one matchmaker, sorted and deduplicated, and admits the
+    /// quorum system every matchmaker-side quorum is drawn from (majority:
+    /// any two quorums intersect, `2q > n`). **A chosen `MatchmakerSet` must
+    /// itself admit the required quorum system**, and since
+    /// [`MatchmakerSet::new`] is the only constructor and asserts this, every
+    /// set that exists — the one a `start` targets, the one a `Bootstrap` or
+    /// `Chosen` carries, the one a `finish` proposes from the members that
+    /// answered the freeze — does. Under the majority system every non-empty
+    /// set qualifies; the check is the explicit invariant a flexible
+    /// matchmaker quorum system would have to satisfy too.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         let n = self.members.len();

@@ -126,7 +126,7 @@ struct Node {
 
 impl Node {
     fn adopt(&mut self, set: &MatchmakerSet) {
-        if set.generation > self.believed.generation && !set.members.is_empty() {
+        if set.generation > self.believed.generation && !set.members().is_empty() {
             self.believed = set.clone();
         }
     }
@@ -268,7 +268,8 @@ impl Ledger {
         {
             eprintln!(
                 "authoritative gen={} members={:?} ({where_})",
-                set.generation.0, set.members
+                set.generation.0,
+                set.members()
             );
         }
         let known = self
@@ -279,8 +280,8 @@ impl Ledger {
             known == set,
             "at most one matchmaker set is authoritative per generation ({where_}): generation {} saw {:?} and {:?}",
             set.generation.0,
-            known.members,
-            set.members
+            known.members(),
+            set.members()
         );
     }
 
@@ -297,7 +298,7 @@ impl Ledger {
         let votes = self.votes.get(&generation);
         let mut by_ballot: BTreeMap<Ballot, BTreeSet<MatchmakerId>> = BTreeMap::new();
         for (who, ballot, members) in votes.into_iter().flatten() {
-            if *members == successor.members && old.contains(*who) {
+            if *members == successor.members() && old.contains(*who) {
                 by_ballot.entry(*ballot).or_default().insert(*who);
             }
         }
@@ -307,7 +308,7 @@ impl Ledger {
                 .any(|voters| voters.len() >= old.quorum_size()),
             "a chosen successor is what a majority of M_g durably voted at one ballot: generation {} successor {:?} votes {:?}",
             generation.0,
-            successor.members,
+            successor.members(),
             by_ballot
         );
     }
@@ -534,10 +535,7 @@ impl World {
                     if local_floor_won {
                         self.reach.activated_with_local_floor += 1;
                     }
-                    let set = MatchmakerSet {
-                        generation: scalars.generation,
-                        members: scalars.members.clone(),
-                    };
+                    let set = MatchmakerSet::new(scalars.generation, scalars.members.clone());
                     let succeeded = MatchmakerGeneration(scalars.generation.0 - 1);
                     self.ledger.observe_authoritative(&set, "activation");
                     self.ledger.assert_majority_voted(succeeded, &set);
@@ -792,9 +790,7 @@ impl World {
                     self.republish(to, reply.matchmaker, &believed);
                 }
             }
-            MatchRefusal::Stale { .. }
-            | MatchRefusal::BelowWatermark { .. }
-            | MatchRefusal::Malformed => {}
+            MatchRefusal::Stale { .. } | MatchRefusal::BelowWatermark { .. } => {}
         }
     }
 
@@ -870,7 +866,7 @@ impl World {
         } else {
             MatchRequest::new(node, ballot, config, believed.generation)
         };
-        for m in believed.members {
+        for m in believed.members().iter().copied() {
             self.send(Envelope::Register {
                 to: m,
                 request: request.clone(),
@@ -908,14 +904,14 @@ impl World {
             (
                 n.believed.generation,
                 n.next_round,
-                n.believed.members.clone(),
+                n.believed.members().to_vec(),
             )
         };
         let watermark = Ballot {
             round: self.rng.below(next_round.max(1)),
             node,
         };
-        for m in members {
+        for m in members.iter().copied() {
             self.send(Envelope::Gc {
                 to: m,
                 generation,
@@ -942,13 +938,13 @@ impl World {
             // straggler that arrives before this beat widens the
             // reconstruction — and a finish's proposal.
             let n = self.node(node);
-            let was = n.reconfigurer.old().map(|s| s.members.len());
+            let was = n.reconfigurer.old().map(|s| s.members().len());
             let shrank =
                 n.reconfigurer
                     .close_stop()
                     .zip(was)
                     .is_some_and(|(reconstruction, len)| {
-                        reconstruction.bootstrap.set.members.len() < len
+                        reconstruction.bootstrap.set.members().len() < len
                     });
             if shrank {
                 self.reach.finish_shrank_the_set += 1;
@@ -1057,15 +1053,15 @@ impl World {
                 site.live.is_some(),
                 site.disk_phase(),
                 site.disk_set().generation.0,
-                site.disk_set().members,
+                site.disk_set().members(),
                 hs.successor
                     .as_ref()
-                    .map(|s| (s.generation.0, s.members.clone())),
+                    .map(|s| (s.generation.0, s.members().to_vec())),
                 hs.decree.promised,
                 hs.decree.vote,
                 hs.pending
                     .iter()
-                    .map(|p| (p.set.generation.0, p.set.members.clone()))
+                    .map(|p| (p.set.generation.0, p.set.members().to_vec()))
                     .collect::<Vec<_>>(),
                 hs.gc_watermark,
                 site.disk.registrations().len(),
@@ -1076,7 +1072,7 @@ impl World {
                 out,
                 "\n  node{i}: believed=({}, {:?}) phase={:?} backoff={}",
                 node.believed.generation.0,
-                node.believed.members,
+                node.believed.members(),
                 node.reconfigurer.phase(),
                 node.backoff
             );
@@ -1142,10 +1138,10 @@ impl World {
             .smallest_started
             .map_or(bootstrap_quorum, |started| started.min(bootstrap_quorum));
         assert!(
-            top_set.members.len() >= floor,
+            top_set.members().len() >= floor,
             "seed {seed}: the top generation {} keeps at least {floor} members; it has {:?}{}",
             top.0,
-            top_set.members,
+            top_set.members(),
             self.dump()
         );
         for (i, site) in self.sites.iter().enumerate() {
@@ -1164,7 +1160,7 @@ impl World {
                 live.hard_state()
                     .pending
                     .iter()
-                    .map(|p| (p.set.generation.0, p.set.members.clone()))
+                    .map(|p| (p.set.generation.0, p.set.members().to_vec()))
                     .collect::<Vec<_>>(),
                 self.dump()
             );
@@ -1331,7 +1327,7 @@ fn two_finishers_with_different_stop_quorums_choose_one_successor() {
     let (a, b, c) = (MatchmakerId(0), MatchmakerId(1), MatchmakerId(2));
     let (f1, f2) = (NodeId(0), NodeId(1));
     let believed = world.node(f1).believed.clone();
-    assert_eq!(believed.members, vec![a, b, c]);
+    assert_eq!(believed.members(), vec![a, b, c]);
     world.node(f1).reconfigurer.finish(&believed).expect("f1");
     world.node(f2).reconfigurer.finish(&believed).expect("f2");
     world.queue_requests(f1);
@@ -1365,8 +1361,8 @@ fn two_finishers_with_different_stop_quorums_choose_one_successor() {
         .reconfigurer
         .close_stop()
         .expect("f2 froze a quorum");
-    assert_eq!(first.bootstrap.set.members, vec![a, b]);
-    assert_eq!(second.bootstrap.set.members, vec![b, c]);
+    assert_eq!(first.bootstrap.set.members(), vec![a, b]);
+    assert_eq!(second.bootstrap.set.members(), vec![b, c]);
     assert_ne!(first.bootstrap.set, second.bootstrap.set);
     // From here the partition heals and the recovery tail runs both
     // finishers to completion — including the discovery a losing node needs
@@ -1408,7 +1404,7 @@ fn a_straggler_that_answers_before_the_close_widens_the_finish() {
     world.chaos = false;
     let node = NodeId(0);
     let believed = world.node(node).believed.clone();
-    assert_eq!(believed.members.len(), 3);
+    assert_eq!(believed.members().len(), 3);
     assert_eq!(believed.quorum_size(), 2);
     world
         .node(node)
@@ -1433,7 +1429,8 @@ fn a_straggler_that_answers_before_the_close_widens_the_finish() {
         .close_stop()
         .expect("the quorum closes on the beat");
     assert_eq!(
-        reconstruction.bootstrap.set.members, believed.members,
+        reconstruction.bootstrap.set.members(),
+        believed.members(),
         "every member that answered the freeze is in the finish's proposal"
     );
     assert_eq!(
@@ -1529,7 +1526,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         .expect("the finisher chose a successor")
         .clone();
     assert_eq!(
-        chosen.members,
+        chosen.members(),
         vec![a, b],
         "finish proposes the members that answered the freeze"
     );
@@ -1615,7 +1612,7 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
             "kill point {kill_after}: the chosen successor is the only generation 1"
         );
         world.assert_converged(1000 + kill_after as u64);
-        for m in &chosen.members {
+        for m in chosen.members() {
             let site = &world.sites[usize::try_from(m.0).expect("index")];
             assert!(
                 site.disk_set() == chosen,
@@ -1673,7 +1670,7 @@ fn a_second_handover_runs_on_the_activated_generation() {
             .get(&MatchmakerGeneration(generation + 1))
             .expect("chosen");
         assert_eq!(
-            chosen.members,
+            chosen.members(),
             target.iter().copied().map(MatchmakerId).collect::<Vec<_>>()
         );
     }

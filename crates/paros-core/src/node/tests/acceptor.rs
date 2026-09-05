@@ -10,7 +10,6 @@ fn promise_and_accept_batches_require_fsync() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(3, 1),
         from_slot: Slot(0),
         config: None,
@@ -47,7 +46,6 @@ fn acceptor_rejects_below_promised_ballot() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,
@@ -126,7 +124,6 @@ fn prepare_below_floor_is_nacked_not_promised() {
     // below our floor: those slots are chosen and we truncated them.
     n.step(Message::Prepare {
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(9, 1),
         from_slot: Slot(0),
         config: None,
