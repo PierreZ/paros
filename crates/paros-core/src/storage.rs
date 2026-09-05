@@ -16,8 +16,9 @@ use crate::types::{Ballot, Command, SessionEntry, Slot};
 /// on construction and resumes. A fresh node is just an empty/sentinel
 /// `Storage`.
 ///
-/// All methods are infallible in Stage 0; error sentinels (`ErrCompacted`,
-/// `ErrUnavailable`, …) are deferred to a later stage.
+/// All methods are infallible: verifying and classifying durable records is
+/// the storage layer's job (its boot scan), done before the core reads
+/// anything back through this port.
 pub trait Storage {
     /// The durable [`HardState`] and static [`Config`] to initialize the node
     /// with. Called once, at construction.

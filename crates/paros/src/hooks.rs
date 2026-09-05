@@ -1,10 +1,12 @@
 //! Driver fault-injection hooks.
 //!
-//! `drain_ready` runs synchronously (no `.await`), so process-granularity chaos
-//! (moonpool's attrition) can only crash a node *between* batches — never at the
-//! persist/send seam within one. [`DriverHooks`] also exposes the driver's
-//! optional policy decisions: delaying an `Accept` re-send, resigning
-//! leadership, choosing the shortest valid election timeout, the peer mailbox's
+//! `drain_ready` awaits the storage seam, but the simulation's world-backed
+//! stores complete every operation on the poll that started it, so a batch never
+//! yields part-way and process-granularity chaos (moonpool's attrition) can only
+//! crash a node *between* batches — never at the persist/send seam within one;
+//! [`Seam`] is how those points become reachable. [`DriverHooks`] also exposes
+//! the driver's optional policy decisions: delaying an `Accept` re-send,
+//! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,
 //! applied at the drain — hold a batch or reverse it), skipping a snapshot
 //! offer, and stretching a tick.
@@ -192,8 +194,8 @@ pub trait DriverHooks {
     /// bootstrap are idempotent, the decree's votes stay durable at the
     /// matchmakers, and the next node to meet the frozen generation
     /// finishes it. It is the driver's own timeout
-    /// ([`RECONFIGURE_TIMEOUT_ELECTIONS`](crate::RECONFIGURE_TIMEOUT_ELECTIONS))
-    /// taken early — the rare-but-valid decision that puts a *second*
+    /// ([`DriverTunables::reconfigure_timeout_elections`](crate::DriverTunables::reconfigure_timeout_elections)
+    /// election timeouts) taken early — the rare-but-valid decision that puts a *second*
     /// reconfigurer on a generation someone else half-replaced.
     fn abandon_reconfigurer(&self, phase: &ReconfigurerPhase) -> bool {
         let _ = phase;

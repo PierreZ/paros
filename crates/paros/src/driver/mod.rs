@@ -17,8 +17,8 @@
 //!
 //! - [`config`] — the per-node tunables, the constants they default to, the
 //!   shared gRPC shapes, the scope guard, the address parser, and [`RunError`].
-//! - [`events`] — the `EV_*` tracing names and the pure helpers that turn a
-//!   domain value into the stable field a trace carries.
+//! - [`events`] — the pure helpers that turn a domain value into the stable
+//!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
 //!   `Outbound` send handle, and the detached peer-delivery task.
 //! - [`snap_repair`] — the snapshot-point custody tally and chunk-repair pull.
@@ -44,16 +44,7 @@ mod transport;
 
 pub use config::{DriverTunables, RunError, parse_addr};
 pub(crate) use config::{accept_and_serve, grpc_keep_alive};
-pub use events::{
-    EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED, EV_CHOSEN,
-    EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED, EV_DUPLICATE_SUPPRESSED,
-    EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_HANDOFF_FENCE_EXPIRED, EV_HANDOFF_REFUSED,
-    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
-    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED,
-    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, command_hash,
-    registration_history_hash,
-};
+pub use events::{command_hash, message_kind, registration_history_hash};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -83,7 +74,7 @@ use crate::storage::NodeStorage;
 
 use boot::replay_boot_state;
 use config::{OnDrop, grpc_channel_config};
-use events::{message_kind, message_route};
+use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
     MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
@@ -426,7 +417,7 @@ where
         membership: node.membership_counters(),
         matchmaking: None,
         matchmaking_timeouts: node.matchmaking_timeouts(),
-        matchmaker_generation: node.matchmaker_set().generation.0,
+        matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
     };
     // Ticks since the open matchmaking request was last (re-)sent.
     let mut match_resend_elapsed: u64 = 0;
@@ -522,45 +513,34 @@ where
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
-            Some((msg, reply)) = rpc.deliver.recv() => {
+            Some(msg) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
-                // `paros_core::Message` is sent and received (no DTO). Surface the
-                // arrival (mirror of `msg_sent`) so the demo can pair sends with
-                // receives and mark the unmatched ones as network drops.
+                // `paros_core::Message` is sent and received (no DTO). The sender
+                // was acknowledged when the message entered the inbox, so nothing
+                // here answers it. Surface the arrival (mirror of `msg_sent`) so
+                // the demo can pair sends with receives and mark the unmatched
+                // ones as network drops.
                 let kind = message_kind(&msg);
                 match message_route(&msg) {
-                    Some((from, config_id, ballot, Some(slot))) => tracing::info!(
+                    Some((from, ballot, Some(slot))) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
                         slot = slot.0,
-                        config_id = config_id.0,
                         "msg_received"
                     ),
                     // The empty-prefix beat: no slot field, mirroring `msg_sent`.
-                    Some((from, config_id, ballot, None)) => tracing::info!(
+                    Some((from, ballot, None)) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
-                        config_id = config_id.0,
                         "msg_received"
                     ),
-                    None => {
-                        if let Some(config_id) = msg.config_id() {
-                            tracing::info!(
-                                node = self_id,
-                                kind,
-                                config_id = config_id.0,
-                                "msg_received"
-                            );
-                        } else {
-                            tracing::info!(node = self_id, kind, "msg_received");
-                        }
-                    }
+                    None => tracing::info!(node = self_id, kind, "msg_received"),
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it
@@ -580,41 +560,27 @@ where
                 // Snapshot-repair traffic is driver-terminal (#101): handled
                 // here, never stepped into the core — consensus state must
                 // not depend on snapshot custody.
-                // A snap-repair message naming a foreign configuration is
-                // ignored (guarded, never asserted — wire input): custody and
-                // chunk bytes are only meaningful within one configuration.
                 let snap_handled = match &msg {
-                    Message::SnapAck {
-                        config_id,
-                        from,
-                        at_index,
-                    } => {
+                    Message::SnapAck { from, at_index } => {
                         // Custody counts toward the coupling quorum only from
                         // members of the active configuration.
-                        if *config_id == node.hard_state().config_id
-                            && node.is_leader()
-                            && node.acceptors().contains(*from)
-                        {
+                        if node.is_leader() && node.acceptors().contains(*from) {
                             snap.acks.entry(*at_index).or_default().insert(*from);
                         }
                         true
                     }
                     Message::SnapChunkRequest {
-                        config_id,
                         from,
                         at_index,
                         chunks,
                     } => {
-                        if *config_id == node.hard_state().config_id {
-                            handle_snap_chunk_request(
-                                &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
-                            )
-                            .await;
-                        }
+                        handle_snap_chunk_request(
+                            &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
+                        )
+                        .await;
                         true
                     }
                     Message::SnapChunkResponse {
-                        config_id,
                         from,
                         at_index,
                         chunks,
@@ -622,9 +588,7 @@ where
                         // Pool-checked: only a pooled node's chunk bytes are
                         // installed (a replica outside the active
                         // configuration holds the same decided point).
-                        if *config_id == node.hard_state().config_id
-                            && node.config().pool().contains(from)
-                        {
+                        if node.config().pool().contains(from) {
                             let at = *at_index;
                             let chunks = chunks.clone();
                             handle_snap_chunk_response(
@@ -647,7 +611,6 @@ where
                     node.step(msg);
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
-                let _ = reply.send(());
             }
             Some(reply) = match_replies.recv() => {
                 // A matchmaker's answer to this candidate's registration (#120):
@@ -691,13 +654,14 @@ where
                     // instead), so the generation this node is finishing is
                     // exactly the one it believes in force.
                     MatchStep::Refused(MatchRefusal::Stopped { successor: None }) if !handover.is_busy() => {
-                        let current = node.matchmaker_set().clone();
-                        if handover.finish(&current).is_ok() {
-                            audit.reconfigurer_started(NodeId(self_id), &current, &current.members);
+                        if let Some(current) = node.matchmaker_set().cloned()
+                            && handover.finish(&current).is_ok()
+                        {
+                            audit.reconfigurer_started(NodeId(self_id), &current, current.members());
                             tracing::info!(
                                 node = self_id,
                                 generation = current.generation.0,
-                                target = current.members.len() as u64,
+                                target = current.members().len() as u64,
                                 finishing = true,
                                 "reconfigurer_started"
                             );
@@ -705,12 +669,19 @@ where
                         }
                     }
                     MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
-                        let set = node.matchmaker_set().clone();
-                        let behind = match &step {
-                            MatchStep::Refused(MatchRefusal::Generation { current }) => current.generation < set.generation,
-                            _ => true,
+                        // A refusal is only ever folded on a matchmaker
+                        // deployment (a plain node ignores every reply), so
+                        // the believed set is there to republish.
+                        let set = node.matchmaker_set().cloned();
+                        let behind = match (&step, &set) {
+                            (MatchStep::Refused(MatchRefusal::Generation { current }), Some(set)) => current.generation < set.generation,
+                            (_, Some(_)) => true,
+                            (_, None) => false,
                         };
-                        if behind && set.generation.0 > 0 {
+                        if let Some(set) = set
+                            && behind
+                            && set.generation.0 > 0
+                        {
                             audit.successor_republished(NodeId(self_id), matchmaker, &set);
                             tracing::info!(node = self_id, matchmaker = matchmaker.0, generation = set.generation.0, "successor_republished");
                             let request = ReconfigureRequest::Chosen {
@@ -790,23 +761,21 @@ where
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
-                let refusal = if !node.config().has_matchmakers() {
-                    "no_matchmakers"
-                } else if target.is_empty() {
-                    "empty"
-                } else if !target.iter().all(|m| links.clients.contains_key(m)) {
-                    "unknown_matchmaker"
-                } else {
-                    match handover.start(node.matchmaker_set(), target.clone()) {
+                let refusal = match node.matchmaker_set() {
+                    None => "no_matchmakers",
+                    Some(_) if target.is_empty() => "empty",
+                    Some(_) if !target.iter().all(|m| links.clients.contains_key(m)) => "unknown_matchmaker",
+                    Some(current) => match handover.start(current, target.clone()) {
                         Ok(()) => "",
                         Err(StartRefusal::Busy) => "busy",
                         Err(StartRefusal::Empty) => "empty",
-                        Err(StartRefusal::Malformed) => "malformed",
-                    }
+                    },
                 };
-                let generation = node.matchmaker_set().generation.0;
-                if refusal.is_empty() {
-                    audit.reconfigurer_started(NodeId(self_id), node.matchmaker_set(), &target);
+                let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
+                if let Some(current) = node.matchmaker_set()
+                    && refusal.is_empty()
+                {
+                    audit.reconfigurer_started(NodeId(self_id), current, &target);
                     tracing::info!(
                         node = self_id,
                         generation,
@@ -887,7 +856,6 @@ where
                     ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => (false, "no_matchmakers", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => (false, "unknown_member", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => (false, "round_exhausted", None),
                 };
@@ -1006,7 +974,7 @@ where
                 // No settle tail: an inspect is a pure read of the core and the
                 // store, so it produces no `Ready` batch.
                 let since = node.acceptors_since();
-                let set = node.matchmaker_set();
+                let matchmakers = node.matchmaker_set();
                 let (gc_watermark, retirable) = node.gc_effective().map_or((None, Vec::new()), |(w, retired)| {
                     (
                         Some(common::Ballot { round: w.round, node: w.node.0 }),
@@ -1020,8 +988,8 @@ where
                     members: node.acceptors().members().iter().map(|n| n.0).collect(),
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
-                    matchmaker_generation: set.generation.0,
-                    matchmakers: set.members.iter().map(|m| m.0).collect(),
+                    matchmaker_generation: matchmakers.map_or(0, |set| set.generation.0),
+                    matchmakers: matchmakers.map_or_else(Vec::new, |set| set.members().iter().map(|m| m.0).collect()),
                     retirable,
                     gc_watermark,
                 });
@@ -1136,7 +1104,7 @@ where
                         tracing::info!(
                             node = self_id,
                             generation = generation.0,
-                            members = bootstrap.set.members.len() as u64,
+                            members = bootstrap.set.members().len() as u64,
                             registrations = bootstrap.history.len() as u64,
                             watermark_round = bootstrap.gc_watermark.round,
                             disagreements = reconstruction.disagreements,

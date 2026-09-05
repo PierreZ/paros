@@ -90,15 +90,6 @@ impl MatchRequest {
         self.from_ballot = Some(from);
         self
     }
-
-    /// The ledger record this request registers.
-    #[must_use]
-    pub fn registration(&self) -> Registration {
-        Registration {
-            config: self.config.clone(),
-            kind: self.kind,
-        }
-    }
 }
 
 /// Why a matchmaker refused a request. Each variant carries enough for the
@@ -142,14 +133,6 @@ pub enum MatchRefusal {
     /// This matchmaker is not authoritative for any generation: a spare, or
     /// a proposed successor's member whose decree it has not learned.
     Inactive,
-    /// The configuration in the request does not admit its own quorum
-    /// system ([`AcceptorConfig::is_well_formed`]) — an unsorted or
-    /// duplicated membership, an empty one, or a quorum that cannot
-    /// intersect itself. Wire input, so a refusal and never an assert: the
-    /// registry would otherwise hold a record whose every later quorum
-    /// tally miscounts or panics, and `Matchmaker::assert_invariants`
-    /// crashes the process the moment it reads it back.
-    Malformed,
 }
 
 /// What a matchmaker answered a request with.

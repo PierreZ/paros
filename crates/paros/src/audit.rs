@@ -11,9 +11,9 @@
 //! Each callback fires **after** the transition it reports is real: a durable
 //! write after its fsync, an apply after the application saw it, a send beside
 //! the transmit. They sit exactly where the driver's `tracing` events already
-//! are — the trace stays for humans and the wasm demo, while correctness
-//! checking moves here, where an implementation can fold each transition into
-//! O(1) incremental state instead of re-scanning a growing event stream.
+//! are — the trace stays for humans, while correctness checking lives here,
+//! where an implementation can fold each transition into O(1) incremental
+//! state instead of re-scanning a growing event stream.
 //!
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
@@ -313,9 +313,8 @@ pub trait Audit {
 
     /// Monotone repair-progress totals for this incarnation, reported when
     /// they change: local faulty records repaired in place, Case-1 straggler
-    /// re-proposals, Case-2 straggler no-op fills, recovery-timeout
-    /// step-downs (CTRL §4.2), and cumulative repair payload bytes (the CTRL
-    /// §5.2 repair-cost metric).
+    /// re-proposals, Case-2 straggler no-op fills, and recovery-timeout
+    /// step-downs (CTRL §4.2).
     fn repair_progress(
         &self,
         node: NodeId,
@@ -323,7 +322,6 @@ pub trait Audit {
         case1: u64,
         case2: u64,
         step_downs: u64,
-        bytes: u64,
     ) {
     }
 
@@ -399,10 +397,16 @@ pub trait Audit {
     /// transient under an open application repair); the requester re-asks.
     fn snapshot_offer_skipped(&self, node: NodeId, offered: Slot) {}
 
-    /// One peer-delivery RPC toward `to` failed or timed out; every message
-    /// of that batch is lost at the transport. Reported from the delivery
-    /// task (the audit handle is cloned into it), so implementations must
-    /// stay observation-only here as everywhere.
+    /// One peer-delivery RPC toward `to` failed or timed out, so the batch
+    /// never (provably) entered the peer's inbox: the connection was down, or
+    /// the peer's bounded inbox stayed full for the whole `delivery_timeout`.
+    /// The peer acknowledges a batch as soon as its messages are *enqueued*,
+    /// never after it has stepped them, so a slow peer loop is not a failed
+    /// delivery — only an unreachable or saturated peer is. A timed-out batch
+    /// may still have been partly enqueued; the protocol's heartbeats and
+    /// resends repair whichever messages were lost. Reported from the
+    /// delivery task (the audit handle is cloned into it), so implementations
+    /// must stay observation-only here as everywhere.
     fn delivery_failed(&self, node: NodeId, to: NodeId) {}
 
     /// This node lost its leadership with client replies still parked:
@@ -758,7 +762,7 @@ pub trait Audit {
     fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
 
     /// The driver deliberately dropped one matchmaker reply after its write
-    /// was durable ([`DriverHooks::drop_client_reply`] with
+    /// was durable ([`DriverHooks::drop_client_reply`](crate::DriverHooks::drop_client_reply) with
     /// [`Reply::Match`](crate::Reply::Match), [`Reply::GcAck`](crate::Reply::GcAck)
     /// or [`Reply::MatchmakerReconfigure`](crate::Reply::MatchmakerReconfigure)).
     fn match_reply_dropped(&self, matchmaker: MatchmakerId, reply: crate::hooks::Reply) {}

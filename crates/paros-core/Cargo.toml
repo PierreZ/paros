@@ -22,7 +22,7 @@ default = ["tracing"]
 # itself wasm-safe, so the portability guarantee holds.
 serde = ["dep:serde"]
 # `#[tracing::instrument]` spans on the state machine's entry points and
-# message handlers (`RawNode::step`/`tick`/`propose`/…, `on_prepare`, …). On by
+# message handlers (`ColocatedNode::step`/`tick`/`propose`/…, `on_prepare`, …). On by
 # default so `paros` and `paros-sim` see the core's spans under the driver's
 # own; disable with `default-features = false` for a zero-dependency build.
 # Spans only observe: with the feature off the generated code is the bare

@@ -17,8 +17,7 @@ use crate::message::Message;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, Slot, Value,
-    command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value, command_fingerprint,
 };
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
@@ -139,26 +138,10 @@ fn registries(n: u64) -> Vec<Matchmaker> {
                     id: MatchmakerId(i),
                     bootstrap: (0..n).map(MatchmakerId).collect(),
                 },
-                &MemRegistry,
+                &crate::matchmaker::MemRegistry::default(),
             )
         })
         .collect()
-}
-
-/// An empty registry port for [`registries`].
-#[derive(Default)]
-struct MemRegistry;
-
-impl crate::matchmaker::RegistryStorage for MemRegistry {
-    fn initial_state(&self) -> crate::matchmaker::MatchmakerHardState {
-        crate::matchmaker::MatchmakerHardState::default()
-    }
-    fn registration(&self, _ballot: Ballot) -> Option<crate::matchmaker::Registration> {
-        None
-    }
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        Vec::new()
-    }
 }
 
 /// `AcceptorConfig` over `members` under the majority system.
@@ -260,7 +243,7 @@ const NO_CHECK_QUORUM: u64 = 1_000_000;
 /// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
 fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
     nodes[idx].set_election_timeout(1);
-    nodes[idx].tick(); // fires CheckLeader -> Candidate, broadcasts Prepare
+    nodes[idx].tick(); // election timeout -> Candidate, broadcasts Prepare
     let q = drain(&mut nodes[idx]);
     deliver_all(nodes, q);
     assert!(

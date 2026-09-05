@@ -74,9 +74,11 @@ pub struct DriverTunables {
     /// How long a peer connect attempt may take before it is retried. Floor:
     /// non-zero (a reconnecting channel retries forever).
     pub connection_timeout: Duration,
-    /// How long one peer-delivery RPC may take before its batch is written
-    /// off as lost (the mailbox is lossy by contract; resends repair it).
-    /// Floor: non-zero.
+    /// How long one peer-delivery RPC may take to get its batch *into the
+    /// peer's inbox* before the batch is written off as lost (the mailbox is
+    /// lossy by contract; resends repair it). The peer acks on enqueue, not
+    /// after processing, so this races the connection and the peer's
+    /// `peer_inbox_capacity`, never its loop. Floor: non-zero.
     pub delivery_timeout: Duration,
     /// Ticks a parked read may wait for its read-index confirmation before
     /// the driver answers a retry redirect. Floor: the confirmation is one
@@ -96,7 +98,8 @@ pub struct DriverTunables {
     /// is deliberately bounded and lossy: the consensus driver never waits for
     /// network I/O, and current heartbeats/resends repair anything dropped
     /// here (overflow evicts the oldest message, keep-newest). The extreme (a
-    /// handful of slots) makes mailbox overflow — [`Audit::dropped_at_mailbox`]
+    /// handful of slots) makes mailbox overflow —
+    /// [`Audit::dropped_at_mailbox`](crate::Audit::dropped_at_mailbox)
     /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
     /// Maximum Paxos messages packed into one protobuf/gRPC request. The

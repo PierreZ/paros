@@ -23,9 +23,10 @@
 //!   |             higher on the driver's next re-send
 //!   v
 //! Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of
-//!   |             each has learned it (stragglers are told again by any node that
-//!   v             meets them, see `ColocatedNode::on_match_reply`)
-//! Idle
+//!   |             each has learned it (re-sent to whoever has not answered; a member
+//!   |             that already activated answers `Learned` again, so a lost ack is
+//!   v             recovered; stragglers are told again by any node that meets them,
+//! Idle            see `ColocatedNode::on_match_reply`)
 //! ```
 //!
 //! Why this is safe: the frozen quorum's registries are immutable when
@@ -50,7 +51,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::decree::{AcceptFold, Decree, PromiseFold};
+use super::decree::{AcceptFold, Decree, DecreePromise};
 use super::{
     MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
     Registration,
@@ -65,16 +66,6 @@ pub enum StartRefusal {
     Busy,
     /// The target names no matchmaker.
     Empty,
-    /// A set in the request does not admit the matchmaker quorum system
-    /// ([`MatchmakerSet::is_well_formed`]) — the generation being replaced,
-    /// or the target. Under the majority system only the *current* set can
-    /// reach it in practice: [`MatchmakerSet::new`] sorts and deduplicates
-    /// the target, and every non-empty sorted set admits a majority. The
-    /// current set is not normalized here — it is what the caller believes
-    /// authoritative — and a malformed one would install a `Stopping` phase
-    /// whose quorum can never complete (an empty one panics the first time
-    /// a quorum is drawn).
-    Malformed,
 }
 
 /// Where the reconfigurer stands.
@@ -92,7 +83,7 @@ pub enum ReconfigurerPhase {
         /// The frozen registries collected so far.
         acks: BTreeMap<MatchmakerId, (Ballot, BTreeMap<Ballot, Registration>)>,
         /// The highest decree ballot any frozen member reported promised:
-        /// the decree opens strictly above it (see `decree_floor` on
+        /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
         decree_floor: Ballot,
         /// The highest **effective configuration** any frozen member
@@ -333,8 +324,10 @@ impl MatchmakerReconfigurer {
     /// # Errors
     ///
     /// [`StartRefusal::Busy`] while a handover runs; [`StartRefusal::Empty`]
-    /// for an empty target; [`StartRefusal::Malformed`] when `current` or the
-    /// target does not admit the matchmaker quorum system.
+    /// for an empty target. Both sets — `current`, over which every freeze
+    /// and decree quorum is drawn, and the target every later quorum is
+    /// drawn from — admit the matchmaker quorum system by construction
+    /// ([`MatchmakerSet::new`] is the only constructor and asserts it).
     pub fn start(
         &mut self,
         current: &MatchmakerSet,
@@ -343,21 +336,13 @@ impl MatchmakerReconfigurer {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
         }
-        // The generation being replaced is a quorum system too: every freeze
-        // and every decree quorum is drawn over it.
-        if !current.is_well_formed() {
-            return Err(StartRefusal::Malformed);
-        }
-        let target = MatchmakerSet::new(current.generation.next(), target);
-        if target.members.is_empty() {
+        if target.is_empty() {
             return Err(StartRefusal::Empty);
         }
-        // The successor must itself admit the quorum system every later
-        // freeze, decree and registration quorum is drawn from.
-        if !target.is_well_formed() {
-            return Err(StartRefusal::Malformed);
-        }
-        let target = target.members;
+        // Normalized through the one constructor, like every set.
+        let target = MatchmakerSet::new(current.generation.next(), target)
+            .members()
+            .to_vec();
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
             target: Some(target),
@@ -381,15 +366,10 @@ impl MatchmakerReconfigurer {
     ///
     /// # Errors
     ///
-    /// [`StartRefusal::Busy`] while a handover runs;
-    /// [`StartRefusal::Malformed`] when `current` does not admit the
-    /// matchmaker quorum system.
+    /// [`StartRefusal::Busy`] while a handover runs.
     pub fn finish(&mut self, current: &MatchmakerSet) -> Result<(), StartRefusal> {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
-        }
-        if !current.is_well_formed() {
-            return Err(StartRefusal::Malformed);
         }
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
@@ -454,7 +434,9 @@ impl MatchmakerReconfigurer {
     #[must_use]
     pub fn stop_quorum_reached(&self) -> bool {
         match &self.phase {
-            ReconfigurerPhase::Stopping { old, acks, .. } => acks.len() >= old.quorum_size(),
+            ReconfigurerPhase::Stopping { old, acks, .. } => {
+                old.has_quorum(&acks.keys().copied().collect())
+            }
             _ => false,
         }
     }
@@ -490,7 +472,7 @@ impl MatchmakerReconfigurer {
         else {
             return None;
         };
-        if acks.len() < old.quorum_size() {
+        if !old.has_quorum(&acks.keys().copied().collect()) {
             return None;
         }
         // The reconstruction (§5): the maximum watermark, and the union of
@@ -540,13 +522,6 @@ impl MatchmakerReconfigurer {
                 .all(|b| *b >= bootstrap.gc_watermark),
             "a reconstruction holds nothing below its watermark"
         );
-        // A proposed successor admits its quorum system: a `start` refused a
-        // malformed target, and a `finish` proposes the members that
-        // answered the freeze — a quorum of the old set, never fewer.
-        assert!(
-            bootstrap.set.is_well_formed(),
-            "a proposed successor admits the matchmaker quorum system"
-        );
         self.phase = ReconfigurerPhase::Bootstrapping {
             old: old.clone(),
             bootstrap: bootstrap.clone(),
@@ -572,7 +547,7 @@ impl MatchmakerReconfigurer {
         match &mut self.phase {
             ReconfigurerPhase::Idle => {}
             ReconfigurerPhase::Stopping { old, acks, .. } => {
-                for m in old.members.iter().filter(|m| !acks.contains_key(m)) {
+                for m in old.members().iter().filter(|m| !acks.contains_key(m)) {
                     queue.push((
                         *m,
                         ReconfigureRequest::Stop {
@@ -585,7 +560,7 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Bootstrapping {
                 bootstrap, acks, ..
             } => {
-                for m in bootstrap.set.members.iter().filter(|m| !acks.contains(m)) {
+                for m in bootstrap.set.members().iter().filter(|m| !acks.contains(m)) {
                     queue.push((
                         *m,
                         ReconfigureRequest::Bootstrap {
@@ -609,7 +584,7 @@ impl MatchmakerReconfigurer {
                             node: me,
                         },
                         old,
-                        bootstrap.set.members.clone(),
+                        bootstrap.set.members().to_vec(),
                     );
                 }
                 let ballot = decree.ballot();
@@ -641,10 +616,10 @@ impl MatchmakerReconfigurer {
                 new_acks,
             } => {
                 let mut targets: Vec<MatchmakerId> = old
-                    .members
+                    .members()
                     .iter()
                     .filter(|m| !old_acks.contains(m))
-                    .chain(successor.members.iter().filter(|m| !new_acks.contains(m)))
+                    .chain(successor.members().iter().filter(|m| !new_acks.contains(m)))
                     .copied()
                     .collect();
                 targets.sort_unstable();
@@ -777,7 +752,7 @@ impl MatchmakerReconfigurer {
                 if set != bootstrap.set || !set.contains(from) || !acks.insert(from) {
                     return ReconfigurerStep::Ignored;
                 }
-                let remaining = bootstrap.set.members.len() - acks.len();
+                let remaining = bootstrap.set.members().len() - acks.len();
                 if remaining > 0 {
                     return ReconfigurerStep::Bootstrapped { remaining };
                 }
@@ -792,7 +767,7 @@ impl MatchmakerReconfigurer {
                     round: self.round,
                     node: self.node,
                 };
-                let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members.clone()));
+                let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members().to_vec()));
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),
@@ -816,11 +791,11 @@ impl MatchmakerReconfigurer {
                             return ReconfigurerStep::Ignored;
                         }
                         let members = match decree.on_promise(from, vote) {
-                            PromiseFold::Ignored => return ReconfigurerStep::Ignored,
-                            PromiseFold::Counted { remaining } => {
+                            DecreePromise::Ignored => return ReconfigurerStep::Ignored,
+                            DecreePromise::Counted { remaining } => {
                                 return ReconfigurerStep::Promised { remaining };
                             }
-                            PromiseFold::Quorum(members) => members,
+                            DecreePromise::Quorum(members) => members,
                         };
                         let adopted = decree.adopted_prior_vote();
                         self.resend();
@@ -844,12 +819,6 @@ impl MatchmakerReconfigurer {
                             AcceptFold::Chosen(members) => members,
                         };
                         let successor = MatchmakerSet::new(old.generation.next(), members);
-                        // The decree chose what some reconfigurer bootstrapped,
-                        // and every bootstrap was a well-formed proposal.
-                        assert!(
-                            successor.is_well_formed(),
-                            "a chosen successor admits the matchmaker quorum system"
-                        );
                         self.phase = ReconfigurerPhase::Publishing {
                             old: old.clone(),
                             successor: successor.clone(),
@@ -943,38 +912,6 @@ mod tests {
         v.iter().copied().map(MatchmakerId).collect()
     }
 
-    /// Review finding P10: `start` and `finish` validated the target but not
-    /// the set being replaced. An empty or unsorted `current` installed a
-    /// `Stopping` phase whose quorum can never complete — and whose first
-    /// quorum draw panics — from a value the caller believes authoritative.
-    #[test]
-    fn a_malformed_current_set_is_refused_by_start_and_finish() {
-        let mut r = MatchmakerReconfigurer::new(NodeId(0));
-        let empty = MatchmakerSet {
-            generation: MatchmakerGeneration(0),
-            members: Vec::new(),
-        };
-        assert_eq!(
-            r.start(&empty, ids(&[0, 1, 2])),
-            Err(StartRefusal::Malformed)
-        );
-        assert_eq!(r.finish(&empty), Err(StartRefusal::Malformed));
-        let unsorted = MatchmakerSet {
-            generation: MatchmakerGeneration(0),
-            members: ids(&[2, 1, 0]),
-        };
-        assert_eq!(
-            r.start(&unsorted, ids(&[0, 1, 2])),
-            Err(StartRefusal::Malformed)
-        );
-        assert_eq!(r.finish(&unsorted), Err(StartRefusal::Malformed));
-        assert!(!r.is_busy(), "a refusal starts nothing");
-        // The same call over a well-formed current runs.
-        let current = MatchmakerSet::new(MatchmakerGeneration(0), ids(&[0, 1, 2]));
-        assert_eq!(r.start(&current, ids(&[0, 1, 3])), Ok(()));
-        assert!(r.is_busy());
-    }
-
     /// A pool of matchmakers, `0..n`, bootstrapped on `bootstrap`.
     fn pool(n: u64, bootstrap: &[u64]) -> Vec<Matchmaker> {
         (0..n)
@@ -1032,6 +969,100 @@ mod tests {
 
     fn set(g: u64, m: &[u64]) -> MatchmakerSet {
         MatchmakerSet::new(MatchmakerGeneration(g), ids(m))
+    }
+
+    /// Like [`deliver`], but every matchmaker *does* step its request and
+    /// only the replies of `mute` are lost on the way back — the shape of a
+    /// lost ack, as opposed to a lost request.
+    fn deliver_muting(
+        r: &mut MatchmakerReconfigurer,
+        pool: &mut [Matchmaker],
+        mute: &[u64],
+    ) -> Vec<ReconfigurerStep> {
+        let mut steps = Vec::new();
+        let ready = r.ready();
+        let requests = ready.requests().to_vec();
+        ready.advance();
+        for (to, request) in requests {
+            let mm = &mut pool[usize::try_from(to.0).expect("index")];
+            mm.step_reconfigure(request);
+            let ready = mm.ready();
+            let replies = ready.reconfigure_replies().to_vec();
+            ready.advance();
+            if mute.contains(&to.0) {
+                continue;
+            }
+            for reply in replies {
+                steps.push(r.on_reply(reply));
+            }
+        }
+        steps
+    }
+
+    /// A `Learned` lost on its way back from a member that *activated* the
+    /// successor must not end the handover: the re-sent `Chosen` finds that
+    /// member already at the successor's generation, and it answers
+    /// `Learned { activated: false, at: g + 1 }` again — counted toward the
+    /// successor's quorum, so the publication reaches `Done`. Before
+    /// `Matchmaker::on_chosen` had that arm the member fell through to a
+    /// refusal naming its new `current`, which the reconfigurer read as
+    /// `Superseded` and aborted: one lost ack from an activated member and
+    /// `Done` was unreachable.
+    #[test]
+    fn a_lost_learned_from_an_activated_member_is_recovered_by_the_re_sent_chosen() {
+        let mut pool = pool(4, &[0, 1, 2]);
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        exchange(&mut r, &mut pool, &[]);
+        exchange(&mut r, &mut pool, &[]);
+        exchange(&mut r, &mut pool, &[]);
+        let steps = exchange(&mut r, &mut pool, &[]);
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, ReconfigurerStep::Chosen { .. }))
+        );
+        assert!(matches!(r.phase(), ReconfigurerPhase::Publishing { .. }));
+        // Every matchmaker learns the decision, but the acks of two successor
+        // members — one shared with the old set, one spare — are lost. The
+        // old set's quorum is met (1 and 2 answered); the successor's is not.
+        let steps = deliver_muting(&mut r, &mut pool, &[0, 3]);
+        assert_eq!(
+            steps,
+            vec![
+                ReconfigurerStep::Published {
+                    old_remaining: 1,
+                    new_remaining: 1,
+                },
+                ReconfigurerStep::Published {
+                    old_remaining: 0,
+                    new_remaining: 1,
+                },
+            ]
+        );
+        for i in [0, 1, 3] {
+            assert_eq!(pool[i].phase(), MatchmakerPhase::Active);
+            assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
+        }
+        assert!(
+            r.is_busy(),
+            "a publication short of the successor's quorum stays open"
+        );
+        // The driver's re-send reaches the two activated members again.
+        r.resend();
+        let steps = deliver(&mut r, &mut pool, &[]);
+        assert!(
+            steps.iter().any(|s| matches!(s, ReconfigurerStep::Done { successor } if *successor == set(1, &[0, 1, 3]))),
+            "the re-sent Chosen is acknowledged by the activated members: {steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, ReconfigurerStep::Superseded { .. })),
+            "an activated member is not a superseding generation"
+        );
+        assert!(!r.is_busy());
     }
 
     /// The happy path: stop a quorum, bootstrap all of the successor, decide,

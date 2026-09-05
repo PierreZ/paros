@@ -172,9 +172,6 @@ impl LinHistory {
         if multi_client {
             assert_reachable!("a run drives concurrent clients against one register");
         }
-        if multi_client {
-            assert_reachable!("a run drives concurrent clients against one register");
-        }
         let concurrent_read_write = self.reads.iter().any(|&(r, _)| {
             self.writes
                 .iter()
@@ -184,33 +181,18 @@ impl LinHistory {
             concurrent_read_write,
             "a linearizable read commits concurrently with a conflicting write"
         );
-        if concurrent_read_write {
-            assert_reachable!("a linearizable read commits concurrently with a conflicting write");
-        }
         assert_sometimes!(!self.read_wm.is_empty(), "a linearizable read commits");
-        if !self.read_wm.is_empty() {
-            assert_reachable!("a linearizable read commits");
-        }
         let multi_slot = self.read_wm.values().any(|wm| *wm >= Some(1));
         assert_sometimes!(multi_slot, "a committed read observes a multi-slot prefix");
-        if multi_slot {
-            assert_reachable!("a committed read observes a multi-slot prefix");
-        }
         // A read served after leadership changed hands — the window where a
         // naive local read goes stale.
         let read_after_change =
             leader_change_ms.is_some_and(|t| self.read_ack_ms.iter().any(|&ms| ms > t));
         assert_sometimes!(read_after_change, "a read commits after a leader change");
-        if read_after_change {
-            assert_reachable!("a read commits after a leader change");
-        }
         assert_sometimes!(
             self.read_retried,
             "a read is retried across nodes before committing"
         );
-        if self.read_retried {
-            assert_reachable!("a read is retried across nodes before committing");
-        }
     }
 }
 

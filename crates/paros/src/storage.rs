@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 
-use paros_core::{
-    Ballot, Command, Config, ConfigId, HardState, MustSync, SessionEntry, Slot, Storage,
-};
+use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 
@@ -37,8 +35,6 @@ pub fn snap_chunk_count(len: usize) -> u32 {
 /// reaction without string parsing. New identities slot in as plain variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageRecord {
-    /// The durable cluster-configuration identity scalar.
-    ConfigId,
     /// The promised-ballot scalar (the `HardState` promise).
     Promise,
     /// The accepted `(ballot, command)` entry at this slot.
@@ -54,10 +50,6 @@ pub enum StorageRecord {
     SnapChunk(Slot, u32),
     /// The staged application transition at this slot (the apply seam).
     Application(Slot),
-    /// A matchmaker's registration of a configuration under this ballot.
-    Registration(Ballot),
-    /// A matchmaker's durable GC watermark scalar.
-    GcWatermark,
     /// The whole staged batch: an fsync flushes every record staged since the
     /// last flush, so a failed fsync has no single-record identity.
     Batch,
@@ -70,7 +62,6 @@ pub enum StorageRecord {
 impl fmt::Display for StorageRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageRecord::ConfigId => write!(f, "config-id"),
             StorageRecord::Promise => write!(f, "promise"),
             StorageRecord::Accepted(slot) => write!(f, "accepted[{}]", slot.0),
             StorageRecord::ChosenIndex => write!(f, "chosen-index"),
@@ -80,10 +71,6 @@ impl fmt::Display for StorageRecord {
                 write!(f, "snap-chunk[{}#{chunk}]", at.0)
             }
             StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
-            StorageRecord::Registration(ballot) => {
-                write!(f, "registration[{}.{}]", ballot.round, ballot.node.0)
-            }
-            StorageRecord::GcWatermark => write!(f, "gc-watermark"),
             StorageRecord::Batch => write!(f, "batch"),
             StorageRecord::Store => write!(f, "store"),
         }
@@ -323,15 +310,6 @@ pub trait NodeStorage: Storage {
         async { Ok(()) }
     }
 
-    /// Persist the durable cluster configuration identity.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the durable write fails.
-    fn persist_config_id(
-        &mut self,
-        config_id: ConfigId,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
-
     /// Persist a raised promised ballot (Phase 1).
     ///
     /// # Errors
@@ -536,9 +514,9 @@ pub trait NodeStorage: Storage {
 /// while draining a [`paros_core::Ready`]. The durable scalars and the per-slot
 /// accepted log are stored separately (never a single blob).
 ///
-/// A crash-testable faulty fake (fail-stop, corruption, protocol-aware recovery)
-/// arrives with the storage-fault milestone (Stage 6); the driver is generic over
-/// [`NodeStorage`], so it swaps in without touching the loop.
+/// The crash-testable faulty store (fail-stop, corruption, protocol-aware
+/// recovery) is the harness's world-backed disk in `paros-sim`; the driver is
+/// generic over [`NodeStorage`], so it swaps in without touching the loop.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     hard_state: HardState,
@@ -607,12 +585,6 @@ impl MemStorage {
 }
 
 impl NodeStorage for MemStorage {
-    #[tracing::instrument(level = "trace", skip_all, fields(config_id = config_id.0))]
-    async fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
-        self.hard_state.config_id = config_id;
-        Ok(())
-    }
-
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.hard_state.max_promised_ballot = ballot;
@@ -817,7 +789,6 @@ pub async fn storage_contract_suite<S: NodeStorage>(
 
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh();
-    s.persist_config_id(ConfigId(3)).await.expect("config id");
     s.persist_ballot(ballot(4)).await.expect("ballot");
     s.append_accepted(Slot(0), ballot(4), user(1, 0xa))
         .await
@@ -829,7 +800,6 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     s.sync(MustSync::Sync).await.expect("sync");
     let mut s = reopen(s);
     let (hs, _config) = s.initial_state();
-    assert_eq!(hs.config_id, ConfigId(3), "config id round-trips");
     assert_eq!(hs.max_promised_ballot, ballot(4), "promise round-trips");
     assert_eq!(hs.chosen_index, Some(Slot(1)), "chosen index round-trips");
     assert_eq!(s.first_slot(), Slot(0), "floor starts at zero");
@@ -995,29 +965,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::{ConfigId, NodeId};
-
-    #[test]
-    fn config_id_round_trips_through_storage() {
-        let mut storage = MemStorage::new(Config {
-            id: NodeId(1),
-            peers: vec![NodeId(1)],
-            ..Config::default()
-        });
-
-        futures::executor::block_on(async {
-            storage
-                .persist_config_id(ConfigId(17))
-                .await
-                .expect("persist configuration identity");
-            storage
-                .sync(MustSync::Sync)
-                .await
-                .expect("sync configuration identity");
-        });
-
-        assert_eq!(storage.initial_state().0.config_id, ConfigId(17));
-    }
+    use paros_core::NodeId;
 
     /// The shared behavioral contract, against the library's default storage.
     /// The simulation runs the same suite against its world-backed storage.

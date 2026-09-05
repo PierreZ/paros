@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::membership::{MatchmakerId, QuorumSystem};
-use crate::types::{Ballot, ConfigId, NodeId, Slot};
+use crate::types::{Ballot, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -25,9 +25,6 @@ use crate::types::{Ballot, ConfigId, NodeId, Slot};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct HardState {
-    /// Durable identity of the cluster configuration this node belongs to.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub config_id: ConfigId,
     /// Highest ballot this node has promised (Phase 1). Monotonically
     /// non-decreasing across the node's lifetime.
     pub max_promised_ballot: Ballot,

@@ -19,5 +19,4 @@ default-theme = "rust"
 additional-js = [
     "book/theme/mermaid.min.js",
     "book/theme/mermaid-init.js",
-    "book/theme/iframe-autosize.js",
 ]

@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
+use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
 use paros::DriverTunables;
@@ -158,8 +158,27 @@ impl NodeShape {
             connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(floor_ticks),
+            // Floor 1: the snapshot lane is a keep-newest `PeerMailbox` that
+            // carries one class (`InstallSnapshot`), so a one-slot lane only
+            // ever evicts an older offer to the same peer in favour of the
+            // newer one, and the requester re-asks every beat — a slower
+            // transfer, never a starved class.
             snapshot_queue_capacity: buggify_knob!(4_usize, 1_usize..9_usize),
+            // Floor 1: the client inboxes are bounded mpsc queues whose tonic
+            // handlers `send().await` into them, so a full inbox is
+            // backpressure (the h2 request waits for the loop to drain one
+            // request), never a dropped request; a one-slot inbox serialises
+            // clients, and a client that waits past its own deadline times
+            // out ambiguously, never wrongly.
             client_inbox_capacity: buggify_knob!(256_usize, 1_usize..17_usize),
+            // Floor 1, same contract: the peer-delivery handler and the
+            // matchmaker reply sinks `send().await`, so a full inbox stalls
+            // the delivering peer's RPC until the loop takes one message
+            // (one message per loop iteration is throttling, not a drop);
+            // a batch that stalls past `delivery_timeout` is written off and
+            // repaired by the next re-send, the mailbox's own contract. Only
+            // the duplicate-reply hook uses `try_send`, and a duplicate that
+            // finds no room is simply not injected.
             peer_inbox_capacity: buggify_knob!(1024_usize, 1_usize..65_usize),
             peer_queue_capacity,
             delivery_batch,
@@ -244,11 +263,10 @@ impl Incarnation {
 }
 
 struct Entry {
+    /// Drawn once, on the node's first boot: the registry entry is created
+    /// exactly once per `ip` (`or_insert_with`), so a restart can only ever
+    /// reuse the shape, never redraw it.
     shape: NodeShape,
-    /// How many times this node's shape was *drawn*. The registry can only
-    /// ever draw once per node by construction; the count exists so the
-    /// end-of-run gate asserts the construction rather than trusting it.
-    draws: u64,
     incarnations: u64,
 }
 
@@ -289,7 +307,6 @@ pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation 
         } else {
             NodeShape::production()
         },
-        draws: 1,
         incarnations: 0,
     });
     entry.incarnations += 1;
@@ -482,24 +499,6 @@ pub(crate) fn matchmaker_floor(bootstrap: usize) -> usize {
     bootstrap.min(MATCHMAKER_LOSS_FLOOR)
 }
 
-/// The shape gate, evaluated once per run from the workload's `check()`: every
-/// node that booted drew its shape exactly once, however many incarnations it
-/// went through. A second draw is what an attrition restart used to do
-/// silently; this keeps it a violation instead of a regression waiting to be
-/// noticed.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_shape_gates(state: &StateHandle) {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    for (ip, entry) in &guard.nodes {
-        assert_always!(
-            entry.draws == 1 && entry.incarnations >= 1,
-            "a node's shape is drawn exactly once per seed, whatever its incarnation count",
-            { "ip" => ip.as_str(), "draws" => entry.draws, "incarnations" => entry.incarnations }
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,7 +522,6 @@ mod tests {
         let registry = registry(&state);
         let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = &guard.nodes["10.0.1.1"];
-        assert_eq!(entry.draws, 1);
         assert_eq!(entry.incarnations, 2);
         assert_eq!(guard.nodes["10.0.1.2"].incarnations, 1);
     }

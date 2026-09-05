@@ -36,28 +36,6 @@ mod client;
 mod matchmaker;
 mod state;
 
-/// A stable label per message kind, for the failure print's send tally.
-fn message_kind(msg: &Message) -> &'static str {
-    match msg {
-        Message::Prepare { .. } => "prepare",
-        Message::Promise { .. } => "promise",
-        Message::Accept { .. } => "accept",
-        Message::Accepted { .. } => "accepted",
-        Message::Commit { .. } => "commit",
-        Message::Nack { .. } => "nack",
-        Message::Heartbeat { .. } => "heartbeat",
-        Message::HeartbeatAck { .. } => "heartbeat_ack",
-        Message::CatchUpRequest { .. } => "catch_up_request",
-        Message::CatchUpResponse { .. } => "catch_up_response",
-        Message::InstallSnapshot { .. } => "install_snapshot",
-        Message::Relinquish { .. } => "relinquish",
-        Message::SnapAck { .. } => "snap_ack",
-        Message::SnapChunkRequest { .. } => "snap_chunk_request",
-        Message::SnapChunkResponse { .. } => "snap_chunk_response",
-        _ => "other",
-    }
-}
-
 pub(crate) use client::ClientHistory;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,7 +48,7 @@ use paros::{
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
     RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
-    StorageRecord, command_hash,
+    StorageRecord, command_hash, message_kind,
 };
 
 use self::state::AuditState;
@@ -339,11 +317,9 @@ impl AuditWorld {
     }
 
     /// A matchmaker's registry was lost for good (#125).
-    #[tracing::instrument(level = "debug", skip(self), fields(matchmaker))]
-    pub(crate) fn note_matchmaker_lost(&self, matchmaker: u64) {
-        let mut st = self.lock();
-        st.matchmakers_lost.insert(matchmaker);
-        st.matchmaker.lost();
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub(crate) fn note_matchmaker_lost(&self) {
+        self.lock().matchmaker.lost();
     }
 
     /// A node booted again after a process-level kill (moonpool attrition on
@@ -612,7 +588,6 @@ pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
     audit.check_client_history(history);
     audit.check_gates();
     crate::world::check_storage_gates(state);
-    crate::shape::check_shape_gates(state);
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()
@@ -965,13 +940,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
             self.state().observe_prepare_send(node.0, to.0, *ballot);
         }
-        if msg.config_id().is_some() {
-            let mut st = self.state();
-            reach_once!(
-                st.config_tagged_protocol_message,
-                "a protocol message carries a configuration identity"
-            );
-        }
         if let Message::Relinquish {
             from,
             ballot,
@@ -1063,10 +1031,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // #122): the ballot's own acceptors, once every prior
             // configuration promised a quorum.
             st.observe_accept_send(node.0, to.0, *ballot);
-            reach_once!(
-                st.any_proposal_checked,
-                "a proposed command is checked against its ballot's other proposals"
-            );
+            st.any_proposal_checked = true;
             if let Some(prev) = st
                 .proposed
                 .insert((ballot.round, ballot.node.0, slot.0), vhash)
@@ -1132,11 +1097,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             won >= promised,
             "a fresh leader has not promised a ballot above the one it won"
         );
-        reach_once!(
-            st.leader_promise_checked,
-            "a fresh leader's promise is checked against the ballot it won"
-        );
-        reach_once!(st.any_leader, "a leader is elected");
+        st.leader_promise_checked = true;
+        st.any_leader = true;
         st.leader_rounds.insert(won.round);
         if st.leader_rounds.len() >= 2 {
             reach_once!(
@@ -1266,18 +1228,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "leadership is handed over more than once in a run"
             );
         }
-        reach_once!(st.any_leader, "a leader is elected");
+        st.any_leader = true;
     }
 
     fn handoff_refused(&self, _node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {
         let mut st = self.state();
-        let (last_target, last_stale, last_shape, last_unfit) = st.handoff_refused;
-        st.handoff_refused = (
-            target.max(last_target),
-            stale.max(last_stale),
-            shape.max(last_shape),
-            unfit.max(last_unfit),
-        );
         if target > 0 {
             reach_once!(
                 st.handoff_refused_target,
@@ -1331,10 +1286,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         dedup: bool,
     ) {
         let mut st = self.state();
-        reach_once!(
-            st.any_ack_checked,
-            "a committed write ack is checked against the acking node's applied prefix"
-        );
+        st.any_ack_checked = true;
         // A committed ack is a claim about a specific applied command: on both
         // ack paths (ack-on-commit and the dedup fast path) the apply of this
         // `(client, seq)` was folded before the ack fired — on this node, or,
@@ -1359,10 +1311,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // The dedup-window edge the reply-drop location exists for: a reply
         // was dropped after commit, and a retry then took the dedup path.
         if dedup && st.propose_reply_dropped {
-            reach_once!(
-                st.dedup_after_dropped_reply,
-                "a committed proposal ack is lost and the retry takes the dedup path"
-            );
+            st.dedup_after_dropped_reply = true;
         }
         // `committed = true` is the promise that the write is in the register
         // this project defines — the *applied* log prefix — so an ack that
@@ -1594,7 +1543,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         st.crashed_any = true;
         match seam {
-            Seam::BeforeSync => st.crashed_before_sync = true,
+            Seam::BeforeSync => {
+                reach_once!(
+                    st.crashed_before_sync,
+                    "the driver crashes before syncing a staged batch"
+                );
+            }
             Seam::AfterSyncBeforeSend => {
                 reach_once!(
                     st.crashed_after_sync,
@@ -1702,15 +1656,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 reach_once!(
                     st.dropped_relinquish,
                     "the driver drops a relinquishment at the send seam"
-                );
-            }
-            // Inert today: `CheckLeader` never crosses the transport (it is a
-            // tick-injected self-event), so this reach gate creates no slot
-            // until a future remote probe makes the drop arm live.
-            Message::CheckLeader { .. } => {
-                reach_once!(
-                    st.dropped_check_leader,
-                    "the driver drops a check-leader at the send seam"
                 );
             }
             _ => {}
@@ -1985,11 +1930,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn quorum_lost(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.quorum_lost,
-            "a leader without an ack quorum steps down (CheckQuorum)"
-        );
+        self.state().quorum_lost = true;
     }
 
     fn duplicate_suppressed(&self, _node: NodeId, _count: u64) {
@@ -2036,7 +1977,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         case1: u64,
         case2: u64,
         step_downs: u64,
-        _bytes: u64,
     ) {
         let mut st = self.state();
         if repaired > 0 {
@@ -2392,14 +2332,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "generation: a client's matchmaker reconfiguration is refused"
             );
         }
-    }
-
-    fn reconfigure_request_sent(
-        &self,
-        _node: NodeId,
-        _matchmaker: MatchmakerId,
-        _request: &ReconfigureRequest,
-    ) {
     }
 
     fn reconfigurer_resend_skipped(&self, _node: NodeId) {

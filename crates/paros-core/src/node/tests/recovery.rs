@@ -53,9 +53,7 @@ fn promise_reports_faulty_tristate_never_none() {
     // Rot slot 1 (chosen) is below a fresh candidate's from_slot; craft a
     // prepare from slot 0 to cover the whole log instead.
     n.step(Message::Prepare {
-        config_id: ConfigId(0),
         reply_to: NodeId(2),
-        leader: NodeId(2),
         ballot: ballot(9, 2),
         from_slot: Slot(0),
         config: None,
@@ -101,7 +99,6 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // The leader re-sends its pending Accept: the fresh record replaces the
     // lost one.
     let accept = Message::Accept {
-        config_id: ConfigId(0),
         reply_to: NodeId(0),
         leader: NodeId(0),
         ballot: nodes[0].ballot(),
@@ -114,9 +111,8 @@ fn accept_repairs_a_faulty_slot_in_place() {
         "the faulty entry was repaired"
     );
     assert!(n.acceptor().records().contains_key(&Slot(3)));
-    let (repaired, _c1, _c2, _sd, bytes) = n.repair_counters();
+    let (repaired, _c1, _c2, _sd) = n.repair_counters();
     assert_eq!(repaired, 1);
-    assert!(bytes > 0, "the repair-cost metric counted the payload");
 }
 
 /// R3 Case 2 at the election itself: with the faulty reporter excluded, a full
@@ -196,7 +192,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
         Some(val(40)),
         "the straggler's clean copy was recovered, not overwritten"
     );
-    let (_r, case1, case2, _sd, _b) = nodes[0].repair_counters();
+    let (_r, case1, case2, _sd) = nodes[0].repair_counters();
     assert_eq!(case1, 1);
     assert_eq!(case2, 0);
 }
@@ -233,7 +229,7 @@ fn recovery_timeout_steps_the_leader_down() {
             break;
         }
     }
-    let (_r, _c1, _c2, step_downs, _b) = nodes[0].repair_counters();
+    let (_r, _c1, _c2, step_downs) = nodes[0].repair_counters();
     assert_eq!(step_downs, 1, "the recovery timeout fired");
     assert!(!nodes[0].is_leader(), "the blocked leader resigned");
 }
@@ -345,7 +341,6 @@ fn install_snapshot_at_equal_index_closes_a_below_floor_repair() {
     // A snapshot at chosen_index == our own chosen index is normally a no-op;
     // with the repair open it is the heal.
     n.step(Message::InstallSnapshot {
-        config_id: ConfigId(0),
         from: NodeId(0),
         ballot: nodes[0].ballot(),
         chosen_index: Slot(2),

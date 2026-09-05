@@ -25,13 +25,13 @@ impl ColocatedNode {
     /// to prepare the acceptors of every *older* one — the members that keep
     /// answering Phase 1 for the ballots they took part in until GC retires
     /// them — and it need not be a member of that older configuration itself.
-    /// The guard is "the campaigning `leader` is the ballot's owner, and both
-    /// it and the `reply_to` address are pooled nodes".
+    /// The guard is "the ballot's owner — the campaigning candidate, which is
+    /// always [`Ballot::node`] since Phase 1 is never proxied — and the
+    /// `reply_to` address are both pooled nodes".
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, round = ballot.round, from_slot = from_slot.0)))]
     pub(super) fn on_prepare(
         &mut self,
         reply_to: NodeId,
-        leader: NodeId,
         ballot: Ballot,
         from_slot: Slot,
         config: Option<AcceptorConfig>,
@@ -41,7 +41,7 @@ impl ColocatedNode {
         // A Promise continuation is valid only for the pooled proposer named
         // by the ballot. The reply address is checked against the pool too,
         // so a promise never answers an arbitrary wire id.
-        if !self.in_pool(reply_to) || !self.in_pool(leader) || ballot.node != leader {
+        if !self.in_pool(reply_to) || !self.in_pool(ballot.node) {
             return;
         }
         match self
@@ -125,7 +125,6 @@ impl ColocatedNode {
                 self.pending_messages.push((
                     Audience::Node(reply_to),
                     Message::Promise {
-                        config_id: self.config_id,
                         from: me,
                         ballot,
                         from_slot,
@@ -229,7 +228,6 @@ impl ColocatedNode {
                 self.pending_messages.push((
                     Audience::Node(reply_to),
                     Message::Accepted {
-                        config_id: self.config_id,
                         from: me,
                         ballot,
                         slot,
@@ -258,16 +256,13 @@ impl ColocatedNode {
         }
     }
 
-    /// Queue a `Nack` for `ballot` at `slot` to `to`, reporting the promise
-    /// that won.
+    /// Queue a `Nack` for `ballot` at `slot` to `to`.
     fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
         self.pending_messages.push((
             Audience::Node(to),
             Message::Nack {
-                config_id: self.config_id,
                 from: self.config.id,
                 ballot,
-                promised: self.acceptor.promised(),
                 slot,
             },
         ));

@@ -25,66 +25,39 @@ mod storage;
 
 pub use audit::{Audit, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
 pub use corruption::{
-    CorruptionVerdict, EntryEvidence, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus,
-    classify_log, decide,
+    CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
 pub use driver::{
-    DriverTunables, EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED,
-    EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED,
-    EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_HANDOFF_FENCE_EXPIRED,
-    EV_HANDOFF_REFUSED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE,
-    EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST,
-    EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError,
-    command_hash, parse_addr, registration_history_hash, run_node,
+    DriverTunables, RunError, command_hash, message_kind, parse_addr, registration_history_hash,
+    run_node,
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, ParosMatchmakerClient, Propose, ProposeAck, Read, ReadAck, Reconfigure,
-    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
-    WireGarbageCollect, WireGarbageCollectAck, WireMatchReply, WireMatchRequest,
-    WireReconfigureReply, WireReconfigureRequest, garbage_collect_ack_from_wire,
-    garbage_collect_from_wire, match_reply_from_wire, match_request_from_wire,
-    reconfigure_reply_from_wire, reconfigure_request_from_wire, wire_garbage_collect,
-    wire_garbage_collect_ack, wire_match_reply, wire_match_request, wire_reconfigure_reply,
-    wire_reconfigure_request,
+    ParosInternalClient, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
+    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{
-    MatchmakerStorage, MemMatchmakerStorage, config_hash, matchmaker_storage_contract_suite,
-    reconfigure_kind, reconfigure_reply_kind, run_matchmaker,
+    MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
 
-pub use paros_core::acceptor::Acceptor;
-pub use paros_core::proposer::Proposer;
-pub use paros_core::replica::Replica;
-pub use paros_core::{
-    AcceptorConfig, AcceptorWrite, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command,
-    Config, ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
-    HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
-    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
-    MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerReady, MatchmakerReconfigurer, MatchmakerSet,
-    MatchmakerWriteOp, Message, MustSync, NodeId, NodeRole, PROMISE_BATCH, PendingBootstrap,
-    ProposeResult, QuorumSystem, REGISTRY_PAGE, ReadIndexResult, ReadState, Ready,
-    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, SessionEntry, Slot,
-    StartRefusal, Storage, Value, WriteOp, command_fingerprint,
-};
-
-pub use paros_core::REPAIR_TIMEOUT_ELECTIONS;
+// The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
+// `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the
+// matchmaker, and every message, record and scalar type they exchange. No core
+// name collides with a name `paros` defines itself, so a user reaches both
+// through one path.
+pub use paros_core::*;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use paros_core::{
-        Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Message, NodeId, Slot,
-        Value,
+        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
     };
     use prost::Message as ProstMessage;
 
@@ -95,7 +68,6 @@ mod tests {
             round: 7,
             node: NodeId(3),
         };
-        let config_id = ConfigId(42);
         let entry = Entry {
             client: ClientId(1),
             seq: ClientSeq(2),
@@ -113,9 +85,7 @@ mod tests {
         catchup.insert(Slot(4), (ballot, command.clone()));
         vec![
             Message::Prepare {
-                config_id,
                 reply_to: NodeId(1),
-                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: None,
@@ -123,9 +93,7 @@ mod tests {
             // A matchmaker deployment's `Prepare` carries the registered
             // configuration; the plain one above carries none.
             Message::Prepare {
-                config_id,
                 reply_to: NodeId(1),
-                leader: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
                 config: Some(paros_core::AcceptorConfig::new(
@@ -134,7 +102,6 @@ mod tests {
                 )),
             },
             Message::Promise {
-                config_id,
                 from: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
@@ -143,7 +110,6 @@ mod tests {
                 next_from_slot: None,
             },
             Message::Accept {
-                config_id,
                 reply_to: NodeId(2),
                 leader: NodeId(2),
                 ballot,
@@ -154,7 +120,6 @@ mod tests {
             // Phase 2 would put on the wire, and the only case that encodes
             // the optional `leader` field at all.
             Message::Accept {
-                config_id,
                 reply_to: NodeId(5),
                 leader: NodeId(2),
                 ballot,
@@ -162,24 +127,17 @@ mod tests {
                 command: command.clone(),
             },
             Message::Accepted {
-                config_id,
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 vhash: 17,
             },
             Message::Nack {
-                config_id,
                 from: NodeId(2),
                 ballot,
-                promised: Ballot {
-                    round: 9,
-                    node: NodeId(4),
-                },
                 slot: Slot(6),
             },
             Message::Commit {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 slot: Slot(6),
@@ -194,7 +152,6 @@ mod tests {
                 entries: catchup,
             },
             Message::InstallSnapshot {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 chosen_index: Slot(5),
@@ -206,9 +163,7 @@ mod tests {
                     (ClientId(4), ClientSeq(0), Slot(5)),
                 ],
             },
-            Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: Some(Slot(2)),
@@ -216,7 +171,6 @@ mod tests {
                 config: None,
             },
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: Some(Slot(2)),
@@ -230,7 +184,6 @@ mod tests {
             // wire encoding used to be unable to say (#56): a leader that has
             // chosen nothing is not a leader that has chosen slot 0.
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: None,
@@ -238,7 +191,6 @@ mod tests {
                 config: None,
             },
             Message::HeartbeatAck {
-                config_id,
                 from: NodeId(1),
                 ballot,
                 seq: 9,
@@ -247,18 +199,15 @@ mod tests {
             // The driver-terminal snap-repair trio carries the configuration
             // identity too (guarded by the driver on receipt, never asserted).
             Message::SnapAck {
-                config_id,
                 from: NodeId(2),
                 at_index: Slot(4),
             },
             Message::SnapChunkRequest {
-                config_id,
                 from: NodeId(1),
                 at_index: Slot(4),
                 chunks: vec![0, 3],
             },
             Message::SnapChunkResponse {
-                config_id,
                 from: NodeId(0),
                 at_index: Slot(4),
                 chunks: vec![(0, Value(vec![1, 2])), (3, Value(vec![]))],
@@ -269,7 +218,6 @@ mod tests {
             // (it is the transferred ballot by construction), so the round
             // trip is what pins that re-derivation.
             Message::Relinquish {
-                config_id,
                 from: NodeId(3),
                 to: NodeId(1),
                 ballot,
@@ -304,7 +252,6 @@ mod tests {
             // The empty tail: a fully settled leader hands over the frontier
             // and nothing else.
             Message::Relinquish {
-                config_id,
                 from: NodeId(3),
                 to: NodeId(2),
                 ballot,
@@ -572,35 +519,25 @@ mod tests {
         }
     }
 
-    /// The `leader` field of a `Prepare`/`Accept` is absent from the wire
-    /// whenever it would merely repeat the reply address — which is every
-    /// message paros sends today, on a plain deployment and on a matchmaker
-    /// one alike. This pins the encoding against the day a proxied Phase 2
-    /// starts populating it.
+    /// The `leader` field of an `Accept` is absent from the wire whenever it
+    /// would merely repeat the reply address — which is every message paros
+    /// sends today, on a plain deployment and on a matchmaker one alike. This
+    /// pins the encoding against the day a proxied Phase 2 starts populating
+    /// it. (A `Prepare` has no such field: Phase 1 is never proxied.)
     #[test]
     fn a_leader_that_is_the_reply_address_stays_off_the_wire() {
         use crate::grpc::internal::consensus_message::Kind;
 
         for msg in every_variant() {
             let wire = crate::grpc::message_to_proto(&msg).expect("encode protobuf DTO");
-            match (msg, wire.kind) {
-                (
-                    Message::Prepare {
-                        reply_to, leader, ..
-                    },
-                    Some(Kind::Prepare(wire)),
-                ) => {
-                    assert_eq!(wire.leader.is_none(), reply_to == leader);
-                }
-                (
-                    Message::Accept {
-                        reply_to, leader, ..
-                    },
-                    Some(Kind::Accept(wire)),
-                ) => {
-                    assert_eq!(wire.leader.is_none(), reply_to == leader);
-                }
-                _ => {}
+            if let (
+                Message::Accept {
+                    reply_to, leader, ..
+                },
+                Some(Kind::Accept(wire)),
+            ) = (msg, wire.kind)
+            {
+                assert_eq!(wire.leader.is_none(), reply_to == leader);
             }
         }
     }

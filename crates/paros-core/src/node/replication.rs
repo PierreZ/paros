@@ -1,25 +1,27 @@
 use super::{Audience, Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 
-/// Leader heartbeat interval, in ticks. The driver always supplies an election
-/// timeout far larger than this (`>= 2 * HEARTBEAT_TICKS`), so a live leader
-/// always beats before any follower's election clock fires.
+/// The leader's heartbeat cadence, in ticks: a leader beats on **every**
+/// tick ([`ColocatedNode::tick`] broadcasts unconditionally), so this is
+/// `1` by definition — a statement of the cadence, not a tunable. The driver
+/// always supplies an election timeout far larger than this
+/// (`>= 2 * HEARTBEAT_TICKS`), so a live leader always beats before any
+/// follower's election clock fires.
 ///
 /// Public because an observer that judges "this leader is still beating" has
-/// to know the period a beat is expected in: an oracle counting beatless
-/// ticks against a hard-coded 1 silently stops being right the moment this
-/// changes.
+/// to know the period a beat is expected in: the sim audit's deposed-leader
+/// oracle counts beatless ticks against this constant rather than a
+/// hard-coded 1, so a cadence change here would move the oracle with it.
 pub const HEARTBEAT_TICKS: u64 = 1;
 
 impl ColocatedNode {
     /// Broadcast one leader beat at a fresh, monotonically increasing
-    /// per-ballot sequence number. Both the tick self-trigger and
+    /// per-ballot sequence number. Both [`ColocatedNode::tick`] and
     /// [`ColocatedNode::read_index`] beat through here, so every broadcast beat
     /// carries a seq an ack can be matched against.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn broadcast_heartbeat(&mut self) {
-        // Both callers (the tick self-trigger and `read_index`) are
-        // leader-gated, and a self-addressed beat never arrives off the wire.
+        // Both callers (`tick` and `read_index`) are leader-gated.
         assert!(
             self.role == NodeRole::Leader,
             "only a leader broadcasts beats"
@@ -34,7 +36,6 @@ impl ColocatedNode {
             .has_matchmakers()
             .then(|| self.acceptors.clone());
         self.broadcast(&Message::Heartbeat {
-            config_id: self.config_id,
             from: self.config.id,
             ballot: self.ballot,
             commit: self.replica.chosen_index(),
@@ -43,8 +44,7 @@ impl ColocatedNode {
         });
     }
 
-    /// Leader self-beat or a follower receiving a peer beat. The self event's
-    /// `seq` is ignored (the real seq is assigned at broadcast).
+    /// A follower receiving a leader's beat.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_heartbeat(
         &mut self,
@@ -58,16 +58,8 @@ impl ColocatedNode {
         // Wire hygiene: a beat adopts its sender as leader (and triggers
         // catch-up toward it), so an id outside the pool must never be
         // followed — the same refusal every quorum-counting handler already
-        // applies. The tick-injected self-beat passes trivially: the pool
-        // always includes this node's own id.
+        // applies.
         if !self.in_pool(from) {
-            return;
-        }
-        if from == me {
-            // Leader self-trigger: broadcast the beat. Re-sending the un-acked
-            // `Accept`s is a *separate* decision the driver makes on the same
-            // cadence — see [`ColocatedNode::resend_pending`].
-            self.broadcast_heartbeat();
             return;
         }
         // Follower receiving the leader's beat: adopt its ballot / leadership only
@@ -105,7 +97,6 @@ impl ColocatedNode {
             self.pending_messages.push((
                 Audience::Node(from),
                 Message::HeartbeatAck {
-                    config_id: self.config_id,
                     from: me,
                     ballot,
                     seq,

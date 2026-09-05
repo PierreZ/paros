@@ -348,10 +348,10 @@ fn matchmake(
         show_config(&request.config),
         kind,
         set.generation.0,
-        show_set(&set.members)
+        show_set(set.members())
     );
     let mut phase = Matchmaking::new(request.ballot, request.config.clone(), request.kind);
-    for id in &set.members {
+    for id in set.members() {
         let (reply, writes) = matchmaker(pool, *id).deliver_match(request.clone());
         // The wiring's guards come first: the reply answers this request.
         assert_eq!(reply.to, request.from);
@@ -721,7 +721,7 @@ fn decree_by_hand() {
     // replaced, under the majority system: the same `AcceptorConfig`, over a
     // different identity type.
     let acceptors: AcceptorConfig<MatchmakerId> =
-        AcceptorConfig::new(m_0().members, QuorumSystem::Majority);
+        AcceptorConfig::new(m_0().members().to_vec(), QuorumSystem::Majority);
     let mut voters: Voters = acceptors
         .members()
         .iter()
@@ -864,7 +864,7 @@ fn describe_refusal(refusal: &MatchRefusal) -> String {
             "Stopped: frozen for generation {}, its successor is g{} = {}",
             set.generation.0.saturating_sub(1),
             set.generation.0,
-            show_set(&set.members)
+            show_set(set.members())
         ),
         MatchRefusal::Stopped { successor: None } => {
             "Stopped: frozen, successor not yet chosen".to_string()
@@ -872,7 +872,7 @@ fn describe_refusal(refusal: &MatchRefusal) -> String {
         MatchRefusal::Generation { current } => format!(
             "Generation: now active for g{} = {}",
             current.generation.0,
-            show_set(&current.members)
+            show_set(current.members())
         ),
         other => format!("{other:?}"),
     }
@@ -884,7 +884,7 @@ fn describe_request(request: &ReconfigureRequest) -> String {
         ReconfigureRequest::Bootstrap { bootstrap, .. } => format!(
             "Bootstrap(g{} = {}, {} registrations)",
             bootstrap.set.generation.0,
-            show_set(&bootstrap.set.members),
+            show_set(bootstrap.set.members()),
             bootstrap.history.len()
         ),
         ReconfigureRequest::DecreePrepare { ballot, .. } => {
@@ -900,7 +900,7 @@ fn describe_request(request: &ReconfigureRequest) -> String {
         ReconfigureRequest::Chosen { successor, .. } => format!(
             "Chosen(g{} = {})",
             successor.generation.0,
-            show_set(&successor.members)
+            show_set(successor.members())
         ),
     }
 }
@@ -971,7 +971,10 @@ fn describe_step(step: &ReconfigurerStep) -> String {
         ),
         ReconfigurerStep::Accepted { remaining } => format!("vote counted, {remaining} to quorum"),
         ReconfigurerStep::Chosen { successor } => {
-            format!("phase 2 quorum: {} is CHOSEN", show_set(&successor.members))
+            format!(
+                "phase 2 quorum: {} is CHOSEN",
+                show_set(successor.members())
+            )
         }
         ReconfigurerStep::Published {
             old_remaining,
@@ -984,7 +987,7 @@ fn describe_step(step: &ReconfigurerStep) -> String {
             format!("preempted by promise {}", show_ballot(*promised))
         }
         ReconfigurerStep::Superseded { successor } => {
-            format!("superseded by {}", show_set(&successor.members))
+            format!("superseded by {}", show_set(successor.members()))
         }
     }
 }
@@ -1067,7 +1070,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
     let m_1 = m_1();
     let mut reconfigurer = MatchmakerReconfigurer::new(N3);
     reconfigurer
-        .start(&m_0, m_1.members.clone())
+        .start(&m_0, m_1.members().to_vec())
         .expect("starts");
     let mut steps = Vec::new();
     let mut votes_when_chosen = None;
@@ -1085,7 +1088,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
             // scalars of example 1's acceptor — the promise and the accepted
             // `(ballot, value)` — over a `Vec<MatchmakerId>`.
             votes_when_chosen = Some(
-                m_0.members
+                m_0.members()
                     .iter()
                     .map(|m| {
                         (
@@ -1111,7 +1114,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
         .expect("the decree opened");
     assert!(steps.iter().any(|s| matches!(
         s,
-        ReconfigurerStep::Proposing { members, adopted: false, .. } if *members == m_1.members
+        ReconfigurerStep::Proposing { members, adopted: false, .. } if *members == m_1.members()
     )));
     assert!(
         steps
@@ -1131,7 +1134,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
     let records = votes_when_chosen.expect("the decree was chosen");
     let voted: Vec<MatchmakerId> = records
         .iter()
-        .filter(|(_, record)| record.vote == Some((decree_ballot, m_1.members.clone())))
+        .filter(|(_, record)| record.vote == Some((decree_ballot, m_1.members().to_vec())))
         .map(|(m, _)| *m)
         .collect();
     assert!(
@@ -1149,7 +1152,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
         "  decree record on {}: promised {}, vote {} @{}",
         show_set(&voted),
         show_ballot(decree_ballot),
-        show_set(&m_1.members),
+        show_set(m_1.members()),
         show_ballot(decree_ballot)
     );
 

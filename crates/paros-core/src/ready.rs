@@ -5,8 +5,8 @@ use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::message::{Audience, Message};
 use crate::node::{ColocatedNode, ReadState};
-use crate::types::{Ballot, Command, ConfigId, NodeId, Slot};
-use crate::write::{self, MustSync, WriteOp};
+use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::write::WriteOp;
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -20,8 +20,8 @@ use crate::write::{self, MustSync, WriteOp};
 /// # Durability ordering — process the buckets in this order
 ///
 /// 1. **Persist** [`Ready::writes`] to stable storage, applying each
-///    [`WriteOp`] in order; fsync the batch first if [`Ready::must_sync`] is
-///    [`MustSync::Sync`].
+///    [`WriteOp`] in order; fsync the batch first if any op
+///    [`needs_sync`](WriteOp::needs_sync) (the [`crate::MustSync`] contract).
 /// 2. **Send** [`Ready::messages`] to peers — *only after* step 1 is durable. A
 ///    `Promise`/`Accepted` published before its durable write is on disk is a
 ///    safety violation (a crash could un-promise / un-accept).
@@ -35,7 +35,7 @@ use crate::write::{self, MustSync, WriteOp};
 ///
 /// The accessors borrow node-owned buffers, so a guard must not be held across
 /// an `.await`. An async driver should copy the buckets out
-/// (`writes().to_vec()`, `must_sync()`, `messages().to_vec()`,
+/// (`writes().to_vec()`, `messages().to_vec()`,
 /// `committed().to_vec()`), `advance()`, await its I/O, then call
 /// [`ColocatedNode::advance_recovery`] to release the next bounded continuation.
 #[must_use = "a Ready must be processed and then advanced; dropping it silently skips a batch"]
@@ -55,14 +55,6 @@ impl<'a> Ready<'a> {
     #[must_use]
     pub fn writes(&self) -> &[WriteOp] {
         self.node.pending_writes()
-    }
-
-    /// Whether this batch must be fsync'd before its [`Ready::messages`] are sent.
-    /// [`MustSync::Sync`] when any write raises a promise or appends an accept;
-    /// [`MustSync::Relaxed`] when the batch only advances the chosen index.
-    #[must_use]
-    pub fn must_sync(&self) -> MustSync {
-        write::classify(self.node.pending_writes())
     }
 
     /// Outbound messages to send **after** [`Ready::writes`] are durable
@@ -89,7 +81,7 @@ impl<'a> Ready<'a> {
         self.node.pending_committed()
     }
 
-    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot, config_id)`.
+    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`.
     /// The core
     /// decided a peer needs a snapshot (it asked for a prefix below this node's
     /// compaction floor) but holds no application state, so the **driver** must
@@ -102,7 +94,7 @@ impl<'a> Ready<'a> {
     /// could carry bytes that do not yet cover the advertised `chosen_index`
     /// boundary.
     #[must_use]
-    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
+    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
         self.node.pending_snapshot_offers()
     }
 
@@ -118,7 +110,10 @@ impl<'a> Ready<'a> {
     }
 
     /// Newly started leader-recovery rounds, how many are fresh gap fills, and
-    /// the suffix slots remaining after this batch. Pure observability.
+    /// the suffix slots remaining after this batch. Also the pacing gate: while
+    /// a batch is pending the core starts no further recovery page;
+    /// [`Ready::advance`] clears it and [`ColocatedNode::advance_recovery`]
+    /// schedules the next.
     #[must_use]
     pub fn recovery_batch(&self) -> Option<(usize, usize, usize)> {
         self.node.pending_recovery_batch()

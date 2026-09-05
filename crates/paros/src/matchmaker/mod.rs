@@ -44,7 +44,7 @@ pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_co
 /// same function on both ends: the driver hashes what it persists and what it
 /// replies, an observer hashes what it sees on the wire.
 #[must_use]
-pub fn config_hash(config: &AcceptorConfig) -> u64 {
+pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fold = |bytes: &[u8]| {
         for &b in bytes {
@@ -205,10 +205,7 @@ where
                     // handle happens to hold: the two agree today, and a
                     // report that reads the handle would quietly start
                     // describing a later generation the moment they do not.
-                    let set = MatchmakerSet {
-                        generation: scalars.generation,
-                        members: scalars.members.clone(),
-                    };
+                    let set = MatchmakerSet::new(scalars.generation, scalars.members.clone());
                     audit.matchmaker_activated(
                         id,
                         &set,
@@ -219,7 +216,7 @@ where
                     tracing::info!(
                         matchmaker = id.0,
                         generation = set.generation.0,
-                        members = set.members.len() as u64,
+                        members = set.members().len() as u64,
                         watermark_round = scalars.gc_watermark.round,
                         registrations = registrations.len() as u64,
                         "matchmaker_activated"
@@ -505,7 +502,7 @@ where
 
 /// The trace label of one reconfiguration request.
 #[must_use]
-pub fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
+pub(crate) fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
     match request {
         ReconfigureRequest::Stop { .. } => "stop",
         ReconfigureRequest::Bootstrap { .. } => "bootstrap",
@@ -517,7 +514,7 @@ pub fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
 
 /// The trace label of one reconfiguration reply.
 #[must_use]
-pub fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
+pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
     match reply {
         ReconfigureReply::Stopped { .. } => "stopped",
         ReconfigureReply::Bootstrapped { .. } => "bootstrapped",

@@ -2,84 +2,22 @@
 use super::*;
 
 #[test]
-fn matching_configuration_message_is_processed_and_reply_is_tagged() {
-    let mut storage = TestStorage::new(0, &[0, 1]);
-    storage.hard_state.config_id = ConfigId(7);
-    let mut n = ColocatedNode::new(&storage);
-
-    n.step(Message::Prepare {
-        config_id: ConfigId(7),
-        reply_to: NodeId(1),
-        leader: NodeId(1),
-        ballot: ballot(1, 1),
-        from_slot: Slot(0),
-        config: None,
-    });
-
-    let out = drain(&mut n);
-    assert!(matches!(
-        out.as_slice(),
-        [(
-            NodeId(1),
-            Message::Promise {
-                config_id: ConfigId(7),
-                ..
-            }
-        )]
-    ));
-}
-
-#[test]
-fn mismatching_configuration_message_is_ignored_before_dispatch() {
-    let mut storage = TestStorage::new(0, &[0, 1]);
-    storage.hard_state.config_id = ConfigId(7);
-    let mut n = ColocatedNode::new(&storage);
-    let promise_before = n.hard_state().max_promised_ballot;
-
-    // A foreign configuration id is an operating condition (a stale peer, a
-    // misconfiguration), never a local invariant: the message is ignored
-    // whole — no reply, no promise movement.
-    n.step(Message::Prepare {
-        config_id: ConfigId(8),
-        reply_to: NodeId(1),
-        leader: NodeId(1),
-        ballot: ballot(1, 1),
-        from_slot: Slot(0),
-        config: None,
-    });
-
-    let out = drain(&mut n);
-    assert!(
-        out.is_empty(),
-        "a cross-configuration prepare draws no reply"
-    );
-    assert_eq!(
-        n.hard_state().max_promised_ballot,
-        promise_before,
-        "a cross-configuration prepare must not move the promise"
-    );
-}
-
-#[test]
 fn promise_and_accept_batches_require_fsync() {
-    use crate::write::MustSync;
+    use crate::write::WriteOp;
 
     // An acceptor promoting its promise on a higher Prepare must fsync before it
     // replies Promise.
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(3, 1),
         from_slot: Slot(0),
         config: None,
     });
     {
         let r = n.ready();
-        assert_eq!(
-            r.must_sync(),
-            MustSync::Sync,
+        assert!(
+            r.writes().iter().any(WriteOp::needs_sync),
             "a promise-raise must fsync before Promise is sent"
         );
         r.advance();
@@ -87,7 +25,6 @@ fn promise_and_accept_batches_require_fsync() {
 
     // An acceptor accepting a value must fsync before it replies Accepted.
     n.step(Message::Accept {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
         leader: NodeId(1),
         ballot: ballot(3, 1),
@@ -96,9 +33,8 @@ fn promise_and_accept_batches_require_fsync() {
     });
     {
         let r = n.ready();
-        assert_eq!(
-            r.must_sync(),
-            MustSync::Sync,
+        assert!(
+            r.writes().iter().any(WriteOp::needs_sync),
             "an accepted-append must fsync before Accepted is sent"
         );
         r.advance();
@@ -109,16 +45,13 @@ fn promise_and_accept_batches_require_fsync() {
 fn acceptor_rejects_below_promised_ballot() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,
     });
     let _ = drain(&mut n);
     n.step(Message::Accept {
-        config_id: ConfigId::default(),
         reply_to: NodeId(2),
         leader: NodeId(2),
         ballot: ballot(3, 2),
@@ -147,7 +80,6 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     // Accept a value at a low ballot that is never chosen (its proposer died
     // before reaching a quorum); this node was the only acceptor.
     n.step(Message::Accept {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
         leader: NodeId(1),
         ballot: ballot(1, 1),
@@ -158,7 +90,6 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     // Learn a DIFFERENT value was chosen for slot 0 at a higher ballot (this node
     // was not in the choosing quorum, so it never accepted that value).
     n.step(Message::Commit {
-        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(2, 2),
         slot: Slot(0),
@@ -192,9 +123,7 @@ fn prepare_below_floor_is_nacked_not_promised() {
     // A higher ballot that would normally win a promise, but its from_slot is
     // below our floor: those slots are chosen and we truncated them.
     n.step(Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(9, 1),
         from_slot: Slot(0),
         config: None,
@@ -219,7 +148,6 @@ fn accept_below_floor_is_ignored() {
     let _ = drain(n);
 
     n.step(Message::Accept {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
         leader: NodeId(1),
         ballot: ballot(9, 1),

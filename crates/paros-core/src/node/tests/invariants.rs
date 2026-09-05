@@ -13,7 +13,6 @@ use super::*;
 
 fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Accept {
-        config_id: ConfigId::default(),
         reply_to: NodeId(from),
         leader: NodeId(from),
         ballot: b,
@@ -24,7 +23,6 @@ fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
 
 fn commit(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Commit {
-        config_id: ConfigId::default(),
         from: NodeId(from),
         ballot: b,
         slot: Slot(slot),
@@ -34,7 +32,6 @@ fn commit(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
 
 fn promise(from: u64, b: Ballot, accepted: BTreeMap<Slot, (Ballot, Command)>) -> Message {
     Message::Promise {
-        config_id: ConfigId::default(),
         from: NodeId(from),
         ballot: b,
         from_slot: Slot(0),
@@ -101,9 +98,7 @@ fn a_higher_ballot_accept_replaces_a_stale_command() {
 fn a_nacked_accept_leaves_the_accepted_log_and_the_batch_untouched() {
     let mut n = node(0, &[0, 1, 2]);
     n.step(Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(1),
-        leader: NodeId(1),
         ballot: ballot(5, 1),
         from_slot: Slot(0),
         config: None,
@@ -242,7 +237,6 @@ fn a_stale_snapshot_never_rewinds_a_frontier() {
     let before = nodes[1].hard_state();
     let floor = nodes[1].acceptor().first_slot();
     nodes[1].step(Message::InstallSnapshot {
-        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: ballot(1, 0),
         chosen_index: Slot(0),

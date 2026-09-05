@@ -31,8 +31,6 @@
 //! borrow, so calling `ready()` again before [`Ready::advance`] is a *compile*
 //! error — not a runtime panic.
 //!
-//! Stage 0 pins this contract in the type system with **zero protocol logic**.
-//!
 //! Beside the node lives the sans-IO **matchmaker** ([`Matchmaker`], the
 //! per-ballot acceptor-configuration registry of Matchmaker Paxos), driven
 //! through the same `step` → `ready` → `advance` shape. It is a separate handle:
@@ -95,7 +93,7 @@ pub use retained::RetainedWindow;
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Fingerprint, NodeId,
-    SessionEntry, Slot, Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId, SessionEntry, Slot,
+    Value, command_fingerprint,
 };
 pub use write::{AcceptorWrite, MustSync, WriteOp};

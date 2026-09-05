@@ -5,10 +5,10 @@
 //! it broke instead of surfacing as a rare seed.
 
 use super::{
-    ClientId, ClientSeq, ColocatedNode, Command, ConfigId, Control, HANDOFF_BATCH,
-    HANDOFF_FENCE_ELECTIONS, LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole,
-    ProposeResult, Slot, TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all,
-    deliver_filtered, drain, make_leader, node, ucmd, val,
+    ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
+    LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, ProposeResult, Slot, TestStorage,
+    ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered, drain,
+    make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
@@ -407,7 +407,6 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
     assert!(nodes[0].can_relinquish());
     let superseding = ballot(nodes[0].ballot().round + 5, 2);
     nodes[0].step(Message::Commit {
-        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: superseding,
         slot: nodes[0].proposer().next_slot(),
@@ -609,5 +608,4 @@ fn the_transferred_tail_names_every_slot_below_the_frontier() {
         pending.values().all(|c| matches!(c, Command::User(_))),
         "the open round carries its client command verbatim"
     );
-    let _ = ucmd(0, 0, 0);
 }

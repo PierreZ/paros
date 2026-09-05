@@ -116,10 +116,9 @@ impl Collector {
         self.acked_by.contains(&matchmaker)
     }
 
-    /// Record that the requests for `generation` are out.
-    pub fn request(&mut self, generation: MatchmakerGeneration) {
+    /// Record that the requests for this generation are out.
+    pub fn request(&mut self) {
         self.requested = true;
-        self.generation = generation;
     }
 
     /// Start the ack tally over at `generation`: acks from a replaced
@@ -235,10 +234,6 @@ impl Collector {
             .filter(|n| !config.contains(*n))
             .collect();
         self.effective = Some((ballot, retired.clone()));
-        assert!(
-            retired.iter().all(|n| !config.contains(*n)),
-            "a retired acceptor is outside the configuration in force"
-        );
         GcStep::Effective {
             watermark: ballot,
             retired,

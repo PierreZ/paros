@@ -321,11 +321,6 @@ impl Matchmaking {
     /// Whether a matchmaker quorum of `matchmakers` has answered completely
     /// — the phase's own completion predicate, asked at the membership
     /// boundary and never as a count.
-    ///
-    /// # Panics
-    ///
-    /// If `matchmakers` is not well formed (see
-    /// [`MatchmakerSet::is_well_formed`]).
     #[must_use]
     pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
         matchmakers.has_quorum(&self.registered_by)
@@ -350,7 +345,7 @@ impl Matchmaking {
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<(MatchmakerId, Option<Ballot>)> {
         matchmakers
-            .members
+            .members()
             .iter()
             .copied()
             .filter(|mm| !self.registered_by.contains(mm))

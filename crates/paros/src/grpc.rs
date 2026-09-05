@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, GcAck,
-    GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, GcAck, GcRequest,
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
+    MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind, SessionEntry, Slot,
     Value,
 };
@@ -44,9 +44,9 @@ pub mod matchmaker {
 pub use internal::paros_internal_client::ParosInternalClient;
 pub(crate) use internal::paros_internal_server::ParosInternalServer;
 pub use internal::{InspectReply, InspectRequest, RetireAck, RetireRequest};
-pub use matchmaker::paros_matchmaker_client::ParosMatchmakerClient;
+pub(crate) use matchmaker::paros_matchmaker_client::ParosMatchmakerClient;
 pub(crate) use matchmaker::paros_matchmaker_server::ParosMatchmakerServer;
-pub use matchmaker::{
+pub(crate) use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,
     MatchReply as WireMatchReply, MatchRequest as WireMatchRequest,
     ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
@@ -241,7 +241,6 @@ fn pending_commands_from_proto(
 }
 
 fn snapshot_to_proto(
-    config_id: ConfigId,
     from: NodeId,
     ballot: Ballot,
     chosen_index: Slot,
@@ -249,7 +248,6 @@ fn snapshot_to_proto(
     sessions: &[SessionEntry],
 ) -> internal::consensus_message::Kind {
     internal::consensus_message::Kind::InstallSnapshot(internal::InstallSnapshot {
-        config_id: config_id.0,
         from: from.0,
         ballot: Some(ballot_to_proto(ballot)),
         chosen_index: chosen_index.0,
@@ -275,24 +273,17 @@ pub(crate) fn message_to_proto(
 
     let kind = match message {
         Message::Prepare {
-            config_id,
             reply_to,
-            leader,
             ballot,
             from_slot,
             config,
         } => Kind::Prepare(internal::Prepare {
-            config_id: config_id.0,
             reply_to: reply_to.0,
-            // Absent when it would merely repeat the reply address, which is
-            // every message paros sends today: the plain wire is unchanged.
-            leader: (leader != reply_to).then_some(leader.0),
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
             config: config.as_ref().map(config_to_proto),
         }),
         Message::Promise {
-            config_id,
             from,
             ballot,
             from_slot,
@@ -300,7 +291,6 @@ pub(crate) fn message_to_proto(
             faulty,
             next_from_slot,
         } => Kind::Promise(internal::Promise {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
@@ -309,14 +299,12 @@ pub(crate) fn message_to_proto(
             next_from_slot: next_from_slot.map(|slot| slot.0),
         }),
         Message::Accept {
-            config_id,
             reply_to,
             leader,
             ballot,
             slot,
             command,
         } => Kind::Accept(internal::Accept {
-            config_id: config_id.0,
             reply_to: reply_to.0,
             // Absent when it would merely repeat the reply address, which is
             // every message paros sends today: the plain wire is unchanged.
@@ -326,39 +314,27 @@ pub(crate) fn message_to_proto(
             command: Some(command_to_proto(command)),
         }),
         Message::Accepted {
-            config_id,
             from,
             ballot,
             slot,
             vhash,
         } => Kind::Accepted(internal::Accepted {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
             vhash: *vhash,
         }),
-        Message::Nack {
-            config_id,
-            from,
-            ballot,
-            promised,
-            slot,
-        } => Kind::Nack(internal::Nack {
-            config_id: config_id.0,
+        Message::Nack { from, ballot, slot } => Kind::Nack(internal::Nack {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
-            promised: Some(ballot_to_proto(*promised)),
             slot: slot.0,
         }),
         Message::Commit {
-            config_id,
             from,
             ballot,
             slot,
             command,
         } => Kind::Commit(internal::Commit {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
@@ -377,30 +353,19 @@ pub(crate) fn message_to_proto(
             })
         }
         Message::InstallSnapshot {
-            config_id,
             from,
             ballot,
             chosen_index,
             snapshot,
             sessions,
-        } => snapshot_to_proto(
-            *config_id,
-            *from,
-            *ballot,
-            *chosen_index,
-            snapshot,
-            sessions,
-        ),
-        Message::CheckLeader { from } => Kind::CheckLeader(internal::CheckLeader { from: from.0 }),
+        } => snapshot_to_proto(*from, *ballot, *chosen_index, snapshot, sessions),
         Message::Heartbeat {
-            config_id,
             from,
             ballot,
             commit,
             seq,
             config,
         } => Kind::Heartbeat(internal::Heartbeat {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
@@ -408,45 +373,34 @@ pub(crate) fn message_to_proto(
             config: config.as_ref().map(config_to_proto),
         }),
         Message::HeartbeatAck {
-            config_id,
             from,
             ballot,
             seq,
             chosen,
         } => Kind::HeartbeatAck(internal::HeartbeatAck {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
             chosen: chosen.map(|s| s.0),
         }),
-        Message::SnapAck {
-            config_id,
-            from,
-            at_index,
-        } => Kind::SnapAck(internal::SnapAck {
-            config_id: config_id.0,
+        Message::SnapAck { from, at_index } => Kind::SnapAck(internal::SnapAck {
             from: from.0,
             at_index: at_index.0,
         }),
         Message::SnapChunkRequest {
-            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkRequest(internal::SnapChunkRequest {
-            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks.clone(),
         }),
         Message::SnapChunkResponse {
-            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkResponse(internal::SnapChunkResponse {
-            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks
@@ -458,7 +412,6 @@ pub(crate) fn message_to_proto(
                 .collect(),
         }),
         Message::Relinquish {
-            config_id,
             from,
             to,
             ballot,
@@ -468,7 +421,6 @@ pub(crate) fn message_to_proto(
             pending,
             config,
         } => Kind::Relinquish(internal::Relinquish {
-            config_id: config_id.0,
             from: from.0,
             to: to.0,
             ballot: Some(ballot_to_proto(*ballot)),
@@ -494,15 +446,12 @@ pub(crate) fn message_from_proto(
 
     match message.kind.ok_or("missing Paxos message kind")? {
         Kind::Prepare(message) => Ok(Message::Prepare {
-            config_id: ConfigId(message.config_id),
             reply_to: NodeId(message.reply_to),
-            leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
             config: config_from_proto(message.config)?,
         }),
         Kind::Promise(message) => Ok(Message::Promise {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
@@ -511,7 +460,6 @@ pub(crate) fn message_from_proto(
             next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
-            config_id: ConfigId(message.config_id),
             reply_to: NodeId(message.reply_to),
             leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
@@ -519,21 +467,17 @@ pub(crate) fn message_from_proto(
             command: command_from_proto(message.command)?,
         }),
         Kind::Accepted(message) => Ok(Message::Accepted {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             vhash: message.vhash,
         }),
         Kind::Nack(message) => Ok(Message::Nack {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
-            promised: ballot_from_proto(message.promised)?,
             slot: Slot(message.slot),
         }),
         Kind::Commit(message) => Ok(Message::Commit {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
@@ -548,7 +492,6 @@ pub(crate) fn message_from_proto(
             entries: slot_commands_from_proto(message.entries)?,
         }),
         Kind::InstallSnapshot(message) => Ok(Message::InstallSnapshot {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             chosen_index: Slot(message.chosen_index),
@@ -565,11 +508,7 @@ pub(crate) fn message_from_proto(
                 })
                 .collect(),
         }),
-        Kind::CheckLeader(message) => Ok(Message::CheckLeader {
-            from: NodeId(message.from),
-        }),
         Kind::Heartbeat(message) => Ok(Message::Heartbeat {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             commit: message.commit.map(Slot),
@@ -577,25 +516,21 @@ pub(crate) fn message_from_proto(
             config: config_from_proto(message.config)?,
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             seq: message.seq,
             chosen: message.chosen.map(Slot),
         }),
         Kind::SnapAck(message) => Ok(Message::SnapAck {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
         }),
         Kind::SnapChunkRequest(message) => Ok(Message::SnapChunkRequest {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message.chunks,
         }),
         Kind::SnapChunkResponse(message) => Ok(Message::SnapChunkResponse {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message
@@ -605,7 +540,6 @@ pub(crate) fn message_from_proto(
                 .collect(),
         }),
         Kind::Relinquish(message) => Ok(Message::Relinquish {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             to: NodeId(message.to),
             ballot: ballot_from_proto(message.ballot)?,
@@ -619,11 +553,14 @@ pub(crate) fn message_from_proto(
 }
 
 /// Requests accepted concurrently by tonic and consumed serially by the node
-/// driver, which exclusively owns the sans-IO core.
+/// driver, which exclusively owns the sans-IO core. Every client-facing lane
+/// carries a reply channel; `deliver` is fire-and-forget — a peer message is
+/// acknowledged to its sender the moment it is *enqueued* here, never after
+/// the loop has stepped it (see [`RpcService`]).
 pub(crate) struct RpcInbox {
     pub(crate) propose: mpsc::Receiver<Call<Propose, ProposeAck>>,
     pub(crate) read: mpsc::Receiver<Call<Read, ReadAck>>,
-    pub(crate) deliver: mpsc::Receiver<Call<Message, ()>>,
+    pub(crate) deliver: mpsc::Receiver<Message>,
     pub(crate) compact: mpsc::Receiver<Call<Compact, CompactAck>>,
     pub(crate) reconfigure: mpsc::Receiver<Call<Reconfigure, ReconfigureAck>>,
     pub(crate) reconfigure_matchmakers:
@@ -643,13 +580,17 @@ pub enum EdgeRejection {
 /// its [`Audit`](crate::Audit), stamped with the node's identity.
 pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 
-/// Cloneable tonic handler. Each method forwards to [`RpcInbox`] and holds the
-/// HTTP/2 response open until the driver completes that request.
+/// Cloneable tonic handler. Each client-facing method forwards to [`RpcInbox`]
+/// and holds the HTTP/2 response open until the driver completes that request.
+/// `deliver` is the exception: it holds the response open only until every
+/// message of the batch is *in the inbox* (the bounded `send().await` is the
+/// backpressure), so the sender's `delivery_timeout` races the peer's inbox
+/// capacity, not the time its loop takes to persist and step the batch.
 #[derive(Clone)]
 pub(crate) struct RpcService {
     propose: mpsc::Sender<Call<Propose, ProposeAck>>,
     read: mpsc::Sender<Call<Read, ReadAck>>,
-    deliver: mpsc::Sender<Call<Message, ()>>,
+    deliver: mpsc::Sender<Message>,
     compact: mpsc::Sender<Call<Compact, CompactAck>>,
     reconfigure: mpsc::Sender<Call<Reconfigure, ReconfigureAck>>,
     reconfigure_matchmakers: mpsc::Sender<Call<ReconfigureMatchmakers, ReconfigureMatchmakersAck>>,
@@ -769,7 +710,12 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
                 (self.on_reject)(EdgeRejection::MessageDecode);
                 Status::invalid_argument(format!("invalid Paxos message: {error}"))
             })?;
-            dispatch(&self.deliver, message).await?;
+            // Enqueue and move on: the ack means "in the peer's inbox", not
+            // "processed" — the bounded send is the only wait.
+            self.deliver
+                .send(message)
+                .await
+                .map_err(|_| Status::unavailable("node driver stopped"))?;
         }
         Ok(Response::new(internal::DeliverAck {}))
     }
@@ -806,7 +752,7 @@ fn acceptor_config_from_proto(
 fn mm_set_to_proto(set: &MatchmakerSet) -> matchmaker::MatchmakerSet {
     matchmaker::MatchmakerSet {
         generation: set.generation.0,
-        members: set.members.iter().map(|m| m.0).collect(),
+        members: set.members().iter().map(|m| m.0).collect(),
     }
 }
 
@@ -867,7 +813,7 @@ fn registrations_from_proto(
 
 /// Encode a matchmaking request for the wire.
 #[must_use]
-pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
+pub(crate) fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
     WireMatchRequest {
         from: request.from.0,
         ballot: Some(ballot_to_proto(request.ballot)),
@@ -882,7 +828,9 @@ pub fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest, &'static str> {
+pub(crate) fn match_request_from_wire(
+    request: WireMatchRequest,
+) -> Result<MatchRequest, &'static str> {
     let from = NodeId(request.from);
     let ballot = ballot_from_proto(request.ballot)?;
     let config = acceptor_config_from_proto(request.config)?;
@@ -900,7 +848,7 @@ pub fn match_request_from_wire(request: WireMatchRequest) -> Result<MatchRequest
 
 /// Encode a matchmaker's reply for the wire.
 #[must_use]
-pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
+pub(crate) fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
     let outcome = match &reply.outcome {
         MatchOutcome::Registered {
             from_ballot,
@@ -934,9 +882,6 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
                 MatchRefusal::Inactive => {
                     matchmaker::refused::Reason::Inactive(matchmaker::RefusedInactive {})
                 }
-                MatchRefusal::Malformed => {
-                    matchmaker::refused::Reason::Malformed(matchmaker::RefusedMalformed {})
-                }
             };
             matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
                 reason: Some(reason),
@@ -956,7 +901,7 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'static str> {
+pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'static str> {
     let outcome = match reply.outcome.ok_or("missing match outcome")? {
         matchmaker::match_reply::Outcome::Registered(registered) => MatchOutcome::Registered {
             from_ballot: ballot_from_proto(registered.from_ballot)?,
@@ -985,7 +930,6 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
                     current: mm_set_value(current)?,
                 },
                 matchmaker::refused::Reason::Inactive(_) => MatchRefusal::Inactive,
-                matchmaker::refused::Reason::Malformed(_) => MatchRefusal::Malformed,
             })
         }
     };
@@ -1000,7 +944,7 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
 
 /// Encode a garbage-collection request for the wire.
 #[must_use]
-pub fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
+pub(crate) fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
     WireGarbageCollect {
         from: request.from.0,
         watermark: Some(ballot_to_proto(request.watermark)),
@@ -1012,7 +956,9 @@ pub fn wire_garbage_collect(request: &GcRequest) -> WireGarbageCollect {
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn garbage_collect_from_wire(request: WireGarbageCollect) -> Result<GcRequest, &'static str> {
+pub(crate) fn garbage_collect_from_wire(
+    request: WireGarbageCollect,
+) -> Result<GcRequest, &'static str> {
     Ok(GcRequest {
         from: NodeId(request.from),
         generation: MatchmakerGeneration(request.generation),
@@ -1022,7 +968,7 @@ pub fn garbage_collect_from_wire(request: WireGarbageCollect) -> Result<GcReques
 
 /// Encode a garbage-collection acknowledgement for the wire.
 #[must_use]
-pub fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
+pub(crate) fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
     WireGarbageCollectAck {
         matchmaker: ack.matchmaker.0,
         watermark: Some(ballot_to_proto(ack.watermark)),
@@ -1035,7 +981,9 @@ pub fn wire_garbage_collect_ack(ack: &GcAck) -> WireGarbageCollectAck {
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn garbage_collect_ack_from_wire(ack: WireGarbageCollectAck) -> Result<GcAck, &'static str> {
+pub(crate) fn garbage_collect_ack_from_wire(
+    ack: WireGarbageCollectAck,
+) -> Result<GcAck, &'static str> {
     Ok(GcAck {
         matchmaker: MatchmakerId(ack.matchmaker),
         generation: MatchmakerGeneration(ack.generation),
@@ -1111,7 +1059,7 @@ fn phase_from_proto(phase: i32) -> Result<MatchmakerPhase, &'static str> {
 
 /// Encode a reconfigurer's request for the wire.
 #[must_use]
-pub fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReconfigureRequest {
+pub(crate) fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReconfigureRequest {
     use matchmaker::reconfigure_request::Kind;
     let kind = match request {
         ReconfigureRequest::Stop { generation, .. } => Kind::Stop(matchmaker::Stop {
@@ -1155,7 +1103,7 @@ pub fn wire_reconfigure_request(request: &ReconfigureRequest) -> WireReconfigure
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn reconfigure_request_from_wire(
+pub(crate) fn reconfigure_request_from_wire(
     request: WireReconfigureRequest,
 ) -> Result<ReconfigureRequest, &'static str> {
     use matchmaker::reconfigure_request::Kind;
@@ -1197,7 +1145,7 @@ pub fn reconfigure_request_from_wire(
 
 /// Encode a matchmaker's reconfiguration reply for the wire.
 #[must_use]
-pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply {
+pub(crate) fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply {
     use matchmaker::reconfigure_reply::Kind;
     let kind = match reply {
         ReconfigureReply::Stopped {
@@ -1281,7 +1229,7 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
 ///
 /// # Errors
 /// Returns a static description of the first malformed field.
-pub fn reconfigure_reply_from_wire(
+pub(crate) fn reconfigure_reply_from_wire(
     reply: WireReconfigureReply,
 ) -> Result<ReconfigureReply, &'static str> {
     use matchmaker::reconfigure_reply::Kind;

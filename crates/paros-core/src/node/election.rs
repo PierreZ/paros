@@ -89,18 +89,19 @@ impl ColocatedNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        if self.config.has_matchmakers() {
+        if let Some(matchmakers) = &self.matchmakers {
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`).
+            let generation = matchmakers.generation;
+            let members = matchmakers.members().to_vec();
             self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
-            let generation = self.matchmakers.generation;
             let request = match kind {
                 RegistrationKind::Reconfiguration => {
                     MatchRequest::reconfigure(me, self.ballot, config, generation)
                 }
                 RegistrationKind::Belief => MatchRequest::new(me, self.ballot, config, generation),
             };
-            for matchmaker in self.matchmakers.members.clone() {
+            for matchmaker in members {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
             }
@@ -177,9 +178,7 @@ impl ColocatedNode {
             self.acceptor.faulty(),
         );
         let prepare = Message::Prepare {
-            config_id: self.config_id,
             reply_to: me,
-            leader: me,
             ballot: self.ballot,
             from_slot,
             config: wire_config,
@@ -254,9 +253,7 @@ impl ColocatedNode {
         self.pending_messages.push((
             Audience::Node(from),
             Message::Prepare {
-                config_id: self.config_id,
                 reply_to: self.config.id,
-                leader: self.config.id,
                 ballot,
                 from_slot: next,
                 config,
@@ -394,7 +391,6 @@ impl ColocatedNode {
                 "a plain campaign runs Phase 1 for its static configuration"
             );
         }
-        self.heartbeat_elapsed = 0;
         self.election_elapsed = 0;
 
         // Fix the allocator/read fence from the complete Phase-1 result before
@@ -587,10 +583,11 @@ impl ColocatedNode {
     /// A rejection of an in-flight ballot. Step down to Follower and let the
     /// randomized election timeout reschedule us. We do **not** immediately
     /// re-prepare: that (with the randomized timeout) is the dueling-proposer
-    /// livelock fix. The reported promise is diagnostic only: retaining an
-    /// arbitrary wire round would let one garbage Nack pin every future campaign.
+    /// livelock fix. The next campaign's round comes from durable local state
+    /// alone: retaining a wire-reported promise would let one garbage Nack pin
+    /// every future campaign.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
-    pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, _promised: Ballot, slot: Slot) {
+    pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
         if !self.in_pool(from) {
             return;
         }

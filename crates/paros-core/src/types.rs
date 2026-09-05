@@ -2,14 +2,6 @@
 
 use core::cmp::Ordering;
 
-/// Durable identity of the cluster configuration a protocol message belongs to.
-///
-/// This stage only plumbs the tag through storage and the wire. Matchmaker
-/// reconfiguration assigns and advances it in M4.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ConfigId(pub u64);
-
 /// Stable identity of a node in the cluster.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

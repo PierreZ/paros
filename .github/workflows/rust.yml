@@ -24,7 +24,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo clippy
-        run: nix develop --command cargo clippy -- --deny warnings
+        run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
         run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
 
@@ -49,15 +49,13 @@ jobs:
   # The teaching examples (`crates/paros-core/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
   # the public API's shape as much as of the protocol. They are linted under the
-  # same pedantic clippy as the crate (the root clippy job does not cover examples).
+  # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Lint the examples
-        run: nix develop --command cargo clippy -p paros-core --examples -- --deny warnings
       - name: Run single_decree
         run: nix develop --command cargo run -p paros-core --example single_decree
       - name: Run multi_paxos
@@ -79,6 +77,8 @@ jobs:
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
       - name: Check paros-core builds for wasm with every feature off (zero deps)
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
+      - name: Check paros-core with the serde derives on (no crate enables the feature)
+        run: nix develop --command cargo check -p paros-core --features serde
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
 

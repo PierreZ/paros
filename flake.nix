@@ -41,8 +41,6 @@
             gcc
 
             # Development tools
-            pkg-config
-            openssl
             cargo-nextest
             cargo-edit
             protobuf

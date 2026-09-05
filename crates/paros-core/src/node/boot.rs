@@ -9,8 +9,8 @@
 //! read back rather than persisted beside it.
 
 use super::{
-    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, HEARTBEAT_TICKS, HandoffCounters,
-    LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
+    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, HandoffCounters, LeadershipOrigin,
+    NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
 
@@ -32,7 +32,11 @@ impl ColocatedNode {
         let (hard_state, config) = storage.initial_state();
         assert_config_shape(&config);
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
-        let matchmakers = MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone());
+        // The `None` arm of the state machine: a plain deployment holds no
+        // matchmaker set at all, never an empty one.
+        let matchmakers = config
+            .has_matchmakers()
+            .then(|| MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone()));
         assert!(
             config
                 .matchmakers
@@ -96,7 +100,6 @@ impl ColocatedNode {
             // and a node that boots as a spare has not been a member of
             // anything, which is the same starting value.
             last_member_ballot: Ballot::zero(),
-            config_id: hard_state.config_id,
             acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
             replica,
             pending_writes: Vec::new(),
@@ -111,8 +114,6 @@ impl ColocatedNode {
             election_elapsed: 0,
             election_timeout: 0,
             needs_election_timeout: true,
-            heartbeat_elapsed: 0,
-            heartbeat_timeout: HEARTBEAT_TICKS,
             heartbeat_seq: 0,
             quorum_lost_step_downs: 0,
             proposer: {
@@ -134,7 +135,6 @@ impl ColocatedNode {
             repair_step_downs: 0,
             repair_case1: 0,
             repair_case2: 0,
-            repair_bytes: 0,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),

@@ -146,20 +146,9 @@ impl WriteOp {
     }
 }
 
-/// The [`MustSync`] classification of a whole batch: [`MustSync::Sync`] if any op
-/// needs an fsync, else [`MustSync::Relaxed`].
-#[must_use]
-pub fn classify(writes: &[WriteOp]) -> MustSync {
-    if writes.iter().any(WriteOp::needs_sync) {
-        MustSync::Sync
-    } else {
-        MustSync::Relaxed
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AcceptorWrite, MustSync, WriteOp, classify};
+    use super::{AcceptorWrite, WriteOp};
     use crate::types::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, Slot, Value};
 
     fn ballot() -> Ballot {
@@ -197,42 +186,5 @@ mod tests {
             }
             .needs_sync()
         );
-    }
-
-    #[test]
-    fn a_batch_is_sync_iff_it_raises_a_promise_or_appends_an_accept() {
-        // Promise-raise or accepted-append ⇒ fsync required.
-        assert_eq!(classify(&[promise()]), MustSync::Sync);
-        assert_eq!(classify(&[append(0)]), MustSync::Sync);
-        // Even mixed with a chosen-index advance, the batch is Sync.
-        assert_eq!(
-            classify(&[append(0), WriteOp::SetChosenIndex(Slot(0))]),
-            MustSync::Sync
-        );
-        // A chosen-index-only advance may use a relaxed write.
-        assert_eq!(
-            classify(&[WriteOp::SetChosenIndex(Slot(0))]),
-            MustSync::Relaxed
-        );
-        // A truncate is fsync'd, on its own or mixed with a chosen-index advance.
-        assert_eq!(
-            classify(&[WriteOp::Truncate {
-                first: Slot(1),
-                sealed: vec![]
-            }]),
-            MustSync::Sync
-        );
-        assert_eq!(
-            classify(&[
-                WriteOp::SetChosenIndex(Slot(3)),
-                WriteOp::Truncate {
-                    first: Slot(1),
-                    sealed: vec![]
-                }
-            ]),
-            MustSync::Sync
-        );
-        // An empty batch persists nothing; relaxed is the safe default.
-        assert_eq!(classify(&[]), MustSync::Relaxed);
     }
 }

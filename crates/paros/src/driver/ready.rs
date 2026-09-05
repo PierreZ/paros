@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::SimulationError;
 use paros_core::{
-    AcceptorWrite, Ballot, ColocatedNode, Command, ConfigId, Control, GcRequest, MatchRequest,
-    MatchmakerId, Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
+    AcceptorWrite, Ballot, ColocatedNode, Command, Control, GcRequest, MatchRequest, MatchmakerId,
+    Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -17,8 +17,8 @@ use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::{NodeStorage, StorageError};
 
 use super::config::RunError;
-use super::events::{command_hash, message_kind};
-use super::transport::{Outbound, send_messages, trace_send_drop};
+use super::events::command_hash;
+use super::transport::{Outbound, send_messages};
 
 /// The client replies this node is holding open: proposals wait on their
 /// slot's commit (ack-on-commit), reads wait on their read-index round's
@@ -40,14 +40,15 @@ async fn send_snapshot_offers<S, H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
+    snapshot_offers: &[(NodeId, Slot, Ballot)],
     sessions: &[SessionEntry],
 ) where
     S: NodeStorage,
     H: DriverHooks,
     A: Audit,
 {
-    for &(to, offered_index, ballot, config_id) in snapshot_offers {
+    let mut offers: Vec<(NodeId, Message)> = Vec::with_capacity(snapshot_offers.len());
+    for &(to, offered_index, ballot) in snapshot_offers {
         // The mismatch skip below, taken spuriously: the requester re-asks
         // every tick and any other custodian may answer, so an unserved beat
         // is always safe — and this reaches the "nobody served me this round"
@@ -87,33 +88,24 @@ async fn send_snapshot_offers<S, H, A>(
             );
             continue;
         }
-        let message = Message::InstallSnapshot {
-            config_id,
-            from: NodeId(out.self_id),
-            ballot,
-            chosen_index: offered_index,
-            snapshot: Value(storage.snapshot().await),
-            // The at-most-once ledger travels beside the opaque bytes (#94):
-            // the receiver seals it so its duplicate-suppression decisions for
-            // the folded prefix match every peer's.
-            sessions: sessions.to_vec(),
-        };
-        if hooks.drop_outgoing(to, &message) {
-            trace_send_drop(audit, out.self_id, to, &message);
-            continue;
-        }
-        out.transmit(hooks, audit, to, &message);
-        if hooks.duplicate_outgoing(to, &message) {
-            audit.duplicated_at_send(NodeId(out.self_id), to, &message);
-            tracing::info!(
-                node = out.self_id,
-                to = to.0,
-                kind = message_kind(&message),
-                "msg_duplicated_at_send"
-            );
-            out.transmit(hooks, audit, to, &message);
-        }
+        offers.push((
+            to,
+            Message::InstallSnapshot {
+                from: NodeId(out.self_id),
+                ballot,
+                chosen_index: offered_index,
+                snapshot: Value(storage.snapshot().await),
+                // The at-most-once ledger travels beside the opaque bytes (#94):
+                // the receiver seals it so its duplicate-suppression decisions
+                // for the folded prefix match every peer's.
+                sessions: sessions.to_vec(),
+            },
+        ));
     }
+    // The offers that survived the per-offer checks go out through the one
+    // send seam every other message uses (drop hook → transmit → duplicate
+    // hook, in that order per message).
+    send_messages(out, hooks, audit, offers);
 }
 
 /// Surface the #88 window: a snapshot install persisted while this node's own
@@ -271,7 +263,7 @@ where
         })
         .collect();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
-    let snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)> = ready.snapshot_offers().to_vec();
+    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -574,8 +566,7 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // Durability marker: whether this batch was fsync'd (a promise-raise or
         // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only
-        // advance). The persist/send-seam animation renders it as a filled vs
-        // hollow tick.
+        // advance).
         tracing::info!(
             node = self_id,
             sync = (must_sync == paros_core::MustSync::Sync),
@@ -670,7 +661,7 @@ fn surface_persisted<A: Audit>(
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a
 /// storage fault never lets the node keep running on state it does not durably
 /// have. The decision is reported through [`Audit::storage_fault`] (typed, at
-/// the instant it is made) and surfaced as [`EV_STORAGE_FAULT`], then
+/// the instant it is made) and traced as `storage_fault`, then
 /// [`RunError::Storage`] unwinds the incarnation. Production semantics: a
 /// storage fault is a process exit (crash-only); the sim's node loop matches
 /// the variant and routes to the crash/restart path instead.

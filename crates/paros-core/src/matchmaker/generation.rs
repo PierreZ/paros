@@ -56,7 +56,7 @@ impl Matchmaker {
                 generation,
                 successor,
                 ..
-            } => self.on_chosen(generation, successor),
+            } => self.on_chosen(generation, &successor),
         };
         self.pending_reconfigure_replies.push(reply);
         self.assert_invariants();
@@ -108,9 +108,8 @@ impl Matchmaker {
         let me = self.config.id;
         let current = self.set();
         let set = bootstrap.set.clone();
-        // Wire hygiene: a proposal this matchmaker is not in, one
-        // that would not move it forward, or one that cannot admit
-        // the quorum system is refused whole. So is a competing
+        // Wire hygiene: a proposal this matchmaker is not in, or one
+        // that would not move it forward, is refused whole. So is a competing
         // proposal for a generation already settled here: once a
         // successor is recorded, nothing else at its generation can
         // ever be chosen, and storing it would keep a whole registry
@@ -121,11 +120,7 @@ impl Matchmaker {
             .successor
             .as_ref()
             .is_some_and(|s| set.generation <= s.generation && set != *s);
-        if !set.contains(me)
-            || set.generation <= current.generation
-            || !set.is_well_formed()
-            || settled
-        {
+        if !set.contains(me) || set.generation <= current.generation || settled {
             self.refusal()
         } else {
             // Keyed by the proposed set: two reconfigurers may
@@ -277,24 +272,37 @@ impl Matchmaker {
 
     /// The learner notification: record the chain link, activate a pending
     /// bootstrap, or refuse (see the *Trust boundary of `Chosen`* section of
-    /// the module doc).
+    /// the module doc). **Idempotent for a member that already activated
+    /// exactly this successor**: it answers `Learned { activated: false, at:
+    /// successor.generation }` again, so a reconfigurer whose first
+    /// `Learned` was lost can still count it toward the successor's quorum
+    /// when its re-sent `Chosen` lands. Refusing there (as the fall-through
+    /// arm did) named a `current` one generation above the one being
+    /// replaced, which the reconfigurer read as *superseded* and aborted —
+    /// after a single lost ack from an activated member the publication
+    /// could never reach `Done`.
     fn on_chosen(
         &mut self,
         generation: MatchmakerGeneration,
-        successor: MatchmakerSet,
+        successor: &MatchmakerSet,
     ) -> ReconfigureReply {
         let me = self.config.id;
         let current = self.set();
         let phase = self.phase();
-        // A learner notification (see the type doc on
-        // `ReconfigureRequest::Chosen`): the matchmaker does not
-        // re-derive the decision, it applies what a proposer that
-        // held the Phase-2 quorum tells it — after the wire checks
-        // any learner makes (the generation chain and a set that
-        // admits the quorum system).
-        let successor = MatchmakerSet::new(successor.generation, successor.members);
-        if successor.generation != generation.next() || !successor.is_well_formed() {
+        // A learner notification: the trust boundary is documented on
+        // `ReconfigureRequest::Chosen`.
+        if successor.generation != generation.next() {
             self.refusal()
+        } else if current == successor {
+            // Already activated (or since frozen) exactly this successor: a
+            // re-sent `Chosen` whose earlier `Learned` was lost. Nothing to
+            // apply; answer what was answered before.
+            ReconfigureReply::Learned {
+                matchmaker: me,
+                generation,
+                activated: false,
+                at: current.generation,
+            }
         } else if current.generation == generation
             && matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
         {
@@ -302,7 +310,7 @@ impl Matchmaker {
                 .hard_state
                 .successor
                 .as_ref()
-                .is_some_and(|recorded| *recorded != successor)
+                .is_some_and(|recorded| recorded != successor)
             {
                 // Two different successors for one generation: one of
                 // the two publications is wrong. A learner cannot tell
@@ -325,11 +333,11 @@ impl Matchmaker {
                     self.hard_state.successor = Some(successor.clone());
                     changed = true;
                 }
-                changed |= self.prune_settled_pending(&successor);
+                changed |= self.prune_settled_pending(successor);
                 if changed {
                     self.stage_scalars();
                 }
-                let activated = self.activate(&successor);
+                let activated = self.activate(successor);
                 ReconfigureReply::Learned {
                     matchmaker: me,
                     generation,
@@ -344,8 +352,8 @@ impl Matchmaker {
             // frozen further back): only an activation can apply —
             // but the decision settles this matchmaker's losing
             // bootstraps either way.
-            let pruned = self.prune_settled_pending(&successor);
-            let activated = self.activate(&successor);
+            let pruned = self.prune_settled_pending(successor);
+            let activated = self.activate(successor);
             if activated {
                 ReconfigureReply::Learned {
                     matchmaker: me,
@@ -368,7 +376,7 @@ impl Matchmaker {
     fn freeze(&mut self) {
         let set = self.set().clone();
         self.hard_state.generation = set.generation;
-        self.hard_state.members = set.members;
+        self.hard_state.members = set.members().to_vec();
         self.hard_state.phase = MatchmakerPhase::Stopped;
         self.refresh_set();
         self.stage_scalars();
@@ -385,10 +393,6 @@ impl Matchmaker {
         if !successor.contains(self.config.id) || successor.generation <= self.set().generation {
             return false;
         }
-        assert!(
-            successor.is_well_formed(),
-            "an activated matchmaker set admits the matchmaker quorum system"
-        );
         let Some(index) = self
             .hard_state
             .pending
@@ -445,7 +449,7 @@ impl Matchmaker {
             "an activated registry holds nothing below the activated watermark"
         );
         self.hard_state.generation = successor.generation;
-        self.hard_state.members.clone_from(&successor.members);
+        self.hard_state.members = successor.members().to_vec();
         self.hard_state.phase = MatchmakerPhase::Active;
         self.hard_state.successor = None;
         self.hard_state.decree = DecreeRecord::default();

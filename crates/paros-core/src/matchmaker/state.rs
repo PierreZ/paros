@@ -148,10 +148,7 @@ pub(crate) fn resolved_set(
     if scalars.generation == MatchmakerGeneration(0) && scalars.members.is_empty() {
         MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.to_vec())
     } else {
-        MatchmakerSet {
-            generation: scalars.generation,
-            members: scalars.members.clone(),
-        }
+        MatchmakerSet::new(scalars.generation, scalars.members.clone())
     }
 }
 

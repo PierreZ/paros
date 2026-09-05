@@ -44,6 +44,14 @@ we study, and analyses of external consensus codebases. This file is the map; re
 - [`papers/protocol-aware-recovery/`](papers/protocol-aware-recovery/) — Alagappan, Ganesan et al.
   (CTRL/PAR). Recovering correctly from *corrupted* storage, not just crashes — the durability edge cases.
 
+### Production systems (AWS)
+- [`papers/amazon-memorydb/`](papers/amazon-memorydb/) — Taleb et al. (AWS). Redis made durable by
+  offloading to a separate transaction-log service: log-backed leader election, snapshot recovery,
+  and how consistency is verified at scale.
+- [`papers/aurora-dsql/`](papers/aurora-dsql/) — Brooker et al. (AWS). Disaggregated multi-region
+  OLTP: coordination deferred to commit through adjudicators and the Journal, precision
+  timestamps, and the testing/correctness chapter (deterministic simulation, formal methods).
+
 ## Code implementation analyses
 
 - [`frankenpaxos/`](frankenpaxos/) — Whittaker's Scala research codebase. Per-slot MultiPaxos, the

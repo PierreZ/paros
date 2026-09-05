@@ -306,21 +306,6 @@ impl Retarget {
     }
 }
 
-#[derive(Clone, Debug)]
-enum Outcome {
-    Acked { seq: u64 },
-    Rejected { seq: u64 },
-    Ambiguous { seq: u64 },
-}
-
-impl Outcome {
-    fn seq(&self) -> u64 {
-        match self {
-            Self::Acked { seq } | Self::Rejected { seq } | Self::Ambiguous { seq } => *seq,
-        }
-    }
-}
-
 enum ProposalResult {
     Acked { leader: Option<u64>, slot: u64 },
     Rejected { leader: Option<u64> },
@@ -579,19 +564,16 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
     }
 }
 
-/// Factory-created stateful test driver. Its model contains outcomes, never a
-/// second implementation of Paxos.
+/// Factory-created stateful test driver. Its model is the client's own
+/// history, never a second implementation of Paxos.
 ///
-/// Both models are keyed by the request's own identity — its `seq` (this
+/// The history is keyed by the request's own identity — its `seq` (this
 /// workload is one client, so `seq` is the `(client, seq)` identity) — never
 /// by the payload hash: two distinct requests can legitimately carry
 /// identical bytes, and hash-keying would alias their outcomes ("never use
 /// hashes as identities"). The payload hash rides along as data, for the
 /// applied-trace joins.
 pub(crate) struct ChainWorkload {
-    /// Per `seq`: the payload's `cmd_hash` and the terminal client outcome.
-    outcomes: BTreeMap<u64, (u64, Outcome)>,
-    issued_count: u64,
     external_digests_compared: bool,
     adversarial: AdversarialCoverage,
     /// This client's own record of what it asked for and what came back —
@@ -605,8 +587,6 @@ pub(crate) struct ChainWorkload {
 impl ChainWorkload {
     pub(crate) fn new(digest: Option<DigestSink>) -> Self {
         Self {
-            outcomes: BTreeMap::new(),
-            issued_count: 0,
             external_digests_compared: false,
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
@@ -1040,8 +1020,6 @@ impl Workload for ChainWorkload {
                             server_count,
                         );
                         max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                        self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                         self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
@@ -1074,13 +1052,9 @@ impl Workload for ChainWorkload {
                             leader,
                             server_count,
                         );
-                        self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
                     ProposalResult::Ambiguous => {
-                        self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
                     }
                 }
@@ -1208,8 +1182,6 @@ impl Workload for ChainWorkload {
                     };
                     let result = if matches!(result, ProposalResult::Ambiguous) {
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_proposal_ambiguous");
-                        self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                         // The reconciling retry: by policy, back to the node
                         // that may have committed the abandoned attempt (the
                         // dedup path on the committing node), or on to the
@@ -1241,8 +1213,6 @@ impl Workload for ChainWorkload {
                                 server_count,
                             );
                             max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                             self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
@@ -1298,14 +1268,10 @@ impl Workload for ChainWorkload {
                                 leader,
                                 server_count,
                             );
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                             self.history.record_write_failed(seq);
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
                         ProposalResult::Ambiguous => {
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                             self.history.record_write_failed(seq);
                         }
                     }
@@ -1482,8 +1448,6 @@ impl Workload for ChainWorkload {
                             );
                             max_acked_slot =
                                 Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                             self.history.record_write_ack(seq, Some(slot), now_ms());
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
@@ -1515,16 +1479,12 @@ impl Workload for ChainWorkload {
                                 redirect,
                                 server_count,
                             );
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Rejected { seq }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
                                 "chain_command_rejected"
                             );
                         } else {
-                            self.outcomes
-                                .insert(seq, (cmd_hash, Outcome::Ambiguous { seq }));
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -2271,8 +2231,6 @@ impl Workload for ChainWorkload {
                     ProposalResult::Acked { leader, slot } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
-                        self.outcomes
-                            .insert(seq, (cmd_hash, Outcome::Acked { seq }));
                         self.history.record_write_ack(seq, Some(slot), now_ms());
                         tracing::info!(
                             cmd = %hash_text(cmd_hash),
@@ -2307,7 +2265,6 @@ impl Workload for ChainWorkload {
                 break;
             }
         }
-        self.issued_count = next_seq;
         let tail = tail(ctx.state());
         tail.lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2506,12 +2463,6 @@ impl Workload for ChainWorkload {
         }
         // (Every acked slot being inside the applied prefix is the audit's
         // final claim, judged once over every client's history.)
-        assert_always!(
-            self.outcomes
-                .iter()
-                .all(|(seq, (_, outcome))| *seq == outcome.seq() && *seq < self.issued_count),
-            "chain: retained outcome model is internally valid"
-        );
         Ok(())
     }
 }
