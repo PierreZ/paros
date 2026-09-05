@@ -81,7 +81,13 @@ target. Raise that to 10,000 only when a substantial protocol, harness, or fault
 introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided
 saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume. A hunt's
 deliverable is a *failing* seed and the diagnosis it leads to — replay it while you fix, cite it in
-the commit, and let it go; it is evidence, not an artifact to keep.
+the commit, and let it go; it is evidence, not an artifact to keep. The `canary` axis
+(`sim-paros-hunt canary [iterations]`) is the same campaign under moonpool's
+`check_determinism`: every seed runs twice and the replay must reproduce the first run's draw
+fingerprints, all of them — a `HashMap` iterated in its randomized order, a static that survives
+a run, a wall-clock read, anything paros or the harness keeps outside the seed — and a failure
+names the first diverging draw. The nextest smoke runs two seeds under it; run a few hundred
+after any change to the harness's randomness, the driver hooks, or the process lifecycle.
 
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
 operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,

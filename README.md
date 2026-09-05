@@ -70,6 +70,7 @@ cargo nextest run                  # or: cargo test
 cargo fmt && cargo clippy -- -D warnings
 cargo xtask sim run paros-chain             # coverage-guided (sancov) simulation sweep, the CI gate
 cargo run --bin sim-paros-hunt -- main 2000 # raw seed hunt; a failing seed is its deliverable
+cargo run --bin sim-paros-hunt -- canary 500 # every seed twice under moonpool's determinism canary; a diverging replay is its deliverable
 ```
 
 ## License
