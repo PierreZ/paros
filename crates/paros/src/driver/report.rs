@@ -134,7 +134,7 @@ pub(crate) struct Deltas {
     pub(crate) role: NodeRole,
     pub(crate) duplicates: u64,
     pub(crate) quorum_lost: u64,
-    pub(crate) repair: (u64, u64, u64, u64, u64),
+    pub(crate) repair: (u64, u64, u64, u64),
     pub(crate) handoff: HandoffCounters,
     pub(crate) membership: (u64, u64),
     pub(crate) matchmaking: Option<Ballot>,
@@ -217,19 +217,18 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         tracing::info!(node = self_id, count, "duplicate_suppressed");
     }
     // Surface any repair progress (Stage 8): in-place heals, straggler
-    // resolutions, recovery-timeout resignations, and the repair-cost bytes.
+    // resolutions, and recovery-timeout resignations.
     let repair = node.repair_counters();
     if repair != *last_repair {
         *last_repair = repair;
-        let (repaired, case1, case2, step_downs, bytes) = repair;
-        audit.repair_progress(NodeId(self_id), repaired, case1, case2, step_downs, bytes);
+        let (repaired, case1, case2, step_downs) = repair;
+        audit.repair_progress(NodeId(self_id), repaired, case1, case2, step_downs);
         tracing::info!(
             node = self_id,
             repaired,
             case1,
             case2,
             step_downs,
-            bytes,
             "repair_progress"
         );
     }

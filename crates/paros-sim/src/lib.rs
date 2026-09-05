@@ -140,8 +140,6 @@ pub(crate) const CLIENT_COUNT_RANGE: std::ops::Range<usize> = 1..4;
 /// sweep's own stopping rule, so it decides *which seeds run* rather than what
 /// happens inside one.
 pub(crate) const PLATEAU_SEEDS: usize = 8;
-/// Cap on the full coverage-guided sweep when driven by `AssertionCoverage`.
-pub const SWEEP_ITERATIONS: usize = 5000;
 /// Cap on the fast smoke sweep the nextest suite runs: a handful of random seeds
 /// through the safety checks, enough to catch an obvious regression quickly.
 /// Saturation is **not** asserted here (that is `cargo xtask sim`'s job).
@@ -263,11 +261,11 @@ pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 /// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
 /// attrition, driver hooks, operation swarm, and the safety/recovery checks under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
-/// coverage plateaus, capped at `max_iterations`). The cap is a parameter because
-/// the two modes saturate differently: the nextest test passes [`SWEEP_ITERATIONS`]
-/// (`AssertionCoverage`), the sancov runner passes [`COVERAGE_ITERATIONS`]
-/// (`CodeCoverage`). Returns the report so the caller can assert no
-/// `assertion_violations` and inspect progress.
+/// coverage plateaus, capped at `max_iterations`). The cap is a parameter so the
+/// caller owns the schedule: the sancov runner (`cargo xtask sim`) passes
+/// [`COVERAGE_ITERATIONS`] and saturates on `CodeCoverage`; the nextest suite
+/// never calls this (its smoke is [`chain_smoke`]). Returns the report so the
+/// caller can assert no `assertion_violations` and inspect progress.
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn explore(max_iterations: usize) -> SimulationReport {
@@ -319,13 +317,6 @@ pub fn chain_seed_digest(seed: u64) -> u64 {
 #[tracing::instrument(level = "debug")]
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
     chain_builder(None).set_iterations(iterations).run()
-}
-
-/// Replay an exploration recipe from a newly constructed campaign builder.
-#[must_use]
-#[tracing::instrument(level = "debug", skip(recipe), fields(recipe_len = recipe.len()))]
-pub fn replay_chain(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
-    chain_builder(None).replay_timeline(seed, recipe).run()
 }
 
 /// Explore one known root seed. This is the focused recipe-discovery command;

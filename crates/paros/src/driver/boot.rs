@@ -36,8 +36,8 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
 ) -> Result<(), RunError> {
-    // Mark this incarnation coming up. The recovery recorder turns every `booted`
-    // after a node's first into a *restart* event for the animation.
+    // Mark this incarnation coming up (every `booted` after a node's first is
+    // a restart).
     tracing::info!(node = self_id, "booted");
 
     let promised = node.hard_state().max_promised_ballot;

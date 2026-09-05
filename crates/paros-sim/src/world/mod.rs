@@ -242,12 +242,6 @@ pub(super) struct Stage7Flags {
     faulty_reported: bool,
     /// A reported record was genuinely re-written by a clean flush.
     record_recovered: bool,
-    /// A corrupted application snapshot was reset for local log replay
-    /// (floor = 0: CTRL's cheap path).
-    snapshot_reset_local: bool,
-    /// A corrupted application snapshot was reset under a truncated log
-    /// (recovery requires a peer's `InstallSnapshot`).
-    snapshot_reset_remote: bool,
 }
 
 /// The per-iteration durable-storage world: every node's durable records, keyed
@@ -802,66 +796,6 @@ impl StorageWorld {
         }
     }
 
-    /// Targeted, budget-checked corruption of one durable record — issue
-    /// #21's single-injection API (`corrupt(node, record)`): the adversarial
-    /// promise-corruption test is one call. Returns whether the budget
-    /// permitted it.
-    #[allow(dead_code)] // armed for #21's targeted tests; the swarm sites drive it today
-    #[tracing::instrument(level = "debug", skip(self), fields(node_key = %node_key, node, record = %record))]
-    pub(crate) fn corrupt(&mut self, node_key: &str, node: u64, record: StorageRecord) -> bool {
-        if !self.may_park(node_key) {
-            return false;
-        }
-        let Some(disk) = self.disks.get_mut(node_key) else {
-            return false;
-        };
-        let kind = match record {
-            StorageRecord::Accepted(slot) => {
-                if !disk.accepted.contains_key(&slot) {
-                    return false;
-                }
-                disk.entry_health.insert(
-                    slot,
-                    SlotHealth {
-                        entry: RecordHealth::Faulty,
-                        id: WitnessStatus::Present,
-                    },
-                );
-                self.marks
-                    .entry(node_key.to_string())
-                    .or_default()
-                    .insert(slot.0);
-                CorruptionKind::BitFlip
-            }
-            StorageRecord::Promise => {
-                disk.promise_health = [RecordHealth::Faulty, RecordHealth::Faulty];
-                CorruptionKind::PromiseCopy
-            }
-            StorageRecord::ChosenIndex => {
-                disk.chosen_health = RecordHealth::Faulty;
-                CorruptionKind::BitFlip
-            }
-            StorageRecord::Truncation => {
-                disk.truncation_health = RecordHealth::Faulty;
-                CorruptionKind::BitFlip
-            }
-            StorageRecord::Snapshot => {
-                disk.snapshot_health = RecordHealth::Faulty;
-                CorruptionKind::BitFlip
-            }
-            _ => return false,
-        };
-        self.park(node_key, node);
-        self.note_corruption(CorruptionInjection {
-            node,
-            record,
-            kind,
-            block: false,
-            outcome: CorruptionOutcome::Dormant,
-        });
-        true
-    }
-
     /// Decide one injection under the budget. `accepted_slots` are the
     /// accepted-log records the fault would suppress on `node` when the lost
     /// leg is taken; the check is conservative (it hypothesizes the loss even
@@ -1096,8 +1030,6 @@ pub(crate) struct CorpusDiskProbe {
     pub(crate) faulty_chunks: BTreeSet<u32>,
 }
 
-/// A matchmaker's durable GC watermark (`None` until it wrote anything): the
-/// corpus's world-truth probe for "no floor became effective yet".
 /// Whether `ip`'s durable registry still holds a registration naming `node` —
 /// the departed-straggler case's real precondition (#124): the configuration
 /// the reconfiguration left behind must still be answerable, or the case is

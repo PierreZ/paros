@@ -112,10 +112,6 @@ fn sim_list(args: &[String]) {
     let binaries = filter_binaries(args);
 
     if binaries.is_empty() {
-        if args.is_empty() {
-            eprintln!("(no sim binaries registered yet — Stage 1 adds the first)");
-            return;
-        }
         eprintln!("No binaries match filters: {args:?}");
         process::exit(1);
     }
@@ -152,10 +148,6 @@ fn sim_run(args: &[String]) {
 
 fn sim_run_all() {
     let binaries: Vec<&SimBinary> = SIM_BINARIES.iter().collect();
-    if binaries.is_empty() {
-        eprintln!("(no sim binaries registered yet — Stage 1 adds the first)");
-        return;
-    }
     run_binaries(&binaries, &[]);
 }
 

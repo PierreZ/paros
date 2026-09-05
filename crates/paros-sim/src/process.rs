@@ -522,7 +522,7 @@ async fn run_matchmaker_role(
         // down for good and the surviving quorum reconstructs a successor
         // set without it. BUGGIFY pairing: the coin fired within the budget.
         assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
-        checker.note_matchmaker_lost(id.0);
+        checker.note_matchmaker_lost();
         tracing::info!(matchmaker = id.0, "matchmaker_lost_exit");
         return Ok(());
     }
@@ -532,7 +532,7 @@ async fn run_matchmaker_role(
             .unwrap_or_else(PoisonError::into_inner)
             .is_matchmaker_parked(my_ip)
         {
-            checker.note_matchmaker_lost(id.0);
+            checker.note_matchmaker_lost();
             tracing::info!(matchmaker = id.0, "matchmaker_stays_down");
             return Ok(());
         }

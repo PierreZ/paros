@@ -96,7 +96,8 @@ pub struct DriverTunables {
     /// is deliberately bounded and lossy: the consensus driver never waits for
     /// network I/O, and current heartbeats/resends repair anything dropped
     /// here (overflow evicts the oldest message, keep-newest). The extreme (a
-    /// handful of slots) makes mailbox overflow — [`Audit::dropped_at_mailbox`]
+    /// handful of slots) makes mailbox overflow —
+    /// [`Audit::dropped_at_mailbox`](crate::Audit::dropped_at_mailbox)
     /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
     /// Maximum Paxos messages packed into one protobuf/gRPC request. The

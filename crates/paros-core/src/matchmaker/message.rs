@@ -90,15 +90,6 @@ impl MatchRequest {
         self.from_ballot = Some(from);
         self
     }
-
-    /// The ledger record this request registers.
-    #[must_use]
-    pub fn registration(&self) -> Registration {
-        Registration {
-            config: self.config.clone(),
-            kind: self.kind,
-        }
-    }
 }
 
 /// Why a matchmaker refused a request. Each variant carries enough for the

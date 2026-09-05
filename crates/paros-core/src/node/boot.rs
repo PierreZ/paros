@@ -96,7 +96,6 @@ impl ColocatedNode {
             // and a node that boots as a spare has not been a member of
             // anything, which is the same starting value.
             last_member_ballot: Ballot::zero(),
-            config_id: hard_state.config_id,
             acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
             replica,
             pending_writes: Vec::new(),
@@ -134,7 +133,6 @@ impl ColocatedNode {
             repair_step_downs: 0,
             repair_case1: 0,
             repair_case2: 0,
-            repair_bytes: 0,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),

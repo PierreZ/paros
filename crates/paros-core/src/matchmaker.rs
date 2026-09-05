@@ -111,22 +111,9 @@
 //!
 //! # Trust boundary of `Chosen`
 //!
-//! Three of the five reconfiguration messages are *acceptor* decisions the
-//! matchmaker makes from its own durable state — `Stop` (freeze), and the
-//! decree's `DecreePrepare`/`DecreeAccept` (promise and vote). `Bootstrap`
-//! is a durable hand-off of a proposal. `Chosen` is the one **learner
-//! notification**: the matchmaker records or activates the successor it is
-//! told, without re-deriving the decision, on the precondition that only a
-//! proposer holding the decree's Phase-2 quorum (or a node relaying such a
-//! publication) emits it. See [`ReconfigureRequest::Chosen`].
-//!
-//! Trusting is not the same as staying silent. The one contradiction a
-//! learner *can* see, it refuses: a `Chosen` for a generation whose
-//! successor this matchmaker already recorded, naming a different set, is
-//! answered with the ordinary refusal (which carries the recorded
-//! successor) and applied to nothing. A wrong relay is precisely what
-//! produces that message, and an `activated: false` `Learned` would have
-//! made it indistinguishable from a duplicate.
+//! `Chosen` is the one **learner notification** among the reconfiguration
+//! messages; its trust boundary is the wire contract, documented on
+//! [`ReconfigureRequest::Chosen`].
 
 mod decree;
 mod generation;
@@ -604,10 +591,11 @@ impl Matchmaker {
     }
 
     /// The cross-field checker, called at boot and at every public mutating
-    /// entry point: no registration below the watermark, every registration
-    /// a well-formed configuration, a frozen or activated generation with a
-    /// durable membership, pending bootstraps strictly above it, and no
-    /// pending bootstrap a recorded successor has already settled.
+    /// entry point: no registration below the watermark, a frozen or
+    /// activated generation with a durable membership, pending bootstraps
+    /// strictly above it, and no pending bootstrap a recorded successor has
+    /// already settled. (A registration's configuration is well-formed by
+    /// construction: [`AcceptorConfig::new`](crate::membership::AcceptorConfig::new) is its only constructor.)
     fn assert_invariants(&self) {
         assert!(
             self.registry
@@ -619,20 +607,6 @@ impl Matchmaker {
             self.registry.floor() == self.hard_state.gc_watermark,
             "the registry's floor is the durable gc watermark"
         );
-        for registration in self.registry.entries().values() {
-            assert!(
-                !registration.config.members().is_empty(),
-                "a registered configuration names at least one acceptor"
-            );
-            assert!(
-                registration
-                    .config
-                    .members()
-                    .windows(2)
-                    .all(|w| w[0] < w[1]),
-                "a registered membership is sorted and deduplicated"
-            );
-        }
         if self.hard_state.generation > MatchmakerGeneration(0) {
             assert!(
                 !self.hard_state.members.is_empty(),
@@ -1007,13 +981,6 @@ mod tests {
         assert_eq!(history[&ballot(1, 1)].config, config(&[0, 1, 2]));
         assert_eq!(mm.highest(), Some(ballot(3, 2)));
     }
-
-    /// Review finding P10a: the registry's own wire hygiene. A
-    /// configuration that does not admit its own quorum system is external
-    /// input, and storing one would make every later tally over it
-    /// miscount — and crash the process at the next boot, when
-    /// `assert_invariants` reads it back. It is refused before anything is
-    /// touched, exactly as a stale or below-floor ballot is.
 
     #[test]
     fn a_request_at_or_below_the_highest_is_refused_with_the_highest() {

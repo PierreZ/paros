@@ -68,7 +68,8 @@ Enter the Nix dev shell (`nix develop`, or rely on direnv), then:
 cargo build
 cargo nextest run                  # or: cargo test
 cargo fmt && cargo clippy -- -D warnings
-cargo run -p paros-sim-runner      # native safety sweep + one seed's timeline
+cargo xtask sim run paros-chain             # coverage-guided (sancov) simulation sweep, the CI gate
+cargo run --bin sim-paros-hunt -- main 2000 # raw seed hunt; a failing seed is its deliverable
 ```
 
 ## License

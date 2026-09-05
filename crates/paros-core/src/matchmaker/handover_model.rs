@@ -253,8 +253,6 @@ struct Ledger {
         BTreeMap<MatchmakerGeneration, BTreeMap<Ballot, (Registration, BTreeSet<MatchmakerId>)>>,
     /// Per generation: every durable decree vote `(matchmaker, ballot, members)`.
     votes: BTreeMap<MatchmakerGeneration, BTreeSet<(MatchmakerId, Ballot, Vec<MatchmakerId>)>>,
-    /// Per generation: how many matchmakers activated its chosen successor.
-    activations: BTreeMap<MatchmakerGeneration, BTreeSet<MatchmakerId>>,
     /// Per generation: every effective configuration durably held as that
     /// generation's, and by whom (the scalar the GC watermark never
     /// collects).
@@ -553,11 +551,6 @@ impl World {
                     if scalars.effective.is_some() {
                         self.reach.inherited_effective += 1;
                     }
-                    self.ledger
-                        .activations
-                        .entry(succeeded)
-                        .or_default()
-                        .insert(id);
                     if self.site(id).restarted {
                         self.reach.activated_after_restart += 1;
                     }

@@ -29,14 +29,7 @@ pub use corruption::{
     classify_log, decide,
 };
 pub use driver::{
-    DriverTunables, EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED,
-    EV_CHOSEN, EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED,
-    EV_DUPLICATE_SUPPRESSED, EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_HANDOFF_FENCE_EXPIRED,
-    EV_HANDOFF_REFUSED, EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE,
-    EV_NODE_TICK, EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST,
-    EV_RECOVERED, EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, RunError,
-    command_hash, parse_addr, registration_history_hash, run_node,
+    DriverTunables, RunError, command_hash, parse_addr, registration_history_hash, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
@@ -64,7 +57,7 @@ pub use paros_core::proposer::Proposer;
 pub use paros_core::replica::Replica;
 pub use paros_core::{
     AcceptorConfig, AcceptorWrite, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command,
-    Config, ConfigId, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
+    Config, Control, Decree, DecreeRecord, Entry, GcAck, GcOutcome, GcRequest, GcStep,
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff, HandoffCounters, HardState,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
     MatchStep, Matchmaker, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
@@ -83,8 +76,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use paros_core::{
-        Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, Message, NodeId, Slot,
-        Value,
+        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
     };
     use prost::Message as ProstMessage;
 
@@ -95,7 +87,6 @@ mod tests {
             round: 7,
             node: NodeId(3),
         };
-        let config_id = ConfigId(42);
         let entry = Entry {
             client: ClientId(1),
             seq: ClientSeq(2),
@@ -113,7 +104,6 @@ mod tests {
         catchup.insert(Slot(4), (ballot, command.clone()));
         vec![
             Message::Prepare {
-                config_id,
                 reply_to: NodeId(1),
                 leader: NodeId(1),
                 ballot,
@@ -123,7 +113,6 @@ mod tests {
             // A matchmaker deployment's `Prepare` carries the registered
             // configuration; the plain one above carries none.
             Message::Prepare {
-                config_id,
                 reply_to: NodeId(1),
                 leader: NodeId(1),
                 ballot,
@@ -134,7 +123,6 @@ mod tests {
                 )),
             },
             Message::Promise {
-                config_id,
                 from: NodeId(1),
                 ballot,
                 from_slot: Slot(5),
@@ -143,7 +131,6 @@ mod tests {
                 next_from_slot: None,
             },
             Message::Accept {
-                config_id,
                 reply_to: NodeId(2),
                 leader: NodeId(2),
                 ballot,
@@ -154,7 +141,6 @@ mod tests {
             // Phase 2 would put on the wire, and the only case that encodes
             // the optional `leader` field at all.
             Message::Accept {
-                config_id,
                 reply_to: NodeId(5),
                 leader: NodeId(2),
                 ballot,
@@ -162,24 +148,17 @@ mod tests {
                 command: command.clone(),
             },
             Message::Accepted {
-                config_id,
                 from: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 vhash: 17,
             },
             Message::Nack {
-                config_id,
                 from: NodeId(2),
                 ballot,
-                promised: Ballot {
-                    round: 9,
-                    node: NodeId(4),
-                },
                 slot: Slot(6),
             },
             Message::Commit {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 slot: Slot(6),
@@ -194,7 +173,6 @@ mod tests {
                 entries: catchup,
             },
             Message::InstallSnapshot {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 chosen_index: Slot(5),
@@ -206,9 +184,7 @@ mod tests {
                     (ClientId(4), ClientSeq(0), Slot(5)),
                 ],
             },
-            Message::CheckLeader { from: NodeId(0) },
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: Some(Slot(2)),
@@ -216,7 +192,6 @@ mod tests {
                 config: None,
             },
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: Some(Slot(2)),
@@ -230,7 +205,6 @@ mod tests {
             // wire encoding used to be unable to say (#56): a leader that has
             // chosen nothing is not a leader that has chosen slot 0.
             Message::Heartbeat {
-                config_id,
                 from: NodeId(0),
                 ballot,
                 commit: None,
@@ -238,7 +212,6 @@ mod tests {
                 config: None,
             },
             Message::HeartbeatAck {
-                config_id,
                 from: NodeId(1),
                 ballot,
                 seq: 9,
@@ -247,18 +220,15 @@ mod tests {
             // The driver-terminal snap-repair trio carries the configuration
             // identity too (guarded by the driver on receipt, never asserted).
             Message::SnapAck {
-                config_id,
                 from: NodeId(2),
                 at_index: Slot(4),
             },
             Message::SnapChunkRequest {
-                config_id,
                 from: NodeId(1),
                 at_index: Slot(4),
                 chunks: vec![0, 3],
             },
             Message::SnapChunkResponse {
-                config_id,
                 from: NodeId(0),
                 at_index: Slot(4),
                 chunks: vec![(0, Value(vec![1, 2])), (3, Value(vec![]))],
@@ -269,7 +239,6 @@ mod tests {
             // (it is the transferred ballot by construction), so the round
             // trip is what pins that re-derivation.
             Message::Relinquish {
-                config_id,
                 from: NodeId(3),
                 to: NodeId(1),
                 ballot,
@@ -304,7 +273,6 @@ mod tests {
             // The empty tail: a fully settled leader hands over the frontier
             // and nothing else.
             Message::Relinquish {
-                config_id,
                 from: NodeId(3),
                 to: NodeId(2),
                 ballot,

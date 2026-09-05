@@ -31,10 +31,10 @@ use crate::types::{Fingerprint, NodeId};
 /// The quorum system a configuration uses: which sets of acceptors count as a
 /// quorum for Phase 1 (election) and Phase 2 (decide).
 ///
-/// Carried as a *value* in [`crate::Config`] from the start (even though there is only
-/// ever one variant today) so that Matchmaker reconfiguration (Stage 9) is a
-/// *data* change — a different quorum system per round — rather than a rewrite of
-/// the election/decide logic. Paxos safety rests on every Phase-1 quorum
+/// Carried as a *value* in [`crate::Config`] (even though there is only ever one
+/// variant today) so that a reconfiguration is a *data* change — a different
+/// quorum system per configuration — rather than a rewrite of the
+/// election/decide logic. Paxos safety rests on every Phase-1 quorum
 /// intersecting every Phase-2 quorum; a simple majority satisfies that trivially.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -333,8 +333,7 @@ impl Fingerprint for Vec<MatchmakerId> {
 
 /// A matchmaker-set **generation** (#125): which matchmaker set is
 /// authoritative. Distinct from a Paxos ballot (consensus leadership, and the
-/// acceptor configuration bound to it) and from [`crate::ConfigId`] (the
-/// durable cluster-configuration tag). Generation 0 is the bootstrap set.
+/// acceptor configuration bound to it). Generation 0 is the bootstrap set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerGeneration(pub u64);

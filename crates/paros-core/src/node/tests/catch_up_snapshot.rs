@@ -81,7 +81,6 @@ fn a_leader_that_lost_its_chosen_index_is_pushed_the_first_slot_back() {
     // The leader forgets: it beats an empty watermark at its current ballot.
     let b = nodes[0].ballot();
     nodes[1].step(Message::Heartbeat {
-        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: b,
         commit: None,
@@ -269,7 +268,7 @@ fn compact_below_the_current_floor_is_a_no_op() {
 
 #[test]
 fn a_compact_batch_requires_fsync() {
-    use crate::write::{MustSync, WriteOp};
+    use crate::write::WriteOp;
 
     let mut nodes = cluster_with_three_chosen();
     let leader = &mut nodes[0];
@@ -284,9 +283,8 @@ fn a_compact_batch_requires_fsync() {
             .any(|w| matches!(w, WriteOp::Truncate { first, .. } if *first == Slot(3))),
         "the batch carries the Truncate delta"
     );
-    assert_eq!(
-        r.must_sync(),
-        MustSync::Sync,
+    assert!(
+        r.writes().iter().any(WriteOp::needs_sync),
         "a truncate must fsync before the batch's messages are sent"
     );
     r.advance();
@@ -371,7 +369,7 @@ fn below_floor_catchup_request_offers_a_snapshot() {
         from_slot: Slot(0), // below our floor
     });
     assert_eq!(n.pending_snapshot_offers.len(), 1, "a snapshot was offered");
-    let (to, chosen_index, _ballot, _config_id) = n.pending_snapshot_offers[0];
+    let (to, chosen_index, _ballot) = n.pending_snapshot_offers[0];
     assert_eq!(to, NodeId(1), "offered to the requester");
     assert_eq!(
         chosen_index,
@@ -389,7 +387,7 @@ fn below_floor_catchup_request_offers_a_snapshot() {
 
 #[test]
 fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
-    use crate::write::{MustSync, WriteOp};
+    use crate::write::WriteOp;
 
     // A node that missed a truncated prefix installs a snapshot at chosen_index 5
     // under ballot {3,0}: it jumps its chosen prefix, fully compacts to floor 6,
@@ -398,7 +396,6 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
     assert_eq!(n.hard_state().chosen_index, None);
 
     n.step(Message::InstallSnapshot {
-        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: ballot(3, 0),
         chosen_index: Slot(5),
@@ -422,9 +419,8 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
     );
 
     let r = n.ready();
-    assert_eq!(
-        r.must_sync(),
-        MustSync::Sync,
+    assert!(
+        r.writes().iter().any(WriteOp::needs_sync),
         "an install is fsync'd before send"
     );
     assert!(
@@ -443,7 +439,6 @@ fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
     // A stale snapshot at or below our prefix is ignored (no going backward), even
     // though it carries a higher ballot.
     n.step(Message::InstallSnapshot {
-        config_id: ConfigId::default(),
         from: NodeId(0),
         ballot: ballot(9, 0),
         chosen_index: Slot(4),
@@ -476,7 +471,6 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
     // Slot 10 arrives out of order (reordered/duplicated `Commit`): chosen,
     // but far above the (empty) contiguous prefix.
     x.step(Message::Commit {
-        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(10),
@@ -488,7 +482,6 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
 
     // A peer answers the below-floor catch-up with a snapshot at boundary 9.
     x.step(Message::InstallSnapshot {
-        config_id: ConfigId::default(),
         from: NodeId(2),
         ballot: ballot(3, 2),
         chosen_index: Slot(9),

@@ -94,7 +94,6 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                     vec![(
                         to,
                         Message::SnapChunkResponse {
-                            config_id: node.hard_state().config_id,
                             from: me,
                             at_index: at,
                             chunks: served,
@@ -128,7 +127,6 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                 vec![(
                     to,
                     Message::InstallSnapshot {
-                        config_id: node.hard_state().config_id,
                         from: me,
                         ballot,
                         chosen_index: ci,
@@ -344,7 +342,6 @@ pub(crate) fn snap_repair_tick<S, H, A>(
                     vec![(
                         leader,
                         Message::SnapAck {
-                            config_id: node.hard_state().config_id,
                             from: me,
                             at_index: point,
                         },
@@ -376,7 +373,6 @@ pub(crate) fn snap_repair_tick<S, H, A>(
                 (
                     *peer,
                     Message::SnapChunkRequest {
-                        config_id: node.hard_state().config_id,
                         from: me,
                         at_index: Slot(at),
                         chunks: wanted.clone(),

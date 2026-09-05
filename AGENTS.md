@@ -99,7 +99,8 @@ and ask any node to drive the generation handover; refused on a plain seed) and 
 for good, and tell it to shut down).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
-that opaque state. `ChainAgreement` checks one command/state per applied index, contiguous local
+that opaque state. The audit's application check (over the `ChainState` the storage layer reports
+through `app_applied`) asserts one command/state per applied index, contiguous local
 application, and proposal validity. Keep its messages stable. Client timeouts and deliberately
 abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
 bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
@@ -175,10 +176,8 @@ role; the acceptor never reads the chosen prefix; the replica never sees a ballo
 caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
 "is this slot chosen" predicate when a probe closes). What that bought, in order: the single
 decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
-is no second Paxos kernel in the crate). Still to come: the matchmaker folds into the role
-system; flexible quorums and Compartmentalized Paxos become deployment data. Each of those is
-a later phase; the first phase extracted the three roles with the behaviour, the public API
-and the sweep unchanged.
+is no second Paxos kernel in the crate). Still to come: flexible quorums and Compartmentalized
+Paxos become deployment data.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -228,7 +227,7 @@ until a matchmaker quorum answered; the replies' histories are unioned above the
 watermark into `H_b`; a refusal abandons the campaign (the next one opens above the refuser's
 highest round); a campaign whose matchmakers are slow is re-asked on every election timeout,
 never abandoned by the clock. **The ledger distinguishes a belief from a fact.** Every
-registration carries a `reconfiguration` flag (`paros_core::Registration`): an ordinary campaign
+registration carries a `kind: RegistrationKind` (`paros_core::Registration`): an ordinary campaign
 registers the configuration the candidate *believes* in force (learned from a leader's
 `Prepare`, `Heartbeat` or `Relinquish`), a `ColocatedNode::reconfigure` campaign registers an
 operator's explicit change. The **effective configuration** is the highest-ballot
@@ -282,7 +281,7 @@ of the configuration it believes in force nor the leader, *and* that watermark s
 `last_member_ballot` — the highest ballot a configuration naming this node was bound to. The first
 three are beliefs and the third one is volatile (a reboot regresses `acceptors` to the bootstrap
 configuration), so without the fourth "the cluster is done with me" would be the operator's
-assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The wrong rule (installed ⇒ deletable, `DPaxos` Appendix D) and
+assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
 its red→green evidence are recorded in the commit that landed the GC. Module doc:
 `crates/paros-core/src/node/gc.rs`; design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`.
@@ -311,7 +310,8 @@ replaces and cannot be given any other quorum): the paper's flexible matchmaker
 quorums are deliberately unsupported, and the handover's safety argument is made under the
 majority model alone. The handover is proven by a sans-IO **model checker**
 (`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
-seeded schedules by default, thousands with `HANDOVER_MODEL_SEEDS`): concurrent reconfigurers
+seeded schedules by default, thousands with `HANDOVER_MODEL_SEEDS`; `HANDOVER_MODEL_STEPS` sets the
+chaos steps per schedule and `HANDOVER_MODEL_TRACE` prints a schedule as it runs): concurrent reconfigurers
 and finishers over the real `Matchmaker` and `MatchmakerReconfigurer` with every message
 dropped, duplicated or reordered, every matchmaker crashed at each durability seam and rebooted
 from its disk, every reconfigurer killed or abandoned at any step and every node rebooted to its
@@ -349,8 +349,7 @@ state recovers — there is deliberately no matchmaker-specific in-place repair.
 what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
 truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
 production we will later search for and adopt an existing high-level storage engine rather than
-building on moonpool's primitives. (Moonpool's *storage chaos* still applies in simulation — it
-perturbs the environment, not the abstraction we code against.) **The seam is async.** Every
+building on moonpool's primitives. **The seam is async.** Every
 `NodeStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
 the boot scan, producing or reading snapshot bytes, restoring the application — returns a `Send`
 future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
@@ -422,7 +421,7 @@ separation; #81 removed the message-class nemesis, which mixed them):
   one-message delivery batch caps per-peer throughput below the protocol's own rate. Both are
   permanent partitions wearing a knob's clothes, which is not a configuration but a defeat of
   eventual synchrony. Two things are **never** buggified: **oracle thresholds**
-  (`CONVERGENCE_GRACE_MS`, `GAP_WEDGE_TICKS`, `DEPOSED_TICK_SLACK`, `PLATEAU_SEEDS`, `SETTLE_MS`),
+  (`DEPOSED_TICK_SLACK`, `PLATEAU_SEEDS`, `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`, `FLOOR_GRACE`),
   because they are the judgement the run is measured against — moving them does not explore a new
   state, it changes the verdict on the old one — and **schedule ceilings** (`*_ITERATIONS`), which
   feed the guided seed schedule rather than the run. Constants that a correctness argument depends
@@ -430,8 +429,10 @@ separation; #81 removed the message-class nemesis, which mixed them):
   all, and say so where they are defined.
 
 The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
-attrition cannot reach — five today: `BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync`,
-and the chunk-repair pair `BeforeChunkSync` / `AfterChunkRestoreBeforeSync`. Give each seam its
+attrition cannot reach — eight today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
+`BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync` and `AfterBootReplayBeforeSync`, the
+chunk-repair pair `BeforeChunkSync` / `AfterChunkRestoreBeforeSync`, and the matchmaker driver's
+`MatchBeforeSync` / `MatchAfterSyncBeforeReply`. Give each seam its
 own BUGGIFY location; sharing one location prevents the sweep from independently selecting the
 distinct failure modes.
 
@@ -450,7 +451,7 @@ storage world, factory-created per seed): every callback folds one transition in
 state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
 the **workload**, which records its own operation history and checks it in `check()`; the client is
 the only party that knows its own program order. The application state machine
-(`ChainAgreement`: one command and one state per applied index, contiguous local application)
+(`ChainState`: one command and one state per applied index, contiguous local application)
 lives in the audit too, fed by the storage layer's `app_applied`/`app_snapshot`/`app_reset`
 callbacks. Tracing is for humans only: nothing reads the trace back, and there is no `Invariant`
 type to add one to. If a fact a check needs exists nowhere the audit can see, add the `Audit`
@@ -672,7 +673,8 @@ driver hooks and the sim/workload layers (per the turbulence doctrine above — 
 
 Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
 Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
-`paros-core` has no deps; everything ultimately points into it.
+`paros-core` is dependency-free with `default-features = false` (its only deps, `serde` and
+`tracing`, are optional and observation-only); everything ultimately points into it.
 
 - `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
   the membership boundary in `membership.rs`) and `ColocatedNode`, the node that wires them
@@ -692,8 +694,8 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
   + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-hyper` and
-  runtime-free tonic (wasm-safe). No dedicated storage crate — the Stage-4+ faulty fake lands
-  here or in the harness.
+  runtime-free tonic (wasm-safe). No dedicated storage crate: the faulty fake is the harness's
+  world-backed store (`crates/paros-sim/src/world/storage.rs`).
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
   corpus. Depends on `paros` + `moonpool-sim`.

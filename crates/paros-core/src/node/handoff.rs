@@ -412,7 +412,6 @@ impl ColocatedNode {
         self.pending_messages.push((
             Audience::Node(target),
             Message::Relinquish {
-                config_id: self.config_id,
                 from: self.config.id,
                 to: target,
                 ballot,
@@ -474,12 +473,12 @@ impl ColocatedNode {
         // fabricate a second holder of this authority — the transport is never
         // trusted with uniqueness.
         //
-        // The sender is deliberately **not** required to be `ballot.node`: an
-        // authority survives a chain of handoffs (A → B → C) while its ballot
-        // keeps naming the node that minted it, so the relinquisher is whoever
-        // currently holds it. What both ids must be is configured members —
-        // the same membership trust boundary `on_accept` already draws around
-        // an incoming ballot.
+        // Every `Relinquish` on the wire has `from == ballot.node`: only the
+        // minter of a ballot may hand it on (`can_relinquish`, one hop). The
+        // guard does not re-derive that equality; what it pins is that both
+        // ids are pooled members — the same membership trust boundary
+        // `on_accept` already draws around an incoming ballot — and that the
+        // successor is exactly this node.
         if to != me || from == me || !self.in_pool(from) || !self.in_pool(ballot.node) {
             self.handoff.rejected_target = self.handoff.rejected_target.saturating_add(1);
             return;

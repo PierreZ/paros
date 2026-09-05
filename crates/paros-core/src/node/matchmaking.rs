@@ -289,7 +289,6 @@ impl ColocatedNode {
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
         let generation = reply.generation;
         let (matchmaker, to, ballot, answer) = split_reply(reply);

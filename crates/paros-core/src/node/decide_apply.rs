@@ -86,7 +86,6 @@ impl ColocatedNode {
         // Accepts reach the active configuration only: a removed node is
         // never contacted for a new ballot's Phase 2.
         self.broadcast_acceptors(&Message::Accept {
-            config_id: self.config_id,
             reply_to: me,
             leader: me,
             ballot,
@@ -127,7 +126,6 @@ impl ColocatedNode {
             "a decided slot is chosen with the decided command"
         );
         self.broadcast(&Message::Commit {
-            config_id: self.config_id,
             from: me,
             ballot,
             slot,

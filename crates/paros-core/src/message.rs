@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, Command, ConfigId, NodeId, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
 
 /// **Who a message is addressed to**, in the protocol's own terms rather
 /// than in addresses.
@@ -74,9 +74,6 @@ pub enum Message {
     /// every slot at or after `from_slot`." One Phase 1 per ballot covers the
     /// whole log suffix (the stable-leader optimization).
     Prepare {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Where the `Promise` (or `Nack`) is addressed. The **reply address**
         /// alone: it says nothing about who owns the ballot.
         reply_to: NodeId,
@@ -110,9 +107,6 @@ pub enum Message {
     /// already-chosen slots as free. A candidate that far behind must recover the
     /// compacted prefix out of band.
     Promise {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot promised.
@@ -140,9 +134,6 @@ pub enum Message {
     // ---- Phase 2 (accept / accepted / nack) ----
     /// Proposer → acceptors: "accept `command` for `slot` at `ballot`."
     Accept {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Where the `Accepted` (or `Nack`) is addressed. The **reply address**
         /// alone.
         reply_to: NodeId,
@@ -164,9 +155,6 @@ pub enum Message {
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The accepted ballot.
@@ -178,18 +166,13 @@ pub enum Message {
     },
     /// Acceptor → proposer: rejection of a `Prepare` or `Accept`.
     Nack {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The rejected ballot, echoed from the `Prepare`/`Accept` that was
         /// refused (matches the proposer's in-flight campaign or accept round).
+        /// The winning promise deliberately does not travel with it: an
+        /// untrusted wire value must never select a future campaign round.
         ballot: Ballot,
-        /// The acceptor's current `max_promised_ballot`, for diagnostics. The
-        /// receiver deliberately does not retain this untrusted wire value as a
-        /// future campaign-round hint.
-        promised: Ballot,
         /// The contested slot.
         slot: Slot,
     },
@@ -197,9 +180,6 @@ pub enum Message {
     // ---- Learning ----
     /// Any → any: `command` is chosen for `slot` (decided at `ballot`).
     Commit {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Sender.
         from: NodeId,
         /// The ballot at which the command was chosen.
@@ -248,9 +228,6 @@ pub enum Message {
     /// node that was down while the cluster advanced and truncated past it, so
     /// commit-replay catch-up can no longer heal it.
     InstallSnapshot {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// Sender (the serving peer).
         from: NodeId,
         /// The ballot the requester adopts (`>=` every ballot the snapshot's
@@ -281,11 +258,6 @@ pub enum Message {
     /// it end to end; [`crate::ColocatedNode::step`] ignores it — consensus state
     /// never depends on snapshot custody.
     SnapAck {
-        /// Durable cluster configuration identity. Snap repair is
-        /// driver-terminal, so the *driver* guards a mismatch on receipt
-        /// (ignore, never assert — wire input); the core never steps it.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// The acknowledging node.
         from: NodeId,
         /// The decided snapshot point recorded (the `Snap` marker's slot).
@@ -296,10 +268,6 @@ pub enum Message {
     /// identity (the `Snap` marker) is what makes the answer verifiable.
     /// Driver-terminal, like [`Message::SnapAck`].
     SnapChunkRequest {
-        /// Durable cluster configuration identity (driver-guarded on receipt,
-        /// like [`Message::SnapAck`]).
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// The requesting node.
         from: NodeId,
         /// The decided snapshot point whose chunks are needed.
@@ -314,10 +282,6 @@ pub enum Message {
     /// [`Message::InstallSnapshot`] instead (the unchanged fallback).
     /// Driver-terminal, like [`Message::SnapAck`].
     SnapChunkResponse {
-        /// Durable cluster configuration identity (driver-guarded on receipt,
-        /// like [`Message::SnapAck`]).
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// The serving peer.
         from: NodeId,
         /// The decided snapshot point the chunks belong to.
@@ -360,14 +324,11 @@ pub enum Message {
     /// one never started, so the cluster simply has no leader until an
     /// ordinary Phase 1 elects one. That is the intended trade.
     Relinquish {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
-        /// The node giving the authority up — its **current** holder. Equal to
-        /// `ballot.node` for the leader that minted the ballot, and a different
-        /// member once the authority has already been handed on at least once
-        /// (an authority survives a chain of handoffs while its ballot keeps
-        /// naming the node that won it).
+        /// The node giving the authority up. Always `ballot.node`: only the
+        /// node that minted a ballot may hand it on (one hop —
+        /// `ColocatedNode::can_relinquish` requires `LeadershipOrigin::Elected`),
+        /// so a successor never relinquishes what it inherited and every
+        /// `Relinquish` on the wire is sent by its ballot's minter.
         from: NodeId,
         /// The **single intended successor**. A receiver whose own id differs
         /// ignores the message whole: authority uniqueness must not depend on
@@ -414,20 +375,11 @@ pub enum Message {
         config: Option<AcceptorConfig>,
     },
 
-    // ---- Tick-injected self-events (synthesized by `tick`, routed via `step`) ----
-    /// "Have I heard from a leader recently?" — drives leader election / a
-    /// ballot bump when it fires.
-    CheckLeader {
-        /// The node checking on itself.
-        from: NodeId,
-    },
-    /// Leader → peers (and a leader self-trigger from `tick`): a liveness beat
-    /// carrying the leader's commit index so followers advance their chosen
-    /// prefix; also the trigger to re-send un-acked `Accept`s.
+    // ---- Liveness ----
+    /// Leader → peers: a liveness beat carrying the leader's commit index so
+    /// followers advance their chosen prefix. Broadcast on the leader's tick
+    /// cadence (and by a read round), never received by its sender.
     Heartbeat {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// The leader heartbeating.
         from: NodeId,
         /// The leader's current ballot (lets a follower adopt or refuse it).
@@ -461,9 +413,6 @@ pub enum Message {
     /// reads need. Carries no durable obligation: the ack claims only "my promise
     /// is at or below `ballot` right now".
     HeartbeatAck {
-        /// Durable cluster configuration identity.
-        #[cfg_attr(feature = "serde", serde(default))]
-        config_id: ConfigId,
         /// The acknowledging follower.
         from: NodeId,
         /// The heartbeat's ballot, echoed.
@@ -477,33 +426,4 @@ pub enum Message {
         #[cfg_attr(feature = "serde", serde(default))]
         chosen: Option<Slot>,
     },
-}
-
-impl Message {
-    /// Return the durable configuration identity carried by a ballot-bearing
-    /// protocol message or by the driver-terminal snapshot-repair kinds (whose
-    /// mismatches the *driver* guards on receipt — the core never asserts on
-    /// them because it never processes them). Local triggers and
-    /// configuration-neutral catch-up requests/responses carry no identity.
-    #[must_use]
-    pub fn config_id(&self) -> Option<ConfigId> {
-        match self {
-            Self::Prepare { config_id, .. }
-            | Self::Promise { config_id, .. }
-            | Self::Accept { config_id, .. }
-            | Self::Accepted { config_id, .. }
-            | Self::Nack { config_id, .. }
-            | Self::Commit { config_id, .. }
-            | Self::InstallSnapshot { config_id, .. }
-            | Self::Heartbeat { config_id, .. }
-            | Self::HeartbeatAck { config_id, .. }
-            | Self::SnapAck { config_id, .. }
-            | Self::SnapChunkRequest { config_id, .. }
-            | Self::SnapChunkResponse { config_id, .. }
-            | Self::Relinquish { config_id, .. } => Some(*config_id),
-            Self::CatchUpRequest { .. }
-            | Self::CatchUpResponse { .. }
-            | Self::CheckLeader { .. } => None,
-        }
-    }
 }

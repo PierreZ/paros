@@ -52,8 +52,7 @@ impl ColocatedNode {
                 .acceptor
                 .record(ci)
                 .map_or(self.acceptor.promised(), |(b, _)| *b);
-            self.pending_snapshot_offers
-                .push((to, ci, choosing, self.config_id));
+            self.pending_snapshot_offers.push((to, ci, choosing));
             return;
         }
         if from_slot > ci {

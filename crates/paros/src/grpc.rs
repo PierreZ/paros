@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, GcAck,
-    GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, GcAck, GcRequest,
+    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
+    MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind, SessionEntry, Slot,
     Value,
 };
@@ -241,7 +241,6 @@ fn pending_commands_from_proto(
 }
 
 fn snapshot_to_proto(
-    config_id: ConfigId,
     from: NodeId,
     ballot: Ballot,
     chosen_index: Slot,
@@ -249,7 +248,6 @@ fn snapshot_to_proto(
     sessions: &[SessionEntry],
 ) -> internal::consensus_message::Kind {
     internal::consensus_message::Kind::InstallSnapshot(internal::InstallSnapshot {
-        config_id: config_id.0,
         from: from.0,
         ballot: Some(ballot_to_proto(ballot)),
         chosen_index: chosen_index.0,
@@ -275,14 +273,12 @@ pub(crate) fn message_to_proto(
 
     let kind = match message {
         Message::Prepare {
-            config_id,
             reply_to,
             leader,
             ballot,
             from_slot,
             config,
         } => Kind::Prepare(internal::Prepare {
-            config_id: config_id.0,
             reply_to: reply_to.0,
             // Absent when it would merely repeat the reply address, which is
             // every message paros sends today: the plain wire is unchanged.
@@ -292,7 +288,6 @@ pub(crate) fn message_to_proto(
             config: config.as_ref().map(config_to_proto),
         }),
         Message::Promise {
-            config_id,
             from,
             ballot,
             from_slot,
@@ -300,7 +295,6 @@ pub(crate) fn message_to_proto(
             faulty,
             next_from_slot,
         } => Kind::Promise(internal::Promise {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             from_slot: from_slot.0,
@@ -309,14 +303,12 @@ pub(crate) fn message_to_proto(
             next_from_slot: next_from_slot.map(|slot| slot.0),
         }),
         Message::Accept {
-            config_id,
             reply_to,
             leader,
             ballot,
             slot,
             command,
         } => Kind::Accept(internal::Accept {
-            config_id: config_id.0,
             reply_to: reply_to.0,
             // Absent when it would merely repeat the reply address, which is
             // every message paros sends today: the plain wire is unchanged.
@@ -326,39 +318,27 @@ pub(crate) fn message_to_proto(
             command: Some(command_to_proto(command)),
         }),
         Message::Accepted {
-            config_id,
             from,
             ballot,
             slot,
             vhash,
         } => Kind::Accepted(internal::Accepted {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
             vhash: *vhash,
         }),
-        Message::Nack {
-            config_id,
-            from,
-            ballot,
-            promised,
-            slot,
-        } => Kind::Nack(internal::Nack {
-            config_id: config_id.0,
+        Message::Nack { from, ballot, slot } => Kind::Nack(internal::Nack {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
-            promised: Some(ballot_to_proto(*promised)),
             slot: slot.0,
         }),
         Message::Commit {
-            config_id,
             from,
             ballot,
             slot,
             command,
         } => Kind::Commit(internal::Commit {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
@@ -377,30 +357,19 @@ pub(crate) fn message_to_proto(
             })
         }
         Message::InstallSnapshot {
-            config_id,
             from,
             ballot,
             chosen_index,
             snapshot,
             sessions,
-        } => snapshot_to_proto(
-            *config_id,
-            *from,
-            *ballot,
-            *chosen_index,
-            snapshot,
-            sessions,
-        ),
-        Message::CheckLeader { from } => Kind::CheckLeader(internal::CheckLeader { from: from.0 }),
+        } => snapshot_to_proto(*from, *ballot, *chosen_index, snapshot, sessions),
         Message::Heartbeat {
-            config_id,
             from,
             ballot,
             commit,
             seq,
             config,
         } => Kind::Heartbeat(internal::Heartbeat {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
@@ -408,45 +377,34 @@ pub(crate) fn message_to_proto(
             config: config.as_ref().map(config_to_proto),
         }),
         Message::HeartbeatAck {
-            config_id,
             from,
             ballot,
             seq,
             chosen,
         } => Kind::HeartbeatAck(internal::HeartbeatAck {
-            config_id: config_id.0,
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
             chosen: chosen.map(|s| s.0),
         }),
-        Message::SnapAck {
-            config_id,
-            from,
-            at_index,
-        } => Kind::SnapAck(internal::SnapAck {
-            config_id: config_id.0,
+        Message::SnapAck { from, at_index } => Kind::SnapAck(internal::SnapAck {
             from: from.0,
             at_index: at_index.0,
         }),
         Message::SnapChunkRequest {
-            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkRequest(internal::SnapChunkRequest {
-            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks.clone(),
         }),
         Message::SnapChunkResponse {
-            config_id,
             from,
             at_index,
             chunks,
         } => Kind::SnapChunkResponse(internal::SnapChunkResponse {
-            config_id: config_id.0,
             from: from.0,
             at_index: at_index.0,
             chunks: chunks
@@ -458,7 +416,6 @@ pub(crate) fn message_to_proto(
                 .collect(),
         }),
         Message::Relinquish {
-            config_id,
             from,
             to,
             ballot,
@@ -468,7 +425,6 @@ pub(crate) fn message_to_proto(
             pending,
             config,
         } => Kind::Relinquish(internal::Relinquish {
-            config_id: config_id.0,
             from: from.0,
             to: to.0,
             ballot: Some(ballot_to_proto(*ballot)),
@@ -494,7 +450,6 @@ pub(crate) fn message_from_proto(
 
     match message.kind.ok_or("missing Paxos message kind")? {
         Kind::Prepare(message) => Ok(Message::Prepare {
-            config_id: ConfigId(message.config_id),
             reply_to: NodeId(message.reply_to),
             leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
@@ -502,7 +457,6 @@ pub(crate) fn message_from_proto(
             config: config_from_proto(message.config)?,
         }),
         Kind::Promise(message) => Ok(Message::Promise {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             from_slot: Slot(message.from_slot),
@@ -511,7 +465,6 @@ pub(crate) fn message_from_proto(
             next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
-            config_id: ConfigId(message.config_id),
             reply_to: NodeId(message.reply_to),
             leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
@@ -519,21 +472,17 @@ pub(crate) fn message_from_proto(
             command: command_from_proto(message.command)?,
         }),
         Kind::Accepted(message) => Ok(Message::Accepted {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             vhash: message.vhash,
         }),
         Kind::Nack(message) => Ok(Message::Nack {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
-            promised: ballot_from_proto(message.promised)?,
             slot: Slot(message.slot),
         }),
         Kind::Commit(message) => Ok(Message::Commit {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
@@ -548,7 +497,6 @@ pub(crate) fn message_from_proto(
             entries: slot_commands_from_proto(message.entries)?,
         }),
         Kind::InstallSnapshot(message) => Ok(Message::InstallSnapshot {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             chosen_index: Slot(message.chosen_index),
@@ -565,11 +513,7 @@ pub(crate) fn message_from_proto(
                 })
                 .collect(),
         }),
-        Kind::CheckLeader(message) => Ok(Message::CheckLeader {
-            from: NodeId(message.from),
-        }),
         Kind::Heartbeat(message) => Ok(Message::Heartbeat {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             commit: message.commit.map(Slot),
@@ -577,25 +521,21 @@ pub(crate) fn message_from_proto(
             config: config_from_proto(message.config)?,
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             seq: message.seq,
             chosen: message.chosen.map(Slot),
         }),
         Kind::SnapAck(message) => Ok(Message::SnapAck {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
         }),
         Kind::SnapChunkRequest(message) => Ok(Message::SnapChunkRequest {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message.chunks,
         }),
         Kind::SnapChunkResponse(message) => Ok(Message::SnapChunkResponse {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             at_index: Slot(message.at_index),
             chunks: message
@@ -605,7 +545,6 @@ pub(crate) fn message_from_proto(
                 .collect(),
         }),
         Kind::Relinquish(message) => Ok(Message::Relinquish {
-            config_id: ConfigId(message.config_id),
             from: NodeId(message.from),
             to: NodeId(message.to),
             ballot: ballot_from_proto(message.ballot)?,

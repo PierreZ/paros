@@ -13,17 +13,6 @@ use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Slot};
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
 
-/// Consecutive **deposed heartbeats** a leader may broadcast before the checker
-/// calls it a zombie (#95). **Never buggified**: an oracle threshold is the
-/// judgement a run is measured against, so drawing it per seed does not
-/// explore a new state, it changes the verdict on the old one (AGENTS.md,
-/// prong 2). A leader whose ballot a promise-majority has moved
-/// strictly past can never again assemble any quorum at that ballot — every
-/// below-promise beat is ignored unacked — yet without `CheckQuorum` nothing ever
-/// demotes it while it is partitioned from the very peers that could tell it.
-/// `CheckQuorum` bounds the zombie window to one ack-quorum-less election-timeout
-/// window (at most ~10 ticks, one beat per tick); forty beats is ~4x that on
-/// the protocol's own clock, immune to wall-time dilation.
 /// Ticks of slack past two `CheckQuorum` windows a deposed leader may keep
 /// beating: the window it is in when the promise-majority forms may have just
 /// started, so it needs that one and the next to notice, plus the tick that
@@ -237,8 +226,6 @@ pub(super) struct AuditState {
     /// `(ballot round, ballot node)` → who is exercising that logical authority
     /// (see [`Authority`]). The uniqueness oracle's whole state.
     pub(super) authorities: BTreeMap<(u64, u64), Authority>,
-    /// Refusal totals folded from [`Audit::handoff_refused`].
-    pub(super) handoff_refused: (u64, u64, u64, u64),
     /// `(node, authority)` pairs the core decided to relinquish — the
     /// "at most once" ledger, keyed on the decision rather than the wire (one
     /// decision can be re-transmitted many times).
@@ -271,7 +258,6 @@ pub(super) struct AuditState {
     pub(super) any_chosen: bool,
     pub(super) any_proposal_checked: bool,
     pub(super) any_ack_checked: bool,
-    pub(super) config_tagged_protocol_message: bool,
     pub(super) any_leader: bool,
     pub(super) leader_promise_checked: bool,
     pub(super) compacted: bool,
@@ -329,8 +315,6 @@ pub(super) struct AuditState {
     /// the driver at the instant they exit, or by a boot that found the
     /// identity retired.
     pub(super) retired: BTreeSet<u64>,
-    /// Matchmakers whose registry was lost for good (#125).
-    pub(super) matchmakers_lost: BTreeSet<u64>,
     pub(super) wiped_any: bool,
     /// A client asked some leader to reconfigure the matchmaker set.
     pub(super) reconfigure_matchmakers_started: bool,
@@ -427,7 +411,6 @@ pub(super) struct AuditState {
     pub(super) dropped_snap_ack: bool,
     pub(super) dropped_snap_chunk_request: bool,
     pub(super) dropped_snap_chunk_response: bool,
-    pub(super) dropped_check_leader: bool,
     pub(super) crashed_after_apply: bool,
     pub(super) crashed_before_chunk_sync: bool,
     pub(super) crashed_after_chunk_restore: bool,
@@ -637,9 +620,6 @@ impl AuditState {
             self.reconfiguration_completed,
             "reconfiguration: a leader is elected under a reconfigured acceptor set"
         );
-        if self.config_tagged_protocol_message {
-            assert_reachable!("a protocol message carries a configuration identity");
-        }
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -707,68 +687,16 @@ impl AuditState {
         );
     }
 
-    /// The driver's durability seams and rare-but-valid policy decisions are
-    /// actually taken on some seeds. Asserts no new safety property; it proves
-    /// the hooks are still connected, since perturbations that stopped firing
-    /// would leave a sweep looking green while quietly testing less.
+    /// The driver-hook outcomes a sweep must be proven to reach. The hooks'
+    /// own firings (a seam crash, a dropped or duplicated message, a skipped
+    /// re-send, a resignation) are recorded as `reachable` at the transition
+    /// that observes them, in [`super::NodeAudit`]; only the *outcomes* that
+    /// need the whole run to judge live here.
     pub(super) fn check_driver_hook_gates(&self) {
-        if self.crashed_after_sync {
-            assert_reachable!("the driver crashes after sync and before sending a batch");
-        }
-        if self.crashed_before_sync {
-            assert_reachable!("the driver crashes before syncing a staged batch");
-        }
         assert_sometimes!(
             self.snapshot_offered,
             "a snapshot offer enters the driver's common outbound path"
         );
-        if self.shortest_timeout {
-            assert_reachable!("the driver selects the shortest valid election timeout");
-        }
-        if self.resend_skipped {
-            assert_reachable!("the driver skips a pending accept re-send");
-        }
-        if self.resigned {
-            assert_reachable!("the driver voluntarily resigns leadership");
-        }
-        if self.dropped_accept {
-            assert_reachable!("the driver drops one isolated accept at the send seam");
-        }
-        if self.dropped_election {
-            assert_reachable!("the driver drops an election message at the send seam");
-        }
-        if self.dropped_commit {
-            assert_reachable!("the driver drops a commit at the send seam");
-        }
-        if self.dropped_accepted {
-            assert_reachable!("the driver drops an accepted ack at the send seam");
-        }
-        if self.dropped_heartbeat {
-            assert_reachable!("the driver drops a heartbeat at the send seam");
-        }
-        if self.dropped_repair {
-            assert_reachable!("the driver drops a repair message at the send seam");
-        }
-        if self.crashed_after_apply {
-            assert_reachable!(
-                "the driver crashes after applying a batch and before its application fsync"
-            );
-        }
-        if self.duplicated_any {
-            assert_reachable!("the driver duplicates a message at the send seam");
-        }
-        if self.duplicated_quorum_kind {
-            assert_reachable!("the driver duplicates a quorum-counting message at the send seam");
-        }
-        if self.duplicated_commit {
-            assert_reachable!("the driver duplicates a commit at the send seam");
-        }
-        if self.duplicated_repair {
-            assert_reachable!("the driver duplicates a repair message at the send seam");
-        }
-        if self.reply_dropped {
-            assert_reachable!("a committed client reply is dropped at the reply seam");
-        }
         assert_sometimes!(
             self.dedup_after_dropped_reply,
             "a committed proposal ack is lost and the retry takes the dedup path"
@@ -785,8 +713,8 @@ impl AuditState {
     /// paths, the fallback to Phase 1 — entirely unexercised.
     ///
     /// Only the facts a campaign is *certain* to reach are `sometimes`; the rest
-    /// stay `reachable`-only, which creates no slot when unreached and so can
-    /// never fail coverage.
+    /// stay `reachable`-only at their transitions in [`super::NodeAudit`], which
+    /// creates no slot when unreached and so can never fail coverage.
     ///
     /// The line is drawn by what a handoff is conditioned on. Relinquishing,
     /// installing, streaming under the inherited ballot and carrying a tail all
@@ -799,9 +727,6 @@ impl AuditState {
     /// two rare draws is what makes a sweep spend its whole seed budget chasing
     /// one bit, so those are recorded when they happen and never demanded.
     pub(super) fn check_handoff_gates(&self) {
-        if self.handoff_relinquished {
-            assert_reachable!("a leader cooperatively hands its authority on");
-        }
         assert_sometimes!(
             self.handoff_installed,
             "a successor installs a transferred authority"
@@ -810,9 +735,6 @@ impl AuditState {
             self.handoff_streamed_without_phase1,
             "a handed-over authority continues Phase 2 without another Phase 1"
         );
-        if self.handoff_carried_tail {
-            assert_reachable!("a handoff carries accepted-but-unchosen work");
-        }
     }
 
     /// A node's promised ballot is monotonic — it never decreases, including
@@ -1179,11 +1101,8 @@ impl AuditState {
             h.read_acked + h.read_failed <= h.read_issued,
             "no read is acked/failed before it is issued"
         );
-        // With no chaos a proposal does come back — a "sometimes" + "reachable".
+        // With no chaos a proposal does come back.
         assert_sometimes!(h.acked > 0, "at least one proposal is acknowledged");
-        if h.acked > 0 {
-            assert_reachable!("a client proposal is acknowledged");
-        }
         check_disclosed_order(h);
         // The sequential fast path, per client: every client runs one operation
         // at a time (a primer batch completes before the next op starts), so

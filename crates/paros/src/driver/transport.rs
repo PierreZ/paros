@@ -20,9 +20,10 @@ use crate::hooks::DriverHooks;
 use super::config::{DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
-/// The driver's outbound side: everything needed to put one message on the wire —
-/// the gRPC clients, the task provider, and this node's id for observability
-/// events. Bundled so `drain_ready` takes one parameter instead of three.
+/// One peer's two outbound mailboxes: `regular` for ordinary protocol
+/// traffic and `snapshot` for the bulky `InstallSnapshot` class. Separate
+/// bounded queues, so a snapshot push can never evict the beats and `Accept`s
+/// queued beside it (and vice versa).
 pub(crate) struct PeerQueues {
     pub(crate) regular: PeerMailbox,
     pub(crate) snapshot: PeerMailbox,
@@ -188,6 +189,8 @@ impl PeerMailbox {
     }
 }
 
+/// The driver's outbound side: every peer's mailboxes plus this node's id for
+/// the observability events. Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
     pub(crate) peer_queues: BTreeMap<NodeId, PeerQueues>,
     /// This node's id, for the observability events.
@@ -217,7 +220,6 @@ impl Outbound {
         // wire without either ever being accepted or chosen.
         match msg {
             Message::Accept {
-                config_id,
                 ballot,
                 slot,
                 command,
@@ -230,45 +232,30 @@ impl Outbound {
                 bnode = ballot.node.0,
                 slot = slot.0,
                 vhash = command_hash(command),
-                config_id = config_id.0,
                 "msg_sent"
             ),
             _ => match message_route(msg) {
-                Some((_, config_id, ballot, Some(slot))) => tracing::info!(
+                Some((_, ballot, Some(slot))) => tracing::info!(
                     node = self.self_id,
                     to = to.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
                     slot = slot.0,
-                    config_id = config_id.0,
                     "msg_sent"
                 ),
                 // A beat from a leader whose chosen prefix is still empty: there is
                 // no slot to report, and reporting a bare `0` would put back on the
                 // trace exactly the sentinel #56 took off the wire.
-                Some((_, config_id, ballot, None)) => tracing::info!(
+                Some((_, ballot, None)) => tracing::info!(
                     node = self.self_id,
                     to = to.0,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
-                    config_id = config_id.0,
                     "msg_sent"
                 ),
-                None => {
-                    if let Some(config_id) = msg.config_id() {
-                        tracing::info!(
-                            node = self.self_id,
-                            to = to.0,
-                            kind,
-                            config_id = config_id.0,
-                            "msg_sent"
-                        );
-                    } else {
-                        tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent");
-                    }
-                }
+                None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
             },
         }
         if let Some(queues) = self.peer_queues.get(&to) {
@@ -450,8 +437,9 @@ fn delivery_batch<A: Audit>(
     (internal::Deliver { messages: batch }, carried)
 }
 
-/// Surface a hook-decided send drop ([`EV_SEND_DROPPED`]). An `Accept` names
-/// its slot so a trace shows exactly which round the loss isolated.
+/// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
+/// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
+/// exactly which round the loss isolated.
 pub(crate) fn trace_send_drop<A: Audit>(audit: &A, self_id: u64, to: NodeId, msg: &Message) {
     audit.dropped_at_send(NodeId(self_id), to, msg);
     let kind = message_kind(msg);

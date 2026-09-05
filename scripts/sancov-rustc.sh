@@ -9,8 +9,10 @@
 #   # Instrument the core crate only:
 #   SANCOV_CRATES=paros_core cargo run --bin sim-...
 #
-#   # Instrument app + framework libraries:
-#   SANCOV_CRATES=paros_core,paros_sim cargo run --bin sim-...
+#   # Instrument the shipped library — the core plus the driver — which is what
+#   # `cargo xtask sim run` sets. Never `paros_sim`: that is the harness, and its
+#   # edges would inflate the denominator and misdirect coverage-guided search.
+#   SANCOV_CRATES=paros_core,paros cargo run --bin sim-...
 #
 #   # No instrumentation (pass-through):
 #   cargo build

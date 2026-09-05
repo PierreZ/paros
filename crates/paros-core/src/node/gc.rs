@@ -79,7 +79,7 @@
 //!
 //! The floor is the leader's own ballot, so it routinely rises **over** the
 //! last reconfiguration's record: an ordinary leader registers a *belief*
-//! (`Registration::reconfiguration == false`), and the flagged record that
+//! (`Registration::kind == RegistrationKind::Belief`), and the flagged record that
 //! says which acceptor set is in force may be many rounds below. Collecting
 //! it would leave every later campaign's histories naming no reconfiguration
 //! at all, so `Matchmaking::stale_belief` could never fire again and a node

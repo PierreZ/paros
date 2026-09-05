@@ -20,7 +20,9 @@ paros = { path = "../paros", version = "0.2.0" }
 moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "b2c4f044e3cea17d711044553a3ec537574602c4", default-features = false, features = ["exploration"] }
 
 async-trait = "0.1"
-# `join_all`, to drive the `Pipelined` workload mode's concurrent proposals.
+# `join_all`, so the chain workload can fan concurrent proposals out (the
+# priming batch, the dual-submit and duplicate-repropose operations) and await
+# them together.
 futures = "0.3"
 http = "1"
 moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "b2c4f044e3cea17d711044553a3ec537574602c4" }

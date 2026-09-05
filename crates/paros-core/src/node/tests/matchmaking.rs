@@ -115,7 +115,6 @@ fn reconfigured(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
 
 fn promise(from: u64, ballot: Ballot) -> Message {
     Message::Promise {
-        config_id: ConfigId::default(),
         from: NodeId(from),
         ballot,
         from_slot: Slot(0),
@@ -507,7 +506,6 @@ fn a_value_held_only_by_an_old_configuration_is_re_proposed() {
     n.step(promise(1, n.ballot()));
     let old = ballot(2, 9);
     n.step(Message::Promise {
-        config_id: ConfigId::default(),
         from: NodeId(3),
         ballot: n.ballot(),
         from_slot: Slot(0),
@@ -535,7 +533,6 @@ fn gap_fill_waits_for_every_configuration() {
     n.step(promise(1, n.ballot()));
     // A record at slot 1 and nothing at slot 0: slot 0 is the hole.
     n.step(Message::Promise {
-        config_id: ConfigId::default(),
         from: NodeId(3),
         ballot: n.ballot(),
         from_slot: Slot(0),
@@ -568,7 +565,6 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     let mut spare = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3], 1);
     let leader_ballot = ballot(5, 3);
     let prepare = Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(3),
         leader: NodeId(3),
         ballot: leader_ballot,
@@ -594,7 +590,6 @@ fn a_removed_member_still_answers_phase_one_for_a_non_member_leader() {
     // A plain node ignores the configuration field outright.
     let mut plain = node(1, &[0, 1, 2]);
     plain.step(Message::Prepare {
-        config_id: ConfigId::default(),
         reply_to: NodeId(0),
         leader: NodeId(0),
         ballot: ballot(5, 0),
@@ -792,7 +787,6 @@ fn an_honored_reconfiguration_may_bind_an_older_ballot_than_the_fence() {
     // A leader at 9 taught this node the membership it holds.
     let learned = ballot(9, 1);
     n.step(Message::Prepare {
-        config_id: n.hard_state().config_id,
         reply_to: NodeId(1),
         leader: NodeId(1),
         ballot: learned,

@@ -22,9 +22,10 @@
 //!        departed-straggler case (#124).
 
 use paros_sim::{
-    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
-    run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_departed_straggler_case, run_snapshot_lifecycle_case,
+    EXPLORATION_TIMELINES_PER_SEED, chain_smoke, chunk_corpus_hunt, corpus_hunt,
+    explore_chain_seed, run_bare_quorum_case, run_chain_seed, run_chunk_corpus_seed,
+    run_chunk_mask, run_corpus_mask, run_corpus_seed, run_departed_straggler_case,
+    run_snapshot_lifecycle_case,
 };
 
 fn main() {
@@ -40,7 +41,7 @@ fn main() {
             .expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
         let report = match axis.as_str() {
-            "explore-main" => explore_chain_seed(seed, 8),
+            "explore-main" => explore_chain_seed(seed, EXPLORATION_TIMELINES_PER_SEED),
             "replay-corpus" => run_corpus_seed(seed),
             "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
             "replay-bare-quorum" => run_bare_quorum_case(seed),

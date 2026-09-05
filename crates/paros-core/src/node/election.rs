@@ -177,7 +177,6 @@ impl ColocatedNode {
             self.acceptor.faulty(),
         );
         let prepare = Message::Prepare {
-            config_id: self.config_id,
             reply_to: me,
             leader: me,
             ballot: self.ballot,
@@ -254,7 +253,6 @@ impl ColocatedNode {
         self.pending_messages.push((
             Audience::Node(from),
             Message::Prepare {
-                config_id: self.config_id,
                 reply_to: self.config.id,
                 leader: self.config.id,
                 ballot,
@@ -587,10 +585,11 @@ impl ColocatedNode {
     /// A rejection of an in-flight ballot. Step down to Follower and let the
     /// randomized election timeout reschedule us. We do **not** immediately
     /// re-prepare: that (with the randomized timeout) is the dueling-proposer
-    /// livelock fix. The reported promise is diagnostic only: retaining an
-    /// arbitrary wire round would let one garbage Nack pin every future campaign.
+    /// livelock fix. The next campaign's round comes from durable local state
+    /// alone: retaining a wire-reported promise would let one garbage Nack pin
+    /// every future campaign.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
-    pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, _promised: Ballot, slot: Slot) {
+    pub(super) fn on_nack(&mut self, from: NodeId, ballot: Ballot, slot: Slot) {
         if !self.in_pool(from) {
             return;
         }

@@ -447,10 +447,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // an ordinary Phase 1 elects one. Aggressive, because that fallback
             // is the path that must always work.
             Message::Relinquish { .. } => buggify_with_prob!(0.25),
-            // Aggressive like the Nack location. Inert today — `CheckLeader`
-            // is a tick-injected self-event that never crosses the transport —
-            // but armed so a future remote leader probe is born chaos-covered.
-            Message::CheckLeader { .. } => buggify_with_prob!(0.25),
             _ => false,
         }
     }

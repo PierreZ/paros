@@ -92,7 +92,7 @@ pub enum ReconfigurerPhase {
         /// The frozen registries collected so far.
         acks: BTreeMap<MatchmakerId, (Ballot, BTreeMap<Ballot, Registration>)>,
         /// The highest decree ballot any frozen member reported promised:
-        /// the decree opens strictly above it (see `decree_floor` on
+        /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
         decree_floor: Ballot,
         /// The highest **effective configuration** any frozen member
@@ -454,7 +454,9 @@ impl MatchmakerReconfigurer {
     #[must_use]
     pub fn stop_quorum_reached(&self) -> bool {
         match &self.phase {
-            ReconfigurerPhase::Stopping { old, acks, .. } => acks.len() >= old.quorum_size(),
+            ReconfigurerPhase::Stopping { old, acks, .. } => {
+                old.has_quorum(&acks.keys().copied().collect())
+            }
             _ => false,
         }
     }
@@ -490,7 +492,7 @@ impl MatchmakerReconfigurer {
         else {
             return None;
         };
-        if acks.len() < old.quorum_size() {
+        if !old.has_quorum(&acks.keys().copied().collect()) {
             return None;
         }
         // The reconstruction (§5): the maximum watermark, and the union of

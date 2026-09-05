@@ -37,8 +37,8 @@ use crate::replica::Replica;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, ConfigId, Control, Entry, NodeId, SessionEntry, Slot,
-    Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
+    command_fingerprint,
 };
 use crate::write::WriteOp;
 
@@ -188,8 +188,6 @@ pub struct ColocatedNode {
     /// no surviving configuration can ask this node for a Phase-1 promise,
     /// because every configuration it was ever a member of is forgotten.
     last_member_ballot: Ballot,
-    /// Durable identity of the cluster configuration this node belongs to.
-    config_id: ConfigId,
     /// The **acceptor** component ([`crate::acceptor::Acceptor`]): the
     /// durable promise, the per-slot accepted log, the compaction floor and
     /// the CTRL tri-state's faulty entries. Rebuilt on boot from the durable
@@ -207,15 +205,19 @@ pub struct ColocatedNode {
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
     /// Snapshot offers to serve this batch:
-    /// `(to, chosen_index, ballot, config_id)`. The core decides *who* needs a
+    /// `(to, chosen_index, ballot)`. The core decides *who* needs a
     /// snapshot and *up to where* (a below-floor catch-up request), but holds no
     /// application state, so the driver attaches the opaque snapshot bytes (from
     /// storage) and sends the [`Message::InstallSnapshot`].
-    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)>,
+    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
     /// Read-index rounds confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
     /// `(started, gap_fills, remaining)` for this Ready's recovery chunk.
+    /// Reported through [`Ready::recovery_batch`] and, while set, the pacing
+    /// gate: `pump_leader_recovery` starts no further page until
+    /// [`Ready::advance`] clears it and [`ColocatedNode::advance_recovery`]
+    /// schedules the next.
     pending_recovery_batch: Option<(usize, usize, usize)>,
 
     /// Logical clock, advanced by [`ColocatedNode::tick`].
@@ -311,11 +313,6 @@ pub struct ColocatedNode {
     /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
     /// assembled from stragglers; decided `Noop`).
     repair_case2: u64,
-    /// Payload bytes the acceptor's in-place repairs shipped this
-    /// incarnation. Tallied here, not in the acceptor: it needs the *meaning*
-    /// of a value ([`command_payload_bytes`]), and to an acceptor a value is
-    /// opaque.
-    repair_bytes: u64,
     /// How this node came to hold its current leadership (see
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,
@@ -336,10 +333,9 @@ pub struct ColocatedNode {
 }
 
 impl ColocatedNode {
-    /// The single input entry point: every stimulus is a [`Message`], routed by
-    /// variant and role. Tick-injected self-events (`CheckLeader`/`Heartbeat`)
-    /// enter here too. A ballot-bearing message naming a configuration other
-    /// than this node's durable configuration is ignored whole.
+    /// The single wire entry point: every peer message is a [`Message`],
+    /// routed by variant and role. The clock is a separate input
+    /// ([`ColocatedNode::tick`]).
     ///
     /// # Panics
     ///
@@ -347,18 +343,6 @@ impl ColocatedNode {
     /// error, never an operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step(&mut self, msg: Message) {
-        // Wire guard, not an assert: a foreign configuration id is an operating
-        // condition (a stale peer, a misconfigured cluster, a message from a
-        // past reconfiguration), never a local invariant. Quorum arithmetic is
-        // meaningless across configurations, so ignore the message wholesale —
-        // no reply, no state change; the sender's own configuration machinery
-        // owns healing the mismatch.
-        if msg
-            .config_id()
-            .is_some_and(|config_id| config_id != self.config_id)
-        {
-            return;
-        }
         match msg {
             Message::Prepare {
                 reply_to,
@@ -393,12 +377,8 @@ impl ColocatedNode {
                 ..
             } => self.on_accepted(from, ballot, slot, vhash),
             Message::Nack {
-                from,
-                ballot,
-                promised,
-                slot,
-                ..
-            } => self.on_nack(from, ballot, promised, slot),
+                from, ballot, slot, ..
+            } => self.on_nack(from, ballot, slot),
             Message::Commit {
                 ballot,
                 slot,
@@ -429,7 +409,6 @@ impl ColocatedNode {
                     from, to, ballot, from_slot, next_slot, decided, pending, config,
                 );
             }
-            Message::CheckLeader { .. } => self.on_check_leader(),
             Message::Heartbeat {
                 from,
                 ballot,
@@ -585,12 +564,11 @@ impl ColocatedNode {
         // Beat immediately (rather than waiting for the next tick) so the
         // round's confirmation costs one network round trip, not a tick.
         self.broadcast_heartbeat();
-        // `QuorumSystem::Majority` is the load-bearing reason the leader may
-        // count its own real acceptor vote unconditionally: a stale leader can
-        // collect at most `q - 1` peer acks once an intersecting majority has
-        // promised higher. A future asymmetric quorum system must replace this
-        // cardinality check and explicit own vote with read-quorum membership.
-        // A leader outside its own configuration has no acceptor vote to cast.
+        // A leader outside its own configuration has no acceptor vote to
+        // cast; a member's own vote is one ack like any other, and the round
+        // confirms only when the membership boundary
+        // (`AcceptorConfig::has_phase2_quorum`) says the acks form a Phase-2
+        // quorum — never a count against a threshold here.
         let own_vote = self.is_acceptor().then_some(self.config.id);
         self.proposer
             .open_read(ctx, index, self.heartbeat_seq, self.tick_count, own_vote);
@@ -684,8 +662,9 @@ impl ColocatedNode {
         self.acceptor.first_slot()
     }
 
-    /// Advance logical time by one tick, synthesizing `CheckLeader`/`Heartbeat`
-    /// self-events when the election / heartbeat counters cross their thresholds.
+    /// Advance logical time by one tick: a leader beats and a non-leader
+    /// checks on its leader when the heartbeat / election counters cross their
+    /// thresholds.
     ///
     /// Re-sending a leader's still-pending `Accept`s is deliberately *not* part of
     /// this: it is a separate decision on the same cadence, so the driver can skip
@@ -703,14 +682,11 @@ impl ColocatedNode {
             self.heartbeat_elapsed += 1;
             if self.heartbeat_elapsed >= self.heartbeat_timeout {
                 self.heartbeat_elapsed = 0;
-                self.step(Message::Heartbeat {
-                    config_id: self.config_id,
-                    from: me,
-                    ballot: self.ballot,
-                    commit: self.replica.chosen_index(),
-                    seq: 0,
-                    config: None,
-                });
+                // Re-sending the un-acked `Accept`s is a *separate* decision the
+                // driver makes on the same cadence — see
+                // [`ColocatedNode::resend_pending`].
+                self.broadcast_heartbeat();
+                self.assert_invariants();
             }
             // GC read rounds that outlived their TTL (lost acks, an unreachable
             // quorum). No re-broadcast logic is needed for the live ones: every
@@ -794,7 +770,8 @@ impl ColocatedNode {
                         "a re-asked matchmaking opens no Phase 1"
                     );
                 } else {
-                    self.step(Message::CheckLeader { from: me });
+                    self.on_check_leader();
+                    self.assert_invariants();
                 }
             }
         }
@@ -844,7 +821,6 @@ impl ColocatedNode {
                     self.pending_messages.push((
                         Audience::Node(to),
                         Message::Prepare {
-                            config_id: self.config_id,
                             reply_to: self.config.id,
                             leader: self.config.id,
                             ballot,
@@ -918,7 +894,6 @@ impl ColocatedNode {
         let pending = self.proposer.resend_page();
         for (slot, ballot, command) in pending {
             self.broadcast_acceptors(&Message::Accept {
-                config_id: self.config_id,
                 reply_to: me,
                 leader: me,
                 ballot,
@@ -1102,12 +1077,11 @@ impl ColocatedNode {
         self.matchmaking_timeouts
     }
 
-    /// The current durable scalars (configuration id, promised ballot, chosen
+    /// The current durable scalars (promised ballot, chosen
     /// index), composed from the components that own them.
     #[must_use]
     pub fn hard_state(&self) -> HardState {
         HardState {
-            config_id: self.config_id,
             max_promised_ballot: self.acceptor.promised(),
             chosen_index: self.replica.chosen_index(),
         }
@@ -1137,12 +1111,6 @@ impl ColocatedNode {
     #[must_use]
     pub fn proposer(&self) -> &Proposer<NodeId, Command> {
         &self.proposer
-    }
-
-    /// The number of ticks observed so far.
-    #[must_use]
-    pub fn tick_count(&self) -> u64 {
-        self.tick_count
     }
 
     /// This node's current role.
@@ -1238,15 +1206,14 @@ impl ColocatedNode {
     /// Monotone repair counters this incarnation, for the driver's audit
     /// report: `(faulty records repaired in place, Case-1 straggler
     /// re-proposals, Case-2 straggler no-op fills, recovery-timeout
-    /// step-downs, repair payload bytes)`.
+    /// step-downs)`.
     #[must_use]
-    pub fn repair_counters(&self) -> (u64, u64, u64, u64, u64) {
+    pub fn repair_counters(&self) -> (u64, u64, u64, u64) {
         (
             self.acceptor.faulty_repaired(),
             self.repair_case1,
             self.repair_case2,
             self.repair_step_downs,
-            self.repair_bytes,
         )
     }
 
@@ -1264,7 +1231,7 @@ impl ColocatedNode {
         self.replica.committed()
     }
 
-    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot, ConfigId)] {
+    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
         &self.pending_snapshot_offers
     }
 

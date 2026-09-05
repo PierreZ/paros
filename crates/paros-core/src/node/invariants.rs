@@ -62,11 +62,6 @@ impl ColocatedNode {
     /// leaves its bootstrap configuration; a matchmaker deployment runs
     /// Phase 2 under a configuration drawn from the pool.
     fn assert_deployment_invariants(&self) {
-        // NOT a global invariant: a still-Leader node can learn a higher-ballot
-        // `Commit` (raising its promise via `mark_chosen`) before any deposing
-        // message arrives — `start_accept_round`'s self-accept guard is the
-        // designed defense. It holds only for a *fresh* leader
-        // (see `try_become_leader`).
         // The deployment couplings: plain Multi-Paxos never matchmakes and
         // never leaves its bootstrap configuration; a matchmaker deployment
         // runs Phase 2 under a configuration drawn from the pool.
@@ -147,10 +142,10 @@ impl ColocatedNode {
                         "an elected leader's ballot names its own node"
                     ),
                     LeadershipOrigin::Handoff { from } => {
-                        // The ballot names whoever *minted* it, which after a
-                        // chain of handoffs is neither this node nor its
-                        // immediate predecessor — so only the predecessor is
-                        // pinned here, and it is always someone else.
+                        // The ballot names whoever *minted* it, and under the
+                        // one-hop rule (`can_relinquish` requires
+                        // `LeadershipOrigin::Elected`) the minter is the
+                        // predecessor itself — always someone else, and pooled.
                         assert!(
                             from != self.config.id,
                             "a handoff leader inherited its authority from another node"

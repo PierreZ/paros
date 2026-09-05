@@ -89,12 +89,6 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
         self.entries.keys().next().copied()
     }
 
-    /// Whether nothing is retained.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Insert `value` at `key`, returning what it replaced.
     ///
     /// # Panics

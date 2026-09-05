@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::SimulationError;
 use paros_core::{
-    AcceptorWrite, Ballot, ColocatedNode, Command, ConfigId, Control, GcRequest, MatchRequest,
-    MatchmakerId, Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
+    AcceptorWrite, Ballot, ColocatedNode, Command, Control, GcRequest, MatchRequest, MatchmakerId,
+    Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -40,14 +40,14 @@ async fn send_snapshot_offers<S, H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    snapshot_offers: &[(NodeId, Slot, Ballot, ConfigId)],
+    snapshot_offers: &[(NodeId, Slot, Ballot)],
     sessions: &[SessionEntry],
 ) where
     S: NodeStorage,
     H: DriverHooks,
     A: Audit,
 {
-    for &(to, offered_index, ballot, config_id) in snapshot_offers {
+    for &(to, offered_index, ballot) in snapshot_offers {
         // The mismatch skip below, taken spuriously: the requester re-asks
         // every tick and any other custodian may answer, so an unserved beat
         // is always safe — and this reaches the "nobody served me this round"
@@ -88,7 +88,6 @@ async fn send_snapshot_offers<S, H, A>(
             continue;
         }
         let message = Message::InstallSnapshot {
-            config_id,
             from: NodeId(out.self_id),
             ballot,
             chosen_index: offered_index,
@@ -271,7 +270,7 @@ where
         })
         .collect();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
-    let snapshot_offers: Vec<(NodeId, Slot, Ballot, ConfigId)> = ready.snapshot_offers().to_vec();
+    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -574,8 +573,7 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
         // Durability marker: whether this batch was fsync'd (a promise-raise or
         // accept — `MustSync::Sync`) or a relaxed write (a chosen-index-only
-        // advance). The persist/send-seam animation renders it as a filled vs
-        // hollow tick.
+        // advance).
         tracing::info!(
             node = self_id,
             sync = (must_sync == paros_core::MustSync::Sync),
@@ -670,7 +668,7 @@ fn surface_persisted<A: Audit>(
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a
 /// storage fault never lets the node keep running on state it does not durably
 /// have. The decision is reported through [`Audit::storage_fault`] (typed, at
-/// the instant it is made) and surfaced as [`EV_STORAGE_FAULT`], then
+/// the instant it is made) and traced as `storage_fault`, then
 /// [`RunError::Storage`] unwinds the incarnation. Production semantics: a
 /// storage fault is a process exit (crash-only); the sim's node loop matches
 /// the variant and routes to the crash/restart path instead.

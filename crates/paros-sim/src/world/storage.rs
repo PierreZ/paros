@@ -25,7 +25,7 @@ use super::{
 use crate::audit::AuditWorld;
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, ConfigId, CorruptionVerdict, HardState, IntegrityFault, MemStorage,
+    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, MemStorage,
     MetadataFault, MustSync, NodeStorage, RecoveryCase, SNAP_CHUNK_BYTES, SessionEntry, Slot,
     SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log,
     command_hash, snap_chunk_count,
@@ -326,7 +326,6 @@ pub(crate) struct DurableStorage<T> {
     /// A decided snapshot point staged for the next durability flush (#101).
     staged_snap_point: Option<(Slot, ChainState)>,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
-    staged_config_id: Option<ConfigId>,
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
     staged_chosen: Option<Slot>,
@@ -437,7 +436,6 @@ impl<T: TimeProvider> DurableStorage<T> {
             faulty_list: Vec::new(),
             faulty_chunks: Vec::new(),
             staged_snap_point: None,
-            staged_config_id: None,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
@@ -468,9 +466,6 @@ impl<T: TimeProvider> DurableStorage<T> {
     /// The record identities currently staged (what the next flush covers).
     fn staged_records(&self) -> Vec<StorageRecord> {
         let mut records = Vec::new();
-        if self.staged_config_id.is_some() {
-            records.push(StorageRecord::ConfigId);
-        }
         if self.staged_ballot.is_some() {
             records.push(StorageRecord::Promise);
         }
@@ -708,7 +703,6 @@ impl<T: TimeProvider> DurableStorage<T> {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "trace", skip_all)]
     fn flush_stage(&mut self) -> Result<(), StorageError> {
-        let config_id = self.staged_config_id.take();
         let ballot = self.staged_ballot.take();
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
@@ -727,9 +721,6 @@ impl<T: TimeProvider> DurableStorage<T> {
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
             let d = w.disk_mut(&key);
-            if let Some(config_id) = config_id {
-                d.hard_state.config_id = config_id;
-            }
             // Sealed ledger records are upserts keyed by (client, seq); the
             // first-slot claim wins, matching the core's ledger semantics.
             for (client, seq, slot) in sealed {
@@ -1084,11 +1075,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             } else {
                 let _ = self.with_world(|w| {
                     w.s7.snapshot_detected = true;
-                    if floor.0 == 0 {
-                        w.s7.snapshot_reset_local = true;
-                    } else {
-                        w.s7.snapshot_reset_remote = true;
-                    }
                     let lanes = w.lane_count();
                     if let Some(disk) = w.disks.get_mut(&key) {
                         disk.chain = ChainState::empty(lanes);
@@ -1287,12 +1273,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         Ok(())
     }
 
-    async fn persist_config_id(&mut self, config_id: ConfigId) -> Result<(), StorageError> {
-        self.write_record(StorageRecord::ConfigId, |s| {
-            s.staged_config_id = Some(config_id);
-        })
-    }
-
     async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.write_record(StorageRecord::Promise, |s| {
             s.staged_ballot = Some(ballot);
@@ -1333,10 +1313,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             assert_always!(
                 self.staged_accepted.is_empty(),
                 "a relaxed flush holds no staged accept"
-            );
-            assert_always!(
-                self.staged_config_id.is_none(),
-                "a relaxed flush holds no staged configuration identity"
             );
             return Ok(());
         }

@@ -235,10 +235,6 @@ impl Collector {
             .filter(|n| !config.contains(*n))
             .collect();
         self.effective = Some((ballot, retired.clone()));
-        assert!(
-            retired.iter().all(|n| !config.contains(*n)),
-            "a retired acceptor is outside the configuration in force"
-        );
         GcStep::Effective {
             watermark: ballot,
             retired,

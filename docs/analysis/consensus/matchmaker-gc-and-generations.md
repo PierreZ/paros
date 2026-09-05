@@ -68,7 +68,7 @@ same gates that refuse a handoff.
 ### The protocol
 
 ```
-election over H_b            leader opens GcState{fence = read fence, prior = members(H_b)}
+election over H_b            leader opens Collector{fence = read fence, prior = members(H_b)}
 HeartbeatAck{chosen}         every configured peer reports its chosen index each beat
 covered                      quorum(C_b) at or past the fence, recovery closed
 GcRequest{b}  -> M_g         re-sent each beat until acked (a lost ack only stalls it)
@@ -147,7 +147,7 @@ matchmakers are idle whenever a leader is stable. paros restates it as follows.
 | set `M_g` | `MatchmakerSet { generation, members }` | matchmaker configuration |
 | phase | `Fresh`, `Inactive` (a spare), `Active`, `Stopped` (frozen) | — |
 | successor link | `MatchmakerHardState::successor` | — |
-| pending bootstrap | `PendingBootstrap { set, gc_watermark, history }` | bootstrapped state |
+| pending bootstrap | `PendingBootstrap { set, gc_watermark, history, effective }` | bootstrapped state |
 
 ### Fencing
 

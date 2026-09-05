@@ -125,7 +125,6 @@ impl ColocatedNode {
                 self.pending_messages.push((
                     Audience::Node(reply_to),
                     Message::Promise {
-                        config_id: self.config_id,
                         from: me,
                         ballot,
                         from_slot,
@@ -229,7 +228,6 @@ impl ColocatedNode {
                 self.pending_messages.push((
                     Audience::Node(reply_to),
                     Message::Accepted {
-                        config_id: self.config_id,
                         from: me,
                         ballot,
                         slot,
@@ -258,16 +256,13 @@ impl ColocatedNode {
         }
     }
 
-    /// Queue a `Nack` for `ballot` at `slot` to `to`, reporting the promise
-    /// that won.
+    /// Queue a `Nack` for `ballot` at `slot` to `to`.
     fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
         self.pending_messages.push((
             Audience::Node(to),
             Message::Nack {
-                config_id: self.config_id,
                 from: self.config.id,
                 ballot,
-                promised: self.acceptor.promised(),
                 slot,
             },
         ));

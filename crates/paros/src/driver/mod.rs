@@ -17,8 +17,8 @@
 //!
 //! - [`config`] — the per-node tunables, the constants they default to, the
 //!   shared gRPC shapes, the scope guard, the address parser, and [`RunError`].
-//! - [`events`] — the `EV_*` tracing names and the pure helpers that turn a
-//!   domain value into the stable field a trace carries.
+//! - [`events`] — the pure helpers that turn a domain value into the stable
+//!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
 //!   `Outbound` send handle, and the detached peer-delivery task.
 //! - [`snap_repair`] — the snapshot-point custody tally and chunk-repair pull.
@@ -44,16 +44,7 @@ mod transport;
 
 pub use config::{DriverTunables, RunError, parse_addr};
 pub(crate) use config::{accept_and_serve, grpc_keep_alive};
-pub use events::{
-    EV_APPLIED, EV_AUTHORITY_INSTALLED, EV_AUTHORITY_RELINQUISHED, EV_BOOTED, EV_CHOSEN,
-    EV_CHOSEN_GAP, EV_CLIENT_REPLY_DROPPED, EV_COMPACTED, EV_CRASHED, EV_DUPLICATE_SUPPRESSED,
-    EV_ELECTION_TIMEOUT_EXTREME, EV_GAP_FILLED, EV_HANDOFF_FENCE_EXPIRED, EV_HANDOFF_REFUSED,
-    EV_LEADER, EV_LEADERSHIP_RESIGNED, EV_MSG_RECV, EV_MSG_SENT, EV_NODE_STATE, EV_NODE_TICK,
-    EV_PERSIST, EV_PREPARE_BELOW_FLOOR, EV_PROPOSE_DEDUP_ACK, EV_QUORUM_LOST, EV_RECOVERED,
-    EV_RESEND_SKIPPED, EV_SEND_DROPPED, EV_SEND_DUPLICATED, EV_SNAPSHOT_INSTALLED,
-    EV_SNAPSHOT_MID_ELECTION, EV_SNAPSHOT_OFFERED, EV_STORAGE_FAULT, EV_SYNCED, command_hash,
-    registration_history_hash,
-};
+pub use events::{command_hash, registration_history_hash};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -529,38 +520,25 @@ where
                 // receives and mark the unmatched ones as network drops.
                 let kind = message_kind(&msg);
                 match message_route(&msg) {
-                    Some((from, config_id, ballot, Some(slot))) => tracing::info!(
+                    Some((from, ballot, Some(slot))) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
                         slot = slot.0,
-                        config_id = config_id.0,
                         "msg_received"
                     ),
                     // The empty-prefix beat: no slot field, mirroring `msg_sent`.
-                    Some((from, config_id, ballot, None)) => tracing::info!(
+                    Some((from, ballot, None)) => tracing::info!(
                         node = self_id,
                         from = from.0,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
-                        config_id = config_id.0,
                         "msg_received"
                     ),
-                    None => {
-                        if let Some(config_id) = msg.config_id() {
-                            tracing::info!(
-                                node = self_id,
-                                kind,
-                                config_id = config_id.0,
-                                "msg_received"
-                            );
-                        } else {
-                            tracing::info!(node = self_id, kind, "msg_received");
-                        }
-                    }
+                    None => tracing::info!(node = self_id, kind, "msg_received"),
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it
@@ -580,41 +558,27 @@ where
                 // Snapshot-repair traffic is driver-terminal (#101): handled
                 // here, never stepped into the core — consensus state must
                 // not depend on snapshot custody.
-                // A snap-repair message naming a foreign configuration is
-                // ignored (guarded, never asserted — wire input): custody and
-                // chunk bytes are only meaningful within one configuration.
                 let snap_handled = match &msg {
-                    Message::SnapAck {
-                        config_id,
-                        from,
-                        at_index,
-                    } => {
+                    Message::SnapAck { from, at_index } => {
                         // Custody counts toward the coupling quorum only from
                         // members of the active configuration.
-                        if *config_id == node.hard_state().config_id
-                            && node.is_leader()
-                            && node.acceptors().contains(*from)
-                        {
+                        if node.is_leader() && node.acceptors().contains(*from) {
                             snap.acks.entry(*at_index).or_default().insert(*from);
                         }
                         true
                     }
                     Message::SnapChunkRequest {
-                        config_id,
                         from,
                         at_index,
                         chunks,
                     } => {
-                        if *config_id == node.hard_state().config_id {
-                            handle_snap_chunk_request(
-                                &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
-                            )
-                            .await;
-                        }
+                        handle_snap_chunk_request(
+                            &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
+                        )
+                        .await;
                         true
                     }
                     Message::SnapChunkResponse {
-                        config_id,
                         from,
                         at_index,
                         chunks,
@@ -622,9 +586,7 @@ where
                         // Pool-checked: only a pooled node's chunk bytes are
                         // installed (a replica outside the active
                         // configuration holds the same decided point).
-                        if *config_id == node.hard_state().config_id
-                            && node.config().pool().contains(from)
-                        {
+                        if node.config().pool().contains(from) {
                             let at = *at_index;
                             let chunks = chunks.clone();
                             handle_snap_chunk_response(

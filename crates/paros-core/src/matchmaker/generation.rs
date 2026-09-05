@@ -286,12 +286,8 @@ impl Matchmaker {
         let me = self.config.id;
         let current = self.set();
         let phase = self.phase();
-        // A learner notification (see the type doc on
-        // `ReconfigureRequest::Chosen`): the matchmaker does not
-        // re-derive the decision, it applies what a proposer that
-        // held the Phase-2 quorum tells it — after the wire checks
-        // any learner makes (the generation chain and a set that
-        // admits the quorum system).
+        // A learner notification: the trust boundary is documented on
+        // `ReconfigureRequest::Chosen`.
         let successor = MatchmakerSet::new(successor.generation, successor.members);
         if successor.generation != generation.next() || !successor.is_well_formed() {
             self.refusal()
