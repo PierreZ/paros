@@ -358,23 +358,29 @@ impl QuorumPolicy {
     }
 
     /// The copies of a record a configuration of `n` may lose under this
-    /// policy and stay winnable. Under a majority `⌊(n-1)/2⌋`; under a
-    /// flexible split `q2 - 1` (`n - q1`: a faulty slot is decidable only
-    /// once a full Phase-1 quorum of clean answers holds, CTRL R2/R3, and a
-    /// value is choosable only while a Phase-2 quorum is live, so both
-    /// quorums must keep clean members — `n - max(q1, q2)`); under a grid
-    /// `⌊(m-1)/2⌋` over `m = min(rows, cols)`, the size of its smallest
-    /// quorum — that many losses break strictly fewer rows and columns than
-    /// the grid has, so some full row still answers Phase 1 and some full
-    /// column still decides, whichever cells the losses hit. For every
-    /// grid the pool range admits (`2 × 2`, `2 × 3`, `3 × 2`) that is
-    /// **zero**: a grid tolerates no permanent loss, because one dead
-    /// acceptor freezes its column's slots for the rest of the run.
+    /// policy and stay winnable: `n` minus the larger of the two phase
+    /// quorums, read off the membership boundary, never re-derived from a
+    /// count here — `⌊(n-1)/2⌋` under a majority, `q2 - 1` under a flexible
+    /// split (`n - q1`: a faulty slot is decidable only once a full Phase-1
+    /// quorum of clean answers holds, CTRL R2/R3, and a value is choosable
+    /// only while a Phase-2 quorum is live, so both quorums must keep clean
+    /// members). Under a grid it is **zero**, whatever the layout: the
+    /// record-recoverability bound would be `⌊(m-1)/2⌋` over `m = min(rows,
+    /// cols)` (that many losses break strictly fewer rows and columns than
+    /// the grid has), but the same budget bounds the *permanent* losses —
+    /// a corruption park, a wipe — and every slot's Phase 2 is addressed to
+    /// one column, so one acceptor dead for good freezes its column's
+    /// slots for the rest of the run: an unwinnable run, which no budget
+    /// may permit. For the grids the pool range admits (`2 × 2`, `2 × 3`,
+    /// `3 × 2`) the two bounds coincide anyway.
     pub(crate) fn tolerated_loss(self, n: usize) -> usize {
         match self.system(n) {
-            QuorumSystem::Majority => n.saturating_sub(1) / 2,
-            QuorumSystem::Flexible { q1, q2 } => n.saturating_sub(q1.max(q2)),
-            QuorumSystem::Grid { rows, cols } => rows.min(cols).saturating_sub(1) / 2,
+            QuorumSystem::Grid { .. } => 0,
+            system => n.saturating_sub(
+                system
+                    .phase1_quorum_size(n)
+                    .max(system.phase2_quorum_size(n)),
+            ),
         }
     }
 
@@ -389,8 +395,8 @@ impl QuorumPolicy {
     /// monotone (a three-member successor is a majority tolerating one
     /// loss, a four-member one a `2 × 2` grid tolerating none), so the
     /// minimum over the range is what the budget keeps; on every grid seed
-    /// the pool range admits that is the whole floor — no storage-fault
-    /// injection and no park, the cost the grid pays for its `1 / cols`.
+    /// that is the whole floor — no storage-fault injection and no park,
+    /// the cost the grid pays for its `1 / cols`.
     pub(crate) fn clean_copies(self, floor: usize, pool: usize) -> usize {
         let loss = (floor..=pool.max(floor))
             .map(|n| self.tolerated_loss(n))

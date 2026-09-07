@@ -504,7 +504,11 @@ where
                 // The column override (#141): consulted only where it can
                 // have an effect — this node leads and its configuration is
                 // a grid — and from the loop, never a task. The core's
-                // `slot % cols` stands under `NoHooks`.
+                // `slot % cols` stands under `NoHooks`. The gate is
+                // deliberately coarse: a proposal the core answers from its
+                // dedup ledger opens no round and spends the draw for
+                // nothing, and knowing that ahead would mean asking the
+                // core twice.
                 let column = match node.acceptors().quorum_system() {
                     QuorumSystem::Grid { cols, .. } if node.is_leader() => hooks
                         .phase2_column(node.proposer().next_slot(), cols)
