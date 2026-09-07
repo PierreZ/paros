@@ -26,6 +26,7 @@ use paros_core::{
     RegistrationKind, Slot,
 };
 
+use crate::driver::BootRefusal;
 use crate::grpc::EdgeRejection;
 use crate::hooks::Seam;
 use crate::storage::StorageError;
@@ -220,6 +221,13 @@ pub trait Audit {
 
     /// This node crashed at a durability `seam` inside a `Ready` batch.
     fn crashed(&self, node: NodeId, seam: Seam) {}
+
+    /// The driver refused to boot this identity (#147): the operator's
+    /// [`BootKind`](crate::BootKind) claim and the store's format marker
+    /// disagree. Reported at the instant of the decision, before the
+    /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
+    /// written and no message left.
+    fn boot_refused(&self, node: NodeId, refusal: BootRefusal) {}
 
     /// A [`NodeStorage`](crate::NodeStorage) call surfaced `error` and the
     /// driver decided `decision` — reported at the instant of the decision,

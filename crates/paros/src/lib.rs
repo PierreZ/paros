@@ -28,8 +28,8 @@ pub use corruption::{
     CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
 pub use driver::{
-    DriverTunables, RunError, command_hash, message_kind, parse_addr, registration_history_hash,
-    run_node,
+    BootKind, BootRefusal, DriverTunables, RunError, command_hash, message_kind, parse_addr,
+    registration_history_hash, run_node,
 };
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,

@@ -122,8 +122,18 @@ never rejoins**; the acceptor set heals around it by reconfiguration.
 - moonpool's `prob_wipe` stays `0`: it wipes moonpool's storage layer, which paros does
   not use (AGENTS.md, *Storage direction*). The storage world draws its own wipe coin at a
   chaotic restart on a matchmaker seed, within the same dead-node budget as a corruption
-  park (a wipe is one more way to lose every copy a node holds). A wiped identity exits at
-  boot, forever.
+  park (a wipe is one more way to lose every copy a node holds).
+- **The library keeps it down (#147), not the harness.** Every store carries a durable
+  format marker (`NodeStorage::is_formatted` / `format`), written by `run_node` on the
+  identity's first boot before the core reads a byte. `run_node` takes the operator's claim
+  as data (`BootKind::{FirstBoot, ExistingMember}`) and refuses an existing member whose
+  store has no marker (`RunError::Refused(BootRefusal::Amnesia)`, reported through
+  `Audit::boot_refused`). The harness reboots a wiped identity as an existing member — its
+  provisioning ledger (`StorageWorld::provisioned`) survives the wipe, the disk does not —
+  and the refusal is what keeps it down; the world keeps the identity parked for the copy
+  budget and the composer only. The red witness for the rule is the harness without the
+  refusal: the wiped node boots fresh and the audit's "a node's promised ballot never
+  decreases" fires on its boot report.
 - The client's reconfiguration composer draws the successor from the *live* pool only, and a
   dead member is the first one a `replace` or `shrink` moves out — that is how the cluster
   replaces a wiped acceptor, and the storage world's copy budget (sized by the bootstrap

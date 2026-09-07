@@ -307,15 +307,18 @@ pub(super) struct AuditState {
     pub(super) corruption_crashed_nodes: BTreeSet<u64>,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
-    /// Nodes whose disk was wiped at a restart (#124, fed by the sim node
-    /// loop): the identity is gone for good and excused from convergence —
-    /// the explanation is the harness's own coin, never a driver decision.
+    /// Nodes whose disk was wiped at a restart (#124): the identity is gone
+    /// for good and excused from convergence. Fed by the driver's own
+    /// refusal to boot the amnesiac store (`Audit::boot_refused`, #147) —
+    /// a library decision the harness only cross-checks against its coin.
     pub(super) wiped: BTreeSet<u64>,
     /// Nodes that shut down on an operator's retirement (#123): reported by
     /// the driver at the instant they exit, or by a boot that found the
     /// identity retired.
     pub(super) retired: BTreeSet<u64>,
     pub(super) wiped_any: bool,
+    /// The library refused an amnesiac member (#147).
+    pub(super) amnesia_refused: bool,
     /// A client asked some leader to reconfigure the matchmaker set.
     pub(super) reconfigure_matchmakers_started: bool,
     /// Some leader refused a matchmaker-set reconfiguration request.

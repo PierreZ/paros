@@ -310,6 +310,27 @@ pub trait NodeStorage: Storage {
         async { Ok(()) }
     }
 
+    /// Whether this store carries the **format marker** (#147): the durable
+    /// proof that the identity this store belongs to has been provisioned —
+    /// written once by [`format`](NodeStorage::format) on the identity's
+    /// first boot, before any protocol state, and never removed. The driver
+    /// judges the operator's [`BootKind`](crate::BootKind) claim against it:
+    /// an existing member whose store has no marker has lost its disk, and
+    /// its durable promise with it, and is refused rather than rejoined.
+    /// Synchronous, answered from what the boot scan loaded, like every
+    /// accessor that reports what a store knows about itself.
+    fn is_formatted(&self) -> bool;
+
+    /// Write the format marker (#147). Staged like every other write and
+    /// durable at the next [`sync`](NodeStorage::sync); the driver syncs it
+    /// alone, on a first boot, before the core reads the store, so the
+    /// marker is on disk no later than the first promise. Nothing but this
+    /// method writes it, and nothing removes it.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn format(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
+
     /// Persist a raised promised ballot (Phase 1).
     ///
     /// # Errors
@@ -530,6 +551,9 @@ pub struct MemStorage {
     sealed: BTreeMap<(paros_core::ClientId, paros_core::ClientSeq), Slot>,
     /// The latest decided snapshot point (#101): `(marker slot, blob)`.
     snap_point: Option<(Slot, Vec<u8>)>,
+    /// The format marker (#147): set by [`NodeStorage::format`], never
+    /// cleared.
+    formatted: bool,
 }
 
 impl MemStorage {
@@ -543,6 +567,7 @@ impl MemStorage {
             first: Slot(0),
             sealed: BTreeMap::new(),
             snap_point: None,
+            formatted: false,
         }
     }
 
@@ -572,6 +597,9 @@ impl MemStorage {
             first,
             sealed: BTreeMap::new(),
             snap_point: None,
+            // Records read back from a formatted store: the marker was
+            // written before any of them could be.
+            formatted: true,
         };
         storage.seal(sealed);
         storage
@@ -585,6 +613,16 @@ impl MemStorage {
 }
 
 impl NodeStorage for MemStorage {
+    fn is_formatted(&self) -> bool {
+        self.formatted
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn format(&mut self) -> Result<(), StorageError> {
+        self.formatted = true;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.hard_state.max_promised_ballot = ballot;
@@ -786,6 +824,33 @@ pub async fn storage_contract_suite<S: NodeStorage>(
             value: Value(vec![byte]),
         })
     };
+
+    // The format marker (#147): absent on a fresh store, present once
+    // `format` is flushed and reopened, and written by nothing else — a
+    // store that took protocol writes without ever being formatted stays
+    // unformatted (that is exactly the wiped-disk shape the driver refuses).
+    let s = fresh();
+    assert!(!s.is_formatted(), "a fresh store carries no format marker");
+    let mut s = fresh();
+    s.persist_ballot(ballot(1)).await.expect("ballot");
+    s.sync(MustSync::Sync).await.expect("sync ballot");
+    let s = reopen(s);
+    assert!(
+        !s.is_formatted(),
+        "protocol writes never format a store on their own"
+    );
+    let mut s = fresh();
+    s.format().await.expect("format");
+    s.sync(MustSync::Sync).await.expect("sync format");
+    let s = reopen(s);
+    assert!(s.is_formatted(), "the format marker survives a reopen");
+    let mut s = reopen(s);
+    s.persist_ballot(ballot(2))
+        .await
+        .expect("ballot after format");
+    s.sync(MustSync::Sync).await.expect("sync after format");
+    let s = reopen(s);
+    assert!(s.is_formatted(), "the format marker is never removed");
 
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh();

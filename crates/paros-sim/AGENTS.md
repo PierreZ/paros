@@ -70,7 +70,10 @@ Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
   scripted case.
 - Hooks are consulted from the node loop only; decisions a spawned task needs
   are carried to it.
-- A wiped identity (lost promise) is parked for the run by the storage world;
-  the library does not enforce that yet (an open item), so keep the park.
+- A wiped identity (lost promise) stays down because the **library** refuses
+  its unformatted store (#147): the world keeps it parked for the budget and
+  the composer only, and its provisioning ledger (`StorageWorld::provisioned`)
+  is the operator's claim the process hands `run_node` as `BootKind`. Never
+  short-circuit a wiped boot in the process again.
 - Spans are non-optional (process and workload lifecycles, the world's
   injections, the audit's gate checks).

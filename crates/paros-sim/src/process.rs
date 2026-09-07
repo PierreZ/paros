@@ -33,8 +33,8 @@ use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::storage_world;
 use paros::{
-    Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, Seam, parse_addr, run_matchmaker,
-    run_node,
+    BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, Seam,
+    parse_addr, run_matchmaker, run_node,
 };
 
 /// A paros node (an acceptor) in the simulation.
@@ -350,7 +350,9 @@ async fn run_acceptor(
         // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
         // which paros does not use (the fake disk is the world), so the
         // amnesia fault is the world's, drawn here at the one place a lost
-        // disk shows — a reboot. The identity never boots again: a wiped
+        // disk shows — a reboot. What happens next is the **library's**
+        // call (#147): the identity boots below as an existing member on an
+        // empty store, and `run_node` refuses the amnesiac store. A wiped
         // node is replaced through an acceptor reconfiguration, never
         // rejoined (an empty disk under an old identity would answer a
         // Phase 1 with "nothing accepted" for slots it voted on). Only a
@@ -368,9 +370,7 @@ async fn run_acceptor(
         {
             // BUGGIFY pairing: the wipe coin fired within the budget.
             assert_reachable!("storage: a restarted node's disk is wiped and the identity retired");
-            checker.note_wiped(self_rank.0);
-            tracing::info!(node = self_rank.0, "storage_wiped_exit");
-            return Ok(());
+            tracing::info!(node = self_rank.0, "storage_wiped");
         }
     }
 
@@ -381,17 +381,27 @@ async fn run_acceptor(
     // that attrition cannot reach.
     loop {
         // A node that is down for good never boots again: retired by the
-        // operator (#123), wiped (#124), or terminally parked by a detected
-        // persistent corruption (attrition may revive the *process*, but the
-        // boot scan would re-detect the same rotted record forever, and a
-        // second crash report for one detection would break the 1:1
-        // injected⇔detected correlation). Exit before touching the store.
-        let (parked, wiped, retired) = {
+        // operator (#123), or terminally parked by a detected persistent
+        // corruption (attrition may revive the *process*, but the boot scan
+        // would re-detect the same rotted record forever, and a second crash
+        // report for one detection would break the 1:1 injected⇔detected
+        // correlation). Exit before touching the store. A **wiped** identity
+        // (#124) is deliberately not on this list any more: it boots, and
+        // the library refuses it (#147, below).
+        let (corruption_parked, retired, boot) = {
             let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
             (
-                guard.is_parked(my_ip),
-                guard.is_wiped(my_ip),
+                guard.is_corruption_parked(my_ip),
                 guard.is_retired(my_ip),
+                // The operator's claim (#147): an identity the world's
+                // provisioning ledger knows is an existing member — a wiped
+                // one included, which is the whole point — and any other is
+                // a first boot the driver formats.
+                if guard.provisioned(my_ip) {
+                    BootKind::ExistingMember
+                } else {
+                    BootKind::FirstBoot
+                },
             )
         };
         if retired {
@@ -399,12 +409,7 @@ async fn run_acceptor(
             tracing::info!(node = self_rank.0, "retired_stays_down");
             return Ok(());
         }
-        if wiped {
-            checker.note_wiped(self_rank.0);
-            tracing::info!(node = self_rank.0, "wiped_stays_down");
-            return Ok(());
-        }
-        if parked {
+        if corruption_parked {
             checker.note_storage_dead(self_rank.0);
             tracing::info!(node = self_rank.0, "storage_parked");
             return Ok(());
@@ -423,6 +428,7 @@ async fn run_acceptor(
             parse_addr(my_ip)?,
             members.clone(),
             matchmakers.clone(),
+            boot,
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -483,6 +489,39 @@ async fn run_acceptor(
                     assert_reachable!("a storage-fault crash restarts after a buggified delay");
                     ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
                 }
+            }
+            // The library refused the store (#147). Amnesia is the wipe
+            // coin's outcome and the one the rule exists for: the identity
+            // stays down for the run, replaced by reconfiguration — the
+            // audit already excused it from convergence when the driver
+            // reported the refusal. The harness cross-checks the refusal
+            // against its own injection: only a wiped disk is ever
+            // amnesiac here.
+            Err(RunError::Refused(BootRefusal::Amnesia)) => {
+                let wiped = world
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_wiped(my_ip);
+                assert_always!(
+                    wiped,
+                    "storage: an amnesia refusal names a wiped identity",
+                    { "node" => self_rank.0 }
+                );
+                tracing::info!(node = self_rank.0, "amnesia_refused_stays_down");
+                return Ok(());
+            }
+            // A first boot on a formatted store is a harness bug: the
+            // provisioning ledger and the disks disagree.
+            Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
+                assert_always!(
+                    false,
+                    "storage: a first boot never meets a formatted store",
+                    { "node" => self_rank.0 }
+                );
+                return Err(SimulationError::InvalidState(format!(
+                    "node {} booted as first boot on a formatted store",
+                    self_rank.0
+                )));
             }
             // The only non-crash exit: a genuine infrastructure failure
             // propagates to the harness instead of being retried.
@@ -599,6 +638,20 @@ async fn run_matchmaker_role(
                     assert_reachable!("a seam-crashed matchmaker restarts after a buggified delay");
                     ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
                 }
+            }
+            // The matchmaker driver judges no boot claim (#147 is the
+            // node's marker; the registry has none yet), so it never
+            // refuses one.
+            Err(RunError::Refused(refusal)) => {
+                assert_always!(
+                    false,
+                    "matchmaker: the matchmaker driver never refuses a boot",
+                    { "matchmaker" => id.0, "refusal" => format!("{refusal:?}") }
+                );
+                return Err(SimulationError::InvalidState(format!(
+                    "matchmaker {} refused a boot: {refusal:?}",
+                    id.0
+                )));
             }
             Err(RunError::Infra(e)) => return Err(e),
             Ok(()) => return Ok(()),
