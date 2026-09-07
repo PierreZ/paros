@@ -270,12 +270,12 @@ struct Entry {
     incarnations: u64,
 }
 
-/// The run's **quorum-system policy** (#140): how every configuration the run
-/// puts in force is judged, drawn once per seed and applied to each
+/// The run's **quorum-system policy** (#140, #141): how every configuration
+/// the run puts in force is judged, drawn once per seed and applied to each
 /// configuration's own size. Protocol data like the bootstrap ranks — a
 /// majority is the plain deployment's system and the default; a flexible
-/// split is the opt-in the swarm turns on per seed, so one campaign proves
-/// the library under both.
+/// split and an acceptor grid are the opt-ins the swarm turns on per seed,
+/// so one campaign proves the library under all three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QuorumPolicy {
     /// A majority in both phases.
@@ -289,6 +289,34 @@ pub(crate) enum QuorumPolicy {
         /// The Phase-2 quorum size drawn at the pool, before clamping.
         q2: usize,
     },
+    /// Compartmentalized Paxos's acceptor grid (#141): rows elect, columns
+    /// decide, and every slot's `Accept` goes to one column. The layout is
+    /// drawn at the pool; a configuration of another size runs the grid
+    /// layout closest to it that tiles it ([`grid_layouts`]), or a majority
+    /// when no layout does — a successor on a grid seed is grid-shaped or
+    /// switches system, never malformed.
+    Grid {
+        /// The rows drawn at the pool.
+        rows: usize,
+        /// The columns drawn at the pool.
+        cols: usize,
+    },
+}
+
+/// Every grid layout of `n` acceptors the harness may run: `rows × cols ==
+/// n` with **both `rows >= 2` and `cols >= 2`** — the knob's floor. A
+/// `1 × n` grid is Flexible Paxos's `|Q1| = 1, |Q2| = n` thought experiment
+/// and an `n × 1` grid its mirror: valid configurations on paper and
+/// permanent partitions under attrition (one dead acceptor stops Phase 2,
+/// or Phase 1, for the rest of the run), which is the defeat of eventual
+/// synchrony the knob doctrine forbids. In row-major order of `rows`, so the
+/// list is a pure function of `n` every process derives alike. Empty when
+/// `n` is prime or below four.
+pub(crate) fn grid_layouts(n: usize) -> Vec<(usize, usize)> {
+    (2..n)
+        .filter(|rows| n.is_multiple_of(*rows) && n / rows >= 2)
+        .map(|rows| (rows, n / rows))
+        .collect()
 }
 
 impl QuorumPolicy {
@@ -298,7 +326,10 @@ impl QuorumPolicy {
     /// acceptor learns a value in one hop", a valid configuration because
     /// the fault window closes before the recovery tail does and the copy
     /// budget ([`StorageWorld::set_budget`]) is sized over the split's
-    /// Phase-1 quorum. `n = 1` and `n = 2` admit only `q2 = 1`.
+    /// Phase-1 quorum. `n = 1` and `n = 2` admit only `q2 = 1`. A grid
+    /// policy lays the drawn layout over `n` when it tiles it, else the
+    /// layout of `n` with the same row count, else the first that tiles it,
+    /// else a majority (see [`grid_layouts`] for the floor).
     ///
     /// [`StorageWorld::set_budget`]: crate::world::StorageWorld::set_budget
     pub(crate) fn system(self, n: usize) -> QuorumSystem {
@@ -311,23 +342,61 @@ impl QuorumPolicy {
                     q2,
                 }
             }
+            QuorumPolicy::Grid { rows, cols } => {
+                let layouts = grid_layouts(n);
+                layouts
+                    .iter()
+                    .find(|(r, c)| *r == rows && *c == cols)
+                    .or_else(|| layouts.iter().find(|(r, _)| *r == rows))
+                    .or_else(|| layouts.first())
+                    .map_or(QuorumSystem::Majority, |(rows, cols)| QuorumSystem::Grid {
+                        rows: *rows,
+                        cols: *cols,
+                    })
+            }
         }
     }
 
-    /// The clean live copies a record must keep under this policy at a
-    /// configuration of `n`: the **larger** of the two phase quorums. A
-    /// faulty slot is decidable only once a full Phase-1 quorum of clean
-    /// answers holds (CTRL R2/R3), and a value is choosable only while a
-    /// Phase-2 quorum is live, so a run stays winnable while both quorums
-    /// have clean members — `max(q1, q2)` copies. The tolerated loss per
-    /// record is therefore `n - max(q1, q2)`: `⌊(n-1)/2⌋` under a majority,
-    /// and `q2 - 1` under the split this policy draws (`q1 = n - q2 + 1 >=
-    /// q2`), never `⌊(n-1)/2⌋` assumed.
-    pub(crate) fn clean_copies(self, n: usize) -> usize {
-        let system = self.system(n);
-        system
-            .phase1_quorum_size(n)
-            .max(system.phase2_quorum_size(n))
+    /// The copies of a record a configuration of `n` may lose under this
+    /// policy and stay winnable. Under a majority `⌊(n-1)/2⌋`; under a
+    /// flexible split `q2 - 1` (`n - q1`: a faulty slot is decidable only
+    /// once a full Phase-1 quorum of clean answers holds, CTRL R2/R3, and a
+    /// value is choosable only while a Phase-2 quorum is live, so both
+    /// quorums must keep clean members — `n - max(q1, q2)`); under a grid
+    /// `⌊(m-1)/2⌋` over `m = min(rows, cols)`, the size of its smallest
+    /// quorum — that many losses break strictly fewer rows and columns than
+    /// the grid has, so some full row still answers Phase 1 and some full
+    /// column still decides, whichever cells the losses hit. For every
+    /// grid the pool range admits (`2 × 2`, `2 × 3`, `3 × 2`) that is
+    /// **zero**: a grid tolerates no permanent loss, because one dead
+    /// acceptor freezes its column's slots for the rest of the run.
+    pub(crate) fn tolerated_loss(self, n: usize) -> usize {
+        match self.system(n) {
+            QuorumSystem::Majority => n.saturating_sub(1) / 2,
+            QuorumSystem::Flexible { q1, q2 } => n.saturating_sub(q1.max(q2)),
+            QuorumSystem::Grid { rows, cols } => rows.min(cols).saturating_sub(1) / 2,
+        }
+    }
+
+    /// The clean live copies a record must keep at the run's configuration
+    /// floor `floor` so that **every** configuration the run may put in
+    /// force — every size in `floor..=pool` — stays winnable: the floor
+    /// minus the smallest loss any of those sizes tolerates
+    /// ([`QuorumPolicy::tolerated_loss`]). Under a majority or a flexible
+    /// split the tolerated loss only grows with `n` (the split fixes `q2`),
+    /// so this is the floor configuration's own `max(q1, q2)` — `⌊n/2⌋ + 1`
+    /// under a majority, `q1` under the split. Under a grid it is not
+    /// monotone (a three-member successor is a majority tolerating one
+    /// loss, a four-member one a `2 × 2` grid tolerating none), so the
+    /// minimum over the range is what the budget keeps; on every grid seed
+    /// the pool range admits that is the whole floor — no storage-fault
+    /// injection and no park, the cost the grid pays for its `1 / cols`.
+    pub(crate) fn clean_copies(self, floor: usize, pool: usize) -> usize {
+        let loss = (floor..=pool.max(floor))
+            .map(|n| self.tolerated_loss(n))
+            .min()
+            .unwrap_or(0);
+        floor.saturating_sub(loss)
     }
 }
 
@@ -403,18 +472,21 @@ pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
     })
 }
 
-/// The run's **quorum-system policy** (#140), drawn once per seed by whichever
-/// process or workload asks first and handed back unchanged to every later
-/// caller (an attrition restart must boot the same node under the same
-/// system, and every client must compose successors under it).
+/// The run's **quorum-system policy** (#140, #141), drawn once per seed by
+/// whichever process or workload asks first and handed back unchanged to
+/// every later caller (an attrition restart must boot the same node under
+/// the same system, and every client must compose successors under it).
 ///
 /// The default is the majority, the plain deployment's system. A perturbing
 /// seed may instead draw a **flexible split**: one `buggify_knob!` location
 /// for `q2` over the pool (default the majority, extreme `1..=pool/2`), with
-/// `q1 = n - q2 + 1` derived per configuration ([`QuorumPolicy::system`]).
-/// The split is opt-in configuration data on the core side, so a majority
-/// seed is byte-identical to a run before the policy existed; a corpus run
-/// (`perturb == false`) never draws.
+/// `q1 = n - q2 + 1` derived per configuration ([`QuorumPolicy::system`]);
+/// or, on a pool whose size tiles a grid, an **acceptor grid**: its own
+/// `buggify_knob!` location over the layouts of the pool ([`grid_layouts`],
+/// floor `rows >= 2` and `cols >= 2`; default no grid), so a seed can be
+/// extreme in one system and never the other. Both are opt-in configuration
+/// data on the core side, so a majority seed is byte-identical to a run
+/// before the policy existed; a corpus run (`perturb == false`) never draws.
 #[tracing::instrument(level = "debug", skip(state), fields(pool, perturb))]
 pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> QuorumPolicy {
     let registry = registry(state);
@@ -425,15 +497,30 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> 
             return QuorumPolicy::Majority;
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
-        if q2 == majority {
+        if q2 != majority {
+            // BUGGIFY pairing: a seed genuinely runs a flexible split (a
+            // cause, never a `sometimes`; the outcomes — a slot decided by
+            // fewer accepts than a majority, an election completed under the
+            // split — are the audit's gates).
+            assert_reachable!("a run draws a flexible quorum system");
+            return QuorumPolicy::Flexible { q2 };
+        }
+        // The grid knob, its own location: index 0 is "no grid", `k` the
+        // `k`-th layout of the pool. A pool that tiles no grid (three or
+        // five nodes) draws nothing here and stays a majority.
+        let layouts = grid_layouts(pool);
+        if layouts.is_empty() {
             return QuorumPolicy::Majority;
         }
-        // BUGGIFY pairing: a seed genuinely runs a flexible split (a cause,
-        // never a `sometimes`; the outcomes — a slot decided by fewer accepts
-        // than a majority, an election completed under the split — are the
-        // audit's gates).
-        assert_reachable!("a run draws a flexible quorum system");
-        QuorumPolicy::Flexible { q2 }
+        let pick = buggify_knob!(0_usize, 1_usize..layouts.len() + 1);
+        let Some((rows, cols)) = pick.checked_sub(1).and_then(|k| layouts.get(k).copied()) else {
+            return QuorumPolicy::Majority;
+        };
+        // BUGGIFY pairing: a seed genuinely runs an acceptor grid (a cause;
+        // the outcomes — a slot decided on a column, an election covered by
+        // a row — are the audit's gates).
+        assert_reachable!("a run draws an acceptor grid");
+        QuorumPolicy::Grid { rows, cols }
     })
 }
 
@@ -450,13 +537,15 @@ pub(crate) const MIN_BOOTSTRAP: usize = 3;
 /// sized by it, exactly as before matchmakers existed. On a matchmaker
 /// deployment the acceptor set may shrink as far as [`MIN_BOOTSTRAP`], and the
 /// budget is sized by *that*: a budget that keeps the clean copies the
-/// policy demands of the smallest configuration
-/// ([`QuorumPolicy::clean_copies`]) keeps them for every larger configuration
-/// too (the tolerated loss `n - max(q1, q2)` only grows with `n` under a
-/// policy that fixes `q2`), so it stays conservative through every
-/// reconfiguration at the cost of fewer storage-fault injections on the
-/// larger matchmaker seeds — and, under a flexible split at a three-node
-/// floor (`q2 = 1`, `q1 = 3`), of none at all.
+/// policy demands over every size the run may put in force
+/// ([`QuorumPolicy::clean_copies`] takes the floor *and* the pool: the
+/// tolerated loss `n - max(q1, q2)` only grows with `n` under a policy that
+/// fixes `q2`, but a grid's `⌊(min(rows, cols) - 1)/2⌋` does not, so the
+/// smallest loss over the range is what the budget keeps), so it stays
+/// conservative through every reconfiguration at the cost of fewer
+/// storage-fault injections on the larger matchmaker seeds — and, under a
+/// flexible split at a three-node floor (`q2 = 1`, `q1 = 3`) or on any
+/// grid seed, of none at all.
 pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
     if has_matchmakers {
         MIN_BOOTSTRAP.min(pool)
@@ -654,8 +743,67 @@ mod tests {
         assert_eq!(quorum_policy(&state, 5, true), first);
         for n in 1..=6 {
             assert_eq!(first.system(n), QuorumSystem::Majority);
-            assert_eq!(first.clean_copies(n), n / 2 + 1);
+            assert_eq!(first.clean_copies(n, n), n / 2 + 1);
+            assert_eq!(first.clean_copies(n, 6), n / 2 + 1);
         }
+    }
+
+    /// The grid policy's floor and its budget, spelled out: only layouts
+    /// with `rows >= 2` and `cols >= 2` exist, a size no layout tiles runs
+    /// a majority, the drawn layout is kept where it fits and the nearest
+    /// row count elsewhere, and the copy budget is the whole floor — a grid
+    /// tolerates no permanent loss, and on a matchmaker seed the minimum
+    /// over the sizes in force is what the budget keeps.
+    #[test]
+    fn a_grid_policy_tiles_or_switches_and_tolerates_no_loss() {
+        assert!(grid_layouts(3).is_empty());
+        assert_eq!(grid_layouts(4), vec![(2, 2)]);
+        assert!(grid_layouts(5).is_empty());
+        assert_eq!(grid_layouts(6), vec![(2, 3), (3, 2)]);
+        assert_eq!(grid_layouts(12), vec![(2, 6), (3, 4), (4, 3), (6, 2)]);
+        let policy = QuorumPolicy::Grid { rows: 3, cols: 2 };
+        assert_eq!(
+            policy.system(6),
+            QuorumSystem::Grid { rows: 3, cols: 2 },
+            "the drawn layout where it tiles"
+        );
+        assert_eq!(
+            policy.system(4),
+            QuorumSystem::Grid { rows: 2, cols: 2 },
+            "the first layout of a size the drawn row count does not tile"
+        );
+        assert_eq!(
+            QuorumPolicy::Grid { rows: 2, cols: 3 }.system(12),
+            QuorumSystem::Grid { rows: 2, cols: 6 },
+            "the layout with the drawn row count where one exists"
+        );
+        assert_eq!(
+            policy.system(3),
+            QuorumSystem::Majority,
+            "no layout: a majority"
+        );
+        assert_eq!(policy.system(5), QuorumSystem::Majority);
+        for n in 1..=8 {
+            assert!(policy.system(n).admits(n));
+        }
+        assert_eq!(policy.tolerated_loss(6), 0);
+        assert_eq!(policy.tolerated_loss(4), 0);
+        assert_eq!(policy.tolerated_loss(3), 1, "a majority of three");
+        assert_eq!(policy.tolerated_loss(5), 2);
+        // A plain grid seed: the floor is the pool, the budget the whole
+        // of it.
+        assert_eq!(policy.clean_copies(6, 6), 6);
+        // A matchmaker seed with a three-node floor on a six-node pool: the
+        // sizes in force tolerate 1, 0, 2, 0 losses — the minimum is zero.
+        assert_eq!(policy.clean_copies(3, 6), 3);
+        // A matchmaker seed on a five-node pool: sizes 3, 4, 5 tolerate 1,
+        // 0, 2 — still zero, because the four-member successor is a grid.
+        assert_eq!(policy.clean_copies(3, 5), 3);
+        // The majority and the split are monotone, so the floor's own
+        // requirement is the budget whatever the pool.
+        assert_eq!(QuorumPolicy::Majority.clean_copies(3, 6), 2);
+        assert_eq!(QuorumPolicy::Flexible { q2: 1 }.clean_copies(3, 6), 3);
+        assert_eq!(QuorumPolicy::Flexible { q2: 2 }.clean_copies(4, 6), 3);
     }
 
     /// The split's floor, spelled out: `q1 + q2 = n + 1` at every size, `q2`
@@ -673,8 +821,9 @@ mod tests {
                 assert!(q2 <= (n / 2).max(1));
                 assert_eq!(q1 + q2, n + 1);
                 assert!(policy.system(n).admits(n));
-                assert_eq!(policy.clean_copies(n), q1);
-                assert_eq!(n - policy.clean_copies(n), q2 - 1);
+                assert_eq!(policy.clean_copies(n, n), q1);
+                assert_eq!(n - policy.clean_copies(n, n), q2 - 1);
+                assert_eq!(policy.tolerated_loss(n), q2 - 1);
             }
         }
     }

@@ -459,6 +459,43 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
+        self.propose_in(client, seq, value, None)
+    }
+
+    /// [`ColocatedNode::propose`] with the driver naming the **column** the
+    /// proposal's Phase 2 is addressed to (#141): `Some(c)` overrides the
+    /// core's own `slot % cols` ([`AcceptorConfig::column_of`]) for this one
+    /// round, `None` is exactly [`ColocatedNode::propose`].
+    ///
+    /// **Always safe, which is why it is a method and not a fault.** Every
+    /// full column of a grid is a Phase-2 quorum of it, and every Phase-1
+    /// quorum (a row) meets every column, so a value chosen through any
+    /// column is learned by every later election; which column a slot uses
+    /// is a load-spreading choice, never a safety one. The round records
+    /// the column it was opened against, so its re-sends and its decision
+    /// stay on that column; a handoff successor or a restarted leader that
+    /// re-proposes the slot derives `slot % cols` afresh, and two fan-outs
+    /// of one `(slot, ballot, command)` to two columns are P2b-idempotent.
+    /// Production never overrides; the deterministic simulation does, from
+    /// the node loop, to reach the column mixes the modulus alone never
+    /// would.
+    ///
+    /// # Panics
+    ///
+    /// If `column` names a column the active configuration does not have —
+    /// one at or past its `cols`, or any column at all under a majority or
+    /// a flexible split, which name none. The driver derives the override
+    /// from [`ColocatedNode::acceptors`], so this is a programmer error,
+    /// never an operating condition. Also if an internal invariant is
+    /// broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column)))]
+    pub fn propose_in(
+        &mut self,
+        client: ClientId,
+        seq: ClientSeq,
+        value: Value,
+        column: Option<usize>,
+    ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
@@ -498,7 +535,8 @@ impl ColocatedNode {
         let slot = self.proposer.allocate();
         let entry = Entry { client, seq, value };
         self.replica.track_inflight(client, seq, slot);
-        self.start_accept_round(slot, Command::User(entry));
+        let column = column.or_else(|| self.acceptors.column_of(slot));
+        self.start_accept_round_in(slot, Command::User(entry), column);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }

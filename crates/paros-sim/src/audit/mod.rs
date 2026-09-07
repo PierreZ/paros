@@ -1088,6 +1088,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if matches!(config.quorum_system(), QuorumSystem::Flexible { .. }) {
             st.elected_flexible = true;
         }
+        // The #141 outcomes: a leadership ran under a grid (its Phase 1 was
+        // covered by a full row); its matchmaking closed with a *different*
+        // grid among the prior configurations (Phase 1 needed a row of that
+        // one too — a row across a reconfiguration); and the configuration
+        // moved between a grid and a majority (a prior of the other kind).
+        let is_grid = |c: &AcceptorConfig| matches!(c.quorum_system(), QuorumSystem::Grid { .. });
+        if is_grid(config) {
+            st.elected_grid = true;
+        }
+        let prior: Vec<AcceptorConfig> = st.prior_of(won).map(<[_]>::to_vec).unwrap_or_default();
+        if prior.iter().any(|c| c != config && is_grid(c)) {
+            st.elected_across_grid = true;
+        }
+        if prior
+            .iter()
+            .any(|c| c != config && is_grid(c) != is_grid(config))
+        {
+            st.reconfigured_across_grid_boundary = true;
+        }
         if let Some(prev) = st.leader_round.insert(node.0, won.round) {
             assert_always!(
                 won.round > prev,
@@ -1366,6 +1385,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             }
         );
         *watermark = (*watermark).max(confirmed);
+        // The #141 outcome: the confirming ack set was a full column of a
+        // grid (the leader's configuration at its current ballot).
+        if let Some(round) = st.leader_round.get(&node.0).copied()
+            && st
+                .config_of(Ballot { round, node })
+                .is_some_and(|c| matches!(c.quorum_system(), QuorumSystem::Grid { .. }))
+        {
+            st.read_confirmed_on_column = true;
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

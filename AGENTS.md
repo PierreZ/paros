@@ -309,7 +309,25 @@ cross-configuration Phase 1 asks two systems their own predicates. The copy budg
 record is `n - q1 = q2 - 1` there and `⌊(n-1)/2⌋` under a majority (`QuorumPolicy::clean_copies`
 derives it; nothing in the harness re-derives a threshold from a count). The draw is a
 `reachable`; the outcomes — an election completed under a flexible split, a slot decided by
-fewer accepts than a majority — are the audit's `sometimes` gates. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
+fewer accepts than a majority — are the audit's `sometimes` gates. **The grid is drawn the
+same way (#141):** on a pool whose size tiles a grid, a second `buggify_knob!` location picks
+one of `paros_sim::shape::grid_layouts` — floor `rows >= 2` and `cols >= 2` (a `1 × n` or
+`n × 1` grid is a permanent partition under attrition) — so with `PROCESS_POOL_RANGE = 3..=6`
+that is `2 × 2`, `2 × 3` or `3 × 2`; a configuration of a size no layout tiles runs a majority
+(`QuorumPolicy::system`), which is how a grid seed's successors are grid-shaped or switch
+system, and the composer's majority coin applies to a grid seed as it does to a flexible one
+(never the reverse). The copy budget is the floor minus the *smallest* loss any size in
+`floor..=pool` tolerates (`QuorumPolicy::clean_copies(floor, pool)`), because a grid's
+`⌊(min(rows, cols) - 1)/2⌋` — zero for every grid the pool admits: one dead acceptor freezes
+its column — is not monotone in `n` the way a majority's or a split's is; a grid seed
+therefore injects no lost leg and parks nobody. The rare-but-valid decision the driver owns
+is *which column* a proposal's Phase 2 goes to: `DriverHooks::phase2_column` (its own BUGGIFY
+location, consulted on the node loop only on a grid leader, handed to the core through
+`ColocatedNode::propose_in`; always safe, every column is a Phase-2 quorum), paired with a
+`reachable` that it fired and a `reachable` that a slot was decided on a column other than its
+own. The grid outcomes are the audit's `sometimes` gates: a slot decided on a column, an
+election covered by a row, one covered by a row across a reconfiguration, a read-index round
+confirmed by a column, a reconfiguration between a grid and a majority. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.

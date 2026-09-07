@@ -532,11 +532,12 @@ impl StorageWorld {
 
     /// Size the copy budget: `n` is the run's configuration floor
     /// (`crate::shape::config_floor`) and `clean_copies` the clean live copies
-    /// every record must keep at that size — the larger of the floor
-    /// configuration's two phase quorums under the run's quorum-system policy
-    /// (`crate::shape::QuorumPolicy::clean_copies`; a majority under the
-    /// plain policy). Set once at boot, first caller wins, and every node
-    /// must derive the same pair.
+    /// every record must keep at that size — the floor minus the smallest
+    /// loss any configuration the run may put in force tolerates under the
+    /// run's quorum-system policy (`crate::shape::QuorumPolicy::clean_copies`:
+    /// a majority under the plain policy, the split's Phase-1 quorum, the
+    /// whole floor on a grid seed). Set once at boot, first caller wins, and
+    /// every node must derive the same pair.
     pub(crate) fn set_budget(&mut self, n: usize, clean_copies: usize) {
         if self.cluster_size == 0 {
             self.cluster_size = n;
@@ -569,9 +570,14 @@ impl StorageWorld {
     /// is the Phase-1 quorum `q1` (the larger of the two): a faulty slot is
     /// decidable only once a full Phase-1 quorum of clean answers holds
     /// (CTRL R2/R3), so the tolerated loss per record is `n - q1 = q2 - 1`,
-    /// not `⌊(n-1)/2⌋`. Never re-derived from a count here: the policy's
-    /// arithmetic is done once at boot and handed in through
-    /// [`StorageWorld::set_budget`].
+    /// not `⌊(n-1)/2⌋`. Under a grid (#141) it is `n - ⌊(m-1)/2⌋` over
+    /// `m = min(rows, cols)`, the grid's smallest quorum — which for every
+    /// grid the pool range admits is the whole of `n`: a record chosen by a
+    /// column survives only while some full row can still answer Phase 1
+    /// with a clean cell in that column, and one dead acceptor freezes its
+    /// column's slots, so a grid seed injects no lost leg and parks nobody.
+    /// Never re-derived from a count here: the policy's arithmetic is done
+    /// once at boot and handed in through [`StorageWorld::set_budget`].
     fn quorum(&self) -> usize {
         self.clean_copies_required
     }

@@ -405,6 +405,26 @@ pub trait DriverHooks {
         false
     }
 
+    /// Which **column** of the active grid this proposal's Phase 2 should be
+    /// addressed to, instead of the core's own `slot % cols` (#141):
+    /// `None` (the default) keeps the core's choice. Consulted only where it
+    /// can have an effect — on a leader whose active configuration is a
+    /// [`QuorumSystem::Grid`](paros_core::QuorumSystem::Grid), from the node
+    /// loop, right before the proposal opens its round — and handed to the
+    /// core through [`paros_core::ColocatedNode::propose_in`]. A returned
+    /// column at or past `cols` is ignored.
+    ///
+    /// Always safe: every full column is a Phase-2 quorum and every row
+    /// meets every column, so which column carries a slot is a
+    /// load-spreading choice, never a safety one (the method's own doc has
+    /// the argument). What the override reaches is the column mix the
+    /// modulus alone never produces — two consecutive slots on one column,
+    /// a slot whose handoff successor re-derives a different column than
+    /// the one its first fan-out used.
+    fn phase2_column(&self, _slot: Slot, _cols: usize) -> Option<usize> {
+        None
+    }
+
     /// Whether to answer a parked read with a retry redirect **now**, before
     /// its confirmation deadline. Always safe: the redirect is the same reply
     /// the deadline produces, and a client is built to retry it; a late core

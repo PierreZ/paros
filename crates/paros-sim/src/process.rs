@@ -298,11 +298,12 @@ async fn run_acceptor(
         // The copy budget is sized by the run's configuration floor
         // (`crate::shape::config_floor`): the whole pool on a plain seed, the
         // smallest set a reconfiguration may shrink to on a matchmaker seed —
-        // and by the clean copies the run's quorum-system policy demands of a
-        // configuration that size (a majority, or the split's Phase-1
-        // quorum).
+        // and by the clean copies the run's quorum-system policy demands
+        // over every size the run may put in force, floor to pool (a
+        // majority, the split's Phase-1 quorum, or — on a grid seed — the
+        // whole floor: a grid tolerates no permanent loss).
         let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
-        guard.set_budget(floor, policy.clean_copies(floor));
+        guard.set_budget(floor, policy.clean_copies(floor, config.pool().len()));
         // The pool above that floor is the retirement budget (#123): every
         // identity a configuration may leave behind.
         guard.set_pool_size(config.pool().len());
@@ -348,7 +349,12 @@ async fn run_acceptor(
             .unwrap_or_else(PoisonError::into_inner)
             .parked_count_excluding(my_ip);
         let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
-        checker.note_process_restart(self_rank.0, parked_peers, floor, policy.clean_copies(floor));
+        checker.note_process_restart(
+            self_rank.0,
+            parked_peers,
+            floor,
+            policy.clean_copies(floor, config.pool().len()),
+        );
         // The disk's wipe coin (#124): a restart that comes back on an empty
         // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
         // which paros does not use (the fake disk is the world), so the

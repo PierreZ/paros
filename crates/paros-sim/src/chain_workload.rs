@@ -1806,18 +1806,23 @@ impl Workload for ChainWorkload {
                     let all_ranks: Vec<u64> =
                         (0..u64::try_from(server_count).unwrap_or(0)).collect();
                     let adversarial_members = buggify_with_prob!(0.10);
-                    // The successor's quorum system (#140): the seed's policy
-                    // at the successor's own size — or, on a flexible seed,
-                    // a coin that composes a *majority* successor instead,
-                    // so the cross-configuration Phase 1 asks two different
-                    // systems their own predicates. Only that direction: a
-                    // majority successor always sits inside the copy budget
-                    // a flexible policy was sized for (its quorum is at most
-                    // the split's `q1`), while a split on a majority seed
-                    // would not, so a majority seed never composes one.
-                    let switch_to_majority =
-                        matches!(policy, crate::shape::QuorumPolicy::Flexible { .. })
-                            && buggify_with_prob!(0.25);
+                    // The successor's quorum system (#140, #141): the seed's
+                    // policy at the successor's own size — or, on a flexible
+                    // or a grid seed, a coin that composes a *majority*
+                    // successor instead, so the cross-configuration Phase 1
+                    // asks two different systems their own predicates. Only
+                    // that direction: a majority successor always sits
+                    // inside the copy budget a flexible or a grid policy was
+                    // sized for (its tolerated loss is never below theirs),
+                    // while a split or a grid on a majority seed would not,
+                    // so a majority seed never composes one. A grid policy
+                    // switches on its own too, at every size no layout
+                    // tiles (`QuorumPolicy::system`).
+                    let switch_to_majority = matches!(
+                        policy,
+                        crate::shape::QuorumPolicy::Flexible { .. }
+                            | crate::shape::QuorumPolicy::Grid { .. }
+                    ) && buggify_with_prob!(0.25);
                     let successor_system = |n: usize| {
                         if switch_to_majority {
                             QuorumSystem::Majority
