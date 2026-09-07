@@ -27,13 +27,14 @@ use moonpool_sim::{
 };
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
-use crate::hooks::BuggifyHooks;
+use crate::hooks::{BuggifyHooks, ScriptedCrash};
 use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, Role};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::storage_world;
 use paros::{
-    Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, parse_addr, run_matchmaker, run_node,
+    Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, Seam, parse_addr, run_matchmaker,
+    run_node,
 };
 
 /// A paros node (an acceptor) in the simulation.
@@ -42,6 +43,9 @@ pub(crate) struct NodeProcess {
     /// A scripted case's fixed bootstrap size (`Some(n)`: ranks `0..n` are
     /// the bootstrap acceptors, the rest spares); `None` draws per the mode.
     bootstrap: Option<usize>,
+    /// A scripted case's one targeted seam crash (`crate::hooks::ScriptedCrash`,
+    /// #146): the first node to reach `seam` crashes there, once per run.
+    seam_crash: Option<Seam>,
 }
 
 /// How a process is perturbed.
@@ -62,6 +66,7 @@ impl NodeProcess {
         Self {
             mode: NodeMode::Chaotic,
             bootstrap: None,
+            seam_crash: None,
         }
     }
 
@@ -69,6 +74,7 @@ impl NodeProcess {
         Self {
             mode: NodeMode::Scripted,
             bootstrap: None,
+            seam_crash: None,
         }
     }
 
@@ -78,6 +84,18 @@ impl NodeProcess {
         Self {
             mode: NodeMode::Scripted,
             bootstrap: Some(bootstrap),
+            seam_crash: None,
+        }
+    }
+
+    /// A scripted node whose hooks crash at `seam` the first time any node
+    /// reaches it in the run — the corpus's one targeted durability-seam
+    /// injection (#146); every other site stays dark.
+    pub(crate) fn scripted_with_seam_crash(seam: Seam) -> Self {
+        Self {
+            mode: NodeMode::Scripted,
+            bootstrap: None,
+            seam_crash: Some(seam),
         }
     }
 }
@@ -133,7 +151,16 @@ impl Process for NodeProcess {
         let perturb = self.mode == NodeMode::Chaotic;
         match deployment.role_of(&my_ip) {
             Some(Role::Acceptor(self_rank)) => {
-                run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb, self.bootstrap).await
+                run_acceptor(
+                    ctx,
+                    &deployment,
+                    self_rank,
+                    &my_ip,
+                    perturb,
+                    self.bootstrap,
+                    self.seam_crash,
+                )
+                .await
             }
             other => {
                 assert_always!(
@@ -188,6 +215,7 @@ async fn run_acceptor(
     my_ip: &str,
     perturb: bool,
     fixed_bootstrap: Option<usize>,
+    seam_crash: Option<Seam>,
 ) -> SimulationResult<()> {
     // The node pool is the map's acceptor list, in `NodeId` order — never
     // "every process in the topology". The matchmaker set is the map's
@@ -277,12 +305,15 @@ async fn run_acceptor(
         }
         guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
     }
-    let hooks = BuggifyHooks::new(
+    let mut hooks = BuggifyHooks::new(
         ctx.time().clone(),
         Duration::from_millis(crate::CHAOS_DURATION_MS),
         perturb,
         shape.seam_crash_bias,
     );
+    if let Some(seam) = seam_crash {
+        hooks = hooks.with_scripted_crash(ScriptedCrash::arm(ctx.state(), seam));
+    }
     // The budgeted storage-fault layer (issue #19 B/C) shares the driver
     // hooks' chaos window: after the cutoff the world stops injecting
     // **new** faults but never heals the consequences of old ones —

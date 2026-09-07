@@ -5,7 +5,7 @@
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    chunk_corpus_canonical_masks, corpus_canonical_masks, corpus_mask_case,
+    ChunkLiveCase, chunk_corpus_canonical_masks, corpus_canonical_masks, corpus_mask_case,
     departed_straggler_case, run_bare_quorum_case, run_chunk_mask, run_snapshot_lifecycle_case,
 };
 
@@ -147,7 +147,7 @@ fn snapshot_lifecycle_compound_reaches_all_paths() {
 #[test]
 fn chunk_canonical_masks_assert_their_analytic_outcomes() {
     for mask in chunk_corpus_canonical_masks() {
-        let report = run_chunk_mask(mask, false);
+        let report = run_chunk_mask(mask, ChunkLiveCase::Intact);
         assert_eq!(report.failed_runs, 0, "chunk mask {mask:#017b} completed");
         assert!(
             report.assertion_violations.is_empty(),
@@ -162,11 +162,29 @@ fn chunk_canonical_masks_assert_their_analytic_outcomes() {
 /// install, and either way converges without fabricating.
 #[test]
 fn chunk_mask_with_lost_live_snapshot_converges() {
-    let report = run_chunk_mask(0b10, true);
+    let report = run_chunk_mask(0b10, ChunkLiveCase::Lost);
     assert_eq!(report.failed_runs, 0, "chunk+live case completed");
     assert!(
         report.assertion_violations.is_empty(),
         "chunk+live case converged: {:?}",
+        report.assertion_violations
+    );
+}
+
+/// The same compound with the one durability seam the swarm never reaches
+/// scripted in (#146): node 0 repairs its chunk, restores the point into its
+/// lost application, and crashes before the restore's sync. The staged
+/// restore dies, the durable chunks stay clean, and the reboot — below the
+/// floor with nothing left to repair — heals through a peer's
+/// `InstallSnapshot`. The workload asserts non-vacuity itself (the scripted
+/// crash fired), so a green run here is a visited seam, never a skipped one.
+#[test]
+fn chunk_mask_with_crash_after_point_restore_recovers() {
+    let report = run_chunk_mask(0b10, ChunkLiveCase::LostThenRestoreCrash);
+    assert_eq!(report.failed_runs, 0, "chunk+restore-crash case completed");
+    assert!(
+        report.assertion_violations.is_empty(),
+        "chunk+restore-crash case visited the seam and converged: {:?}",
         report.assertion_violations
     );
 }

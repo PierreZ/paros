@@ -16,11 +16,13 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`), drawn once per node per
   seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
-- `process.rs` `NodeProcess::{chaotic, scripted}`, `MatchmakerProcess`,
-  `IdleProcess`, `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle`
-  (the corpus's `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all
-  `DriverHooks` methods, one `buggify_with_prob!` location each, and the
-  module-doc table of *enabled / consulted / fired / recovered* per hook.
+- `process.rs` `NodeProcess::{chaotic, scripted, scripted_with_bootstrap,
+  scripted_with_seam_crash}`, `MatchmakerProcess`, `IdleProcess`,
+  `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
+  `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
+  one `buggify_with_prob!` location each, the module-doc table of *enabled /
+  consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
+  corpus's one targeted seam crash, fired once per run, no draw.
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
   `buggify_knob!`; the operation-id table `PROPOSE=0 … RETIRE=13`,

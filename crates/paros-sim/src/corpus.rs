@@ -1506,6 +1506,27 @@ pub(crate) enum ChunkMaskSource {
     Seeded,
 }
 
+/// What a chunk-mask case does to node 0's **live** application beside the
+/// chunk mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkLiveCase {
+    /// The live states stay healthy: chunk repair is the only heal.
+    Intact,
+    /// Node 0's live snapshot is rotted too, driving the point-restore /
+    /// whole-blob race on top of the chunk repair.
+    Lost,
+    /// As [`ChunkLiveCase::Lost`], and the node **crashes after the point
+    /// restore, before its sync** (`Seam::AfterChunkRestoreBeforeSync`,
+    /// #146): the one durability seam the swarm never reaches, scripted. The
+    /// analytic outcome: the staged restore dies with the storage handle,
+    /// the repaired chunks — flushed before the restore — stay clean and
+    /// durable, the reboot lands below the floor again with nothing pending
+    /// to repair (so the point is never restored a second time), and the
+    /// node heals through a peer's `InstallSnapshot` instead. The cluster
+    /// converges, every assemblable chunk clean.
+    LostThenRestoreCrash,
+}
+
 /// Per-chunk corruption masks over the retained decided snapshot point (#101):
 /// a fully replicated prefix is compacted through the Snap/Truncate coupling,
 /// every node retains the byte-identical point, and the mask rots chunks per
@@ -1513,23 +1534,25 @@ pub(crate) enum ChunkMaskSource {
 /// on every holder (chunk repair is the only heal — the live application
 /// states stay healthy, so no whole-blob path runs); a chunk with 0 clean
 /// copies must stay faulty on every holder, never fabricated, while the
-/// cluster itself stays fully available (the live states are custody). With
-/// `rot_live_node0`, node 0's live snapshot is rotted too, driving the
-/// point-restore / whole-blob race on top of the chunk repair.
+/// cluster itself stays fully available (the live states are custody). The
+/// [`ChunkLiveCase`] says what happens to node 0's live snapshot beside the
+/// mask.
 pub(crate) struct ChunkMaskWorkload {
     source: ChunkMaskSource,
-    rot_live_node0: bool,
+    live: ChunkLiveCase,
     repaired_clean: bool,
     unassemblable_held: bool,
+    restore_crash_recovered: bool,
 }
 
 impl ChunkMaskWorkload {
-    pub(crate) fn new(source: ChunkMaskSource, rot_live_node0: bool) -> Self {
+    pub(crate) fn new(source: ChunkMaskSource, live: ChunkLiveCase) -> Self {
         Self {
             source,
-            rot_live_node0,
+            live,
             repaired_clean: false,
             unassemblable_held: false,
+            restore_crash_recovered: false,
         }
     }
 }
@@ -1717,7 +1740,7 @@ impl Workload for ChunkMaskWorkload {
                 unassemblable.insert(chunk);
             }
         }
-        if self.rot_live_node0 {
+        if self.live != ChunkLiveCase::Intact {
             corpus_corrupt_snapshot(state, &servers[0], 0);
         }
         // Cross-check: chunk rot alone never strands a slot — the live
@@ -1803,8 +1826,23 @@ impl Workload for ChunkMaskWorkload {
             "corpus: a chunk with no clean copy is never fabricated",
             { "mask" => mask }
         );
-        self.repaired_clean = converged && repaired && (mask != 0 || self.rot_live_node0);
+        self.repaired_clean =
+            converged && repaired && (mask != 0 || self.live != ChunkLiveCase::Intact);
         self.unassemblable_held = held && !unassemblable.is_empty();
+        if self.live == ChunkLiveCase::LostThenRestoreCrash {
+            // Non-vacuity: the case exists to visit the seam, so a run in
+            // which the scripted crash never fired — node 0 never reached
+            // the restore — observed nothing and must not pass silently.
+            // The mask must give node 0 at least one assemblable rotted
+            // chunk, or no repair completes and no restore runs.
+            let fired = crate::hooks::scripted_crash_fired(state);
+            assert_always!(
+                fired,
+                "corpus: the scripted crash after the point restore fired",
+                { "mask" => mask }
+            );
+            self.restore_crash_recovered = fired && converged && repaired;
+        }
         drop(clients);
         Ok(())
     }
@@ -1819,6 +1857,12 @@ impl Workload for ChunkMaskWorkload {
             self.unassemblable_held,
             "corpus: an unassemblable chunk is correctly left faulty"
         );
+        if self.live == ChunkLiveCase::LostThenRestoreCrash {
+            assert_sometimes!(
+                self.restore_crash_recovered,
+                "corpus: a node crashed after its point restore recovers and the cluster converges"
+            );
+        }
         Ok(())
     }
 }

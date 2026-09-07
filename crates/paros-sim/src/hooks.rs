@@ -47,12 +47,75 @@
 //! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the
 //! lost-ack re-propose, a lost `Promise`/`Prepare`/`Nack` stretches an
 //! election, and the repair, snap-repair and handoff planes each have theirs.
+//!
+//! # The corpus's scripted seam crash (#146)
+//!
+//! A corpus case runs with every BUGGIFY site dark, so a durability seam
+//! whose precondition only a choreographed case can build — the chunk
+//! repair completing on a node whose application is lost,
+//! `Seam::AfterChunkRestoreBeforeSync` — would never fire there either.
+//! [`ScriptedCrash`] is the targeted form of `crash_at`: one named seam,
+//! answered `true` exactly **once per run** (the once-flag lives on the
+//! per-seed `StateHandle`, so the rebooted incarnation does not crash again),
+//! no probability drawn. It is consulted before the swarm sites and
+//! independently of the chaos window, and its fired gate is the same audit
+//! `crashed` report every seam has.
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{StateHandle, TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{DriverHooks, HandoffContext, Message, NodeId, ReconfigurerPhase, Seam};
+
+const SCRIPTED_CRASH_KEY: &str = "paros-scripted-seam-crash";
+
+/// A corpus case's targeted seam crash: `seam` is crashed at the first time
+/// any node reaches it in the run, and never again. Cloned into every
+/// incarnation's hooks; the flag is shared through the state handle.
+#[derive(Clone)]
+pub(crate) struct ScriptedCrash {
+    seam: Seam,
+    /// `true` while the crash is still owed; `false` once it fired.
+    armed: Arc<Mutex<bool>>,
+}
+
+impl ScriptedCrash {
+    /// Arm `seam` for this run (idempotent across incarnations: the flag is
+    /// published once per seed and every later call finds it).
+    pub(crate) fn arm(state: &StateHandle, seam: Seam) -> Self {
+        Self {
+            seam,
+            armed: scripted_crash_flag(state),
+        }
+    }
+
+    /// Whether `seam` is the scripted one and still owed; consumes it.
+    fn fire(&self, seam: Seam) -> bool {
+        if seam != self.seam {
+            return false;
+        }
+        let mut armed = self.armed.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *armed, false)
+    }
+}
+
+fn scripted_crash_flag(state: &StateHandle) -> Arc<Mutex<bool>> {
+    if let Some(flag) = state.get::<Arc<Mutex<bool>>>(SCRIPTED_CRASH_KEY) {
+        return flag;
+    }
+    let flag = Arc::new(Mutex::new(true));
+    state.publish(SCRIPTED_CRASH_KEY, flag.clone());
+    flag
+}
+
+/// Whether this run's scripted seam crash has fired — a corpus case's
+/// non-vacuity check (`false` when none was armed).
+pub(crate) fn scripted_crash_fired(state: &StateHandle) -> bool {
+    state
+        .get::<Arc<Mutex<bool>>>(SCRIPTED_CRASH_KEY)
+        .is_some_and(|flag| !*flag.lock().unwrap_or_else(PoisonError::into_inner))
+}
 
 /// The driver's `DriverHooks` under simulation (see the module doc).
 pub(crate) struct BuggifyHooks<T> {
@@ -66,6 +129,9 @@ pub(crate) struct BuggifyHooks<T> {
     /// write window. Part of the node's per-seed shape (`crate::shape`), so a
     /// restarted node keeps the bias its first boot drew.
     seam_crash_bias: f64,
+    /// A corpus case's one targeted seam crash (see the module doc); `None`
+    /// on the main campaign, where every seam is a swarm site.
+    scripted: Option<ScriptedCrash>,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -75,7 +141,14 @@ impl<T: TimeProvider> BuggifyHooks<T> {
             cutoff,
             enabled,
             seam_crash_bias,
+            scripted: None,
         }
+    }
+
+    /// Script one seam crash into these hooks (a corpus case).
+    pub(crate) fn with_scripted_crash(mut self, scripted: ScriptedCrash) -> Self {
+        self.scripted = Some(scripted);
+        self
     }
 
     fn active(&self) -> bool {
@@ -86,6 +159,12 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
     fn crash_at(&self, seam: Seam) -> bool {
+        // The corpus's targeted injection comes first and draws nothing: a
+        // scripted case replays as choreographed (module doc).
+        if self.scripted.as_ref().is_some_and(|s| s.fire(seam)) {
+            assert_reachable!("corpus: a scripted seam crash fires");
+            return true;
+        }
         let prob = 0.03 * self.seam_crash_bias;
         let fired = self.active()
             && match seam {
