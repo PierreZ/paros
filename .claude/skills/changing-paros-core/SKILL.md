@@ -19,7 +19,7 @@ because the perturbation is a caller that stops calling.
 | durable promise, accepted log, compaction floor, CTRL faulty set | `acceptor.rs` (`Acceptor`) |
 | Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds, bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
 | chosen prefix, contiguous apply walk, at-most-once ledger, repair cursor; `chosen_gap()` lives here (`node.replica().chosen_gap()`) | `replica.rs` (`Replica`) |
-| `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose | `membership.rs` |
+| `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership.rs` |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
 | the registry and generations, the handover, the single decree over the shared roles at slot zero, the model checker | `matchmaker.rs`, `matchmaker/{reconfigurer,decree,generation,handover_model,storage,message,state,write}.rs` |
 | wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally** | `node.rs`, `node/{election,replication,handoff,gc,matchmaking,reconfigure,reads,decide_apply,catch_up_snapshot,boot,acceptor,helpers,invariants}.rs` |
@@ -78,7 +78,7 @@ cargo check --target wasm32-unknown-unknown -p paros-core
 cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 cargo check -p paros-core --features serde
 RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps
-cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums
+cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums, acceptor_grid
 cargo nextest run -p paros-core                   # incl. the handover model checker
 ```
 
