@@ -63,6 +63,11 @@ pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
             fold(&(q1 as u64).to_le_bytes());
             fold(&(q2 as u64).to_le_bytes());
         }
+        paros_core::QuorumSystem::Grid { rows, cols } => {
+            fold(&[2_u8]);
+            fold(&(rows as u64).to_le_bytes());
+            fold(&(cols as u64).to_le_bytes());
+        }
     }
     h
 }

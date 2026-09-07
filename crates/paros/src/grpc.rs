@@ -76,16 +76,69 @@ fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static 
     })
 }
 
-fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
-    let (quorum_system, phase1_quorum, phase2_quorum) = match config.quorum_system() {
-        QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0),
-        QuorumSystem::Flexible { q1, q2 } => (common::QuorumSystem::Flexible, q1 as u64, q2 as u64),
+/// The wire form of a quorum system: the discriminant plus the scalars its
+/// variant carries — `(phase1_quorum, phase2_quorum)` for a flexible split,
+/// `(rows, cols)` for a grid, all zero under a majority so a plain
+/// deployment's encoding is unchanged (proto3 omits default-valued fields).
+/// Shared by every message that carries a configuration or names one (the
+/// `Reconfigure` RPC), so the two encodings cannot drift.
+pub(crate) struct WireQuorumSystem {
+    pub(crate) quorum_system: i32,
+    pub(crate) phase1_quorum: u64,
+    pub(crate) phase2_quorum: u64,
+    pub(crate) rows: u64,
+    pub(crate) cols: u64,
+}
+
+pub(crate) fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
+    let size = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let (kind, phase1_quorum, phase2_quorum, rows, cols) = match quorum_system {
+        QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0, 0, 0),
+        QuorumSystem::Flexible { q1, q2 } => {
+            (common::QuorumSystem::Flexible, size(q1), size(q2), 0, 0)
+        }
+        QuorumSystem::Grid { rows, cols } => {
+            (common::QuorumSystem::Grid, 0, 0, size(rows), size(cols))
+        }
     };
-    common::AcceptorConfig {
-        members: config.members().iter().map(|n| n.0).collect(),
-        quorum_system: quorum_system.into(),
+    WireQuorumSystem {
+        quorum_system: kind.into(),
         phase1_quorum,
         phase2_quorum,
+        rows,
+        cols,
+    }
+}
+
+/// Decode a wire quorum system. Only the discriminant and the sizes are
+/// checked here; whether the membership admits it is the caller's question
+/// (`QuorumSystem::admits`), asked once the membership is known.
+pub(crate) fn quorum_system_from_proto(
+    wire: &WireQuorumSystem,
+) -> Result<QuorumSystem, &'static str> {
+    match common::QuorumSystem::try_from(wire.quorum_system) {
+        Ok(common::QuorumSystem::Majority) => Ok(QuorumSystem::Majority),
+        Ok(common::QuorumSystem::Flexible) => Ok(QuorumSystem::Flexible {
+            q1: usize::try_from(wire.phase1_quorum).map_err(|_| "phase-1 quorum out of range")?,
+            q2: usize::try_from(wire.phase2_quorum).map_err(|_| "phase-2 quorum out of range")?,
+        }),
+        Ok(common::QuorumSystem::Grid) => Ok(QuorumSystem::Grid {
+            rows: usize::try_from(wire.rows).map_err(|_| "grid rows out of range")?,
+            cols: usize::try_from(wire.cols).map_err(|_| "grid cols out of range")?,
+        }),
+        Err(_) => Err("unknown quorum system"),
+    }
+}
+
+fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
+    let wire = quorum_system_to_proto(config.quorum_system());
+    common::AcceptorConfig {
+        members: config.members().iter().map(|n| n.0).collect(),
+        quorum_system: wire.quorum_system,
+        phase1_quorum: wire.phase1_quorum,
+        phase2_quorum: wire.phase2_quorum,
+        rows: wire.rows,
+        cols: wire.cols,
     }
 }
 
@@ -101,14 +154,13 @@ fn config_from_proto(
     let Some(config) = config else {
         return Ok(None);
     };
-    let quorum_system = match common::QuorumSystem::try_from(config.quorum_system) {
-        Ok(common::QuorumSystem::Majority) => QuorumSystem::Majority,
-        Ok(common::QuorumSystem::Flexible) => QuorumSystem::Flexible {
-            q1: usize::try_from(config.phase1_quorum).map_err(|_| "phase-1 quorum out of range")?,
-            q2: usize::try_from(config.phase2_quorum).map_err(|_| "phase-2 quorum out of range")?,
-        },
-        Err(_) => return Err("unknown quorum system"),
-    };
+    let quorum_system = quorum_system_from_proto(&WireQuorumSystem {
+        quorum_system: config.quorum_system,
+        phase1_quorum: config.phase1_quorum,
+        phase2_quorum: config.phase2_quorum,
+        rows: config.rows,
+        cols: config.cols,
+    })?;
     if config.members.is_empty() {
         return Err("empty acceptor configuration");
     }
