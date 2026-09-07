@@ -48,7 +48,7 @@ pub use self::authority::ReadRound;
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
-pub use self::rounds::Round;
+pub use self::rounds::{PendingAccept, Round};
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
@@ -744,7 +744,7 @@ mod tests {
     fn rounds_decide_on_a_configuration_quorum() {
         let mut p = Proposer::new();
         let c = config(&[0, 1, 2]);
-        p.open_round(Slot(5), ballot(1, 0), cmd(1), Some(NodeId(0)));
+        p.open_round(Slot(5), ballot(1, 0), cmd(1), Some(NodeId(0)), None);
         assert!(p.decided(Slot(5), &c).is_none());
         assert!(!p.fold_accepted(NodeId(1), ballot(1, 0), Slot(5), 0));
         assert!(p.fold_accepted(

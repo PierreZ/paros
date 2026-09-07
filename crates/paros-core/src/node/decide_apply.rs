@@ -14,11 +14,18 @@ impl ColocatedNode {
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accepted(&mut self, from: NodeId, ballot: Ballot, slot: Slot, vhash: u64) {
-        // Quorum sets are keyed by NodeId, over the **active configuration**:
-        // an acceptor outside the ballot's registered configuration must
-        // never inflate an accept quorum (wire hygiene, and #122's "a joining
-        // acceptor never inflates a quorum it is not in").
-        if !self.acceptors.contains(from) {
+        // Quorum sets are keyed by NodeId, over the **active configuration**
+        // and the round's column: an acceptor outside the ballot's
+        // registered configuration must never inflate an accept quorum (wire
+        // hygiene, and #122's "a joining acceptor never inflates a quorum it
+        // is not in"), and under a grid an acceptor outside the round's
+        // column — one a duplicate or a misroute reached — may well have
+        // accepted, but its vote is not the column's and does not count.
+        // No open round at the slot: nothing to count toward.
+        let Some(column) = self.proposer.round_column(slot) else {
+            return;
+        };
+        if !self.acceptors.is_phase2_addressee(from, column) {
             return;
         }
         if !self.proposer.fold_accepted(from, ballot, slot, vhash) {
@@ -67,13 +74,23 @@ impl ColocatedNode {
         }
         let me = self.config.id;
         let ballot = self.ballot;
+        // The column this slot's Phase 2 is addressed to: a pure function of
+        // the slot under the active configuration (a grid's `slot % cols`,
+        // nothing under a majority or a flexible split), so a handoff
+        // successor re-proposing this slot and a restarted leader's re-send
+        // derive the same column without carrying it.
+        let column = self.acceptors.column_of(slot);
         // Never lower our promise: if a competing higher `Prepare` raised it
         // since we became leader, skip the self-accept (the round relies on
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
-        // A leader that is not a member of its own configuration (a
-        // reconfiguration that removed it, #122) is a proposer and a learner
-        // but not an acceptor: it records nothing and casts no vote.
-        let own_vote = if self.is_acceptor() && ballot >= self.acceptor.promised() {
+        // A leader that is not an addressee of this round — outside its own
+        // configuration (a reconfiguration that removed it, #122), or under
+        // a grid outside the slot's column — is a proposer and a learner but
+        // not one of the round's acceptors: it records nothing and casts no
+        // vote.
+        let own_vote = if self.acceptors.is_phase2_addressee(me, column)
+            && ballot >= self.acceptor.promised()
+        {
             self.acceptor.set_promise(ballot, &mut self.pending_writes);
             self.record_accepted(slot, ballot, command.clone());
             Some(me)
@@ -82,16 +99,11 @@ impl ColocatedNode {
         };
         // One round per slot per leadership (asserted by the component).
         self.proposer
-            .open_round(slot, ballot, command.clone(), own_vote);
-        // Accepts reach the active configuration only: a removed node is
-        // never contacted for a new ballot's Phase 2.
-        self.broadcast_acceptors(&Message::Accept {
-            reply_to: me,
-            leader: me,
-            ballot,
-            slot,
-            command,
-        });
+            .open_round(slot, ballot, command.clone(), own_vote, column);
+        // Accepts reach the active configuration's addressees only: a
+        // removed node is never contacted for a new ballot's Phase 2, and a
+        // grid's other columns never see this slot.
+        self.send_accept(slot, ballot, command, column);
         self.try_decide(slot);
     }
 

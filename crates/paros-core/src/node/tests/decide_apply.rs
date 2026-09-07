@@ -516,3 +516,106 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     let _ = drain(&mut x);
     assert_eq!(x.hard_state().chosen_index, Some(Slot(1)));
 }
+
+/// A six-node `2 × 3` grid over `0..6`: rows `{0, 1, 2}` and `{3, 4, 5}`,
+/// columns `{0, 3}`, `{1, 4}` and `{2, 5}`.
+fn grid_node(id: u64) -> ColocatedNode {
+    let mut storage = TestStorage::new(id, &[0, 1, 2, 3, 4, 5]);
+    storage.config.quorum_system = crate::membership::QuorumSystem::Grid { rows: 2, cols: 3 };
+    ColocatedNode::new(&storage)
+}
+
+fn accept_targets(queue: &[(NodeId, Message)]) -> Vec<NodeId> {
+    queue
+        .iter()
+        .filter(|(_, m)| matches!(m, Message::Accepted { .. } | Message::Accept { .. }))
+        .filter_map(|(to, m)| matches!(m, Message::Accept { .. }).then_some(*to))
+        .collect()
+}
+
+/// The mechanism behind #141's column addressing, pinned at the node: a
+/// slot's `Accept` goes to its column (`slot % cols`) and nowhere else, the
+/// re-send goes to the same column, a configured acceptor outside the
+/// column never counts toward the decision, and the column alone decides.
+#[test]
+fn a_grid_round_is_addressed_and_judged_by_its_column() {
+    let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
+    make_leader(&mut nodes, 0);
+    let ballot = nodes[0].ballot();
+
+    // Slot 0 -> column 0 = {0, 3}. The leader sits in it: its own vote is
+    // cast, and the only other addressee is node 3.
+    assert!(matches!(
+        nodes[0].propose(ClientId(1), ClientSeq(1), val(10)),
+        ProposeResult::Accepted(_)
+    ));
+    let first = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&first), vec![NodeId(3)]);
+    assert_eq!(nodes[0].proposer.round_column(Slot(0)), Some(Some(0)));
+    assert!(
+        nodes[0].proposer.rounds()[&Slot(0)]
+            .accepted_by()
+            .contains(&NodeId(0))
+    );
+
+    // The re-send addresses exactly the column the round was opened
+    // against — the column is a function of the slot, never re-drawn.
+    nodes[0].resend_pending();
+    let resent = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&resent), vec![NodeId(3)]);
+
+    // A configured acceptor outside the column (node 1, column 1) that
+    // accepted a stray copy answers `Accepted`: the vote does not count,
+    // and the round is not decided by it.
+    nodes[0].step(Message::Accepted {
+        from: NodeId(1),
+        ballot,
+        slot: Slot(0),
+        vhash: command_fingerprint(&ucmd(1, 1, 10)),
+    });
+    assert!(
+        !nodes[0].proposer.rounds()[&Slot(0)]
+            .accepted_by()
+            .contains(&NodeId(1)),
+        "an out-of-column vote is never folded"
+    );
+    assert_eq!(chosen_at(&nodes[0], 0), None);
+
+    // The column's other member decides it.
+    deliver_all(&mut nodes, first);
+    for n in &nodes {
+        assert_eq!(chosen_at(n, 0), Some(val(10)));
+    }
+
+    // Slot 1 -> column 1 = {1, 4}: the leader is not an addressee, casts no
+    // vote and records nothing until the decision; both members must accept.
+    assert!(matches!(
+        nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
+        ProposeResult::Accepted(_)
+    ));
+    let second = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&second), vec![NodeId(1), NodeId(4)]);
+    assert_eq!(nodes[0].proposer.round_column(Slot(1)), Some(Some(1)));
+    assert!(
+        nodes[0].proposer.rounds()[&Slot(1)]
+            .accepted_by()
+            .is_empty()
+    );
+    assert_eq!(nodes[0].acceptor().record(Slot(1)), None);
+    // Only node 1 answers: half a column decides nothing.
+    let only_node_1: Vec<(NodeId, Message)> = second
+        .iter()
+        .filter(|(to, _)| *to == NodeId(1))
+        .cloned()
+        .collect();
+    deliver_all(&mut nodes, only_node_1);
+    assert_eq!(chosen_at(&nodes[0], 1), None);
+    let only_node_4: Vec<(NodeId, Message)> = second
+        .into_iter()
+        .filter(|(to, _)| *to == NodeId(4))
+        .collect();
+    deliver_all(&mut nodes, only_node_4);
+    for n in &nodes {
+        assert_eq!(chosen_at(n, 1), Some(val(20)));
+    }
+}

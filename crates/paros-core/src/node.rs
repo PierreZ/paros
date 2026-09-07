@@ -882,16 +882,11 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return;
         }
-        let me = self.config.id;
         let pending = self.proposer.resend_page();
-        for (slot, ballot, command) in pending {
-            self.broadcast_acceptors(&Message::Accept {
-                reply_to: me,
-                leader: me,
-                ballot,
-                slot,
-                command,
-            });
+        for accept in pending {
+            // The same column the round was opened against: a re-send never
+            // widens a grid round to another column.
+            self.send_accept(accept.slot, accept.ballot, accept.command, accept.column);
         }
         self.assert_invariants();
     }

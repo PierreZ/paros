@@ -667,11 +667,10 @@ fn phase2(
             .on_accept(ballot, slot, value.clone())
             .expect("own promise");
     }
-    proposer.open_round(slot, ballot, value.clone(), own_vote);
+    proposer.open_round(slot, ballot, value.clone(), own_vote, None);
     let addressees: Vec<NodeId> = config
-        .phase2_addressees()
-        .iter()
-        .copied()
+        .phase2_addressees(None)
+        .into_iter()
         .filter(|id| Some(*id) != me)
         .collect();
     println!(
@@ -1065,7 +1064,7 @@ fn decree_phase2(
     disk: &mut Vec<AcceptorWrite<Vec<MatchmakerId>>>,
 ) {
     let value = value.to_vec();
-    proposer.open_round(DECREE, b, value.clone(), None);
+    proposer.open_round(DECREE, b, value.clone(), None, None);
     for (id, voter) in voters.iter_mut() {
         assert_eq!(voter.admit(b, DECREE), AcceptOutcome::Admitted);
         voter.set_promise(b, disk);
