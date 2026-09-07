@@ -725,7 +725,10 @@ table-of-contents comment to navigate. Deleting is part of every change: a super
 process type, flag, or gate goes out in the PR that supersedes it.
 
 Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
-`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. Note: `paros` and
+`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. **Never edit a `CHANGELOG.md`
+by hand**: release-plz generates it from the commit history at release time, so a hand-written
+entry is duplicated or conflicts with the generated one. The commit message is where a change is
+described. Note: `paros` and
 `paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
 moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
 
