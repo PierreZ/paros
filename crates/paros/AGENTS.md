@@ -27,7 +27,9 @@ the driver, never in a sim-only path.
   returns nothing, draws nothing, reads no clock.
 - `storage.rs` `NodeStorage: Storage` (async seam: every method that may
   touch the device returns a `Send` future; the boot scan loads and verifies,
-  the synchronous accessors answer from memory), `MemStorage`,
+  the synchronous accessors answer from memory; the format marker
+  `is_formatted` / `format`, #147, is what `run_node` judges the operator's
+  `BootKind` against — `BootRefusal`, `RunError::Refused`), `MemStorage`,
   `storage_contract_suite` · `matchmaker/{mod,storage}.rs` `run_matchmaker`,
   `MatchmakerConfig`, `MatchmakerStorage: RegistryStorage`,
   `MemMatchmakerStorage`, `matchmaker_storage_contract_suite`.

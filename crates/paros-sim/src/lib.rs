@@ -32,6 +32,7 @@ mod roles;
 mod shape;
 mod world;
 
+pub use corpus::ChunkLiveCase;
 pub use moonpool_sim::{AssertKind, SimulationReport};
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -391,11 +392,24 @@ fn scripted_builder(
     bootstrap: Option<usize>,
     matchmakers: usize,
 ) -> SimulationBuilder {
+    scripted_builder_with(nodes, bootstrap, matchmakers, None)
+}
+
+/// [`scripted_builder`] with one scripted durability-seam crash (#146): the
+/// first node to reach `seam_crash` crashes there, once per run. Every
+/// other site stays dark.
+fn scripted_builder_with(
+    nodes: usize,
+    bootstrap: Option<usize>,
+    matchmakers: usize,
+    seam_crash: Option<paros::Seam>,
+) -> SimulationBuilder {
     let mut builder = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(nodes, move || match bootstrap {
-            Some(ranks) => Box::new(NodeProcess::scripted_with_bootstrap(ranks)),
-            None => Box::new(NodeProcess::scripted()),
+        .processes(nodes, move || match (bootstrap, seam_crash) {
+            (Some(ranks), _) => Box::new(NodeProcess::scripted_with_bootstrap(ranks)),
+            (None, Some(seam)) => Box::new(NodeProcess::scripted_with_seam_crash(seam)),
+            (None, None) => Box::new(NodeProcess::scripted()),
         });
     if matchmakers > 0 {
         builder = builder.processes(matchmakers, || Box::new(MatchmakerProcess::scripted()));
@@ -563,13 +577,16 @@ pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
         .run()
 }
 
-/// The per-chunk mask corpus builder (see `crate::corpus`).
-fn chunk_corpus_builder(
-    source: corpus::ChunkMaskSource,
-    rot_live_node0: bool,
-) -> SimulationBuilder {
-    scripted_builder(corpus::CORPUS_NODES, None, 0)
-        .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, rot_live_node0)))
+/// The per-chunk mask corpus builder (see `crate::corpus`). The restore-crash
+/// live case is the one corpus shape whose process hooks are not dark: it
+/// scripts `Seam::AfterChunkRestoreBeforeSync` (#146).
+fn chunk_corpus_builder(source: corpus::ChunkMaskSource, live: ChunkLiveCase) -> SimulationBuilder {
+    let seam_crash = match live {
+        ChunkLiveCase::Intact | ChunkLiveCase::Lost => None,
+        ChunkLiveCase::LostThenRestoreCrash => Some(paros::Seam::AfterChunkRestoreBeforeSync),
+    };
+    scripted_builder_with(corpus::CORPUS_NODES, None, 0, seam_crash)
+        .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, live)))
 }
 
 /// The canonical chunk-mask cases (bit index `node * 5 + chunk` over the
@@ -592,12 +609,15 @@ pub fn chunk_corpus_canonical_masks() -> Vec<u32> {
 }
 
 /// Run one explicit chunk-mask case deterministically (seeded by the mask).
-/// `rot_live_node0` additionally rots node 0's live snapshot, driving the
-/// point-restore / whole-blob race on top of the chunk repair.
+/// `live` says what happens to node 0's live snapshot beside the mask: lost,
+/// it drives the point-restore / whole-blob race on top of the chunk repair;
+/// lost then crashed after the restore, it visits the one durability seam
+/// the swarm never reaches (#146) — the mask must then give node 0 at least
+/// one assemblable rotted chunk, or the case is vacuous and says so.
 #[must_use]
 #[tracing::instrument(level = "debug")]
-pub fn run_chunk_mask(mask: u32, rot_live_node0: bool) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), rot_live_node0)
+pub fn run_chunk_mask(mask: u32, live: ChunkLiveCase) -> SimulationReport {
+    chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), live)
         .set_iterations(1)
         .set_debug_seeds(vec![u64::from(mask)])
         .run()
@@ -608,7 +628,7 @@ pub fn run_chunk_mask(mask: u32, rot_live_node0: bool) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
+    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
         .set_iterations(iterations)
         .run()
 }
@@ -617,7 +637,7 @@ pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_chunk_corpus_seed(seed: u64) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, false)
+    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run()

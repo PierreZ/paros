@@ -271,6 +271,44 @@ pub fn parse_addr(ip: &str) -> SimulationResult<String> {
         .map_err(|e| SimulationError::InvalidState(format!("bad addr: {e}")))
 }
 
+/// What the operator claims about the store [`crate::run_node`] is handed
+/// (#147): configuration data, never inferred from the store's contents.
+///
+/// The claim is judged against the store's **format marker**
+/// ([`crate::NodeStorage::is_formatted`]): a store that has ever belonged to
+/// a member carries one, written by the driver on the identity's first boot
+/// and never removed. An existing member whose store carries no marker has
+/// lost its disk — *amnesia*, not a clean crash — and its durable promise
+/// with it; booting it would answer a Phase 1 with "nothing accepted" for
+/// slots it once voted on, so the driver refuses
+/// ([`BootRefusal::Amnesia`]). A first boot on a store that already carries
+/// a marker is two identities on one disk, refused as well
+/// ([`BootRefusal::AlreadyFormatted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootKind {
+    /// This identity has never been provisioned: the store is empty and the
+    /// driver formats it (writes the marker, durably) before the core reads
+    /// anything.
+    FirstBoot,
+    /// This identity was provisioned before: the store must carry the marker.
+    ExistingMember,
+}
+
+/// Why [`crate::run_node`] refused to boot (#147): the operator's
+/// [`BootKind`] claim and the store's format marker disagree. An operating
+/// error — a result value, never an assert — because the claim is external
+/// input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootRefusal {
+    /// An existing member's store carries no format marker: the disk was
+    /// lost, and the durable promise with it. The identity never rejoins;
+    /// the cluster replaces it by reconfiguration.
+    Amnesia,
+    /// A first boot found a store already formatted: another identity's
+    /// disk, or a provisioning mistake. Nothing is written.
+    AlreadyFormatted,
+}
+
 /// Why a driver loop stopped, typed — the shared exit of every provider-generic
 /// driver in this crate ([`crate::run_node`] and [`crate::run_matchmaker`]).
 /// The driver's *domain* outcomes — a crash it
@@ -294,6 +332,12 @@ pub enum RunError {
     /// path must be correct for both outcomes of an ambiguous write; see
     /// [`crate::WriteOutcome`]).
     Storage(StorageError),
+    /// The driver refused to boot this identity on this store (#147): the
+    /// operator's [`BootKind`] claim and the store's format marker disagree.
+    /// Nothing was written and no message left; the identity stays down
+    /// until the operator resolves the claim (an amnesiac member is replaced
+    /// by reconfiguration, never rebooted).
+    Refused(BootRefusal),
     /// A provider/infrastructure failure (bind, listen, address parsing): the
     /// only place a [`SimulationError`] escapes the driver, and a genuine
     /// failure — never a recovery signal.
@@ -305,6 +349,16 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::SeamCrash(seam) => write!(f, "injected crash at durability seam {seam:?}"),
             RunError::Storage(e) => write!(f, "storage fault, crashing: {e}"),
+            RunError::Refused(BootRefusal::Amnesia) => write!(
+                f,
+                "boot refused: an existing member's store carries no format marker (amnesia)"
+            ),
+            RunError::Refused(BootRefusal::AlreadyFormatted) => {
+                write!(
+                    f,
+                    "boot refused: a first boot on a store that is already formatted"
+                )
+            }
             RunError::Infra(e) => write!(f, "infrastructure failure: {e}"),
         }
     }
@@ -315,7 +369,7 @@ impl std::error::Error for RunError {
         match self {
             RunError::Storage(e) => Some(e),
             RunError::Infra(e) => Some(e),
-            RunError::SeamCrash(_) => None,
+            RunError::SeamCrash(_) | RunError::Refused(_) => None,
         }
     }
 }

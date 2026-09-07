@@ -323,6 +323,11 @@ pub(crate) struct DurableStorage<T> {
     /// snapshot point (#101), served through
     /// [`NodeStorage::faulty_snap_chunks`].
     faulty_chunks: Vec<(Slot, u32)>,
+    /// The format marker as of boot (#147), served through
+    /// [`NodeStorage::is_formatted`].
+    formatted: bool,
+    /// A format marker staged for the next durability flush (#147).
+    staged_format: bool,
     /// A decided snapshot point staged for the next durability flush (#101).
     staged_snap_point: Option<(Slot, ChainState)>,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
@@ -357,6 +362,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let mut boot = MemStorage::new(config.clone());
         let mut application = ChainState::default();
         let mut evidence = BootEvidence::default();
+        let mut formatted = false;
         if let Some(strong) = world.upgrade() {
             let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             application = ChainState::empty(guard.lane_count());
@@ -376,6 +382,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             );
             if let Some(disk) = guard.disks.get(&key) {
                 application = disk.chain;
+                formatted = disk.formatted;
                 // Read-back pair of the flush ordering `sync` claims: a floor
                 // that reached the disk never outruns the chosen index that
                 // reached the disk (the flush applies the floor last, and a
@@ -441,6 +448,8 @@ impl<T: TimeProvider> DurableStorage<T> {
             staged_chosen: None,
             staged_floor: None,
             staged_snapshot: None,
+            formatted,
+            staged_format: false,
             staged_applies: Vec::new(),
             staged_sealed: Vec::new(),
         }
@@ -703,6 +712,7 @@ impl<T: TimeProvider> DurableStorage<T> {
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "trace", skip_all)]
     fn flush_stage(&mut self) -> Result<(), StorageError> {
+        let format = std::mem::take(&mut self.staged_format);
         let ballot = self.staged_ballot.take();
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
@@ -720,7 +730,17 @@ impl<T: TimeProvider> DurableStorage<T> {
         let node = self.node_id;
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
+            if format {
+                // The marker lands and the operator's ledger records the
+                // provisioning at the same instant (#147): a lost format
+                // sync leaves both unset, so the next boot is a first boot
+                // again, never a wrongly refused member.
+                w.provisioned.insert(key.clone());
+            }
             let d = w.disk_mut(&key);
+            if format {
+                d.formatted = true;
+            }
             // Sealed ledger records are upserts keyed by (client, seq); the
             // first-slot claim wins, matching the core's ledger semantics.
             for (client, seq, slot) in sealed {
@@ -896,6 +916,20 @@ impl<T: TimeProvider> DurableStorage<T> {
 }
 
 impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
+    fn is_formatted(&self) -> bool {
+        self.formatted
+    }
+
+    /// The format marker (#147) stages like every write and lands on the
+    /// next flush. Its own sync is not a fault site: the marker is one bit
+    /// written once at provisioning, and the seam every swarm fault targets
+    /// is the protocol's, not the operator's.
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn format(&mut self) -> Result<(), StorageError> {
+        self.staged_format = true;
+        Ok(())
+    }
+
     /// The Stage-7 detection layer at the seam (CLStore-equivalent): verify
     /// every durable record's read-back evidence, classify each mismatch with
     /// the total decision function (`paros::classify_log`), and surface the

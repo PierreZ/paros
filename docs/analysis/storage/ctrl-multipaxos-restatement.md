@@ -62,7 +62,7 @@ Case 2:
 
 Strictly better than Raft's truncate: nothing is discarded, the slot is decided as a
 no-op. The threshold is **a full Q1 quorum of `none`** — under flexible quorums, whatever
-Q1 the configuration defines (`QuorumSystem::quorum_size`), never a hardcoded majority.
+Q1 the configuration defines (`AcceptorConfig::has_phase1_quorum`), never a hardcoded majority.
 The tally is per slot: a node counts toward `none` at `s` only when it has answered the
 whole suffix covering `s` and reported neither `have` nor `faulty` there. The quorum of
 `none` need not be the quorum that elected the leader — any Q1-sized set of none-reporters

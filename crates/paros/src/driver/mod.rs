@@ -42,7 +42,7 @@ mod report;
 mod snap_repair;
 mod transport;
 
-pub use config::{DriverTunables, RunError, parse_addr};
+pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub(crate) use config::{accept_and_serve, grpc_keep_alive};
 pub use events::{command_hash, message_kind, registration_history_hash};
 
@@ -154,6 +154,11 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// plain Multi-Paxos; it must agree with the `Config`'s matchmaker set. The
 /// driver speaks the matchmaker contract only when it is non-empty.
 ///
+/// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
+/// first boot formats the store (the marker, durably) before the core reads
+/// it; an existing member must find the marker, or the driver refuses
+/// ([`RunError::Refused`]) — an amnesiac identity never rejoins.
+///
 /// `tunables` is the driver's per-node transport shape ([`DriverTunables`]):
 /// production passes [`DriverTunables::default()`] (the historical constants);
 /// the sim harness buggifies it per seed, FDB knob style.
@@ -173,7 +178,9 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// fresh storage); [`RunError::Storage`] when a [`NodeStorage`] call failed and
 /// the driver took its fail-stop crash decision — production treats it as a
 /// process exit (crash-only), the sim node loop recovers through the same
-/// restart path as a seam crash; [`RunError::Infra`] for genuine
+/// restart path as a seam crash; [`RunError::Refused`] when `boot` and the
+/// store's format marker disagree (nothing was written, nothing sent: the
+/// identity stays down); [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len()))]
@@ -189,6 +196,7 @@ pub async fn run_node<P, S, H, A>(
     local_addr: String,
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
+    boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -224,6 +232,43 @@ where
         .boot_scan()
         .await
         .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+
+    // #147: the operator's claim against the store's format marker, judged
+    // before the core reads a byte. The marker is what makes "a wiped
+    // identity never rejoins" a property of the library rather than of
+    // whoever runs it: an empty-but-openable store is indistinguishable
+    // from a first boot to `ColocatedNode::new`, so the refusal has to
+    // happen here, on the claim. A first boot formats the store durably
+    // first — the marker lands on disk no later than the first promise,
+    // which is the ordering the refusal relies on.
+    match (boot, storage.is_formatted()) {
+        (BootKind::ExistingMember, true) => {}
+        (BootKind::FirstBoot, false) => {
+            storage
+                .format()
+                .await
+                .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+            storage
+                .sync(paros_core::MustSync::Sync)
+                .await
+                .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+            tracing::info!(node = boot_id, "store_formatted");
+        }
+        (BootKind::ExistingMember, false) => {
+            audit.boot_refused(NodeId(boot_id), BootRefusal::Amnesia);
+            tracing::warn!(node = boot_id, refusal = "amnesia", "boot_refused");
+            return Err(RunError::Refused(BootRefusal::Amnesia));
+        }
+        (BootKind::FirstBoot, true) => {
+            audit.boot_refused(NodeId(boot_id), BootRefusal::AlreadyFormatted);
+            tracing::warn!(
+                node = boot_id,
+                refusal = "already_formatted",
+                "boot_refused"
+            );
+            return Err(RunError::Refused(BootRefusal::AlreadyFormatted));
+        }
+    }
 
     // Every task spawned by this incarnation must stop when `run_node` exits,
     // including a durability-seam error that immediately starts a replacement

@@ -19,25 +19,35 @@
 //!        `sim-paros-hunt replay-corpus-mask <mask>` — one explicit mask.
 //!        `sim-paros-hunt corpus-chunks [iterations]` — the per-chunk mask
 //!        corpus over the decided snapshot point; `replay-chunk-mask <mask>` /
-//!        `replay-chunk-seed <seed>` replay one case.
+//!        `replay-chunk-seed <seed>` replay one case, and
+//!        `replay-chunk-restore-crash <mask>` the mask with node 0's live
+//!        snapshot lost and a scripted crash after its point restore (#146).
 //!        `sim-paros-hunt replay-bare-quorum <seed>` / `replay-lifecycle
 //!        <seed>` — the bare-quorum lost-slot case and the §5.1.2
 //!        snapshot-lifecycle compound; `replay-departed <seed>` — the
 //!        departed-straggler case (#124).
 
 use paros_sim::{
-    EXPLORATION_TIMELINES_PER_SEED, chain_canary_hunt, chain_seed_canary, chain_smoke,
-    chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case, run_chain_seed,
-    run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
+    ChunkLiveCase, EXPLORATION_TIMELINES_PER_SEED, chain_canary_hunt, chain_seed_canary,
+    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
+    run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
     run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
-    if let "replay-main" | "replay-canary" | "explore-main" | "replay-corpus"
-    | "replay-corpus-mask" | "replay-bare-quorum" | "replay-lifecycle" | "replay-departed"
-    | "replay-chunk-mask" | "replay-chunk-seed" = axis.as_str()
+    if let "replay-main"
+    | "replay-canary"
+    | "explore-main"
+    | "replay-corpus"
+    | "replay-corpus-mask"
+    | "replay-bare-quorum"
+    | "replay-lifecycle"
+    | "replay-departed"
+    | "replay-chunk-mask"
+    | "replay-chunk-seed"
+    | "replay-chunk-restore-crash" = axis.as_str()
     {
         let seed = std::env::args()
             .nth(2)
@@ -52,9 +62,14 @@ fn main() {
             "replay-bare-quorum" => run_bare_quorum_case(seed),
             "replay-lifecycle" => run_snapshot_lifecycle_case(seed),
             "replay-departed" => run_departed_straggler_case(seed),
-            "replay-chunk-mask" => {
-                run_chunk_mask(u32::try_from(seed & 0x7FFF).unwrap_or_default(), false)
-            }
+            "replay-chunk-mask" => run_chunk_mask(
+                u32::try_from(seed & 0x7FFF).unwrap_or_default(),
+                ChunkLiveCase::Intact,
+            ),
+            "replay-chunk-restore-crash" => run_chunk_mask(
+                u32::try_from(seed & 0x7FFF).unwrap_or_default(),
+                ChunkLiveCase::LostThenRestoreCrash,
+            ),
             "replay-chunk-seed" => run_chunk_corpus_seed(seed),
             _ => run_chain_seed(seed),
         };

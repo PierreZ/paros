@@ -78,7 +78,7 @@ cargo check --target wasm32-unknown-unknown -p paros-core
 cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 cargo check -p paros-core --features serde
 RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps
-cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker
+cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums
 cargo nextest run -p paros-core                   # incl. the handover model checker
 ```
 

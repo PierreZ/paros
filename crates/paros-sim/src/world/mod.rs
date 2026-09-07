@@ -125,6 +125,9 @@ pub(super) struct NodeDisk {
     /// Per-chunk health of the retained point's blob (fixed
     /// [`SNAP_CHUNK_BYTES`] chunking of the encoded state).
     snap_chunk_health: Vec<RecordHealth>,
+    /// The format marker (#147): written by the driver on the identity's
+    /// first boot, never cleared — gone only with the whole disk (a wipe).
+    formatted: bool,
 }
 
 impl NodeDisk {
@@ -294,13 +297,25 @@ pub(crate) struct StorageWorld {
     parked: BTreeSet<String>,
     /// The same set by numeric node id, for correlating the injection ledger.
     parked_ids: BTreeSet<u64>,
-    /// Nodes whose disk was **wiped** at a restart (#124): the identity is
-    /// gone for good — it never boots again, its records are lost, and the
-    /// copy budget counts it exactly like a parked node (it *is* parked). A
-    /// wiped identity is replaced, never rejoined: an empty disk under an old
-    /// identity is indistinguishable from a fresh spare and would answer a
-    /// Phase 1 with "nothing accepted here" for slots it once voted on.
+    /// Nodes whose disk was **wiped** at a restart (#124): every record
+    /// gone, the format marker with them, and the copy budget counts the
+    /// identity exactly like a parked node (it *is* parked, for the budget
+    /// and for the composer). Whether it boots again is **not** the
+    /// world's call any more (#147): the process reboots it as an existing
+    /// member on the empty disk, and the library refuses the amnesiac store
+    /// (`RunError::Refused(BootRefusal::Amnesia)`) — an empty disk under an
+    /// old identity would answer a Phase 1 with "nothing accepted here" for
+    /// slots it once voted on. A wiped identity is replaced by
+    /// reconfiguration, never rejoined.
     wiped: BTreeSet<String>,
+    /// The operator's provisioning ledger (#147): every identity whose
+    /// store has ever been formatted, kept **outside** the disks so a wipe
+    /// erases the marker but not the memory of having provisioned the node
+    /// — that memory is what makes the harness reboot a wiped identity as
+    /// `BootKind::ExistingMember` rather than as a first boot. Recorded
+    /// exactly when the marker lands durably, so a first boot whose format
+    /// sync was lost is a first boot again.
+    provisioned: BTreeSet<String>,
     /// Nodes the operator **retired** (#123): named retirable by a leader's
     /// garbage collection, shut down for good by the workload. Budgeted like
     /// a parked node — the world is protocol-blind and stays conservative.
@@ -337,6 +352,21 @@ impl StorageWorld {
         self.wiped.contains(ip)
     }
 
+    /// Whether `ip` was parked by a **detected corruption** — the one park
+    /// the process honors before touching its store (the boot scan would
+    /// re-detect the same rotted record forever). A wiped identity is parked
+    /// for the budget but boots (#147): the library, not the harness,
+    /// refuses its empty store; a retired one has its own exit.
+    pub(crate) fn is_corruption_parked(&self, ip: &str) -> bool {
+        self.parked.contains(ip) && !self.wiped.contains(ip) && !self.retired.contains(ip)
+    }
+
+    /// Whether the operator has ever provisioned `ip` (#147): the claim the
+    /// harness hands the driver as `BootKind`.
+    pub(crate) fn provisioned(&self, ip: &str) -> bool {
+        self.provisioned.contains(ip)
+    }
+
     /// Whether `ip` was retired by the operator.
     pub(crate) fn is_retired(&self, ip: &str) -> bool {
         self.retired.contains(ip)
@@ -347,12 +377,15 @@ impl StorageWorld {
         self.parked_matchmakers.contains(ip)
     }
 
-    /// Wipe `ip`'s disk at a restart (#124): every record gone, the identity
-    /// parked for the run. Permitted under the same dead-node budget as a
-    /// corruption park — a wipe is one more way to lose every copy a node
-    /// holds — so the cluster keeps a clean quorum of every record and a
-    /// live quorum of every configuration the run may put in force. Returns
-    /// whether it fired.
+    /// Wipe `ip`'s disk at a restart (#124): every record gone, the format
+    /// marker with them, the identity parked for the **budget**. Permitted
+    /// under the same dead-node budget as a corruption park — a wipe is one
+    /// more way to lose every copy a node holds — so the cluster keeps a
+    /// clean quorum of every record and a live quorum of every configuration
+    /// the run may put in force. The park is accounting only: the process
+    /// boots the identity on its empty disk and the library refuses it
+    /// (#147, [`StorageWorld::is_corruption_parked`]). Returns whether it
+    /// fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     pub(crate) fn wipe(&mut self, key: &str, node: u64) -> bool {
         if self.parked.contains(key) || self.retired.contains(key) || !self.may_park(key) {

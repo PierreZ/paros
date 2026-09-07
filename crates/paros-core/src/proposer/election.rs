@@ -114,6 +114,16 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     pub fn promised(&self) -> &BTreeSet<Id> {
         &self.promises.answered
     }
+
+    /// What the promises counted so far reported, per slot: the
+    /// highest-ballot accepted value each slot was seen with. Read-only —
+    /// P2c runs over it when the election closes; observing it mid-campaign
+    /// is how a reader sees *why* a Phase-1 quorum must be complete before
+    /// any slot is judged free.
+    #[must_use]
+    pub fn recovered(&self) -> &BTreeMap<Slot, (Ballot, V)> {
+        &self.recovered
+    }
 }
 
 impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {

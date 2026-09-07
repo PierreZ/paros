@@ -41,7 +41,7 @@ storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and har
 
 ## Learning Paxos with paros-core
 
-Three small, deterministic, runnable examples drive the composable roles of
+Four small, deterministic, runnable examples drive the composable roles of
 [`paros-core`](crates/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
@@ -53,11 +53,15 @@ property each one teaches. Read them in order:
 3. [`matchmaker.rs`](crates/paros-core/examples/matchmaker.rs) — configuration discovery
    through the matchmakers, a reconfiguration as a round change, and the matchmaker set
    itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
+4. [`flexible_quorums.rs`](crates/paros-core/examples/flexible_quorums.rs) — Flexible Paxos:
+   four nodes under `Flexible { q1: 3, q2: 2 }` decide on two accepts, and the next election
+   needs three promises so that one of them reports what the deciding pair chose.
 
 ```sh
 cargo run -p paros-core --example single_decree
 cargo run -p paros-core --example multi_paxos
 cargo run -p paros-core --example matchmaker
+cargo run -p paros-core --example flexible_quorums
 ```
 
 ## Build and test

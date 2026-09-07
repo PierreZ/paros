@@ -43,12 +43,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Audit, Ballot, Command, Control, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
-    RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision,
-    StorageRecord, command_hash, message_kind,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
+    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
+    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
+    PROMISE_BATCH, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
+    ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
+    StorageFaultDecision, StorageRecord, command_hash, message_kind,
 };
 
 use self::state::AuditState;
@@ -296,18 +296,6 @@ impl AuditWorld {
     #[tracing::instrument(level = "debug", skip(self), fields(node))]
     pub(crate) fn note_storage_dead(&self, node: u64) {
         self.lock().storage_dead.insert(node);
-    }
-
-    /// A node's disk was wiped at a restart (#124): the identity is gone for
-    /// good. Convergence excuses it; a reconfiguration replaces it.
-    #[tracing::instrument(level = "debug", skip(self), fields(node))]
-    pub(crate) fn note_wiped(&self, node: u64) {
-        let mut st = self.lock();
-        st.wiped.insert(node);
-        reach_once!(
-            st.wiped_any,
-            "storage: a wiped identity stays down and is replaced by reconfiguration"
-        );
     }
 
     /// A boot found its identity retired by the operator (#123) and exited.
@@ -1533,6 +1521,34 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 reach_once!(
                     st.corruption_crashed,
                     "storage: a detected corruption crashes the node"
+                );
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, refusal = ?refusal))]
+    fn boot_refused(&self, node: NodeId, refusal: BootRefusal) {
+        let mut st = self.state();
+        match refusal {
+            // #147: the library, not the harness, keeps a wiped identity
+            // down. The identity is gone for good: convergence excuses it,
+            // a reconfiguration replaces it.
+            BootRefusal::Amnesia => {
+                st.wiped.insert(node.0);
+                reach_once!(
+                    st.wiped_any,
+                    "storage: a wiped identity stays down and is replaced by reconfiguration"
+                );
+                reach_once!(
+                    st.amnesia_refused,
+                    "storage: the library refuses to boot an amnesiac member"
+                );
+            }
+            BootRefusal::AlreadyFormatted => {
+                assert_always!(
+                    false,
+                    "storage: a first boot never meets a formatted store",
+                    { "node" => node.0 }
                 );
             }
         }

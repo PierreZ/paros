@@ -55,7 +55,12 @@ exhaustive where the swarm can only sample it.
 
 - Every fault is targeted: no `Chaos::Network`/`Storage` swarm on a corpus
   builder; moonpool's `crash`/`restart` through `FaultContext` are the
-  lifecycle primitives.
+  lifecycle primitives. A durability seam only a choreographed case can
+  reach is crashed the same way — `scripted_builder_with(.., Some(seam))`
+  gives every node `NodeProcess::scripted_with_seam_crash`, whose hooks
+  answer `crash_at(seam)` once per run and draw nothing (`ScriptedCrash`,
+  #146; `ChunkLiveCase::LostThenRestoreCrash` is the one case) — and the
+  case asserts its own non-vacuity (`hooks::scripted_crash_fired`).
 - The corpus registers no matchmaker group and draws no bootstrap except in
   the departed-straggler case; keep it that way unless the outcome table
   needs a reconfiguration.

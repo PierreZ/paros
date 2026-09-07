@@ -16,11 +16,13 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`), drawn once per node per
   seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
-- `process.rs` `NodeProcess::{chaotic, scripted}`, `MatchmakerProcess`,
-  `IdleProcess`, `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle`
-  (the corpus's `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all
-  `DriverHooks` methods, one `buggify_with_prob!` location each, and the
-  module-doc table of *enabled / consulted / fired / recovered* per hook.
+- `process.rs` `NodeProcess::{chaotic, scripted, scripted_with_bootstrap,
+  scripted_with_seam_crash}`, `MatchmakerProcess`, `IdleProcess`,
+  `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
+  `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
+  one `buggify_with_prob!` location each, the module-doc table of *enabled /
+  consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
+  corpus's one targeted seam crash, fired once per run, no draw.
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
   `buggify_knob!`; the operation-id table `PROPOSE=0 … RETIRE=13`,
@@ -68,7 +70,10 @@ Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
   scripted case.
 - Hooks are consulted from the node loop only; decisions a spawned task needs
   are carried to it.
-- A wiped identity (lost promise) is parked for the run by the storage world;
-  the library does not enforce that yet (an open item), so keep the park.
+- A wiped identity (lost promise) stays down because the **library** refuses
+  its unformatted store (#147): the world keeps it parked for the budget and
+  the composer only, and its provisioning ledger (`StorageWorld::provisioned`)
+  is the operator's claim the process hands `run_node` as `BootKind`. Never
+  short-circuit a wiped boot in the process again.
 - Spans are non-optional (process and workload lifecycles, the world's
   injections, the audit's gate checks).

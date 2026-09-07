@@ -182,8 +182,9 @@ role; the acceptor never reads the chosen prefix; the replica never sees a ballo
 caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
 "is this slot chosen" predicate when a probe closes). What that bought, in order: the single
 decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
-is no second Paxos kernel in the crate). Still to come: flexible quorums and Compartmentalized
-Paxos become deployment data.
+is no second Paxos kernel in the crate); flexible quorums are deployment data
+(`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
+changes). Still to come: Compartmentalized Paxos becomes deployment data the same way.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -565,18 +566,29 @@ application state. The application owns compaction of its own state. What paros 
 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
 rejoins** (#124): a snapshot restores the log, not the promise, so a naive rejoin could regress a
-promise it once made. **Today that rule is enforced by the harness, not by the library**: the
-storage world parks a wiped identity for the run, and an empty-but-openable store is
-indistinguishable from a first boot to `ColocatedNode::new`, so `run_node` would happily bring a wiped
-node back as a fresh member. Closing it needs a durable format marker on the store
-(`NodeStorage`) that `run_node` refuses to boot an existing member without. That is an open
-item, not a claim the library makes. A wiped identity is parked for the run exactly like a retired one and the
-acceptor set heals around it by reconfiguration — the client's composer draws successors from the
-live pool and moves a dead member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's
-storage layer, which paros does not use); the storage world draws its own wipe coin at a chaotic
-restart on a matchmaker seed, under the same dead-node budget as a corruption park. A moonpool
-issue asks for the reboot kind to be exposed to a restarted process so a harness-owned disk can
-honor `CrashAndWipe` directly.
+promise it once made. **The library enforces that rule (#147), not the harness.** Every store
+carries a durable **format marker** (`NodeStorage::is_formatted` / `format`, TigerBeetle's
+superblock idea): `run_node` takes the operator's claim as data (`BootKind::{FirstBoot,
+ExistingMember}`, never inferred from the store), formats the store durably on a first boot
+*before* the core reads a byte, and **refuses** an existing member whose store has no marker
+(`RunError::Refused(BootRefusal::Amnesia)`, reported through `Audit::boot_refused`) — an
+empty-but-openable store is otherwise indistinguishable from a first boot to `ColocatedNode::new`.
+A first boot on a formatted store is refused too (`AlreadyFormatted`: two identities on one
+disk). The marker is a store property, not protocol state: no `HardState` scalar, and the plain
+deployment persists the same two scalars. In the harness the operator's claim is the storage
+world's **provisioning ledger**, recorded exactly when the marker lands durably and kept outside
+the disks, so a wipe erases the marker but not the memory of having provisioned the node: the
+process reboots a wiped identity as an existing member, the library refuses it, and the world
+keeps the identity parked *for the budget and the composer only*. Removing that refusal and
+rebooting the wiped node fresh is the red witness (the audit's "a node's promised ballot never
+decreases", folded from the boot report). The acceptor set heals around a wiped identity by
+reconfiguration — the client's composer draws successors from the live pool and moves a dead
+member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's storage layer, which paros
+does not use); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
+seed, under the same dead-node budget as a corruption park. A moonpool issue asks for the reboot
+kind to be exposed to a restarted process so a harness-owned disk can honor `CrashAndWipe`
+directly. The matchmaker's registry has no marker yet: the harness never wipes a matchmaker (a
+lost registry is a park, #125), so the parity is an open item, not a hole in a claim.
 
 **Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
 *election* destroys a leader's authority and makes the successor rediscover the log
@@ -724,7 +736,10 @@ table-of-contents comment to navigate. Deleting is part of every change: a super
 process type, flag, or gate goes out in the PR that supersedes it.
 
 Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
-`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. Note: `paros` and
+`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. **Never edit a `CHANGELOG.md`
+by hand**: release-plz generates it from the commit history at release time, so a hand-written
+entry is duplicated or conflicts with the generated one. The commit message is where a change is
+described. Note: `paros` and
 `paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
 moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
 

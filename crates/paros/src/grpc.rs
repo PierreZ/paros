@@ -1,6 +1,6 @@
 //! Generated gRPC contract and the bridge into the single-owner node driver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use paros_core::{
@@ -77,14 +77,24 @@ fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static 
 }
 
 fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
+    let (quorum_system, phase1_quorum, phase2_quorum) = match config.quorum_system() {
+        QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0),
+        QuorumSystem::Flexible { q1, q2 } => (common::QuorumSystem::Flexible, q1 as u64, q2 as u64),
+    };
     common::AcceptorConfig {
         members: config.members().iter().map(|n| n.0).collect(),
-        quorum_system: match config.quorum_system() {
-            QuorumSystem::Majority => common::QuorumSystem::Majority.into(),
-        },
+        quorum_system: quorum_system.into(),
+        phase1_quorum,
+        phase2_quorum,
     }
 }
 
+/// Decode a wire configuration, **refusing** what `AcceptorConfig::new`
+/// would panic on: the constructor asserts well-formedness because a
+/// malformed configuration is a programmer error inside the process, but on
+/// the wire it is external input, so it is validated here first
+/// (`QuorumSystem::admits` over the deduplicated membership) and answered
+/// with an error, never a crash.
 fn config_from_proto(
     config: Option<common::AcceptorConfig>,
 ) -> Result<Option<AcceptorConfig>, &'static str> {
@@ -93,13 +103,21 @@ fn config_from_proto(
     };
     let quorum_system = match common::QuorumSystem::try_from(config.quorum_system) {
         Ok(common::QuorumSystem::Majority) => QuorumSystem::Majority,
+        Ok(common::QuorumSystem::Flexible) => QuorumSystem::Flexible {
+            q1: usize::try_from(config.phase1_quorum).map_err(|_| "phase-1 quorum out of range")?,
+            q2: usize::try_from(config.phase2_quorum).map_err(|_| "phase-2 quorum out of range")?,
+        },
         Err(_) => return Err("unknown quorum system"),
     };
     if config.members.is_empty() {
         return Err("empty acceptor configuration");
     }
+    let members: BTreeSet<NodeId> = config.members.into_iter().map(NodeId).collect();
+    if !quorum_system.admits(members.len()) {
+        return Err("acceptor configuration does not admit its quorum system");
+    }
     Ok(Some(AcceptorConfig::new(
-        config.members.into_iter().map(NodeId).collect(),
+        members.into_iter().collect(),
         quorum_system,
     )))
 }

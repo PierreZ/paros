@@ -7,16 +7,21 @@
 //! ask [`AcceptorConfig::has_phase1_quorum`] or
 //! [`AcceptorConfig::has_phase2_quorum`], which ask
 //! [`QuorumSystem::is_phase1_quorum`] / [`QuorumSystem::is_phase2_quorum`];
-//! no tally compares a count against a threshold on its own. Today the one
-//! quorum system is a majority, where the two predicates are identical.
-//! Flexible quorums, grids and the compartmentalized deployments are new
-//! variants of [`QuorumSystem`] and new data in a configuration — never a
-//! rewrite of the tallies. The predicates are **phase-split** precisely so
-//! such a variant is expressible: Paxos safety needs every Phase-1 quorum to
-//! intersect every Phase-2 quorum (`q1 + q2 > n`, see
-//! [`QuorumSystem::cross_intersects`]), not each phase's quorums to intersect
-//! each other, and a system that exploits the difference cannot be written
-//! against one un-tagged predicate.
+//! no tally compares a count against a threshold on its own. Two quorum
+//! systems exist: [`QuorumSystem::Majority`], the default, where the two
+//! predicates coincide, and [`QuorumSystem::Flexible`], where they differ
+//! for the first time — Flexible Paxos's simple quorums, `|Q1| = q1` and
+//! `|Q2| = q2` with only `q1 + q2 > n` required. Grids and the
+//! compartmentalized deployments are further variants of [`QuorumSystem`]
+//! and new data in a configuration — never a rewrite of the tallies. The
+//! predicates are **phase-split** precisely so such a variant is
+//! expressible: Paxos safety needs every Phase-1 quorum to intersect every
+//! Phase-2 quorum (`q1 + q2 > n`, see [`QuorumSystem::cross_intersects`]),
+//! not each phase's quorums to intersect each other, and a system that
+//! exploits the difference cannot be written against one un-tagged
+//! predicate. The majority is the plain deployment's system and stays the
+//! default: a flexible system is opt-in configuration data, chosen per
+//! configuration and carried with it.
 //!
 //! Matchmaker quorums are deliberately **not** parameterized
 //! ([`MatchmakerSet::has_quorum`] is a majority by construction): the
@@ -31,56 +36,126 @@ use crate::types::{Fingerprint, NodeId};
 /// The quorum system a configuration uses: which sets of acceptors count as a
 /// quorum for Phase 1 (election) and Phase 2 (decide).
 ///
-/// Carried as a *value* in [`crate::Config`] (even though there is only ever one
-/// variant today) so that a reconfiguration is a *data* change — a different
-/// quorum system per configuration — rather than a rewrite of the
-/// election/decide logic. Paxos safety rests on every Phase-1 quorum
-/// intersecting every Phase-2 quorum; a simple majority satisfies that trivially.
+/// Carried as a *value* in [`crate::Config`] so that a reconfiguration is a
+/// *data* change — a different quorum system per configuration — rather than
+/// a rewrite of the election/decide logic. Paxos safety rests on every
+/// Phase-1 quorum intersecting every Phase-2 quorum
+/// ([`QuorumSystem::cross_intersects`]); a simple majority satisfies that
+/// trivially, and a flexible split satisfies it by construction
+/// ([`AcceptorConfig::new`] asserts it once).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum QuorumSystem {
     /// A simple majority of the membership: any `⌊n/2⌋ + 1` acceptors. Every two
     /// majorities intersect, so Phase-1 and Phase-2 quorums always share an
-    /// acceptor.
+    /// acceptor. The plain deployment's system and the default.
     #[default]
     Majority,
+    /// Flexible Paxos's **simple quorums** (Howard, Malkhi, Spiegelman, §4):
+    /// any `q1` acceptors form a Phase-1 quorum and any `q2` a Phase-2
+    /// quorum, with only the cross-phase intersection `q1 + q2 > n` required
+    /// (§3: `∀ Q1, ∀ Q2 : Q1 ∩ Q2 ≠ ∅`, and nothing within a phase). Two
+    /// Phase-2 quorums need not intersect — an even cluster may decide on
+    /// `n/2` accepts — and neither need two Phase-1 quorums. The trade is
+    /// the paper's: a smaller `q2` makes the steady state (Phase 2, one round
+    /// per command) cheaper and tolerant of `q2 - 1` failures at any time,
+    /// paid for by a larger `q1` at the next election. `Flexible { q1: n/2 +
+    /// 1, q2: n/2 + 1 }` is the majority again; `q2 = 1` is "any single
+    /// acceptor learns a value in one hop, but recovery needs everyone up".
+    ///
+    /// Well-formed over `n` members when `1 <= q1 <= n`, `1 <= q2 <= n` and
+    /// `q1 + q2 > n` ([`QuorumSystem::admits`]); a configuration that does
+    /// not admit its system cannot be constructed.
+    Flexible {
+        /// The Phase-1 quorum size: promises an election needs.
+        q1: usize,
+        /// The Phase-2 quorum size: accepts that choose a value.
+        q2: usize,
+    },
+}
+
+/// The size of a majority over `members`: `⌊n/2⌋ + 1`. The one place the
+/// majority is spelled out as arithmetic; every majority in the crate — the
+/// acceptor-side default and the matchmaker quorum — derives from here.
+fn majority_of(members: usize) -> usize {
+    members / 2 + 1
+}
+
+/// How many of `voters` are in the sorted membership `members` — the count
+/// every cardinality quorum compares. A voter outside `members` never counts.
+fn counted<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> usize {
+    voters
+        .iter()
+        .filter(|v| members.binary_search(v).is_ok())
+        .count()
 }
 
 impl QuorumSystem {
-    /// The number of acceptors that form a quorum over a membership of `members`.
+    /// The number of acceptors a **Phase-1** quorum over a membership of
+    /// `members` takes. Kept, with [`QuorumSystem::phase2_quorum_size`], for
+    /// the one thing a predicate cannot report — how many more answers a
+    /// pending tally still waits for; whether a tally *holds* is always
+    /// [`QuorumSystem::is_phase1_quorum`].
     #[must_use]
-    pub fn quorum_size(self, members: usize) -> usize {
+    pub fn phase1_quorum_size(self, members: usize) -> usize {
         match self {
-            QuorumSystem::Majority => members / 2 + 1,
+            QuorumSystem::Majority => majority_of(members),
+            QuorumSystem::Flexible { q1, .. } => q1,
+        }
+    }
+
+    /// The number of acceptors a **Phase-2** quorum over a membership of
+    /// `members` takes. See [`QuorumSystem::phase1_quorum_size`].
+    #[must_use]
+    pub fn phase2_quorum_size(self, members: usize) -> usize {
+        match self {
+            QuorumSystem::Majority => majority_of(members),
+            QuorumSystem::Flexible { q2, .. } => q2,
         }
     }
 
     /// Whether every Phase-1 quorum of a membership of `members` intersects
     /// every Phase-2 quorum of it — the one arithmetic fact Paxos safety
-    /// rests on, `q1 + q2 > n`. For [`QuorumSystem::Majority`] both phases
-    /// take the same `q`, so it reduces to the familiar `2q > n`; a future
-    /// `Flexible { q1, q2 }` variant would answer `q1 + q2 > n` here and is
-    /// free to let one phase's quorums *not* intersect each other (Flexible
-    /// Paxos's whole point — an even cluster with `|Q2| = n/2`), which the
-    /// old self-intersection assert forbade outright.
+    /// rests on, `q1 + q2 > n` (Flexible Paxos §4). For
+    /// [`QuorumSystem::Majority`] both phases take the same `q`, so it
+    /// reduces to the familiar `2q > n`; [`QuorumSystem::Flexible`] answers
+    /// `q1 + q2 > n` and is free to let one phase's quorums *not* intersect
+    /// each other (the paper's whole point — an even cluster with
+    /// `|Q2| = n/2`), which the old self-intersection assert forbade
+    /// outright.
     #[must_use]
     pub fn cross_intersects(self, members: usize) -> bool {
-        match self {
-            QuorumSystem::Majority => {
-                let q = self.quorum_size(members);
-                q.saturating_add(q) > members
-            }
-        }
+        self.phase1_quorum_size(members)
+            .saturating_add(self.phase2_quorum_size(members))
+            > members
     }
 
-    /// Whether `voters` form a quorum over the sorted membership `members`.
-    /// The **one** predicate every tally asks — Phase-1 completion, a
-    /// Phase-2 decision, a read-index confirmation, `CheckQuorum`, the GC
-    /// fence, and every matchmaker-side tally (registration, GC ack, freeze,
-    /// the successor decree, publication) — so a quorum system that is not a
-    /// cardinality (a grid, a flexible split) answers here with set
-    /// membership and no tally ever compares a count against a threshold on
-    /// its own. A voter outside `members` never counts.
+    /// Whether this quorum system can be run over a membership of `members`
+    /// at all: each phase's quorum is at least one acceptor and at most the
+    /// membership, and the two cross-intersect. This is the
+    /// well-formedness arm [`AcceptorConfig::new`] asserts once; it is public
+    /// so a wire boundary can *refuse* a malformed configuration before
+    /// constructing one, where the constructor would panic.
+    ///
+    /// A majority admits every non-empty membership. A flexible split admits
+    /// `n` when `1 <= q1 <= n`, `1 <= q2 <= n` and `q1 + q2 > n`.
+    #[must_use]
+    pub fn admits(self, members: usize) -> bool {
+        let q1 = self.phase1_quorum_size(members);
+        let q2 = self.phase2_quorum_size(members);
+        members >= 1
+            && (1..=members).contains(&q1)
+            && (1..=members).contains(&q2)
+            && self.cross_intersects(members)
+    }
+
+    /// Whether `voters` form a **majority** of the sorted membership
+    /// `members`. The body of [`QuorumSystem::Majority`]'s two predicates and
+    /// of every matchmaker-side tally ([`MatchmakerSet::has_quorum`]) — and
+    /// deliberately *not* a method on a quorum system: it matches on no
+    /// variant, so it can never quietly answer for a system that is not a
+    /// majority. A tally that wants a quorum of a configuration asks the
+    /// phase-tagged predicate; a voter outside `members` never counts.
     ///
     /// Generic over the identity so the matchmaker namespace
     /// ([`MatchmakerId`]) and the decree kernel's own acceptor type ask the
@@ -88,52 +163,50 @@ impl QuorumSystem {
     /// over a sorted membership and a count, and neither depends on what an
     /// identity *is*.
     #[must_use]
-    pub fn is_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
-        match self {
-            QuorumSystem::Majority => {
-                let counted = voters
-                    .iter()
-                    .filter(|v| members.binary_search(v).is_ok())
-                    .count();
-                counted >= self.quorum_size(members.len())
-            }
-        }
+    pub fn is_majority<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> bool {
+        counted(members, voters) >= majority_of(members.len())
     }
 
     /// Whether `voters` form a **Phase-1** quorum over `members`: the
     /// promises an election (or a CTRL repair probe) must hold before it may
     /// conclude anything about what an earlier ballot could have chosen.
     /// Identical to [`QuorumSystem::is_phase2_quorum`] under
-    /// [`QuorumSystem::Majority`]; a flexible system makes them differ.
+    /// [`QuorumSystem::Majority`]; [`QuorumSystem::Flexible`] counts against
+    /// `q1` here and `q2` there. A voter outside `members` never counts.
     #[must_use]
     pub fn is_phase1_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
         match self {
-            QuorumSystem::Majority => self.is_quorum(members, voters),
+            QuorumSystem::Majority => Self::is_majority(members, voters),
+            QuorumSystem::Flexible { q1, .. } => counted(members, voters) >= q1,
         }
     }
 
     /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
     /// that choose a value, and every claim that rests on one — a leader's
     /// standing authority (`CheckQuorum`), a read's confirmation, the GC
-    /// fence's custody claim.
+    /// fence's custody claim. A voter outside `members` never counts.
     #[must_use]
     pub fn is_phase2_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
         match self {
-            QuorumSystem::Majority => self.is_quorum(members, voters),
+            QuorumSystem::Majority => Self::is_majority(members, voters),
+            QuorumSystem::Flexible { q2, .. } => counted(members, voters) >= q2,
         }
     }
 
     /// The acceptors a Phase-2 message is addressed to, out of `members`.
     ///
     /// A majority addresses the whole membership: any subset large enough may
-    /// answer. A grid or a compartmentalized deployment would address one
+    /// answer. So does a flexible split — any `q2` of them decide, so every
+    /// one of them is asked (the paper's `2|Q2|` message saving, addressing
+    /// only `q2` and retrying on the rest, is a latency trade paros does not
+    /// take). A grid or a compartmentalized deployment would address one
     /// *column* here, and that is the whole of the change — the caller
     /// ([`crate::ColocatedNode`]'s Phase-2 fan-out) already asks the boundary
     /// instead of iterating the membership itself.
     #[must_use]
     pub fn phase2_addressees<I>(self, members: &[I]) -> &[I] {
         match self {
-            QuorumSystem::Majority => members,
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => members,
         }
     }
 }
@@ -153,7 +226,7 @@ impl QuorumSystem {
 /// **Both fields are private and [`AcceptorConfig::new`] is the only way to
 /// build one**, deserialisation included (see `SerdeAcceptorConfig`). The
 /// membership is a sorted, deduplicated [`Vec`] that
-/// [`AcceptorConfig::contains`] and [`QuorumSystem::is_quorum`] binary-search:
+/// [`AcceptorConfig::contains`] and every quorum predicate binary-search:
 /// an unsorted or duplicated vector would not fail, it would make a quorum
 /// tally *silently miscount*, which is the one failure mode a consensus
 /// membership must not have. Only `new` normalizes, so only `new` may
@@ -227,9 +300,12 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// Whether this configuration can be run at all: at least one acceptor, a
-    /// membership that is sorted and deduplicated, and a quorum system whose
-    /// Phase-1 and Phase-2 quorums always intersect
-    /// ([`QuorumSystem::cross_intersects`]). This is the invariant
+    /// membership that is sorted and deduplicated, and a quorum system the
+    /// membership admits ([`QuorumSystem::admits`]: each phase's quorum
+    /// between one acceptor and the whole membership, and the two phases'
+    /// quorums always intersecting, [`QuorumSystem::cross_intersects`] —
+    /// `2q > n` for a majority, `q1 + q2 > n` for a flexible split). This is
+    /// the invariant
     /// [`AcceptorConfig::new`] establishes — asserted there, once, since it
     /// is the only constructor (deserialisation included) — and every quorum
     /// predicate relies on it without re-checking; it is public so a reader
@@ -243,13 +319,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         let n = self.members.len();
-        if n == 0 {
-            return false;
-        }
-        let q = self.quorum_system.quorum_size(n);
-        q >= 1
-            && self.quorum_system.cross_intersects(n)
-            && self.members.windows(2).all(|w| w[0] < w[1])
+        self.quorum_system.admits(n) && self.members.windows(2).all(|w| w[0] < w[1])
     }
 
     /// Whether `voters` hold a **Phase-1** quorum of this configuration —
@@ -432,7 +502,7 @@ impl MatchmakerSet {
     /// programmer error: the arithmetic guarantees it).
     #[must_use]
     pub fn quorum_size(&self) -> usize {
-        let quorum = self.members.len() / 2 + 1;
+        let quorum = majority_of(self.members.len());
         // Postcondition: self-intersecting over the membership.
         assert!(
             quorum * 2 > self.members.len(),
@@ -443,12 +513,12 @@ impl MatchmakerSet {
 
     /// Whether `voters` hold a matchmaker quorum of this set — the only way
     /// a matchmaker-side tally is ever judged. Routes to
-    /// [`QuorumSystem::is_quorum`] under [`QuorumSystem::Majority`], the one
-    /// quorum model paros supports for matchmakers (see
-    /// [`MatchmakerSet::quorum_size`]); a voter outside the set never counts.
+    /// [`QuorumSystem::is_majority`], the one quorum model paros supports for
+    /// matchmakers (see [`MatchmakerSet::quorum_size`]); a voter outside the
+    /// set never counts.
     #[must_use]
     pub fn has_quorum(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
-        QuorumSystem::Majority.is_quorum(&self.members, voters)
+        QuorumSystem::is_majority(&self.members, voters)
     }
 
     /// Whether `id` is a member.
@@ -475,5 +545,115 @@ impl MatchmakerSet {
             return false;
         }
         QuorumSystem::Majority.cross_intersects(n) && self.members.windows(2).all(|w| w[0] < w[1])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem};
+    use crate::types::NodeId;
+
+    fn nodes(ids: impl IntoIterator<Item = u64>) -> Vec<NodeId> {
+        ids.into_iter().map(NodeId).collect()
+    }
+
+    fn voters(ids: impl IntoIterator<Item = u64>) -> BTreeSet<NodeId> {
+        ids.into_iter().map(NodeId).collect()
+    }
+
+    /// The point of the variant: under `Flexible { q1: 3, q2: 2 }` over four
+    /// acceptors the two phase predicates differ for the first time — two
+    /// accepts choose, two promises do not elect — while a majority would
+    /// have taken three of either.
+    #[test]
+    fn flexible_predicates_differ_by_phase() {
+        let flexible = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 3, q2: 2 });
+        let majority = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Majority);
+        let two = voters([1, 2]);
+        let three = voters([1, 2, 3]);
+        assert!(flexible.has_phase2_quorum(&two));
+        assert!(!flexible.has_phase1_quorum(&two));
+        assert!(flexible.has_phase1_quorum(&three));
+        assert!(!majority.has_phase2_quorum(&two));
+        assert!(!majority.has_phase1_quorum(&two));
+        assert!(majority.has_phase1_quorum(&three));
+        assert!(majority.has_phase2_quorum(&three));
+        // Two Phase-2 quorums need not intersect under the flexible split;
+        // every Phase-1 quorum still meets every Phase-2 quorum.
+        assert!(flexible.has_phase2_quorum(&voters([3, 4])));
+        assert_eq!(flexible.quorum_system().phase1_quorum_size(4), 3);
+        assert_eq!(flexible.quorum_system().phase2_quorum_size(4), 2);
+        assert_eq!(flexible.phase2_addressees(), flexible.members());
+    }
+
+    /// A voter outside the membership never counts, under either system.
+    #[test]
+    fn strangers_never_count() {
+        let flexible = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 3, q2: 2 });
+        assert!(!flexible.has_phase2_quorum(&voters([1, 9])));
+        assert!(!flexible.has_phase1_quorum(&voters([1, 2, 9])));
+        let majority = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
+        assert!(!majority.has_phase2_quorum(&voters([1, 9])));
+    }
+
+    /// The well-formedness arm, spelled out: `1 <= q1 <= n`, `1 <= q2 <= n`,
+    /// `q1 + q2 > n`. A majority admits every non-empty membership.
+    #[test]
+    fn admits_is_the_flexible_arm() {
+        for n in 1..=7 {
+            assert!(QuorumSystem::Majority.admits(n));
+            assert!(QuorumSystem::Majority.cross_intersects(n));
+        }
+        assert!(!QuorumSystem::Majority.admits(0));
+        let f = |q1, q2| QuorumSystem::Flexible { q1, q2 };
+        assert!(f(3, 2).admits(4));
+        assert!(f(2, 3).admits(4));
+        assert!(f(4, 1).admits(4));
+        assert!(f(1, 4).admits(4));
+        assert!(f(3, 3).admits(4));
+        assert!(!f(2, 2).admits(4), "q1 + q2 = n does not intersect");
+        assert!(!f(0, 4).admits(4), "an empty Phase-1 quorum");
+        assert!(!f(4, 0).admits(4), "an empty Phase-2 quorum");
+        assert!(!f(5, 1).admits(4), "a quorum larger than the membership");
+        assert!(!f(usize::MAX, usize::MAX).admits(4), "no overflow");
+        assert!(!f(1, 1).admits(0));
+    }
+
+    /// The constructor is the only site, and it refuses a split whose
+    /// phases do not cross-intersect.
+    #[test]
+    #[should_panic(expected = "an acceptor configuration admits its quorum system")]
+    fn flexible_without_cross_intersection_is_unconstructible() {
+        let _ = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 2, q2: 2 });
+    }
+
+    #[test]
+    #[should_panic(expected = "an acceptor configuration admits its quorum system")]
+    fn flexible_larger_than_the_membership_is_unconstructible() {
+        let _ = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Flexible { q1: 4, q2: 1 });
+    }
+
+    /// Normalization happens before the arm: duplicates collapse, so a
+    /// split that admits the *deduplicated* size is what counts.
+    #[test]
+    fn well_formedness_is_judged_over_the_deduplicated_membership() {
+        let config =
+            AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::Flexible { q1: 2, q2: 1 });
+        assert_eq!(config.members(), nodes([1, 2]));
+        assert!(config.is_well_formed());
+    }
+
+    /// Matchmaker quorums are majorities only, whatever the acceptor side
+    /// runs: `MatchmakerSet` holds no quorum system at all.
+    #[test]
+    fn matchmaker_quorums_stay_majorities() {
+        let set = MatchmakerSet::new(MatchmakerGeneration(0), (1..=4).map(MatchmakerId).collect());
+        assert_eq!(set.quorum_size(), 3);
+        let two: BTreeSet<MatchmakerId> = [1, 2].into_iter().map(MatchmakerId).collect();
+        let three: BTreeSet<MatchmakerId> = [1, 2, 3].into_iter().map(MatchmakerId).collect();
+        assert!(!set.has_quorum(&two));
+        assert!(set.has_quorum(&three));
     }
 }

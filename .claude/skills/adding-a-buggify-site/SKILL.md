@@ -68,7 +68,10 @@ asks `crash_at(seam)` at (`BeforeSync`, `AfterSyncBeforeSend`,
 `AfterChunkRestoreBeforeSync`, `MatchBeforeSync`, `MatchAfterSyncBeforeReply`).
 A new durability boundary gets a new variant and its own location in
 `BuggifyHooks`; sharing one location stops the sweep from selecting the
-failure modes independently.
+failure modes independently. If the swarm cannot build the seam's
+precondition (it took #146 to visit `AfterChunkRestoreBeforeSync`), the
+corpus scripts it: `ScriptedCrash` answers `crash_at` for one named seam
+once per run, and the corpus case asserts the crash fired.
 
 ## The four questions every site must answer
 
