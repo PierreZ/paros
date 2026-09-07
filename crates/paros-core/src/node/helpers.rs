@@ -70,6 +70,12 @@ impl ColocatedNode {
         if self.is_acceptor() {
             self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
         }
+        // The second thing every configuration move does (#143): a quorum
+        // read opened against the superseded configuration asked a row that
+        // need not intersect the successor's columns, so it may never
+        // complete — the driver times it out and the client retries under
+        // the configuration now believed.
+        self.quorum_reads.abandon_superseded(self.acceptors_since);
     }
 
     /// Queue `msg` to every node of the pool except this one — the learner

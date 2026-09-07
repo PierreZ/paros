@@ -189,6 +189,18 @@ impl Replica {
         self.chosen_index
     }
 
+    /// Whether the contiguous chosen prefix covers `index` — the replica's
+    /// one answer to a quorum read (#143, Compartmentalized Paxos §3.4): a
+    /// read at watermark `index` may be served once the replica has chosen
+    /// (and, through the driver's apply seam, applied) everything up to it.
+    /// `None` is the empty watermark, covered by any prefix. The replica
+    /// consumes "applied past `index`" and nothing else — it never sees the
+    /// watermark tally that produced the index.
+    #[must_use]
+    pub fn covers(&self, index: Option<Slot>) -> bool {
+        self.chosen_index >= index
+    }
+
     /// First slot not in the contiguous chosen prefix.
     #[must_use]
     pub fn first_unchosen(&self) -> Slot {

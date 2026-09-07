@@ -11,6 +11,7 @@ mod handoff;
 mod helpers;
 mod invariants;
 mod matchmaking;
+mod quorum_reads;
 mod reads;
 mod reconfigure;
 mod replication;
@@ -32,6 +33,7 @@ use crate::matchmaking::Matchmaking;
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use crate::message::{Audience, Message};
 use crate::proposer::Proposer;
+use crate::quorum_read::QuorumReads;
 use crate::ready::Ready;
 use crate::replica::Replica;
 use crate::state::{Config, HardState};
@@ -210,9 +212,15 @@ pub struct ColocatedNode {
     /// application state, so the driver attaches the opaque snapshot bytes (from
     /// storage) and sends the [`Message::InstallSnapshot`].
     pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
-    /// Read-index rounds confirmed this batch, drained via
+    /// Read-index rounds and quorum reads confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
+    /// The **quorum reads** this node has open (#143,
+    /// [`crate::quorum_read`]): leaderless, on any role, bound to the
+    /// configuration each was opened against and dropped by TTL. Volatile
+    /// and independent of the leadership — a role change abandons nothing
+    /// here; a configuration change abandons every read opened before it.
+    quorum_reads: QuorumReads<NodeId>,
     /// `(started, gap_fills, remaining)` for this Ready's recovery chunk.
     /// Reported through [`Ready::recovery_batch`] and, while set, the pacing
     /// gate: `pump_leader_recovery` starts no further page until
@@ -422,6 +430,13 @@ impl ColocatedNode {
             } => {
                 self.on_heartbeat_ack(from, ballot, seq, chosen);
             }
+            Message::PreRead { reply_to, ctx } => self.on_pre_read(reply_to, ctx),
+            Message::PreReadAck {
+                from,
+                ctx,
+                watermark,
+                config_since,
+            } => self.on_pre_read_ack(from, ctx, watermark, config_since),
             // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
             // driver's repair layer owns these end to end and normally
             // intercepts them before `step`. Consensus state never depends on
@@ -770,6 +785,7 @@ impl ColocatedNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
+        self.tick_quorum_reads();
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();
@@ -1098,6 +1114,13 @@ impl ColocatedNode {
     #[must_use]
     pub fn proposer(&self) -> &Proposer<NodeId, Command> {
         &self.proposer
+    }
+
+    /// The quorum reads this node has open (#143, [`crate::quorum_read`]),
+    /// for drivers / oracles.
+    #[must_use]
+    pub fn quorum_reads(&self) -> &QuorumReads<NodeId> {
+        &self.quorum_reads
     }
 
     /// This node's current role.

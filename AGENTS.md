@@ -153,7 +153,25 @@ own**. The roles:
   (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
   `gap_fill: bool` would not).
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
-  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else.
+  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else —
+  and answers one question about it, `covers(index)`, for the quorum reads below.
+- `quorum_read.rs` — `QuorumRead` / `QuorumReads` (#143, Compartmentalized Paxos §3.4, *Paxos
+  Quorum Reads*): the **leaderless read** tally. A reader asks a Phase-1 quorum — a row of a
+  grid (`AcceptorConfig::row_of`, `ctx % rows`, addressed through `phase1_addressees` and
+  judged by `has_phase1_quorum_in`), the whole membership under a majority or a flexible
+  split — for their vote watermarks (`Acceptor::vote_watermark`: the highest slot voted,
+  monotone across records and truncations), takes the maximum, and surfaces the read through
+  the same `Ready::read_states` once the replica covers it. `ColocatedNode::quorum_read(ctx)`
+  wires it on **any** node — leader, follower, spare — and no path in it touches a beat, an
+  ack or a read-index round: the read-index path is untouched and a plain deployment's
+  `Heartbeat` / `HeartbeatAck` are byte-for-byte what they were. **No clock anywhere**: the
+  paper's read leases (§9) are exactly what this rung refuses. The argument is single-
+  configuration (a row meets every column of *its* grid), so a read is bound to the
+  configuration it was opened against, a node abandons its open reads when it learns a newer
+  one, and a `PreReadAck` carries the answerer's configuration ballot so a row that knows a
+  successor abandons the read; the residual — a grid row wholly unaware of a completed
+  successor — is what the client-history linearizability oracle judges once the driver half
+  lands. §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
   every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum`, the
   GC fence, the matchmaker-side tallies and the decree kernel all ask

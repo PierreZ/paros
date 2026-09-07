@@ -62,6 +62,7 @@ pub mod membership;
 mod message;
 mod node;
 pub mod proposer;
+pub mod quorum_read;
 mod ready;
 pub mod replica;
 pub mod retained;
@@ -88,6 +89,7 @@ pub use node::{
     ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState, ReconfigureRefusal,
     ReconfigureResult,
 };
+pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
 pub use retained::RetainedWindow;
 pub use state::{Config, HardState};

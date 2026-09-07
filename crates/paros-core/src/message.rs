@@ -413,6 +413,45 @@ pub enum Message {
         config: Option<AcceptorConfig>,
     },
 
+    // ---- Leaderless reads (Paxos Quorum Reads, #143) ----
+    /// Any node → a **Phase-1 quorum** of acceptors (a row of a grid; the
+    /// whole membership under a majority or a flexible split): "what is the
+    /// highest slot you have voted in?" — the first half of a
+    /// **quorum read** (Compartmentalized Paxos §3.4). Fire-and-forget, never
+    /// re-sent: a read whose row does not answer within its TTL is dropped
+    /// silently and the driver's client-facing retry asks again. Carries no
+    /// ballot and no configuration: the reader tallies the answers over the
+    /// configuration *it* believes in force, and abandons the read if an
+    /// answer names a newer one.
+    PreRead {
+        /// Where the `PreReadAck` is addressed. The reply address alone.
+        reply_to: NodeId,
+        /// The reader's correlation token, echoed by the ack.
+        ctx: u64,
+    },
+    /// Acceptor → the reader: its **vote watermark**
+    /// ([`crate::acceptor::Acceptor::vote_watermark`]) — the highest slot
+    /// it has voted in, `None` on a log that never voted. No durable
+    /// obligation: the ack claims "I have voted this high", a fact the
+    /// durable log already holds, and the reader waits until its replica has
+    /// applied the maximum over its quorum before serving.
+    PreReadAck {
+        /// The answering acceptor.
+        from: NodeId,
+        /// The read's correlation token, echoed.
+        ctx: u64,
+        /// The acceptor's vote watermark.
+        watermark: Option<Slot>,
+        /// The ballot of the acceptor configuration the answering node
+        /// believes in force, on a matchmaker deployment — the reader
+        /// abandons a read whose row names a configuration newer than the
+        /// one it was opened against (its row may not intersect the
+        /// successor's columns). `None` on plain Multi-Paxos, whose
+        /// configuration never moves.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config_since: Option<Ballot>,
+    },
+
     /// Follower → leader: acknowledges a [`Message::Heartbeat`] whose ballot the
     /// follower accepts (its promise is at or below it), echoing `(ballot, seq)`.
     /// A quorum of acks at the leader's current ballot, for beats broadcast at or

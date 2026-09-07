@@ -13,7 +13,11 @@ doctrine; this file is the map.
   `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
   `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,
-  `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen) · `matchmaking.rs`
+  `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen, and
+  whose row addressing — `row_of`, `phase1_addressees`, `is_phase1_addressee`,
+  `has_phase1_quorum_in` — the one place a read row is) · `quorum_read.rs` `QuorumRead` /
+  `QuorumReads` (the leaderless read tally, #143: a row's vote watermarks, the maximum, the
+  replica's `covers`; wired on any node by `node/quorum_reads.rs`) · `matchmaking.rs`
   `Matchmaking` (the candidate's phase) · `retained.rs` `RetainedWindow`.
 - `matchmaker.rs` `Matchmaker` + `matchmaker/{reconfigurer,decree,generation,
   handover_model,storage,message,state,write}.rs`: the registry, the handover
@@ -23,7 +27,7 @@ doctrine; this file is the map.
   points, the driver-policy surface such as `resend_pending`, `step_down`,
   `relinquish_to`, `reconfigure`) + `node/*.rs` named by **concern**
   (`election`, `replication`, `handoff`, `gc`, `matchmaking`, `reconfigure`,
-  `reads`, `decide_apply`, `catch_up_snapshot`, `boot`, `acceptor`,
+  `reads`, `quorum_reads`, `decide_apply`, `catch_up_snapshot`, `boot`, `acceptor`,
   `helpers`, `invariants`). Wiring only; no protocol tally lives here.
 - `message.rs` `Message` + `Audience` · `ready.rs` `Ready<'a>` (the borrow
   guard that makes a second `ready()` before `advance()` a compile error) ·
@@ -49,7 +53,7 @@ doctrine; this file is the map.
 
 Unit tests are inline: `node/tests.rs` + `node/tests/*.rs` (one file per
 concern), plus the role, matchmaker, reconfigurer, decree and model-checker
-modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid}.rs`
+modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,quorum_read}.rs`
 run in CI.
 Gates: `cargo check --target wasm32-unknown-unknown -p paros-core` (with and
 without default features), `cargo check -p paros-core --features serde`,

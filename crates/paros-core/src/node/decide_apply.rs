@@ -246,5 +246,6 @@ impl ColocatedNode {
         }
         self.pump_app_repair();
         self.try_confirm_reads();
+        self.serve_quorum_reads();
     }
 }

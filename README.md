@@ -41,7 +41,7 @@ storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and har
 
 ## Learning Paxos with paros-core
 
-Five small, deterministic, runnable examples drive the composable roles of
+Six small, deterministic, runnable examples drive the composable roles of
 [`paros-core`](crates/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
@@ -61,6 +61,10 @@ property each one teaches. Read them in order:
    addressed to one column so each acceptor sees a third of the commands, a majority of
    promises that is still not a row, and the next election needing a full row because each
    promise in it reports exactly its own column's value.
+6. [`quorum_read.rs`](crates/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
+   row of the same grid answers with its vote watermarks while a column is mid-decision, the
+   reader settles on the maximum and waits for its replica to apply it, and the leader sends
+   no beat and opens no round — a linearizable read with no leader and no clock.
 
 ```sh
 cargo run -p paros-core --example single_decree
@@ -68,6 +72,7 @@ cargo run -p paros-core --example multi_paxos
 cargo run -p paros-core --example matchmaker
 cargo run -p paros-core --example flexible_quorums
 cargo run -p paros-core --example acceptor_grid
+cargo run -p paros-core --example quorum_read
 ```
 
 ## Build and test

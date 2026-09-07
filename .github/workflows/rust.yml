@@ -66,6 +66,8 @@ jobs:
         run: nix develop --command cargo run -p paros-core --example flexible_quorums
       - name: Run acceptor_grid
         run: nix develop --command cargo run -p paros-core --example acceptor_grid
+      - name: Run quorum_read
+        run: nix develop --command cargo run -p paros-core --example quorum_read
 
   # The sans-IO core and the library driver stay portable to wasm32: paros-core is
   # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The

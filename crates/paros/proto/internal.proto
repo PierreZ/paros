@@ -65,6 +65,8 @@ message ConsensusMessage {
     SnapChunkRequest snap_chunk_request = 14;
     SnapChunkResponse snap_chunk_response = 15;
     Relinquish relinquish = 16;
+    PreRead pre_read = 17;
+    PreReadAck pre_read_ack = 18;
   }
 }
 
@@ -280,6 +282,27 @@ message Relinquish {
   // The authority's registered configuration, transferred verbatim (absent on
   // plain Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 9;
+}
+
+// Leaderless reads (Paxos Quorum Reads, #143): a reader asks a Phase-1
+// quorum of acceptors (a row of a grid) for their vote watermarks, takes the
+// maximum, and serves the read from any replica that has applied it. No
+// ballot, no clock, no durable obligation on either side.
+message PreRead {
+  // Where the PreReadAck is addressed.
+  uint64 reply_to = 1;
+  // The reader's correlation token, echoed by the ack.
+  uint64 ctx = 2;
+}
+
+message PreReadAck {
+  uint64 from = 1;
+  uint64 ctx = 2;
+  // The highest slot this acceptor has voted in (absent: never voted).
+  optional uint64 watermark = 3;
+  // The ballot of the configuration the answering node believes in force
+  // (absent on plain Multi-Paxos).
+  optional .paros.common.v1.Ballot config_since = 4;
 }
 
 message InspectRequest {}
