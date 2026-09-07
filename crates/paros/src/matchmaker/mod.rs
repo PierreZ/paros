@@ -56,9 +56,14 @@ pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
     for member in config.members() {
         fold(&member.0.to_le_bytes());
     }
-    fold(&[match config.quorum_system() {
-        paros_core::QuorumSystem::Majority => 0_u8,
-    }]);
+    match config.quorum_system() {
+        paros_core::QuorumSystem::Majority => fold(&[0_u8]),
+        paros_core::QuorumSystem::Flexible { q1, q2 } => {
+            fold(&[1_u8]);
+            fold(&(q1 as u64).to_le_bytes());
+            fold(&(q2 as u64).to_le_bytes());
+        }
+    }
     h
 }
 

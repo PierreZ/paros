@@ -182,8 +182,9 @@ role; the acceptor never reads the chosen prefix; the replica never sees a ballo
 caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
 "is this slot chosen" predicate when a probe closes). What that bought, in order: the single
 decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
-is no second Paxos kernel in the crate). Still to come: flexible quorums and Compartmentalized
-Paxos become deployment data.
+is no second Paxos kernel in the crate); flexible quorums are deployment data
+(`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
+changes). Still to come: Compartmentalized Paxos becomes deployment data the same way.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*

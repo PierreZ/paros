@@ -207,7 +207,11 @@ impl Decree {
         }
         if !self.proposer.phase1_won(self.ballot) {
             return DecreePromise::Counted {
-                remaining: self.remaining(self.promised()),
+                remaining: self
+                    .acceptors
+                    .quorum_system()
+                    .phase1_quorum_size(self.acceptors.members().len())
+                    .saturating_sub(self.promised()),
             };
         }
         // Nothing is ever chosen behind a decree, so no slot is excluded and
@@ -254,8 +258,16 @@ impl Decree {
             .rounds()
             .get(&DECREE_SLOT)
             .map_or(0, |round| round.accepted_by().len());
+        // How many more accepts the decree still waits for — the one thing
+        // a quorum *predicate* cannot report, so the one place a decree
+        // quorum is spelled as a number (a majority: `Decree::new` builds
+        // its acceptors under `QuorumSystem::Majority`).
         AcceptFold::Counted {
-            remaining: self.remaining(accepted),
+            remaining: self
+                .acceptors
+                .quorum_system()
+                .phase2_quorum_size(self.acceptors.members().len())
+                .saturating_sub(accepted),
         }
     }
 
@@ -271,15 +283,6 @@ impl Decree {
     /// How many matchmakers have promised.
     fn promised(&self) -> usize {
         self.proposer.election().map_or(0, |e| e.promised().len())
-    }
-
-    /// How many more answers a quorum still waits for — the one thing a
-    /// quorum *predicate* cannot report.
-    fn remaining(&self, held: usize) -> usize {
-        self.acceptors
-            .quorum_system()
-            .quorum_size(self.acceptors.members().len())
-            .saturating_sub(held)
     }
 }
 

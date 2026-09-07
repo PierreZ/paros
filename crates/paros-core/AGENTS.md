@@ -10,7 +10,7 @@ doctrine; this file is the map.
 - `acceptor.rs` `Acceptor` · `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
   `Proposer` · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
   `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
-  `MatchmakerSet`, `QuorumSystem` (the one quorum boundary) · `matchmaking.rs`
+  `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority` and `Flexible { q1, q2 }`) · `matchmaking.rs`
   `Matchmaking` (the candidate's phase) · `retained.rs` `RetainedWindow`.
 - `matchmaker.rs` `Matchmaker` + `matchmaker/{reconfigurer,decree,generation,
   handover_model,storage,message,state,write}.rs`: the registry, the handover
@@ -46,7 +46,7 @@ doctrine; this file is the map.
 
 Unit tests are inline: `node/tests.rs` + `node/tests/*.rs` (one file per
 concern), plus the role, matchmaker, reconfigurer, decree and model-checker
-modules. `examples/{single_decree,multi_paxos,matchmaker}.rs` run in CI.
+modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums}.rs` run in CI.
 Gates: `cargo check --target wasm32-unknown-unknown -p paros-core` (with and
 without default features), `cargo check -p paros-core --features serde`,
 `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`. A protocol
