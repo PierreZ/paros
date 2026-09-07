@@ -34,7 +34,8 @@ pub use driver::{
 pub use grpc::{
     Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
     ParosInternalClient, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
-    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest,
+    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, WireQuorumSystem,
+    quorum_system_from_proto, quorum_system_to_proto,
 };
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{

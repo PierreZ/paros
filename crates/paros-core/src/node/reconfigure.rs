@@ -75,6 +75,12 @@ pub enum ReconfigureRefusal {
     /// The requested configuration names a node outside the addressable
     /// pool, which this deployment can neither reach nor prepare.
     UnknownMember,
+    /// The requested membership does not admit the requested quorum system
+    /// ([`crate::QuorumSystem::admits`]). Decided at the boundary that
+    /// decodes the request — `ColocatedNode::reconfigure` takes an
+    /// [`AcceptorConfig`], which cannot exist malformed — and carried here so
+    /// a refusal is one type wherever it is judged.
+    Malformed,
     /// The leadership is not settled: a Phase-1-shaped recovery, a repair
     /// probe, or an application repair is still open. A reconfiguration moves
     /// a *settled* leadership to a new ballot; the caller retries once the

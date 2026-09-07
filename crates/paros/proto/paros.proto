@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package paros.v1;
 
+import "common.proto";
+
 // Client-facing journal API. A future proxy can expose this contract while the
 // nodes keep their consensus protocol on the separate internal service.
 service Paros {
@@ -57,6 +59,16 @@ message CompactAck {
 message Reconfigure {
   // The new acceptor set (node ids drawn from the deployment's pool).
   repeated uint64 members = 1;
+  // The quorum system the new configuration runs under, encoded exactly as
+  // `paros.common.v1.AcceptorConfig` encodes it (the same field numbers):
+  // a majority leaves every scalar at zero, so a request that names members
+  // alone is byte-identical to before the field existed. A configuration
+  // the membership does not admit is refused as `malformed`.
+  .paros.common.v1.QuorumSystem quorum_system = 2;
+  uint64 phase1_quorum = 3;
+  uint64 phase2_quorum = 4;
+  uint64 rows = 5;
+  uint64 cols = 6;
 }
 
 message ReconfigureMatchmakers {

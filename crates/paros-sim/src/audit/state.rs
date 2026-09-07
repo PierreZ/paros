@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, QuorumSystem, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -463,6 +463,12 @@ pub(super) struct AuditState {
     /// reconfiguration went all the way through matchmaking and the
     /// cross-configuration Phase 1.
     pub(super) reconfiguration_completed: bool,
+    /// Flexible-quorum coverage (#140): a leadership ran under a flexible
+    /// split, and a slot was decided by an accept set that is not a majority
+    /// of its configuration — the two outcomes that prove `q2 < ⌊n/2⌋ + 1`
+    /// genuinely ran rather than merely being drawn.
+    pub(super) elected_flexible: bool,
+    pub(super) decided_below_majority: bool,
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
     pub(super) cross_config_phase1_checked: bool,
@@ -622,6 +628,14 @@ impl AuditState {
         assert_sometimes!(
             self.reconfiguration_completed,
             "reconfiguration: a leader is elected under a reconfigured acceptor set"
+        );
+        assert_sometimes!(
+            self.elected_flexible,
+            "flexible: an election completes under a flexible quorum system"
+        );
+        assert_sometimes!(
+            self.decided_below_majority,
+            "flexible: a slot is decided by fewer accepts than a majority"
         );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
@@ -815,6 +829,16 @@ impl AuditState {
                     self.decided
                         .insert(slot, (ballot.round, ballot.node.0, vhash));
                     self.decided_max = Some(self.decided_max.map_or(slot, |m| m.max(slot)));
+                    // The accept set that first made the decision is a Phase-2
+                    // quorum of the configuration; under a flexible split (or
+                    // a grid column) it may be smaller than a majority of it,
+                    // which is the whole point of the variant. Judged through
+                    // the boundary's own majority predicate, never a count.
+                    if let Some(c) = &config
+                        && !QuorumSystem::is_majority(c.members(), &voters)
+                    {
+                        self.decided_below_majority = true;
+                    }
                 }
                 // Two quorums (at any two ballots) must agree — the crown
                 // jewel judged on durable accepts alone, with no apply in the

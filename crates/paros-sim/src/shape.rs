@@ -36,7 +36,7 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
-use paros::DriverTunables;
+use paros::{DriverTunables, QuorumSystem};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -270,11 +270,75 @@ struct Entry {
     incarnations: u64,
 }
 
+/// The run's **quorum-system policy** (#140): how every configuration the run
+/// puts in force is judged, drawn once per seed and applied to each
+/// configuration's own size. Protocol data like the bootstrap ranks — a
+/// majority is the plain deployment's system and the default; a flexible
+/// split is the opt-in the swarm turns on per seed, so one campaign proves
+/// the library under both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuorumPolicy {
+    /// A majority in both phases.
+    Majority,
+    /// Flexible Paxos's simple quorums with `q2` accepts deciding and
+    /// `q1 = n - q2 + 1` promises electing — the tightest split that still
+    /// cross-intersects. `q2` is clamped to `1..=n/2` per configuration, so a
+    /// successor of a different size runs the same *kind* of split at its
+    /// own dimensions.
+    Flexible {
+        /// The Phase-2 quorum size drawn at the pool, before clamping.
+        q2: usize,
+    },
+}
+
+impl QuorumPolicy {
+    /// The quorum system a configuration of `n` acceptors runs under this
+    /// policy. **Floor:** `q1 + q2 = n + 1 > n` by construction and
+    /// `q2 >= 1`; the extreme `q2 = 1` is Flexible Paxos's "any single
+    /// acceptor learns a value in one hop", a valid configuration because
+    /// the fault window closes before the recovery tail does and the copy
+    /// budget ([`StorageWorld::set_budget`]) is sized over the split's
+    /// Phase-1 quorum. `n = 1` and `n = 2` admit only `q2 = 1`.
+    ///
+    /// [`StorageWorld::set_budget`]: crate::world::StorageWorld::set_budget
+    pub(crate) fn system(self, n: usize) -> QuorumSystem {
+        match self {
+            QuorumPolicy::Majority => QuorumSystem::Majority,
+            QuorumPolicy::Flexible { q2 } => {
+                let q2 = q2.clamp(1, (n / 2).max(1));
+                QuorumSystem::Flexible {
+                    q1: n.saturating_sub(q2).saturating_add(1),
+                    q2,
+                }
+            }
+        }
+    }
+
+    /// The clean live copies a record must keep under this policy at a
+    /// configuration of `n`: the **larger** of the two phase quorums. A
+    /// faulty slot is decidable only once a full Phase-1 quorum of clean
+    /// answers holds (CTRL R2/R3), and a value is choosable only while a
+    /// Phase-2 quorum is live, so a run stays winnable while both quorums
+    /// have clean members — `max(q1, q2)` copies. The tolerated loss per
+    /// record is therefore `n - max(q1, q2)`: `⌊(n-1)/2⌋` under a majority,
+    /// and `q2 - 1` under the split this policy draws (`q1 = n - q2 + 1 >=
+    /// q2`), never `⌊(n-1)/2⌋` assumed.
+    pub(crate) fn clean_copies(self, n: usize) -> usize {
+        let system = self.system(n);
+        system
+            .phase1_quorum_size(n)
+            .max(system.phase2_quorum_size(n))
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     /// Run-level: the application's digest-lane count, fixed by the first
     /// node to boot.
     lanes: Option<u8>,
+    /// Run-level: the quorum-system policy (see [`quorum_policy`]), fixed by
+    /// the first caller — a node or a client.
+    quorum: Option<QuorumPolicy>,
     /// Run-level: the bootstrap acceptor ranks (see [`bootstrap_ranks`]),
     /// fixed by the first caller — a node or a client.
     bootstrap: Option<Vec<u64>>,
@@ -339,6 +403,40 @@ pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
     })
 }
 
+/// The run's **quorum-system policy** (#140), drawn once per seed by whichever
+/// process or workload asks first and handed back unchanged to every later
+/// caller (an attrition restart must boot the same node under the same
+/// system, and every client must compose successors under it).
+///
+/// The default is the majority, the plain deployment's system. A perturbing
+/// seed may instead draw a **flexible split**: one `buggify_knob!` location
+/// for `q2` over the pool (default the majority, extreme `1..=pool/2`), with
+/// `q1 = n - q2 + 1` derived per configuration ([`QuorumPolicy::system`]).
+/// The split is opt-in configuration data on the core side, so a majority
+/// seed is byte-identical to a run before the policy existed; a corpus run
+/// (`perturb == false`) never draws.
+#[tracing::instrument(level = "debug", skip(state), fields(pool, perturb))]
+pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> QuorumPolicy {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.quorum.get_or_insert_with(|| {
+        let majority = pool / 2 + 1;
+        if !perturb || pool < 2 {
+            return QuorumPolicy::Majority;
+        }
+        let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
+        if q2 == majority {
+            return QuorumPolicy::Majority;
+        }
+        // BUGGIFY pairing: a seed genuinely runs a flexible split (a cause,
+        // never a `sometimes`; the outcomes — a slot decided by fewer accepts
+        // than a majority, an election completed under the split — are the
+        // audit's gates).
+        assert_reachable!("a run draws a flexible quorum system");
+        QuorumPolicy::Flexible { q2 }
+    })
+}
+
 /// The smallest acceptor configuration a matchmaker seed ever puts in force
 /// — the bootstrap never draws below it and no reconfiguration shrinks below
 /// it. Not a tunable: it is the size the storage world's copy budget is
@@ -347,15 +445,18 @@ pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
 pub(crate) const MIN_BOOTSTRAP: usize = 3;
 
 /// The **configuration floor** of a run, and the size the storage world's
-/// copy budget (`StorageWorld::set_cluster_size`) is computed over. On a
-/// plain deployment the membership is fixed at the whole pool, so the budget
-/// is sized by it, exactly as before matchmakers existed. On a matchmaker
+/// copy budget (`StorageWorld::set_budget`) is computed over. On a plain
+/// deployment the membership is fixed at the whole pool, so the budget is
+/// sized by it, exactly as before matchmakers existed. On a matchmaker
 /// deployment the acceptor set may shrink as far as [`MIN_BOOTSTRAP`], and the
-/// budget is sized by *that*: a budget that keeps a clean quorum of the
-/// smallest configuration keeps one of every larger configuration too (the
-/// tolerated loss `⌊(n-1)/2⌋` only grows with `n`), so it stays conservative
-/// through every reconfiguration at the cost of fewer storage-fault
-/// injections on the larger matchmaker seeds.
+/// budget is sized by *that*: a budget that keeps the clean copies the
+/// policy demands of the smallest configuration
+/// ([`QuorumPolicy::clean_copies`]) keeps them for every larger configuration
+/// too (the tolerated loss `n - max(q1, q2)` only grows with `n` under a
+/// policy that fixes `q2`), so it stays conservative through every
+/// reconfiguration at the cost of fewer storage-fault injections on the
+/// larger matchmaker seeds — and, under a flexible split at a three-node
+/// floor (`q2 = 1`, `q1 = 3`), of none at all.
 pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
     if has_matchmakers {
         MIN_BOOTSTRAP.min(pool)
@@ -541,5 +642,40 @@ mod tests {
         let state = StateHandle::new();
         let shape = boot(&state, "10.0.1.1", false).shape;
         assert_eq!(shape, NodeShape::production());
+    }
+
+    /// The policy is run-level: the first caller fixes it, a corpus run never
+    /// draws, and a majority policy is the plain system at every size.
+    #[test]
+    fn the_quorum_policy_is_fixed_by_the_first_caller() {
+        let state = StateHandle::new();
+        let first = quorum_policy(&state, 5, false);
+        assert_eq!(first, QuorumPolicy::Majority);
+        assert_eq!(quorum_policy(&state, 5, true), first);
+        for n in 1..=6 {
+            assert_eq!(first.system(n), QuorumSystem::Majority);
+            assert_eq!(first.clean_copies(n), n / 2 + 1);
+        }
+    }
+
+    /// The split's floor, spelled out: `q1 + q2 = n + 1` at every size, `q2`
+    /// clamped to `1..=n/2`, and the clean-copy requirement is the larger
+    /// quorum — `q1` — so the tolerated loss is `q2 - 1`.
+    #[test]
+    fn a_flexible_policy_cross_intersects_at_every_size() {
+        for drawn in 1..=3 {
+            let policy = QuorumPolicy::Flexible { q2: drawn };
+            for n in 1..=6 {
+                let QuorumSystem::Flexible { q1, q2 } = policy.system(n) else {
+                    panic!("a flexible policy runs a flexible split");
+                };
+                assert!(q2 >= 1);
+                assert!(q2 <= (n / 2).max(1));
+                assert_eq!(q1 + q2, n + 1);
+                assert!(policy.system(n).admits(n));
+                assert_eq!(policy.clean_copies(n), q1);
+                assert_eq!(n - policy.clean_copies(n), q2 - 1);
+            }
+        }
     }
 }

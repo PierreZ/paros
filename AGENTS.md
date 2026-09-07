@@ -274,8 +274,20 @@ The harness treats membership as protocol data, with one floor under every confi
 puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
 bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
 whole pool on a plain one. That floor, not the bootstrap size, is what the storage world's copy
-budget is computed over: a budget keeping a clean quorum of the smallest configuration keeps one
-of every larger configuration too. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
+budget is computed over: a budget keeping the clean copies the run's quorum-system policy demands
+of the smallest configuration keeps them for every larger configuration too. **The quorum system
+is protocol data drawn the same way (#140):** `paros_sim::shape::quorum_policy` draws once per
+seed — the majority by default, or a flexible split with one `buggify_knob!` for `q2` (extreme
+`1..=n/2`, floor `q2 >= 1`; `q1 = n - q2 + 1` derived per configuration so `q1 + q2 > n` always)
+— and every configuration a run puts in force, the bootstrap and every successor the composer
+asks for, runs the policy at its own size; on a flexible seed the composer may compose a
+majority successor (never the reverse, which the budget was not sized for), so the
+cross-configuration Phase 1 asks two systems their own predicates. The copy budget keeps a clean
+**Phase-1** quorum — the larger of the two under the drawn split — so the tolerated loss per
+record is `n - q1 = q2 - 1` there and `⌊(n-1)/2⌋` under a majority (`QuorumPolicy::clean_copies`
+derives it; nothing in the harness re-derives a threshold from a count). The draw is a
+`reachable`; the outcomes — an election completed under a flexible split, a slot decided by
+fewer accepts than a majority — are the audit's `sometimes` gates. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.

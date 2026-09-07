@@ -80,17 +80,28 @@ fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static 
 /// variant carries — `(phase1_quorum, phase2_quorum)` for a flexible split,
 /// `(rows, cols)` for a grid, all zero under a majority so a plain
 /// deployment's encoding is unchanged (proto3 omits default-valued fields).
-/// Shared by every message that carries a configuration or names one (the
-/// `Reconfigure` RPC), so the two encodings cannot drift.
-pub(crate) struct WireQuorumSystem {
-    pub(crate) quorum_system: i32,
-    pub(crate) phase1_quorum: u64,
-    pub(crate) phase2_quorum: u64,
-    pub(crate) rows: u64,
-    pub(crate) cols: u64,
+/// Shared by every message that carries a configuration or names one
+/// (`AcceptorConfig` inside every protocol message, the `Reconfigure`
+/// request, the `Inspect` reply), so the encodings cannot drift. Public so
+/// an operator or a client composing a `Reconfigure` fills the same fields
+/// the library reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WireQuorumSystem {
+    /// The `paros.common.v1.QuorumSystem` discriminant.
+    pub quorum_system: i32,
+    /// `q1` under a flexible split, else zero.
+    pub phase1_quorum: u64,
+    /// `q2` under a flexible split, else zero.
+    pub phase2_quorum: u64,
+    /// The grid's rows, else zero.
+    pub rows: u64,
+    /// The grid's columns, else zero.
+    pub cols: u64,
 }
 
-pub(crate) fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
+/// Encode a quorum system for the wire.
+#[must_use]
+pub fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
     let size = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
     let (kind, phase1_quorum, phase2_quorum, rows, cols) = match quorum_system {
         QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0, 0, 0),
@@ -113,9 +124,11 @@ pub(crate) fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumS
 /// Decode a wire quorum system. Only the discriminant and the sizes are
 /// checked here; whether the membership admits it is the caller's question
 /// (`QuorumSystem::admits`), asked once the membership is known.
-pub(crate) fn quorum_system_from_proto(
-    wire: &WireQuorumSystem,
-) -> Result<QuorumSystem, &'static str> {
+///
+/// # Errors
+///
+/// An unknown discriminant, or a size that does not fit a `usize`.
+pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem, &'static str> {
     match common::QuorumSystem::try_from(wire.quorum_system) {
         Ok(common::QuorumSystem::Majority) => Ok(QuorumSystem::Majority),
         Ok(common::QuorumSystem::Flexible) => Ok(QuorumSystem::Flexible {
