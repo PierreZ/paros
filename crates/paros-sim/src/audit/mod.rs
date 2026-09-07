@@ -46,9 +46,9 @@ use paros::{
     AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
     GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
     MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigureResult,
-    ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam, Slot, StorageError,
-    StorageFaultDecision, StorageRecord, command_hash, message_kind,
+    PROMISE_BATCH, PendingBootstrap, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam,
+    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash, message_kind,
 };
 
 use self::state::AuditState;
@@ -321,8 +321,21 @@ impl AuditWorld {
     ///
     /// Recorded here as coverage, never as a verdict: whether a seed draws both
     /// an attrition kill and a parking corruption is the swarm's business.
-    #[tracing::instrument(level = "debug", skip(self), fields(node, parked_peers, cluster_size))]
-    pub(crate) fn note_process_restart(&self, node: u64, parked_peers: usize, cluster_size: usize) {
+    /// `quorum` is the live members the configuration floor needs to keep
+    /// running — the run's quorum-system policy at that size, handed in
+    /// rather than re-derived from the count here.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(node, parked_peers, cluster_size, quorum)
+    )]
+    pub(crate) fn note_process_restart(
+        &self,
+        node: u64,
+        parked_peers: usize,
+        cluster_size: usize,
+        quorum: usize,
+    ) {
         let mut st = self.lock();
         if parked_peers == 0 {
             return;
@@ -331,7 +344,6 @@ impl AuditWorld {
             st.parked_overlap,
             "storage: a transient process loss overlaps a corruption-parked node"
         );
-        let quorum = cluster_size / 2 + 1;
         // The node reporting is the one that was down; anything else down at
         // the same time only makes the loss deeper, so this is the *at least*
         // side of the count.
@@ -1070,6 +1082,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.bind_config(won, config);
         if st.bootstrap.as_ref().is_some_and(|b| b != config) {
             st.reconfiguration_completed = true;
+        }
+        // The #140 outcome: a leadership genuinely ran under a flexible
+        // split (the draw is a `reachable` in `shape::quorum_policy`).
+        if matches!(config.quorum_system(), QuorumSystem::Flexible { .. }) {
+            st.elected_flexible = true;
         }
         if let Some(prev) = st.leader_round.insert(node.0, won.round) {
             assert_always!(

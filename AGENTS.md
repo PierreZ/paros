@@ -164,7 +164,16 @@ own**. The roles:
   *later* ballot decided behind it (a decision, the GC fence, a read's confirmation,
   `CheckQuorum`). Addressing goes through the same boundary
   (`QuorumSystem::phase2_addressees`), so flexible, grid and compartmentalized quorums are new
-  variants there — never a rewrite of a tally or of a fan-out. `AcceptorConfig`'s fields are
+  variants there — never a rewrite of a tally or of a fan-out. The grid (`QuorumSystem::Grid {
+  rows, cols }`, #141) is the first system that is not a cardinality: a Phase-1 quorum is any
+  full row and a Phase-2 quorum any full column, answered by set membership, and every slot's
+  `Accept` is addressed to **one column** — `slot % cols` (`QuorumSystem::column_of`), a pure
+  function of the slot so a handoff successor and a restarted leader's re-send derive the same
+  column without carrying it; the `Round` records it, `Audience::AcceptorsOf` carries it to the
+  driver, and the decision is judged by that column alone (`has_phase2_quorum_in`) — an acceptor
+  outside it that accepted a stray copy is a member whose vote does not count. The standing
+  claims (`CheckQuorum`, a read's confirmation, the GC fence) ask the column-less predicate and
+  any full column satisfies them. `AcceptorConfig`'s fields are
   private and `new` is its only constructor (deserialisation included): the membership is
   binary-searched, so an unsorted one would silently miscount rather than fail.
 - `matchmaking.rs` — `Matchmaking`: the candidate's matchmaking phase — the registration tally
@@ -184,7 +193,10 @@ caller hands each one the data it needs (the acceptor's own records when a Phase
 decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
 is no second Paxos kernel in the crate); flexible quorums are deployment data
 (`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
-changes). Still to come: Compartmentalized Paxos becomes deployment data the same way.
+changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, cols }`, #141
+— set-membership predicates and column addressing, still zero tally lines). Still to come: the
+rest of Compartmentalized Paxos (proxy leaders, quorum reads, a replica tier) becomes deployment
+data the same way.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -262,8 +274,20 @@ The harness treats membership as protocol data, with one floor under every confi
 puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
 bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
 whole pool on a plain one. That floor, not the bootstrap size, is what the storage world's copy
-budget is computed over: a budget keeping a clean quorum of the smallest configuration keeps one
-of every larger configuration too. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
+budget is computed over: a budget keeping the clean copies the run's quorum-system policy demands
+of the smallest configuration keeps them for every larger configuration too. **The quorum system
+is protocol data drawn the same way (#140):** `paros_sim::shape::quorum_policy` draws once per
+seed — the majority by default, or a flexible split with one `buggify_knob!` for `q2` (extreme
+`1..=n/2`, floor `q2 >= 1`; `q1 = n - q2 + 1` derived per configuration so `q1 + q2 > n` always)
+— and every configuration a run puts in force, the bootstrap and every successor the composer
+asks for, runs the policy at its own size; on a flexible seed the composer may compose a
+majority successor (never the reverse, which the budget was not sized for), so the
+cross-configuration Phase 1 asks two systems their own predicates. The copy budget keeps a clean
+**Phase-1** quorum — the larger of the two under the drawn split — so the tolerated loss per
+record is `n - q1 = q2 - 1` there and `⌊(n-1)/2⌋` under a majority (`QuorumPolicy::clean_copies`
+derives it; nothing in the harness re-derives a threshold from a count). The draw is a
+`reachable`; the outcomes — an election completed under a flexible split, a slot decided by
+fewer accepts than a majority — are the audit's `sometimes` gates. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.

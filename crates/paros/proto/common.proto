@@ -21,21 +21,28 @@ message Ballot {
 // How a quorum is derived from a membership. A majority is the default and
 // the plain deployment's system; a flexible split (Flexible Paxos's simple
 // quorums, `|Q1| = phase1_quorum`, `|Q2| = phase2_quorum`, `q1 + q2 > n`)
-// carries its two sizes in the configuration beside it. Grid quorums land
-// here as a further variant, on both wires at once.
+// carries its two sizes in the configuration beside it; a grid
+// (Compartmentalized Paxos §3.2: the sorted membership laid out row-major,
+// any full row a Phase-1 quorum, any full column a Phase-2 quorum,
+// `rows * cols == n`) carries its two dimensions. The same enum on both
+// wires, so the variants cannot drift.
 enum QuorumSystem {
   QUORUM_SYSTEM_MAJORITY = 0;
   QUORUM_SYSTEM_FLEXIBLE = 1;
+  QUORUM_SYSTEM_GRID = 2;
 }
 
 // An acceptor configuration: a membership plus the quorum system over it.
-// The two sizes are meaningful only under `QUORUM_SYSTEM_FLEXIBLE`; a
-// majority configuration leaves them at zero, so its encoding — and every
-// message a plain deployment exchanges — is byte-identical to before the
-// variant existed (proto3 omits default-valued fields).
+// The two sizes are meaningful only under `QUORUM_SYSTEM_FLEXIBLE` and the
+// two dimensions only under `QUORUM_SYSTEM_GRID`; a majority configuration
+// leaves all four at zero, so its encoding — and every message a plain
+// deployment exchanges — is byte-identical to before either variant
+// existed (proto3 omits default-valued fields).
 message AcceptorConfig {
   repeated uint64 members = 1;
   QuorumSystem quorum_system = 2;
   uint64 phase1_quorum = 3;
   uint64 phase2_quorum = 4;
+  uint64 rows = 5;
+  uint64 cols = 6;
 }

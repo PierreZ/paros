@@ -522,14 +522,14 @@ fn phase2(
     // this proposer is no acceptor. Each `Accepted` reply carries the
     // value's fingerprint, so a vote for a different value at the same
     // ballot could never be miscounted as a vote for this one.
-    proposer.open_round(DECREE, ballot, candidate.clone(), None);
+    proposer.open_round(DECREE, ballot, candidate.clone(), None, None);
     println!(
         "ballot {}: Accept goes to every acceptor, asking for a vote on {}",
         show_ballot(ballot),
         show(candidate)
     );
     let mut chosen = None;
-    for id in config.phase2_addressees().to_vec() {
+    for id in config.phase2_addressees(None) {
         if !reach.contains(&id) {
             println!("  {} -> (unreachable: the Accept never arrives)", name(id));
             continue;

@@ -295,6 +295,14 @@ message InspectReply {
   .paros.common.v1.Ballot config_ballot = 5;
   // Whether this node currently leads.
   bool leader = 6;
+  // The quorum system of that configuration — what an operator composing a
+  // successor reads beside the members. The same encoding as
+  // `paros.common.v1.AcceptorConfig`.
+  .paros.common.v1.QuorumSystem quorum_system = 11;
+  uint64 phase1_quorum = 12;
+  uint64 phase2_quorum = 13;
+  uint64 rows = 14;
+  uint64 cols = 15;
   // The matchmaker set this node believes authoritative (#125): its
   // generation and members (empty on plain Multi-Paxos).
   uint64 matchmaker_generation = 7;

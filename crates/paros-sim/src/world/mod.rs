@@ -274,6 +274,9 @@ pub(crate) struct StorageWorld {
     /// zero refuses every injection). This is the run's *configuration floor*
     /// (`crate::shape::config_floor`), not the pool.
     cluster_size: usize,
+    /// The clean live copies every record must keep at `cluster_size`
+    /// (see [`StorageWorld::quorum`]); set with it.
+    clean_copies_required: usize,
     /// The addressable node pool (set once at boot): every identity the
     /// deployment names, members and spares alike. The retirement budget is
     /// the difference between it and [`StorageWorld::cluster_size`].
@@ -527,13 +530,25 @@ impl StorageWorld {
         self.unbudgeted = true;
     }
 
-    pub(crate) fn set_cluster_size(&mut self, n: usize) {
+    /// Size the copy budget: `n` is the run's configuration floor
+    /// (`crate::shape::config_floor`) and `clean_copies` the clean live copies
+    /// every record must keep at that size — the larger of the floor
+    /// configuration's two phase quorums under the run's quorum-system policy
+    /// (`crate::shape::QuorumPolicy::clean_copies`; a majority under the
+    /// plain policy). Set once at boot, first caller wins, and every node
+    /// must derive the same pair.
+    pub(crate) fn set_budget(&mut self, n: usize, clean_copies: usize) {
         if self.cluster_size == 0 {
             self.cluster_size = n;
+            self.clean_copies_required = clean_copies;
         }
         assert_always!(
             self.cluster_size == n,
             "storage: every node derives the same cluster size"
+        );
+        assert_always!(
+            self.clean_copies_required == clean_copies,
+            "storage: every node derives the same clean-copy requirement"
         );
     }
 
@@ -549,8 +564,16 @@ impl StorageWorld {
         );
     }
 
+    /// The clean live copies every record keeps — the **quorum** the budget
+    /// defends. Under a majority it is `⌊n/2⌋ + 1`; under a flexible split it
+    /// is the Phase-1 quorum `q1` (the larger of the two): a faulty slot is
+    /// decidable only once a full Phase-1 quorum of clean answers holds
+    /// (CTRL R2/R3), so the tolerated loss per record is `n - q1 = q2 - 1`,
+    /// not `⌊(n-1)/2⌋`. Never re-derived from a count here: the policy's
+    /// arithmetic is done once at boot and handed in through
+    /// [`StorageWorld::set_budget`].
     fn quorum(&self) -> usize {
-        self.cluster_size / 2 + 1
+        self.clean_copies_required
     }
 
     /// Clean live copies of the accepted-log record at `slot`: cluster members

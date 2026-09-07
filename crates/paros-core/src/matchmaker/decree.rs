@@ -221,8 +221,9 @@ impl Decree {
             .recovered
             .get(&DECREE_SLOT)
             .map_or_else(|| self.proposal.clone(), |(_, v)| v.clone());
+        // A majority names no column.
         self.proposer
-            .open_round(DECREE_SLOT, self.ballot, value.clone(), None);
+            .open_round(DECREE_SLOT, self.ballot, value.clone(), None, None);
         DecreePromise::Quorum(value)
     }
 

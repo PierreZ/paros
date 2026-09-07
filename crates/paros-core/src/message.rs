@@ -29,11 +29,19 @@ pub enum Audience {
     /// One node, by id: every reply, every targeted request, the single
     /// successor of a handoff.
     Node(NodeId),
-    /// The Phase-2 addressees of `config`
+    /// The Phase-2 addressees of `config` in `column`
     /// ([`AcceptorConfig::phase2_addressees`]) — an `Accept`'s fan-out. A
-    /// removed node is never contacted for a new ballot's accepts, and a
-    /// grid or compartmentalized deployment addresses one column here.
-    AcceptorsOf(AcceptorConfig),
+    /// removed node is never contacted for a new ballot's accepts. The
+    /// column is the one the core resolved for the round
+    /// ([`AcceptorConfig::column_of`], `None` under a majority or a flexible
+    /// split), carried here so the driver's deployment map never re-derives
+    /// it: a grid addresses that one column and nothing else.
+    AcceptorsOf {
+        /// The configuration the round runs under.
+        config: AcceptorConfig,
+        /// The column the round was opened against.
+        column: Option<usize>,
+    },
     /// Every node of the pool — the learner fan-out (commits, beats,
     /// catch-up), which reaches spares and removed members too so every
     /// replica keeps the chosen log.
@@ -49,10 +57,9 @@ impl Audience {
     pub fn resolve(&self, pool: &[NodeId], me: NodeId) -> Vec<NodeId> {
         match self {
             Audience::Node(to) => vec![*to],
-            Audience::AcceptorsOf(config) => config
-                .phase2_addressees()
-                .iter()
-                .copied()
+            Audience::AcceptorsOf { config, column } => config
+                .phase2_addressees(*column)
+                .into_iter()
                 .filter(|p| *p != me)
                 .collect(),
             Audience::Learners => pool.iter().copied().filter(|p| *p != me).collect(),

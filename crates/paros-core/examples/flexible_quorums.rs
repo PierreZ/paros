@@ -331,14 +331,14 @@ fn accept_round(
     me.acceptor
         .record_accepted(slot, ballot, command.clone(), &mut me.disk);
     me.proposer
-        .open_round(slot, ballot, command.clone(), Some(leader));
+        .open_round(slot, ballot, command.clone(), Some(leader), None);
     println!(
         "ballot {}: accept slot {} = {} (needs q2 = 2 accepts, the leader's own included)",
         show_ballot(ballot),
         slot.0,
         show(command)
     );
-    for peer in config.phase2_addressees().to_vec() {
+    for peer in config.phase2_addressees(None) {
         if peer == leader {
             continue;
         }

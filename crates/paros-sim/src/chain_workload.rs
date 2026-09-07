@@ -1,6 +1,6 @@
 //! Chain-of-Blocks client workload.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -13,8 +13,9 @@ use moonpool_sim::{
     buggify_with_prob, swarm_op_enabled,
 };
 use paros::{
-    Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose, Read,
-    Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, parse_addr,
+    Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose,
+    QuorumSystem, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, WireQuorumSystem,
+    parse_addr, quorum_system_from_proto, quorum_system_to_proto,
 };
 
 use crate::audit::{ClientHistory, audit_world, check_run};
@@ -705,6 +706,11 @@ impl Workload for ChainWorkload {
         } else {
             1
         };
+        // The run's quorum-system policy (#140): what every successor this
+        // client composes runs under, at the successor's own size. Drawn by
+        // whoever asked first — a node or this client — and the same for
+        // both.
+        let policy = crate::shape::quorum_policy(ctx.state(), servers.len(), true);
         // The matchmaker pool's address book and the floor no matchmaker set
         // this client asks for goes below (#125): the bootstrap set's size,
         // capped at three — the smallest set that keeps a quorum after the
@@ -867,15 +873,21 @@ impl Workload for ChainWorkload {
                 CompactResult::Ambiguous
             }
         };
-        let reconfigure_once = |target: usize, members: Vec<u64>| {
+        let reconfigure_once = |target: usize, members: Vec<u64>, quorum_system: QuorumSystem| {
             let clients = public_clients.clone();
             let time = time.clone();
             async move {
                 let mut attempt_target = target % clients.len();
                 let mut client = clients[attempt_target].clone();
+                let wire = quorum_system_to_proto(quorum_system);
                 for _attempt in 0..config.reconfigure_attempts {
                     let request = Reconfigure {
                         members: members.clone(),
+                        quorum_system: wire.quorum_system,
+                        phase1_quorum: wire.phase1_quorum,
+                        phase2_quorum: wire.phase2_quorum,
+                        rows: wire.rows,
+                        cols: wire.cols,
                     };
                     let outcome = moonpool_sim::select! {
                         response = client.reconfigure(request) => match response {
@@ -1752,13 +1764,25 @@ impl Workload for ChainWorkload {
                     // operating condition, never a wrong state.
                     let probe_target = leader_hint.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
-                    let members = moonpool_sim::select! {
+                    let in_force = moonpool_sim::select! {
                         response = probe.inspect(InspectRequest {}) => response
                             .ok()
-                            .map(|response| response.into_inner().members),
+                            .map(|response| {
+                                let reply = response.into_inner();
+                                let wire = WireQuorumSystem {
+                                    quorum_system: reply.quorum_system,
+                                    phase1_quorum: reply.phase1_quorum,
+                                    phase2_quorum: reply.phase2_quorum,
+                                    rows: reply.rows,
+                                    cols: reply.cols,
+                                };
+                                (reply.members, quorum_system_from_proto(&wire).ok())
+                            }),
                         _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
                         () = shutdown.cancelled() => None,
                     };
+                    let members = in_force.as_ref().map(|(members, _)| members.clone());
+                    let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
                     let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
                     // The successor draws from the live pool: an identity the
@@ -1782,8 +1806,35 @@ impl Workload for ChainWorkload {
                     let all_ranks: Vec<u64> =
                         (0..u64::try_from(server_count).unwrap_or(0)).collect();
                     let adversarial_members = buggify_with_prob!(0.10);
+                    // The successor's quorum system (#140): the seed's policy
+                    // at the successor's own size — or, on a flexible seed,
+                    // a coin that composes a *majority* successor instead,
+                    // so the cross-configuration Phase 1 asks two different
+                    // systems their own predicates. Only that direction: a
+                    // majority successor always sits inside the copy budget
+                    // a flexible policy was sized for (its quorum is at most
+                    // the split's `q1`), while a split on a majority seed
+                    // would not, so a majority seed never composes one.
+                    let switch_to_majority =
+                        matches!(policy, crate::shape::QuorumPolicy::Flexible { .. })
+                            && buggify_with_prob!(0.25);
+                    let successor_system = |n: usize| {
+                        if switch_to_majority {
+                            QuorumSystem::Majority
+                        } else {
+                            policy.system(n)
+                        }
+                    };
+                    // A live quorum of *both* phases under the successor's
+                    // own system: Phase 1 must complete against it (it is in
+                    // `H_b` from then on) and Phase 2 must decide under it.
+                    // Asked of the membership boundary, never a count.
                     let keeps_live_quorum = |next: &[u64]| {
-                        next.iter().filter(|m| live.contains(m)).count() * 2 > next.len()
+                        let live_members: BTreeSet<u64> =
+                            next.iter().filter(|m| live.contains(m)).copied().collect();
+                        let system = successor_system(next.len());
+                        system.is_phase1_quorum(next, &live_members)
+                            && system.is_phase2_quorum(next, &live_members)
                     };
                     // Most shapes need a spare, which most seeds do not have:
                     // walk the shape ring from the draw so an impossible
@@ -1838,8 +1889,25 @@ impl Workload for ChainWorkload {
                                 "reconfiguration: a successor acceptor set shares no member with its predecessor"
                             );
                         }
-                        tracing::info!(shape = name, members = ?next, "chain_reconfigure_request");
-                        let outcome = reconfigure_once(probe_target, next).await;
+                        let mut system = successor_system(next.len());
+                        if system_in_force.is_some_and(|in_force| {
+                            std::mem::discriminant(&in_force) != std::mem::discriminant(&system)
+                        }) {
+                            assert_reachable!(
+                                "reconfiguration: the client composes a successor under a different quorum system"
+                            );
+                        }
+                        // The adversarial half (R5's spirit): an operator who
+                        // names a quorum system the membership does not admit
+                        // — `1 + 1 > n` fails for any two or more members —
+                        // must be refused at the wire, never crash the node.
+                        let malformed = buggify_with_prob!(0.05)
+                            && !QuorumSystem::Flexible { q1: 1, q2: 1 }.admits(next.len());
+                        if malformed {
+                            system = QuorumSystem::Flexible { q1: 1, q2: 1 };
+                        }
+                        tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
+                        let outcome = reconfigure_once(probe_target, next, system).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
                         match outcome {
                             ReconfigureResult::Started { leader, .. } => {
@@ -1849,6 +1917,11 @@ impl Workload for ChainWorkload {
                                 assert_always!(
                                     has_matchmakers,
                                     "reconfiguration: a deployment without matchmakers never accepts a reconfiguration",
+                                    { "shape" => name }
+                                );
+                                assert_always!(
+                                    !malformed,
+                                    "reconfiguration: a configuration that does not admit its quorum system is never started",
                                     { "shape" => name }
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
@@ -1867,6 +1940,16 @@ impl Workload for ChainWorkload {
                                         { "shape" => name }
                                     );
                                     self.adversarial.reconfigure_refused_plain = true;
+                                }
+                                if refusal == "malformed" {
+                                    assert_always!(
+                                        malformed,
+                                        "reconfiguration: only a configuration that does not admit its quorum system is refused as malformed",
+                                        { "shape" => name }
+                                    );
+                                    assert_reachable!(
+                                        "reconfiguration: a configuration that does not admit its quorum system is refused"
+                                    );
                                 }
                                 Self::update_leader_hint(
                                     &mut leader_hint,

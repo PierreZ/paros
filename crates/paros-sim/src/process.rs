@@ -264,13 +264,18 @@ async fn run_acceptor(
             .into_iter()
             .map(MatchmakerId)
             .collect();
+    // The quorum system is protocol data too (#140): the run's policy, drawn
+    // once per seed, applied to the bootstrap configuration's own size. A
+    // majority on a plain or unperturbed seed; a flexible split on the seeds
+    // the swarm turns it on for.
+    let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let config = Config {
         id: self_rank,
         peers: bootstrap.clone(),
+        quorum_system: policy.system(bootstrap.len()),
         nodes: pool,
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
-        ..Config::default()
     };
 
     // The per-iteration durable-storage world, shared by every node and
@@ -292,11 +297,12 @@ async fn run_acceptor(
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
         // The copy budget is sized by the run's configuration floor
         // (`crate::shape::config_floor`): the whole pool on a plain seed, the
-        // smallest set a reconfiguration may shrink to on a matchmaker seed.
-        guard.set_cluster_size(crate::shape::config_floor(
-            config.pool().len(),
-            config.has_matchmakers(),
-        ));
+        // smallest set a reconfiguration may shrink to on a matchmaker seed —
+        // and by the clean copies the run's quorum-system policy demands of a
+        // configuration that size (a majority, or the split's Phase-1
+        // quorum).
+        let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
+        guard.set_budget(floor, policy.clean_copies(floor));
         // The pool above that floor is the retirement budget (#123): every
         // identity a configuration may leave behind.
         guard.set_pool_size(config.pool().len());
@@ -341,11 +347,8 @@ async fn run_acceptor(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .parked_count_excluding(my_ip);
-        checker.note_process_restart(
-            self_rank.0,
-            parked_peers,
-            crate::shape::config_floor(config.pool().len(), config.has_matchmakers()),
-        );
+        let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
+        checker.note_process_restart(self_rank.0, parked_peers, floor, policy.clean_copies(floor));
         // The disk's wipe coin (#124): a restart that comes back on an empty
         // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
         // which paros does not use (the fake disk is the world), so the
@@ -679,7 +682,7 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .set_cluster_size(1);
+            .set_budget(1, 1);
         world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -57,8 +57,8 @@ use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, GcAck, MatchRefusal,
     MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole,
-    ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    ProposeResult, ReadIndexResult, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest,
+    ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -67,7 +67,7 @@ use crate::audit::Audit;
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
     ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck,
-    RpcInbox, common, rpc_channel,
+    RpcInbox, WireQuorumSystem, common, rpc_channel,
 };
 use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
@@ -889,10 +889,27 @@ where
                 // refuses outright, and an unsettled leadership asks the
                 // client to retry.
                 let members: Vec<NodeId> = req.members.iter().copied().map(NodeId).collect();
-                let result = if members.is_empty() {
-                    ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember)
-                } else {
-                    node.reconfigure(&AcceptorConfig::new(members.clone(), QuorumSystem::Majority))
+                // The quorum system is the request's (#140): a data change
+                // like the membership. Wire input, so a system the
+                // membership does not admit is *refused* here — the one
+                // place it is validated — where `AcceptorConfig::new` would
+                // panic on it.
+                let quorum_system = crate::grpc::quorum_system_from_proto(&WireQuorumSystem {
+                    quorum_system: req.quorum_system,
+                    phase1_quorum: req.phase1_quorum,
+                    phase2_quorum: req.phase2_quorum,
+                    rows: req.rows,
+                    cols: req.cols,
+                });
+                let distinct = members.iter().collect::<std::collections::BTreeSet<_>>().len();
+                let result = match quorum_system {
+                    _ if members.is_empty() => {
+                        ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember)
+                    }
+                    Ok(quorum_system) if quorum_system.admits(distinct) => {
+                        node.reconfigure(&AcceptorConfig::new(members.clone(), quorum_system))
+                    }
+                    _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
                 };
                 audit.reconfigure_acked(NodeId(self_id), &members, result);
                 let (accepted, refusal, round) = match result {
@@ -901,6 +918,7 @@ where
                     ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => (false, "no_matchmakers", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => (false, "unknown_member", None),
+                    ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
                     ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => (false, "round_exhausted", None),
                 };
@@ -1026,11 +1044,17 @@ where
                         retired.iter().map(|n| n.0).collect(),
                     )
                 });
+                let quorum_system = crate::grpc::quorum_system_to_proto(node.acceptors().quorum_system());
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.acceptor().first_slot().0,
                     snapshot: storage.snapshot().await,
                     members: node.acceptors().members().iter().map(|n| n.0).collect(),
+                    quorum_system: quorum_system.quorum_system,
+                    phase1_quorum: quorum_system.phase1_quorum,
+                    phase2_quorum: quorum_system.phase2_quorum,
+                    rows: quorum_system.rows,
+                    cols: quorum_system.cols,
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
                     matchmaker_generation: matchmakers.map_or(0, |set| set.generation.0),

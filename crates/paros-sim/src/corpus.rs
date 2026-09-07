@@ -378,7 +378,7 @@ impl CorpusClients {
             }
             let mut client = self.public[target].clone();
             let response = moonpool_sim::select! {
-                response = client.reconfigure(Reconfigure { members: members.to_vec() }) => {
+                response = client.reconfigure(Reconfigure { members: members.to_vec(), ..Reconfigure::default() }) => {
                     response.ok().map(tonic::Response::into_inner)
                 }
                 _ = time.sleep(RPC_TIMEOUT) => None,

@@ -80,16 +80,37 @@ impl ColocatedNode {
             .push((Audience::Learners, msg.clone()));
     }
 
-    /// Queue `msg` to every Phase-2 addressee of the active configuration
-    /// except this node — the Phase-2 fan-out: a removed node is never
-    /// contacted for a new ballot's accepts. The addressee list comes from
-    /// the membership boundary ([`AcceptorConfig::phase2_addressees`]), not
-    /// from iterating the membership here, so a grid or compartmentalized
-    /// deployment addresses a column without touching this fan-out. Under
-    /// the majority system that is the whole membership, as before.
-    pub(super) fn broadcast_acceptors(&mut self, msg: &Message) {
-        self.pending_messages
-            .push((Audience::AcceptorsOf(self.acceptors.clone()), msg.clone()));
+    /// Queue an `Accept` for `slot` to every Phase-2 addressee of the active
+    /// configuration in `column` except this node — the Phase-2 fan-out: a
+    /// removed node is never contacted for a new ballot's accepts. The
+    /// addressee list comes from the membership boundary
+    /// ([`AcceptorConfig::phase2_addressees`]), never from iterating the
+    /// membership here: a grid addresses the one column the round was
+    /// opened against, a majority or a flexible split the whole membership.
+    /// Both the first send ([`ColocatedNode::start_accept_round`]) and the
+    /// re-send ([`ColocatedNode::resend_pending`]) come through here with
+    /// the column the round recorded, so the two always agree.
+    pub(super) fn send_accept(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: Command,
+        column: Option<usize>,
+    ) {
+        let me = self.config.id;
+        self.pending_messages.push((
+            Audience::AcceptorsOf {
+                config: self.acceptors.clone(),
+                column,
+            },
+            Message::Accept {
+                reply_to: me,
+                leader: me,
+                ballot,
+                slot,
+                command,
+            },
+        ));
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign

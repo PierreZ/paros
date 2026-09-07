@@ -13,8 +13,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `Deployment`, `Role`.
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
   (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
-  `bootstrap_ranks`, `matchmaker_bootstrap_ranks`), drawn once per node per
-  seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
+  `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the run's `QuorumPolicy`
+  through `quorum_policy` — majority or a flexible split, #140), drawn once
+  per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
 - `process.rs` `NodeProcess::{chaotic, scripted, scripted_with_bootstrap,
   scripted_with_seam_crash}`, `MatchmakerProcess`, `IdleProcess`,
