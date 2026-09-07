@@ -8,7 +8,8 @@ doctrine; this file is the map.
 ## Map
 
 - `acceptor.rs` `Acceptor` · `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
-  `Proposer` · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
+  `Proposer` (its Phase-2 tally is the standalone `proposer::Rounds` it embeds and delegates
+  to — the one tally a proxy leader runs without the rest of the role, #142) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
   `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
   `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,

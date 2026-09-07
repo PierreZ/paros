@@ -271,7 +271,6 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         );
         assert!(self.probe.is_none(), "a candidate holds no repair probe");
         self.rounds.clear();
-        self.resend_cursor = None;
         // ---- Faulty-slot tally (Stage 8, CTRL): a slot some quorum member
         // reported *faulty* is fair game for the pump only if the tally
         // already rules out a hidden chosen value (see `qualifying_answers`):

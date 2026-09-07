@@ -145,7 +145,11 @@ own**. The roles:
   floor and the CTRL faulty set; it decides `prepare`/`admit` and emits the write ops.
 - `proposer.rs` — `Proposer`: the Phase-1 election (per-configuration completion, the P2c
   merge), the CTRL repair probe, the Phase-2 rounds and their decision, the bounded recovery a
-  fresh leadership drains. Its policies are **explicit types, never flags**
+  fresh leadership drains. The Phase-2 rounds are a **standalone tally** it embeds and delegates
+  to (`proposer::Rounds`, `proposer/rounds.rs`, #142 rung 0): the one tally another deployment
+  runs *without* the rest of the role — Compartmentalized Paxos's proxy leader is a `Rounds` plus
+  routing — so there is never a second Phase-2 kernel, exactly as the decree reuses `Proposer` +
+  `Acceptor` at slot zero. Its policies are **explicit types, never flags**
   (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
   `gap_fill: bool` would not).
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once

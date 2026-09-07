@@ -17,7 +17,7 @@ because the perturbation is a caller that stops calling.
 | Concern | Module |
 |---|---|
 | durable promise, accepted log, compaction floor, CTRL faulty set | `acceptor.rs` (`Acceptor`) |
-| Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds, bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
+| Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds (the standalone `Rounds` tally the proposer embeds; a proxy leader embeds the same one, never a second kernel), bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
 | chosen prefix, contiguous apply walk, at-most-once ledger, repair cursor; `chosen_gap()` lives here (`node.replica().chosen_gap()`) | `replica.rs` (`Replica`) |
 | `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership.rs` |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |

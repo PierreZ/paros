@@ -48,7 +48,7 @@ pub use self::authority::ReadRound;
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
-pub use self::rounds::{PendingAccept, Round};
+pub use self::rounds::{PendingAccept, Round, Rounds};
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
@@ -311,12 +311,12 @@ pub struct Proposer<Id, V> {
     election: Option<Election<Id, V>>,
     /// The leader's open repair probe (Stage 8, CTRL).
     probe: Option<RepairProbe<Id, V>>,
-    /// Per-slot in-flight Phase-2 rounds, keyed by slot. The leader streams these.
-    rounds: BTreeMap<Slot, Round<Id, V>>,
+    /// The Phase-2 tally: the per-slot in-flight rounds the leader streams
+    /// and their re-send cursor — a standalone [`Rounds`] this role embeds
+    /// and delegates to (the proxy leader of #142 embeds the same one).
+    rounds: Rounds<Id, V>,
     /// Remaining bounded recovery work for the current leadership.
     recovery: Option<Recovery<V>>,
-    /// Fair cursor for bounded pending-Accept re-sends.
-    resend_cursor: Option<Slot>,
     /// Next slot a fresh proposal is allocated at. The **one** piece of this
     /// component that outlives a leadership: it is derived from the durable
     /// accepted log (at boot, at a snapshot install, at a won Phase 1), not
@@ -340,9 +340,8 @@ impl<Id, V> Default for Proposer<Id, V> {
         Self {
             election: None,
             probe: None,
-            rounds: BTreeMap::new(),
+            rounds: Rounds::default(),
             recovery: None,
-            resend_cursor: None,
             next_slot: Slot(0),
             read_floor: None,
             read_rounds: Vec::new(),
@@ -397,7 +396,6 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         self.probe = None;
         self.rounds.clear();
         self.recovery = None;
-        self.resend_cursor = None;
         self.read_floor = None;
         self.read_rounds.clear();
         self.quorum_acked_by.clear();
