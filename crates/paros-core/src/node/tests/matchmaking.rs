@@ -998,3 +998,122 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     assert_eq!(history.len(), 1);
     assert_eq!(next_from_ballot, None);
 }
+
+/// A GC raise between two pages of one answer collects the cursor itself:
+/// the matchmaker's next page starts at its raised watermark, *above* the
+/// cursor the candidate asked for, and reports that watermark beside it.
+/// The candidate takes the page — everything it skipped sits below a floor
+/// the fold maxes into the closing watermark — and the campaign completes
+/// with the union filtered at the raised floor. Refusing it wedged the
+/// campaign at that matchmaker for good: `tick` never abandons a pending
+/// matchmaking, so the candidate re-asked from the collected cursor forever
+/// (the handover model's claim 4 found it on seed 8 once its tail raised
+/// floors between pages). A page above the cursor that does *not* start at
+/// the sender's watermark is still not the one owed.
+#[test]
+fn a_page_that_starts_at_a_raised_watermark_above_the_cursor_is_taken() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    let cursor = ballot(200, 1);
+    assert_eq!(
+        n.on_match_reply(registered_page(
+            0,
+            b,
+            Ballot::zero(),
+            full_page(&[0, 1, 3]),
+            Some(cursor),
+        )),
+        MatchStep::Paged { next: cursor }
+    );
+    drain_match_requests(&mut n);
+    // Above the cursor but not at the reported floor: a page of some other
+    // shape, ignored whole.
+    let raised = ballot(300, 1);
+    let second = BTreeMap::from([belief(ballot(301, 1), &[1, 2, 3])]);
+    assert_eq!(
+        n.on_match_reply(registered_page(0, b, raised, second.clone(), None)),
+        MatchStep::Ignored
+    );
+    // The same page at the floor it reports: taken, and it closes the answer.
+    let mut reply = registered_page(0, b, raised, second, None);
+    if let MatchOutcome::Registered { gc_watermark, .. } = &mut reply.outcome {
+        *gc_watermark = raised;
+    }
+    let step = n.on_match_reply(reply);
+    let MatchStep::Completed {
+        prior, watermark, ..
+    } = step
+    else {
+        panic!("the page at the raised floor closes the quorum: {step:?}");
+    };
+    assert_eq!(
+        watermark, raised,
+        "the raised floor is the closing watermark"
+    );
+    assert_eq!(
+        prior,
+        vec![cfg(&[1, 2, 3])],
+        "the first page's configurations sit below the raised floor"
+    );
+}
+
+/// The same wedge end to end against a real registry: a registry larger
+/// than a page answers a prefix and a cursor, its floor rises over that
+/// cursor before the re-ask lands, and the re-asked page starts at the new
+/// floor. The candidate's campaign completes anyway.
+#[test]
+fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign() {
+    let page = crate::matchmaker::REGISTRY_PAGE as u64;
+    let mut mms = registries(1);
+    for round in 1..=page + 1 {
+        mms[0].step(MatchRequest::new(
+            NodeId(1),
+            ballot(round, 1),
+            cfg(&[0, 1, 2]),
+            MatchmakerGeneration(0),
+        ));
+        mms[0].ready().advance();
+    }
+    // The candidate's first campaign is stale against that registry; the
+    // refusal raises its round floor and the next one opens above it.
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    assert!(matches!(
+        run_matchmaking(&mut n, &mut mms).as_slice(),
+        [MatchStep::Refused(MatchRefusal::Stale { .. })]
+    ));
+    campaign(&mut n);
+    let b = n.ballot();
+    assert!(b > ballot(page + 1, 1));
+    let cursor = ballot(page + 1, 1);
+    assert_eq!(
+        run_matchmaking(&mut n, &mut mms),
+        vec![MatchStep::Paged { next: cursor }]
+    );
+    // A leader's GC lands between the two pages, strictly above the cursor
+    // and below the campaign.
+    let raised = ballot(page + 1, 5);
+    assert!(raised > cursor && raised < b);
+    assert_eq!(
+        mms[0].advance_gc_watermark(MatchmakerGeneration(0), raised),
+        crate::matchmaker::GcOutcome::Raised
+    );
+    mms[0].ready().advance();
+    // The re-ask from the cursor is answered from the raised floor, and the
+    // candidate closes on it: nothing below the floor is owed to Phase 1.
+    let steps = run_matchmaking(&mut n, &mut mms);
+    let [
+        MatchStep::Completed {
+            prior, watermark, ..
+        },
+    ] = steps.as_slice()
+    else {
+        panic!("the campaign completes on the page at the raised floor: {steps:?}");
+    };
+    assert_eq!(*watermark, raised);
+    assert!(
+        prior.is_empty(),
+        "every prior configuration sits below the raised floor"
+    );
+}
