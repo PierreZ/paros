@@ -482,10 +482,28 @@ where
     // With an absolute deadline the sleep is zero-length once the deadline
     // passes and fires regardless of load.
     let mut next_tick = time.now() + tunables.tick_interval;
+    // The accept future is PERSISTENT across select passes, for the same
+    // reason the tick deadline above is absolute: `select!` drops and
+    // re-creates its futures every pass, and a dropped accept forfeits its
+    // progress. moonpool charges the accept latency per `accept()` call and
+    // returns the reserved connection to the listener's queue when the future
+    // is dropped, so under a client storm arriving faster than that latency
+    // (a retry loop with a zero backoff pinned to one node, ~3 ms apart
+    // against a 1–10 ms accept) no peer connection is ever accepted: the node
+    // answers every client, hears no `Prepare` or `Heartbeat`, and on a
+    // flexible seed whose Phase 1 needs every acceptor the cluster never
+    // elects (seed 17898267817771645730 on 3484b13: 14,497 accepts cancelled
+    // at one listener in 60 s, none completed after the chaos window; green
+    // with this future). A kernel finishes the handshake whether or not an
+    // `accept()` is pending, so production never saw it; polling one future
+    // until it completes keeps the reservation and its delay in the sim too,
+    // and only a completed accept creates the next one.
+    let mut accept = Box::pin(listener.accept());
 
     loop {
         moonpool_core::select! {
-            accepted = listener.accept() => {
+            accepted = &mut accept => {
+                accept = Box::pin(listener.accept());
                 let (stream, addr) = accepted
                     .map_err(|e| SimulationError::InvalidState(format!("gRPC accept: {e}")))?;
                 let connection = grpc_server.serve_connection_with_shutdown(
