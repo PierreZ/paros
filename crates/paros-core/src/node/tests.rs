@@ -308,6 +308,7 @@ mod election;
 mod handoff;
 mod invariants;
 mod matchmaking;
+mod quorum_reads;
 mod reads;
 mod reconfigure;
 mod recovery;

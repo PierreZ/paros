@@ -40,6 +40,7 @@
 //! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
+//! | `phase2_column` | inline | "grid: a slot is decided on a column other than its own" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
 //!
@@ -66,7 +67,7 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_reachable, buggify_with_prob};
 
-use paros::{DriverHooks, HandoffContext, Message, NodeId, ReconfigurerPhase, Seam};
+use paros::{DriverHooks, HandoffContext, Message, NodeId, ReconfigurerPhase, Seam, Slot};
 
 const SCRIPTED_CRASH_KEY: &str = "paros-scripted-seam-crash";
 
@@ -643,6 +644,24 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // in the audit (`snap_chunk_withheld`), where the requester's later
         // repair can be tied back to the silence.
         self.active() && buggify_with_prob!(0.25)
+    }
+
+    fn phase2_column(&self, slot: Slot, cols: usize) -> Option<usize> {
+        // Per proposal on a grid leader. The override picks the *other*
+        // column the modulus would not — `(slot + 1) % cols`, the column of
+        // the slot after this one — so consecutive slots land on one column
+        // and a slot's re-proposal by a handoff successor (which derives
+        // `slot % cols` afresh) lands on a different column than its first
+        // fan-out did. Every column is a Phase-2 quorum, so the choice is
+        // always valid; the fired gate is inline, the outcome — a slot
+        // decided on a column other than its own — is the audit's.
+        if !self.active() || cols < 2 || !buggify_with_prob!(0.10) {
+            return None;
+        }
+        // BUGGIFY pairing: the override genuinely fires.
+        assert_reachable!("grid: the driver overrides a round's column");
+        let cols_u64 = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
+        usize::try_from((slot.0.wrapping_add(1)) % cols_u64).ok()
     }
 
     fn expire_parked_read_early(&self) -> bool {

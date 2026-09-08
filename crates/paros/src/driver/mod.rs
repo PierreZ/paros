@@ -57,8 +57,8 @@ use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, GcAck, MatchRefusal,
     MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole,
-    ProposeResult, ReadIndexResult, ReconfigureRefusal, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -501,7 +501,21 @@ where
                 // redirects immediately.
                 let seq = req.seq;
                 let client = req.client;
-                match node.propose(ClientId(req.client), ClientSeq(req.seq), Value(req.command)) {
+                // The column override (#141): consulted only where it can
+                // have an effect — this node leads and its configuration is
+                // a grid — and from the loop, never a task. The core's
+                // `slot % cols` stands under `NoHooks`. The gate is
+                // deliberately coarse: a proposal the core answers from its
+                // dedup ledger opens no round and spends the draw for
+                // nothing, and knowing that ahead would mean asking the
+                // core twice.
+                let column = match node.acceptors().quorum_system() {
+                    QuorumSystem::Grid { cols, .. } if node.is_leader() => hooks
+                        .phase2_column(node.proposer().next_slot(), cols)
+                        .filter(|c| *c < cols),
+                    _ => None,
+                };
+                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column) {
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.

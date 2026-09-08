@@ -145,11 +145,33 @@ own**. The roles:
   floor and the CTRL faulty set; it decides `prepare`/`admit` and emits the write ops.
 - `proposer.rs` — `Proposer`: the Phase-1 election (per-configuration completion, the P2c
   merge), the CTRL repair probe, the Phase-2 rounds and their decision, the bounded recovery a
-  fresh leadership drains. Its policies are **explicit types, never flags**
+  fresh leadership drains. The Phase-2 rounds are a **standalone tally** it embeds and delegates
+  to (`proposer::Rounds`, `proposer/rounds.rs`, #142 rung 0): the one tally another deployment
+  runs *without* the rest of the role — Compartmentalized Paxos's proxy leader is a `Rounds` plus
+  routing — so there is never a second Phase-2 kernel, exactly as the decree reuses `Proposer` +
+  `Acceptor` at slot zero. Its policies are **explicit types, never flags**
   (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
   `gap_fill: bool` would not).
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
-  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else.
+  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else —
+  and answers one question about it, `covers(index)`, for the quorum reads below.
+- `quorum_read.rs` — `QuorumRead` / `QuorumReads` (#143, Compartmentalized Paxos §3.4, *Paxos
+  Quorum Reads*): the **leaderless read** tally. A reader asks a Phase-1 quorum — a row of a
+  grid (`AcceptorConfig::row_of`, `ctx % rows`, addressed through `phase1_addressees` and
+  judged by `has_phase1_quorum_in`), the whole membership under a majority or a flexible
+  split — for their vote watermarks (`Acceptor::vote_watermark`: the highest slot voted,
+  monotone across records and truncations), takes the maximum, and surfaces the read through
+  the same `Ready::read_states` once the replica covers it. `ColocatedNode::quorum_read(ctx)`
+  wires it on **any** node — leader, follower, spare — and no path in it touches a beat, an
+  ack or a read-index round: the read-index path is untouched and a plain deployment's
+  `Heartbeat` / `HeartbeatAck` are byte-for-byte what they were. **No clock anywhere**: the
+  paper's read leases (§9) are exactly what this rung refuses. The argument is single-
+  configuration (a row meets every column of *its* grid), so a read is bound to the
+  configuration it was opened against, a node abandons its open reads when it learns a newer
+  one, and a `PreReadAck` carries the answerer's configuration ballot so a row that knows a
+  successor abandons the read; the residual — a grid row wholly unaware of a completed
+  successor — is what the client-history linearizability oracle judges once the driver half
+  lands. §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
   every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum`, the
   GC fence, the matchmaker-side tallies and the decree kernel all ask
@@ -287,7 +309,25 @@ cross-configuration Phase 1 asks two systems their own predicates. The copy budg
 record is `n - q1 = q2 - 1` there and `⌊(n-1)/2⌋` under a majority (`QuorumPolicy::clean_copies`
 derives it; nothing in the harness re-derives a threshold from a count). The draw is a
 `reachable`; the outcomes — an election completed under a flexible split, a slot decided by
-fewer accepts than a majority — are the audit's `sometimes` gates. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
+fewer accepts than a majority — are the audit's `sometimes` gates. **The grid is drawn the
+same way (#141):** on a pool whose size tiles a grid, a second `buggify_knob!` location picks
+one of `paros_sim::shape::grid_layouts` — floor `rows >= 2` and `cols >= 2` (a `1 × n` or
+`n × 1` grid is a permanent partition under attrition) — so with `PROCESS_POOL_RANGE = 3..=6`
+that is `2 × 2`, `2 × 3` or `3 × 2`; a configuration of a size no layout tiles runs a majority
+(`QuorumPolicy::system`), which is how a grid seed's successors are grid-shaped or switch
+system, and the composer's majority coin applies to a grid seed as it does to a flexible one
+(never the reverse). The copy budget is the floor minus the *smallest* loss any size in
+`floor..=pool` tolerates (`QuorumPolicy::clean_copies(floor, pool)`), because a grid's
+`⌊(min(rows, cols) - 1)/2⌋` — zero for every grid the pool admits: one dead acceptor freezes
+its column — is not monotone in `n` the way a majority's or a split's is; a grid seed
+therefore injects no lost leg and parks nobody. The rare-but-valid decision the driver owns
+is *which column* a proposal's Phase 2 goes to: `DriverHooks::phase2_column` (its own BUGGIFY
+location, consulted on the node loop only on a grid leader, handed to the core through
+`ColocatedNode::propose_in`; always safe, every column is a Phase-2 quorum), paired with a
+`reachable` that it fired and a `reachable` that a slot was decided on a column other than its
+own. The grid outcomes are the audit's `sometimes` gates: a slot decided on a column, an
+election covered by a row, one covered by a row across a reconfiguration, a read-index round
+confirmed by a column, a reconfiguration between a grid and a majority. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.

@@ -469,6 +469,18 @@ pub(super) struct AuditState {
     /// genuinely ran rather than merely being drawn.
     pub(super) elected_flexible: bool,
     pub(super) decided_below_majority: bool,
+    /// Grid coverage (#141): a slot decided on a column, an election covered
+    /// by a row, one covered by a row *across* a reconfiguration (a grid in
+    /// `H_b`), a read-index round confirmed by a column, a reconfiguration
+    /// between a grid and a majority configuration — the outcomes that prove
+    /// the grid genuinely ran, and a slot decided on a column other than its
+    /// own (the driver's override took effect).
+    pub(super) decided_on_column: bool,
+    pub(super) decided_off_column: bool,
+    pub(super) elected_grid: bool,
+    pub(super) elected_across_grid: bool,
+    pub(super) read_confirmed_on_column: bool,
+    pub(super) reconfigured_across_grid_boundary: bool,
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
     pub(super) cross_config_phase1_checked: bool,
@@ -504,7 +516,7 @@ impl AuditState {
 
     /// The prior configurations (`H_b`) the owner of `ballot` closed its
     /// matchmaking with, if that phase ran (never on plain Multi-Paxos).
-    fn prior_of(&self, ballot: Ballot) -> Option<&[AcceptorConfig]> {
+    pub(super) fn prior_of(&self, ballot: Ballot) -> Option<&[AcceptorConfig]> {
         self.prior
             .get(&(ballot.node.0, ballot.round, ballot.node.0))
             .map(Vec::as_slice)
@@ -637,6 +649,28 @@ impl AuditState {
             self.decided_below_majority,
             "flexible: a slot is decided by fewer accepts than a majority"
         );
+        assert_sometimes!(
+            self.decided_on_column,
+            "grid: a slot is decided on a column"
+        );
+        assert_sometimes!(self.elected_grid, "grid: an election is covered by a row");
+        assert_sometimes!(
+            self.elected_across_grid,
+            "grid: an election is covered by a row across a reconfiguration"
+        );
+        assert_sometimes!(
+            self.read_confirmed_on_column,
+            "grid: a read-index round is confirmed by a column"
+        );
+        assert_sometimes!(
+            self.reconfigured_across_grid_boundary,
+            "grid: a reconfiguration moves between a grid and a majority"
+        );
+        // The hook's outcome: a reachable, since whether a seed draws the
+        // override is the swarm's business.
+        if self.decided_off_column {
+            assert_reachable!("grid: a slot is decided on a column other than its own");
+        }
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -838,6 +872,25 @@ impl AuditState {
                         && !QuorumSystem::is_majority(c.members(), &voters)
                     {
                         self.decided_below_majority = true;
+                    }
+                    // The grid outcomes (#141): the decision was made by a
+                    // column, and — when the driver's override took effect —
+                    // by a column other than the slot's own. Judged through
+                    // the boundary's own column predicates, never a count:
+                    // the deciding voters lie in some full column, and not
+                    // in the slot's.
+                    if let Some(c) = &config
+                        && let QuorumSystem::Grid { cols, .. } = c.quorum_system()
+                    {
+                        self.decided_on_column = true;
+                        let own = c.column_of(Slot(slot));
+                        let on_own = c.has_phase2_quorum_in(&voters, own);
+                        let elsewhere = (0..cols)
+                            .filter(|column| Some(*column) != own)
+                            .any(|column| c.has_phase2_quorum_in(&voters, Some(column)));
+                        if !on_own && elsewhere {
+                            self.decided_off_column = true;
+                        }
                     }
                 }
                 // Two quorums (at any two ballots) must agree — the crown

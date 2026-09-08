@@ -47,9 +47,28 @@ impl ColocatedNode {
         }
         self.mark_chosen(slot, command, ballot);
     }
-    /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0)))]
+    /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`,
+    /// addressed to the column the active configuration derives for it.
     pub(super) fn start_accept_round(&mut self, slot: Slot, command: Command) {
+        // The column this slot's Phase 2 is addressed to: a pure function of
+        // the slot under the active configuration (a grid's `slot % cols`,
+        // nothing under a majority or a flexible split), so a handoff
+        // successor re-proposing this slot and a restarted leader's re-send
+        // derive the same column without carrying it.
+        let column = self.acceptors.column_of(slot);
+        self.start_accept_round_in(slot, command, column);
+    }
+
+    /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`
+    /// to `column` — the configuration's own column for the slot, or the
+    /// one the driver named ([`ColocatedNode::propose_in`]).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0, column = ?column)))]
+    pub(super) fn start_accept_round_in(
+        &mut self,
+        slot: Slot,
+        command: Command,
+        column: Option<usize>,
+    ) {
         // Precondition stack (every caller is leader-gated and floor-guarded):
         // only a leader opens a Phase-2 round, and never below the compaction
         // floor — a below-floor slot is already chosen and truncated.
@@ -72,14 +91,20 @@ impl ColocatedNode {
                 "an accept round never re-opens a chosen slot"
             );
         }
+        // A named column is one the active grid has; a majority or a
+        // flexible split names none. The core derives its own through the
+        // membership boundary, and a driver's override is checked against
+        // the same boundary — a stray column is a programmer error.
+        assert!(
+            match self.acceptors.quorum_system() {
+                crate::membership::QuorumSystem::Grid { cols, .. } =>
+                    column.is_none_or(|c| c < cols),
+                _ => column.is_none(),
+            },
+            "an accept round's column is a column of the active configuration"
+        );
         let me = self.config.id;
         let ballot = self.ballot;
-        // The column this slot's Phase 2 is addressed to: a pure function of
-        // the slot under the active configuration (a grid's `slot % cols`,
-        // nothing under a majority or a flexible split), so a handoff
-        // successor re-proposing this slot and a restarted leader's re-send
-        // derive the same column without carrying it.
-        let column = self.acceptors.column_of(slot);
         // Never lower our promise: if a competing higher `Prepare` raised it
         // since we became leader, skip the self-accept (the round relies on
         // peer `Accepted`s and will stall, then we step down on the `Nack`).
@@ -246,5 +271,6 @@ impl ColocatedNode {
         }
         self.pump_app_repair();
         self.try_confirm_reads();
+        self.serve_quorum_reads();
     }
 }

@@ -241,6 +241,31 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         self.faulty.first_key()
     }
 
+    /// The **vote watermark** (#143, Compartmentalized Paxos §3.4): the
+    /// highest slot this acceptor has voted in — the last retained record,
+    /// the last faulty entry (identity known, value lost: it *was* voted),
+    /// or `first_slot - 1` when the retained log is empty above a compaction
+    /// floor (every truncated slot was chosen, hence voted). `None` only on a
+    /// log that never voted anything.
+    ///
+    /// paros records a *chosen* value as the authoritative accepted record
+    /// (`mark_chosen` → [`Acceptor::record_accepted`]), so a learner-only
+    /// record raises the watermark too. That is **conservative, never
+    /// unsafe**: a quorum read waits until the replica has applied the
+    /// watermark, so a watermark that is too high costs latency, and one
+    /// that is too low would be the bug — it cannot be, because every vote
+    /// this acceptor cast is either retained, faulty, or below the floor.
+    /// Monotone across [`Acceptor::record_accepted`] and
+    /// [`Acceptor::truncate`] (asserted at both).
+    #[must_use]
+    pub fn vote_watermark(&self) -> Option<Slot> {
+        let truncated = self.first_slot().0.checked_sub(1).map(Slot);
+        [self.records.last_key(), self.faulty.last_key(), truncated]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+
     /// Faulty entries repaired in place this incarnation — half of the CTRL
     /// §5.2 metric. The other half, the payload bytes those repairs shipped,
     /// is the caller's to tally: it needs the *meaning* of a value, which an
@@ -399,6 +424,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             ballot <= self.promised,
             "a record is never accepted above the promise"
         );
+        let watermark_before = self.vote_watermark();
         let repaired = self.faulty.remove(slot).is_some();
         if repaired {
             self.faulty_repaired += 1;
@@ -419,6 +445,12 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 value: command,
             }
             .into(),
+        );
+        // Postcondition: a vote only ever raises the watermark (a quorum read
+        // that captured the old one stays sound).
+        assert!(
+            self.vote_watermark() >= watermark_before,
+            "the vote watermark never decreases across a record"
         );
         repaired
     }
@@ -482,9 +514,16 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             first >= self.first_slot(),
             "the compaction floor never moves backward"
         );
+        let watermark_before = self.vote_watermark();
         self.records.raise_floor(first);
         self.faulty.raise_floor(first);
         self.assert_invariants();
+        // Postcondition: the slots a truncation drops were voted, and the
+        // floor now stands in for them — the watermark never regresses.
+        assert!(
+            self.vote_watermark() >= watermark_before,
+            "the vote watermark never decreases across a truncation"
+        );
     }
 }
 
@@ -522,6 +561,38 @@ mod tests {
         let mut writes: Vec<WriteOp> = Vec::new();
         acceptor.record_accepted(Slot(0), ballot(1), command(1), &mut writes);
         acceptor.record_accepted(Slot(0), ballot(1), command(2), &mut writes);
+    }
+
+    /// The vote watermark (#143) is the highest slot voted, and it survives
+    /// a truncation: the truncated prefix was voted, so the floor stands in
+    /// for it. A faulty entry counts (it was voted), and so does a record
+    /// learned rather than accepted (conservative, never unsafe).
+    #[test]
+    fn the_vote_watermark_is_the_highest_slot_voted_and_survives_truncation() {
+        let mut acceptor: Acceptor<Command> =
+            Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new());
+        assert_eq!(acceptor.vote_watermark(), None, "nothing voted yet");
+        let mut writes: Vec<WriteOp> = Vec::new();
+        acceptor.set_promise(ballot(1), &mut writes);
+        acceptor.record_accepted(Slot(0), ballot(1), command(0), &mut writes);
+        acceptor.record_accepted(Slot(3), ballot(1), command(3), &mut writes);
+        assert_eq!(acceptor.vote_watermark(), Some(Slot(3)));
+        // A vote at a lower slot never lowers it.
+        acceptor.record_accepted(Slot(1), ballot(1), command(1), &mut writes);
+        assert_eq!(acceptor.vote_watermark(), Some(Slot(3)));
+        // Truncating past every record: the floor stands in for the votes.
+        acceptor.truncate(Slot(4), Vec::new(), &mut writes);
+        assert!(acceptor.records().is_empty());
+        assert_eq!(acceptor.vote_watermark(), Some(Slot(3)));
+        // Truncating to a floor above the old watermark raises it: every
+        // slot below the floor was chosen, hence voted.
+        acceptor.truncate(Slot(6), Vec::new(), &mut writes);
+        assert_eq!(acceptor.vote_watermark(), Some(Slot(5)));
+        // A faulty entry — identity known, value lost — was voted too.
+        let mut faulty = BTreeMap::new();
+        faulty.insert(Slot(9), ballot(1));
+        let rotted: Acceptor<Command> = Acceptor::new(ballot(1), BTreeMap::new(), Slot(6), faulty);
+        assert_eq!(rotted.vote_watermark(), Some(Slot(9)));
     }
 
     /// The role classification `write.rs` states: every durable change an

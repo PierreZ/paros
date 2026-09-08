@@ -13,6 +13,7 @@ use super::{
     NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
+use crate::quorum_read::QuorumReads;
 
 impl ColocatedNode {
     /// Construct from a read-only [`Storage`] by reading durable state back in.
@@ -106,6 +107,7 @@ impl ColocatedNode {
             pending_messages: Vec::new(),
             pending_snapshot_offers: Vec::new(),
             pending_read_states: Vec::new(),
+            quorum_reads: QuorumReads::new(),
             pending_recovery_batch: None,
             tick_count: 0,
             role: NodeRole::Follower,

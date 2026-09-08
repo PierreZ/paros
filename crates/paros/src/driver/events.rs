@@ -98,6 +98,8 @@ pub fn message_kind(m: &Message) -> &'static str {
         Message::SnapChunkRequest { .. } => "snap_chunk_request",
         Message::SnapChunkResponse { .. } => "snap_chunk_response",
         Message::Relinquish { .. } => "relinquish",
+        Message::PreRead { .. } => "pre_read",
+        Message::PreReadAck { .. } => "pre_read_ack",
         _ => "unknown",
     }
 }
@@ -183,6 +185,8 @@ pub(crate) fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str
         Some(Kind::Relinquish(_)) => "relinquish",
         Some(Kind::SnapChunkRequest(_)) => "snap_chunk_request",
         Some(Kind::SnapChunkResponse(_)) => "snap_chunk_response",
+        Some(Kind::PreRead(_)) => "pre_read",
+        Some(Kind::PreReadAck(_)) => "pre_read_ack",
         None => "unknown",
     }
 }

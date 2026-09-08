@@ -11,6 +11,7 @@ mod handoff;
 mod helpers;
 mod invariants;
 mod matchmaking;
+mod quorum_reads;
 mod reads;
 mod reconfigure;
 mod replication;
@@ -32,6 +33,7 @@ use crate::matchmaking::Matchmaking;
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use crate::message::{Audience, Message};
 use crate::proposer::Proposer;
+use crate::quorum_read::QuorumReads;
 use crate::ready::Ready;
 use crate::replica::Replica;
 use crate::state::{Config, HardState};
@@ -210,9 +212,15 @@ pub struct ColocatedNode {
     /// application state, so the driver attaches the opaque snapshot bytes (from
     /// storage) and sends the [`Message::InstallSnapshot`].
     pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
-    /// Read-index rounds confirmed this batch, drained via
+    /// Read-index rounds and quorum reads confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
+    /// The **quorum reads** this node has open (#143,
+    /// [`crate::quorum_read`]): leaderless, on any role, bound to the
+    /// configuration each was opened against and dropped by TTL. Volatile
+    /// and independent of the leadership — a role change abandons nothing
+    /// here; a configuration change abandons every read opened before it.
+    quorum_reads: QuorumReads<NodeId>,
     /// `(started, gap_fills, remaining)` for this Ready's recovery chunk.
     /// Reported through [`Ready::recovery_batch`] and, while set, the pacing
     /// gate: `pump_leader_recovery` starts no further page until
@@ -422,6 +430,13 @@ impl ColocatedNode {
             } => {
                 self.on_heartbeat_ack(from, ballot, seq, chosen);
             }
+            Message::PreRead { reply_to, ctx } => self.on_pre_read(reply_to, ctx),
+            Message::PreReadAck {
+                from,
+                ctx,
+                watermark,
+                config_since,
+            } => self.on_pre_read_ack(from, ctx, watermark, config_since),
             // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
             // driver's repair layer owns these end to end and normally
             // intercepts them before `step`. Consensus state never depends on
@@ -444,6 +459,43 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
+        self.propose_in(client, seq, value, None)
+    }
+
+    /// [`ColocatedNode::propose`] with the driver naming the **column** the
+    /// proposal's Phase 2 is addressed to (#141): `Some(c)` overrides the
+    /// core's own `slot % cols` ([`AcceptorConfig::column_of`]) for this one
+    /// round, `None` is exactly [`ColocatedNode::propose`].
+    ///
+    /// **Always safe, which is why it is a method and not a fault.** Every
+    /// full column of a grid is a Phase-2 quorum of it, and every Phase-1
+    /// quorum (a row) meets every column, so a value chosen through any
+    /// column is learned by every later election; which column a slot uses
+    /// is a load-spreading choice, never a safety one. The round records
+    /// the column it was opened against, so its re-sends and its decision
+    /// stay on that column; a handoff successor or a restarted leader that
+    /// re-proposes the slot derives `slot % cols` afresh, and two fan-outs
+    /// of one `(slot, ballot, command)` to two columns are P2b-idempotent.
+    /// Production never overrides; the deterministic simulation does, from
+    /// the node loop, to reach the column mixes the modulus alone never
+    /// would.
+    ///
+    /// # Panics
+    ///
+    /// If `column` names a column the active configuration does not have —
+    /// one at or past its `cols`, or any column at all under a majority or
+    /// a flexible split, which name none. The driver derives the override
+    /// from [`ColocatedNode::acceptors`], so this is a programmer error,
+    /// never an operating condition. Also if an internal invariant is
+    /// broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column)))]
+    pub fn propose_in(
+        &mut self,
+        client: ClientId,
+        seq: ClientSeq,
+        value: Value,
+        column: Option<usize>,
+    ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
@@ -483,7 +535,8 @@ impl ColocatedNode {
         let slot = self.proposer.allocate();
         let entry = Entry { client, seq, value };
         self.replica.track_inflight(client, seq, slot);
-        self.start_accept_round(slot, Command::User(entry));
+        let column = column.or_else(|| self.acceptors.column_of(slot));
+        self.start_accept_round_in(slot, Command::User(entry), column);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -770,6 +823,7 @@ impl ColocatedNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
+        self.tick_quorum_reads();
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();
@@ -1098,6 +1152,13 @@ impl ColocatedNode {
     #[must_use]
     pub fn proposer(&self) -> &Proposer<NodeId, Command> {
         &self.proposer
+    }
+
+    /// The quorum reads this node has open (#143, [`crate::quorum_read`]),
+    /// for drivers / oracles.
+    #[must_use]
+    pub fn quorum_reads(&self) -> &QuorumReads<NodeId> {
+        &self.quorum_reads
     }
 
     /// This node's current role.

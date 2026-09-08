@@ -533,6 +533,73 @@ fn accept_targets(queue: &[(NodeId, Message)]) -> Vec<NodeId> {
         .collect()
 }
 
+/// The driver-named column (#141's sim half): `propose_in` addresses the
+/// round to the column the driver named instead of `slot % cols`, the
+/// re-send stays on it, and the decision is judged by it — while a stray
+/// column is a programmer error.
+#[test]
+fn a_driver_named_column_is_the_round_s_column() {
+    let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
+    make_leader(&mut nodes, 0);
+    // Slot 0 would go to column 0 = {0, 3}; the driver names column 2 =
+    // {2, 5}, of which the leader is not a member.
+    assert!(matches!(
+        nodes[0].propose_in(ClientId(1), ClientSeq(1), val(10), Some(2)),
+        ProposeResult::Accepted(Slot(0))
+    ));
+    let first = drain(&mut nodes[0]);
+    assert_eq!(accept_targets(&first), vec![NodeId(2), NodeId(5)]);
+    assert_eq!(nodes[0].proposer.round_column(Slot(0)), Some(Some(2)));
+    assert!(
+        nodes[0].proposer.rounds()[&Slot(0)]
+            .accepted_by()
+            .is_empty(),
+        "the leader is outside the named column and casts no vote"
+    );
+    nodes[0].resend_pending();
+    assert_eq!(
+        accept_targets(&drain(&mut nodes[0])),
+        vec![NodeId(2), NodeId(5)]
+    );
+    // The slot's own column {0, 3} decides nothing for this round.
+    let ballot = nodes[0].ballot();
+    nodes[0].step(Message::Accepted {
+        from: NodeId(3),
+        ballot,
+        slot: Slot(0),
+        vhash: command_fingerprint(&ucmd(1, 1, 10)),
+    });
+    assert_eq!(chosen_at(&nodes[0], 0), None);
+    deliver_all(&mut nodes, first);
+    for n in &nodes {
+        assert_eq!(chosen_at(n, 0), Some(val(10)));
+    }
+    // `None` is exactly `propose`: slot 1 -> column 1 = {1, 4}.
+    assert!(matches!(
+        nodes[0].propose_in(ClientId(1), ClientSeq(2), val(20), None),
+        ProposeResult::Accepted(Slot(1))
+    ));
+    assert_eq!(
+        accept_targets(&drain(&mut nodes[0])),
+        vec![NodeId(1), NodeId(4)]
+    );
+}
+
+#[test]
+#[should_panic(expected = "an accept round's column is a column of the active configuration")]
+fn a_column_the_grid_does_not_have_is_a_programmer_error() {
+    let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
+    make_leader(&mut nodes, 0);
+    let _ = nodes[0].propose_in(ClientId(1), ClientSeq(1), val(10), Some(3));
+}
+
+#[test]
+#[should_panic(expected = "an accept round's column is a column of the active configuration")]
+fn a_column_under_a_majority_is_a_programmer_error() {
+    let mut nodes = cluster_with_three_chosen();
+    let _ = nodes[0].propose_in(ClientId(1), ClientSeq(9), val(10), Some(0));
+}
+
 /// The mechanism behind #141's column addressing, pinned at the node: a
 /// slot's `Accept` goes to its column (`slot % cols`) and nowhere else, the
 /// re-send goes to the same column, a configured acceptor outside the

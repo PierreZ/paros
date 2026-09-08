@@ -513,6 +513,21 @@ pub(crate) fn message_to_proto(
             pending: pending_commands_to_proto(pending),
             config: config.as_ref().map(config_to_proto),
         }),
+        Message::PreRead { reply_to, ctx } => Kind::PreRead(internal::PreRead {
+            reply_to: reply_to.0,
+            ctx: *ctx,
+        }),
+        Message::PreReadAck {
+            from,
+            ctx,
+            watermark,
+            config_since,
+        } => Kind::PreReadAck(internal::PreReadAck {
+            from: from.0,
+            ctx: *ctx,
+            watermark: watermark.map(|slot| slot.0),
+            config_since: config_since.map(ballot_to_proto),
+        }),
         _ => return Err("unsupported Paxos message variant"),
     };
     Ok(internal::ConsensusMessage { kind: Some(kind) })
@@ -631,6 +646,19 @@ pub(crate) fn message_from_proto(
             decided: slot_commands_from_proto(message.decided)?,
             pending: pending_commands_from_proto(message.pending)?,
             config: config_from_proto(message.config)?,
+        }),
+        Kind::PreRead(message) => Ok(Message::PreRead {
+            reply_to: NodeId(message.reply_to),
+            ctx: message.ctx,
+        }),
+        Kind::PreReadAck(message) => Ok(Message::PreReadAck {
+            from: NodeId(message.from),
+            ctx: message.ctx,
+            watermark: message.watermark.map(Slot),
+            config_since: message
+                .config_since
+                .map(|ballot| ballot_from_proto(Some(ballot)))
+                .transpose()?,
         }),
     }
 }
