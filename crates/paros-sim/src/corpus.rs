@@ -1523,7 +1523,12 @@ pub enum ChunkLiveCase {
     /// durable, the reboot lands below the floor again with nothing pending
     /// to repair (so the point is never restored a second time), and the
     /// node heals through a peer's `InstallSnapshot` instead. The cluster
-    /// converges, every assemblable chunk clean.
+    /// converges, every assemblable chunk clean. The race between the
+    /// point restore and the whole-blob install is scripted, not left to
+    /// timing: while the crash is still owed no node offers a whole-blob
+    /// snapshot (`crate::hooks`), so the restore is the only heal that can
+    /// run first and the seam is visited on every mask that gives node 0
+    /// an assemblable rotted chunk.
     LostThenRestoreCrash,
 }
 
