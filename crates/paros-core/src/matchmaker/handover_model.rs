@@ -20,6 +20,34 @@
 //!    every registration of `g` durably held by a majority of `M_g`, at or
 //!    above the activated watermark, is in it verbatim.
 //!
+//! The matchmaker interaction verification (`docs/analysis/consensus/
+//! matchmaker-interaction-verification.md`) added the claims the nodes'
+//! side of the contract rests on, judged at the same granularity:
+//!
+//! 4. **a completed matchmaking is complete** — every node runs the real
+//!    candidate tally ([`Matchmaking`], pages and cursors included), and at
+//!    closure `H_b` holds every registration below `b`, at or above the
+//!    maximum reported watermark, that a majority of any generation up to
+//!    the addressed one durably holds (§3.3, across GC and handovers);
+//! 5. **the effective configuration reaches every campaign** — the
+//!    closed tally's effective configuration is at least the highest
+//!    reconfiguration registration a majority durably held below `b`,
+//!    whether or not its record was collected or the generation replaced;
+//!    and on every disk the scalar is monotone across every write, the GC
+//!    watermark's included;
+//! 6. **a reply that moves nothing is `Ignored`, and `Ignored` moves
+//!    nothing** — the reconfigurer's stall clock resets exactly when the
+//!    fold changed the running phase's tally;
+//! 7. **the freeze closes only on the driver's beat**, and the close
+//!    proposes exactly the members that answered it (a finish) or the
+//!    operator's target;
+//! 8. **a publication finishes only once a majority of the successor is
+//!    durably at its generation**, and a re-sent `Chosen` is answered
+//!    idempotently by a member that already activated it;
+//! 9. **every reply is backed by the disk that answered it** — the freeze,
+//!    the pending bootstrap, the promise, the vote, the activation and the
+//!    registration are durable at the seam the reply leaves through.
+//!
 //! Then the faults stop, every matchmaker is restarted alive, and the model
 //! asserts the liveness claim behind `MatchmakerReconfigurer::finish`: with
 //! nodes that keep meeting frozen generations, the pool converges on one
@@ -41,6 +69,7 @@ use super::{
     MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     MatchmakerWriteOp, MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
 };
+use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::{Ballot, NodeId};
 
@@ -114,20 +143,103 @@ impl Site {
     }
 }
 
+/// A node's open matchmaking campaign: the real candidate tally over the
+/// matchmaker set it believes authoritative, and the request it re-asks
+/// with. What `ColocatedNode` holds in `matchmaking`, without the node.
+struct Campaign {
+    tally: Matchmaking,
+    generation: MatchmakerGeneration,
+    request: MatchRequest,
+}
+
 /// A node: its reconfigurer, the matchmaker set it believes authoritative,
-/// and its registration ballot counter.
+/// its registration ballot counter, and its open campaign.
 struct Node {
     reconfigurer: MatchmakerReconfigurer,
     believed: MatchmakerSet,
     next_round: u64,
     /// Pending ticks of a post-preemption backoff (the driver's jitter).
     backoff: u64,
+    /// The open matchmaking campaign, if any. Like the node's, it is never
+    /// abandoned by the clock: the beat re-asks whoever has not answered,
+    /// and only a complete quorum, a refusal, an adopted generation or a
+    /// reboot closes it.
+    campaign: Option<Campaign>,
 }
 
 impl Node {
     fn adopt(&mut self, set: &MatchmakerSet) {
         if set.generation > self.believed.generation && !set.members().is_empty() {
             self.believed = set.clone();
+            // `ColocatedNode::learn_matchmakers`: a campaign against the
+            // replaced generation can never complete, so it is dropped.
+            self.campaign = None;
+        }
+    }
+}
+
+/// The shape of a reconfigurer's running phase — everything a reply can
+/// move. Two shapes are equal exactly when the fold changed nothing, which
+/// is what the stall clock must be able to tell (claim 6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PhaseShape {
+    Idle,
+    Stopping {
+        generation: MatchmakerGeneration,
+        acks: Vec<MatchmakerId>,
+        decree_floor: Ballot,
+        effective: Option<Ballot>,
+    },
+    Bootstrapping {
+        set: MatchmakerSet,
+        acks: Vec<MatchmakerId>,
+    },
+    Deciding {
+        ballot: Ballot,
+        value: Option<Vec<MatchmakerId>>,
+        unanswered: Vec<MatchmakerId>,
+        preempted: bool,
+    },
+    Publishing {
+        old_acks: Vec<MatchmakerId>,
+        new_acks: Vec<MatchmakerId>,
+    },
+}
+
+impl PhaseShape {
+    fn of(reconfigurer: &MatchmakerReconfigurer) -> Self {
+        match reconfigurer.phase() {
+            ReconfigurerPhase::Idle => Self::Idle,
+            ReconfigurerPhase::Stopping {
+                old,
+                acks,
+                decree_floor,
+                effective,
+                ..
+            } => Self::Stopping {
+                generation: old.generation,
+                acks: acks.keys().copied().collect(),
+                decree_floor: *decree_floor,
+                effective: effective.as_ref().map(|(b, _)| *b),
+            },
+            ReconfigurerPhase::Bootstrapping {
+                bootstrap, acks, ..
+            } => Self::Bootstrapping {
+                set: bootstrap.set.clone(),
+                acks: acks.iter().copied().collect(),
+            },
+            ReconfigurerPhase::Deciding { decree, .. } => Self::Deciding {
+                ballot: decree.ballot(),
+                value: decree.value().cloned(),
+                unanswered: decree.unanswered(),
+                preempted: decree.preempted().is_some(),
+            },
+            ReconfigurerPhase::Publishing {
+                old_acks, new_acks, ..
+            } => Self::Publishing {
+                old_acks: old_acks.iter().copied().collect(),
+                new_acks: new_acks.iter().copied().collect(),
+            },
         }
     }
 }
@@ -208,6 +320,34 @@ struct Reach {
     /// Two matchmakers were active for two different generations at once —
     /// a half-completed handover, the state every discovery rule exists for.
     concurrent_generations: u64,
+    /// A node's campaign closed on a complete matchmaker quorum (claims 4
+    /// and 5 were judged).
+    campaign_completed: u64,
+    /// A campaign folded a page that was not its sender's last: the
+    /// candidate re-asked from the cursor.
+    campaign_paged: u64,
+    /// A page arrived above the cursor owed, at the sender's own watermark:
+    /// a GC raise collected the cursor between two pages, and the fold took
+    /// the page (the wedge of the interaction verification, concern 2).
+    campaign_page_jumped: u64,
+    /// A closed campaign found its belief stale against the effective
+    /// configuration (what `MatchStep::StaleConfiguration` fires on).
+    campaign_stale_belief: u64,
+    /// A campaign was refused by a member of the set it addressed.
+    campaign_refused: u64,
+    /// A closed campaign judged its completeness against a registration
+    /// that only a *replaced* generation's majority held — the claim
+    /// crossed a handover.
+    completeness_across_handover: u64,
+    /// A closed campaign's effective configuration came from a record no
+    /// answerer's history still carried — the scalar alone crossed a GC.
+    effective_outlived_its_record: u64,
+    /// A reconfigurer folded a reply that changed nothing (a duplicate, a
+    /// straggler after the close, a stranger) and answered `Ignored`.
+    reply_ignored: u64,
+    /// A member that had already activated a successor was told `Chosen`
+    /// again and answered `Learned` again.
+    chosen_resent_to_activated: u64,
 }
 
 impl Reach {
@@ -233,6 +373,24 @@ impl Reach {
                 self.activated_with_local_floor,
             ),
             ("concurrent_generations", self.concurrent_generations),
+            ("campaign_completed", self.campaign_completed),
+            ("campaign_paged", self.campaign_paged),
+            ("campaign_page_jumped", self.campaign_page_jumped),
+            ("campaign_stale_belief", self.campaign_stale_belief),
+            ("campaign_refused", self.campaign_refused),
+            (
+                "completeness_across_handover",
+                self.completeness_across_handover,
+            ),
+            (
+                "effective_outlived_its_record",
+                self.effective_outlived_its_record,
+            ),
+            ("reply_ignored", self.reply_ignored),
+            (
+                "chosen_resent_to_activated",
+                self.chosen_resent_to_activated,
+            ),
         ];
         for (name, count) in counters {
             assert!(
@@ -287,6 +445,34 @@ impl Ledger {
 
     fn members_of(&self, generation: MatchmakerGeneration) -> Option<&MatchmakerSet> {
         self.authoritative.get(&generation)
+    }
+
+    /// Every registration below `below` that a majority of some generation
+    /// up to `generation` durably holds, with the generation it was
+    /// registered at: what a completed matchmaking at `generation` must
+    /// have learned (claim 4). A registration of a replaced generation
+    /// reached its quorum before the freeze, so the reconstruction carries
+    /// it into every later generation (invariant 3) — or the reconstructed
+    /// watermark rose over it, which the closed tally's maximum watermark
+    /// reflects.
+    fn majority_held_below(
+        &self,
+        generation: MatchmakerGeneration,
+        below: Ballot,
+    ) -> Vec<(MatchmakerGeneration, Ballot, Registration)> {
+        let mut held = Vec::new();
+        for (registered_at, registrations) in self.registrations.range(..=generation) {
+            let Some(members) = self.members_of(*registered_at) else {
+                continue;
+            };
+            for (ballot, (registration, holders)) in registrations.range(..below) {
+                let by_members = holders.iter().filter(|m| members.contains(**m)).count();
+                if by_members >= members.quorum_size() {
+                    held.push((*registered_at, *ballot, registration.clone()));
+                }
+            }
+        }
+        held
     }
 
     /// Invariant 2: `successor` of `generation` rests on a majority vote of
@@ -421,6 +607,7 @@ impl World {
                 believed: believed.clone(),
                 next_round: 1,
                 backoff: 0,
+                campaign: None,
             })
             .collect();
         let mut ledger = Ledger::default();
@@ -503,7 +690,30 @@ impl World {
                 }
                 _ => false,
             };
+            let effective_before = self
+                .site(id)
+                .disk
+                .hard_state()
+                .effective
+                .as_ref()
+                .map(|(b, _)| *b);
             self.site(id).disk.apply(op);
+            // Claim 5, the disk half: the effective configuration is a
+            // monotone scalar — a GC raise, a freeze, a vote, an activation
+            // (which takes the maximum of the local and the reconstructed
+            // one) may raise it, and nothing ever lowers or clears it.
+            let effective_after = self
+                .site(id)
+                .disk
+                .hard_state()
+                .effective
+                .as_ref()
+                .map(|(b, _)| *b);
+            assert!(
+                effective_after >= effective_before,
+                "the effective configuration never regresses on a disk: mm{} held {effective_before:?}, {op:?} left {effective_after:?}",
+                id.0
+            );
             match op {
                 MatchmakerWriteOp::Register {
                     ballot,
@@ -606,7 +816,16 @@ impl World {
                 let before = published
                     .as_ref()
                     .map(|s| (self.settled_pending(to, s), self.disk_generation(to)));
-                self.at_matchmaker(
+                // Claim 8, the idempotence half: a member that already
+                // activated exactly this successor is being told again (its
+                // earlier `Learned` was lost, or a node republished). It
+                // answers `Learned` again and writes nothing.
+                let site = &self.sites[usize::try_from(to.0).expect("index")];
+                let already_activated = published
+                    .as_ref()
+                    .is_some_and(|s| site.live.is_some() && site.disk_set() == *s);
+                let disk_before = site.disk.clone();
+                let replies = self.at_matchmaker(
                     to,
                     |mm| mm.step_reconfigure(request),
                     |reply| {
@@ -620,6 +839,27 @@ impl World {
                             .collect()
                     },
                 );
+                if already_activated {
+                    let successor = published.clone().expect("a Chosen was published");
+                    for reply in &replies {
+                        let Envelope::ReconfigureReply { reply, .. } = reply else {
+                            unreachable!("a reconfiguration is answered by a reconfigure reply")
+                        };
+                        assert!(
+                            matches!(
+                                reply,
+                                ReconfigureReply::Learned { activated: false, at, .. } if *at == successor.generation
+                            ),
+                            "a re-sent Chosen is answered Learned again by a member that activated it: mm{} answered {reply:?}",
+                            to.0
+                        );
+                        self.reach.chosen_resent_to_activated += 1;
+                    }
+                    assert!(
+                        self.sites[usize::try_from(to.0).expect("index")].disk == disk_before,
+                        "a re-sent Chosen writes nothing at a member that activated it"
+                    );
+                }
                 if let (Some(successor), Some((settled, generation))) = (published, before)
                     && self.disk_generation(to) == generation
                     && self.settled_pending(to, &successor) < settled
@@ -656,19 +896,21 @@ impl World {
                     |_| Vec::new(),
                 );
             }
-            Envelope::ReconfigureReply { to, reply } => self.reconfigure_reply(to, reply),
+            Envelope::ReconfigureReply { to, reply } => self.reconfigure_reply(to, &reply),
             Envelope::MatchReply { to, reply } => self.match_reply(to, reply),
         }
     }
 
     /// Run `step` on a live matchmaker, persist its batch (or crash at a
-    /// seam), and queue the replies `out` builds from the batch.
+    /// seam), and queue the replies `out` builds from the batch. Returns
+    /// the replies that left (empty when the matchmaker was down or died
+    /// before they could).
     fn at_matchmaker(
         &mut self,
         to: MatchmakerId,
         step: impl FnOnce(&mut Matchmaker),
         out: impl FnOnce(&super::MatchmakerReady<'_>) -> Vec<Envelope>,
-    ) {
+    ) -> Vec<Envelope> {
         let chaos = self.chaos;
         let crash_before = chaos && self.rng.chance(1, 120);
         let crash_between = chaos && self.rng.chance(1, 120);
@@ -684,7 +926,7 @@ impl World {
         let site = self.site(to);
         let Some(mm) = site.live.as_mut() else {
             // Down: the message is lost.
-            return;
+            return Vec::new();
         };
         step(mm);
         let ready = mm.ready();
@@ -695,7 +937,7 @@ impl World {
             // The batch dies whole before it is durable, no reply leaves.
             site.live = None;
             self.reach.crash_before_persist += 1;
-            return;
+            return Vec::new();
         }
         if crash_torn && writes.len() > 1 {
             let landed = 1 + usize::try_from(self.rng.below(writes.len() as u64 - 1))
@@ -703,24 +945,191 @@ impl World {
             self.persist(to, &writes[..landed]);
             self.site(to).live = None;
             self.reach.crash_torn_prefix += 1;
-            return;
+            return Vec::new();
         }
         self.persist(to, &writes);
+        // Claim 9: the batch is durable, so every reply about to leave is a
+        // fact the disk now holds — persist-before-reply is only structural
+        // if the write is actually *in* the batch the reply travels with.
+        for reply in &replies {
+            self.assert_reply_backed(to, reply);
+        }
         if crash_between {
             self.site(to).live = None;
             self.reach.crash_before_reply += 1;
-            return;
+            return Vec::new();
         }
-        for reply in replies {
-            self.send(reply);
+        for reply in &replies {
+            self.send(reply.clone());
         }
         if crash_after {
             self.site(to).live = None;
         }
+        replies
     }
 
-    fn reconfigure_reply(&mut self, to: NodeId, reply: ReconfigureReply) {
-        let step = self.node(to).reconfigurer.on_reply(reply);
+    /// Claim 9 at one reply: what it asserts about the answering matchmaker
+    /// is on that matchmaker's disk.
+    fn assert_reply_backed(&self, from: MatchmakerId, reply: &Envelope) {
+        let site = &self.sites[usize::try_from(from.0).expect("index")];
+        let disk = site.disk.hard_state();
+        let set = site.disk_set();
+        let phase = site.disk_phase();
+        match reply {
+            Envelope::MatchReply { reply, .. } => {
+                if let MatchOutcome::Registered {
+                    gc_watermark,
+                    effective,
+                    ..
+                } = &reply.outcome
+                {
+                    assert!(
+                        site.disk.registrations().contains_key(&reply.ballot),
+                        "a Registered reply names a durable registration: mm{} answered {:?}",
+                        from.0,
+                        reply.ballot
+                    );
+                    assert!(
+                        *gc_watermark == disk.gc_watermark,
+                        "a Registered reply reports the durable watermark"
+                    );
+                    // The scalar reported is the one held *below* the
+                    // request: a reconfiguration's own record never appears
+                    // in its own answer, and neither does the scalar it just
+                    // raised — the disk may hold exactly that ballot above
+                    // what the reply says, and nothing else.
+                    let reported = effective.as_ref().map(|(b, _)| *b);
+                    let durable = disk.effective.as_ref().map(|(b, _)| *b);
+                    assert!(
+                        reported == durable
+                            || (reported < durable && durable == Some(reply.ballot)),
+                        "a Registered reply reports the durable effective configuration below it: mm{} reported {reported:?}, holds {durable:?}, answered {:?}",
+                        from.0,
+                        reply.ballot
+                    );
+                }
+            }
+            Envelope::ReconfigureReply { reply, .. } => match reply {
+                ReconfigureReply::Stopped {
+                    generation,
+                    gc_watermark,
+                    effective,
+                    decree_promised,
+                    ..
+                } => {
+                    assert!(
+                        phase == MatchmakerPhase::Stopped && set.generation == *generation,
+                        "a Stopped reply leaves a durably frozen generation: mm{} is {phase:?} at {:?}",
+                        from.0,
+                        set.generation
+                    );
+                    assert!(
+                        *gc_watermark == disk.gc_watermark
+                            && *effective == disk.effective
+                            && *decree_promised == disk.decree.promised,
+                        "a Stopped reply reports the durable scalars"
+                    );
+                }
+                ReconfigureReply::Bootstrapped { set, .. } => {
+                    assert!(
+                        disk.pending.iter().any(|p| p.set == *set),
+                        "a Bootstrapped reply names a durably pending bootstrap"
+                    );
+                }
+                ReconfigureReply::Promised { ballot, .. } => {
+                    assert!(
+                        disk.decree.promised >= *ballot,
+                        "a Promised reply leaves a durable promise"
+                    );
+                }
+                ReconfigureReply::Accepted { ballot, .. } => {
+                    assert!(
+                        disk.decree.vote.as_ref().is_some_and(|(b, _)| b == ballot),
+                        "an Accepted reply leaves a durable vote"
+                    );
+                }
+                ReconfigureReply::Learned { activated, at, .. } => {
+                    assert!(
+                        set.generation == *at,
+                        "a Learned reply reports the generation the disk stands at"
+                    );
+                    if *activated {
+                        assert!(
+                            phase == MatchmakerPhase::Active,
+                            "an activation is durable before it is answered"
+                        );
+                    }
+                }
+                ReconfigureReply::Nacked { .. } | ReconfigureReply::Refused { .. } => {}
+            },
+            Envelope::Reconfigure { .. } | Envelope::Register { .. } | Envelope::Gc { .. } => {
+                unreachable!("a matchmaker sends replies only")
+            }
+        }
+    }
+
+    fn reconfigure_reply(&mut self, to: NodeId, reply: &ReconfigureReply) {
+        let shape_before = PhaseShape::of(&self.node(to).reconfigurer);
+        let elapsed_before = self.node(to).reconfigurer.stalled_for();
+        let step = self.node(to).reconfigurer.on_reply(reply.clone());
+        let shape_after = PhaseShape::of(&self.node(to).reconfigurer);
+        let elapsed_after = self.node(to).reconfigurer.stalled_for();
+        // Claim 6: the stall clock resets exactly when the fold moved the
+        // running phase. A duplicate ack, a straggler answering a phase
+        // that closed, a stranger's reply — anything that leaves the tally
+        // as it was — is `Ignored` and leaves the clock alone; anything
+        // counted is visible in the shape and restarts it.
+        if matches!(step, ReconfigurerStep::Ignored) {
+            assert!(
+                shape_after == shape_before,
+                "an Ignored reply moves nothing: node{} folded {reply:?} and went from {shape_before:?} to {shape_after:?}",
+                to.0
+            );
+            assert!(
+                elapsed_after == elapsed_before,
+                "an Ignored reply never resets the stall clock: node{} folded {reply:?}",
+                to.0
+            );
+            self.reach.reply_ignored += 1;
+        } else {
+            assert!(
+                shape_after != shape_before,
+                "a reply that counts moves the phase: node{} answered {step:?} to {reply:?} with the shape unchanged at {shape_after:?}",
+                to.0
+            );
+            assert!(
+                elapsed_after == 0,
+                "a counted reply restarts the stall clock"
+            );
+        }
+        // Claim 7: a freeze ack never closes the freeze — the driver's beat
+        // does, once the quorum holds, so every straggler before that beat
+        // widens the reconstruction.
+        if matches!(step, ReconfigurerStep::Stopped { .. }) {
+            assert!(
+                matches!(shape_after, PhaseShape::Stopping { .. }),
+                "a Stopped ack leaves the freeze open for the driver's beat"
+            );
+        }
+        // Claim 8: a publication finishes only once a majority of the
+        // successor's members durably stand at its generation (or beyond) —
+        // a member that only recorded the chain link is still serving the
+        // generation being replaced. A reply leaves only after its persist,
+        // so what the reconfigurer counted is on the disks now.
+        if let ReconfigurerStep::Done { successor } = &step {
+            let serving: BTreeSet<MatchmakerId> = successor
+                .members()
+                .iter()
+                .copied()
+                .filter(|m| self.disk_generation(*m) >= successor.generation)
+                .collect();
+            assert!(
+                successor.has_quorum(&serving),
+                "a publication is done only once a successor quorum durably serves it: {:?} of {:?}",
+                serving,
+                successor.members()
+            );
+        }
         match &step {
             ReconfigurerStep::Chosen { successor } => {
                 // The reconfigurer claims a Phase-2 quorum: the votes behind
@@ -757,10 +1166,22 @@ impl World {
     /// generation with no successor, adopt a chosen set it is told about,
     /// republish the set it knows to a member left behind.
     fn match_reply(&mut self, to: NodeId, reply: MatchReply) {
+        let believed = self.node(to).believed.clone();
+        // The campaign half, behind `ColocatedNode::on_match_reply`'s guards:
+        // addressed to this node, from a member of the believed set, for the
+        // generation and ballot of the open campaign.
+        let for_campaign = reply.to == to
+            && believed.contains(reply.matchmaker)
+            && reply.generation == believed.generation
+            && self.node(to).campaign.as_ref().is_some_and(|c| {
+                c.tally.ballot() == reply.ballot && c.generation == reply.generation
+            });
+        if for_campaign {
+            self.fold_campaign(to, &reply);
+        }
         let MatchOutcome::Refused(refusal) = reply.outcome else {
             return;
         };
-        let believed = self.node(to).believed.clone();
         match refusal {
             MatchRefusal::Stopped { successor: None } => {
                 if !self.node(to).reconfigurer.is_busy()
@@ -791,6 +1212,175 @@ impl World {
                 }
             }
             MatchRefusal::Stale { .. } | MatchRefusal::BelowWatermark { .. } => {}
+        }
+    }
+
+    /// Fold one member's answer into the open campaign — the model's
+    /// `fold_registration` / `fold_refusal`: a page is unioned (and the
+    /// next one asked for from its cursor), a complete quorum closes the
+    /// campaign and judges claims 4 and 5, a refusal abandons it.
+    fn fold_campaign(&mut self, to: NodeId, reply: &MatchReply) {
+        let matchmaker = reply.matchmaker;
+        let believed = self.node(to).believed.clone();
+        let page = match RegisteredPage::from_outcome(reply.outcome.clone()) {
+            Ok(page) => page,
+            Err(refusal) => {
+                // `ColocatedNode::fold_refusal`: the next campaign opens
+                // above the round that refused this one.
+                let floor = match refusal {
+                    MatchRefusal::Stale { highest } => Some(highest.round),
+                    MatchRefusal::BelowWatermark { watermark } => Some(watermark.round),
+                    _ => None,
+                };
+                let node = self.node(to);
+                node.campaign = None;
+                if let Some(floor) = floor {
+                    node.next_round = node.next_round.max(floor.saturating_add(1));
+                }
+                self.reach.campaign_refused += 1;
+                return;
+            }
+        };
+        let (fold, jumped, request) = {
+            let campaign = self
+                .node(to)
+                .campaign
+                .as_mut()
+                .expect("the reply was guarded against an open campaign");
+            let owed = campaign
+                .tally
+                .unanswered(&believed)
+                .into_iter()
+                .find(|(m, _)| *m == matchmaker)
+                .and_then(|(_, cursor)| cursor);
+            // A page that starts above the cursor owed, at the sender's own
+            // watermark: a GC raise collected the cursor between two pages
+            // (`Matchmaker::page` starts every page at `max(cursor,
+            // watermark)`). What it skipped is below a floor the fold maxes
+            // into the closing watermark, so it must be taken — refusing it
+            // wedges the campaign at that matchmaker for good, and
+            // `ColocatedNode::tick` never abandons a pending matchmaking.
+            let jumped = owed.is_some_and(|cursor| {
+                page.from_ballot > cursor && page.from_ballot == page.gc_watermark
+            });
+            let fold = campaign.tally.fold(matchmaker, page);
+            (fold, jumped.then_some(owed), campaign.request.clone())
+        };
+        if let Some(owed) = jumped {
+            self.reach.campaign_page_jumped += 1;
+            assert!(
+                fold != MatchFold::Ignored,
+                "a page above the cursor at the sender's raised watermark is folded, not refused: node{} owed {owed:?} from mm{}",
+                to.0,
+                matchmaker.0
+            );
+        }
+        match fold {
+            MatchFold::Ignored => {}
+            MatchFold::Paged(next) => {
+                self.reach.campaign_paged += 1;
+                self.send(Envelope::Register {
+                    to: matchmaker,
+                    request: request.from_page(next),
+                });
+            }
+            MatchFold::Registered => {
+                let held = self
+                    .node(to)
+                    .campaign
+                    .as_ref()
+                    .is_some_and(|c| c.tally.quorum_held(&believed));
+                if held {
+                    self.close_campaign(to);
+                }
+            }
+        }
+    }
+
+    /// Claims 4 and 5 at a campaign's closure: the union the candidate
+    /// would hand Phase 1 is complete, and the effective configuration it
+    /// would judge its belief against is the one in force.
+    fn close_campaign(&mut self, to: NodeId) {
+        let campaign = self
+            .node(to)
+            .campaign
+            .take()
+            .expect("a campaign closes only while open");
+        self.reach.campaign_completed += 1;
+        if campaign.tally.stale_belief().is_some() {
+            self.reach.campaign_stale_belief += 1;
+        }
+        let ballot = campaign.tally.ballot();
+        let watermark = campaign.tally.watermark();
+        let history = campaign.tally.history();
+        let held = self.ledger.majority_held_below(campaign.generation, ballot);
+        let mut highest_reconfiguration: Option<Ballot> = None;
+        for (registered_at, registered, registration) in &held {
+            if registration.kind.is_reconfiguration() {
+                highest_reconfiguration = highest_reconfiguration.max(Some(*registered));
+            }
+            if *registered < watermark {
+                // Collected: the maximum reported watermark says no future
+                // Phase 1 needs it (§3.2 filters the union once, by the
+                // maximum, at closure).
+                continue;
+            }
+            // Claim 4 (§3.3): every registration below `b` that reached a
+            // majority — of this generation, or of one it replaced — is in
+            // the union some answerer contributed, pages and all.
+            assert!(
+                history
+                    .get(registered)
+                    .is_some_and(|configs| configs.contains(&registration.config)),
+                "a completed matchmaking is complete: node{} closed {ballot:?} at generation {} above {watermark:?} without {registered:?} (registered at generation {}, held by a majority){}",
+                to.0,
+                campaign.generation.0,
+                registered_at.0,
+                self.dump()
+            );
+            if *registered_at < campaign.generation {
+                self.reach.completeness_across_handover += 1;
+            }
+        }
+        // Claim 5: the effective configuration the quorum reports is at
+        // least the highest reconfiguration a majority durably registered
+        // below `b` — GC may have collected its record, a handover may have
+        // replaced the generation that took it, and the scalar carries it
+        // across both. This is what `MatchStep::StaleConfiguration` fires
+        // on, so a belief can never reinstate a superseded configuration.
+        let effective = campaign.tally.effective().map(|(b, _)| *b);
+        assert!(
+            effective >= highest_reconfiguration,
+            "a completed matchmaking learns the effective configuration: node{} closed {ballot:?} with {effective:?}, a majority holds a reconfiguration at {highest_reconfiguration:?}{}",
+            to.0,
+            self.dump()
+        );
+        if let Some(highest) = highest_reconfiguration
+            && !history.contains_key(&highest)
+        {
+            self.reach.effective_outlived_its_record += 1;
+        }
+    }
+
+    /// The election clock's re-ask (`ColocatedNode::resend_matchmaking`):
+    /// every member that has not answered completely is asked again, from
+    /// the cursor its last page named.
+    fn resend_campaign(&mut self, node: NodeId) {
+        let believed = self.node(node).believed.clone();
+        let Some(campaign) = self.node(node).campaign.as_ref() else {
+            return;
+        };
+        let request = campaign.request.clone();
+        let unanswered = campaign.tally.unanswered(&believed);
+        for (matchmaker, cursor) in unanswered {
+            let request = match cursor {
+                Some(from) => request.clone().from_page(from),
+                None => request.clone(),
+            };
+            self.send(Envelope::Register {
+                to: matchmaker,
+                request,
+            });
         }
     }
 
@@ -846,8 +1436,14 @@ impl World {
     }
 
     /// A node registers a configuration with the matchmakers it believes
-    /// authoritative (its campaign's matchmaking phase).
+    /// authoritative (its campaign's matchmaking phase). A node whose
+    /// campaign is still open re-asks it instead — `ColocatedNode::tick`
+    /// never abandons a pending matchmaking, it only ever re-sends.
     fn register(&mut self, node: NodeId) {
+        if self.node(node).campaign.is_some() {
+            self.resend_campaign(node);
+            return;
+        }
         let (round, believed) = {
             let n = self.node(node);
             let round = n.next_round;
@@ -866,6 +1462,11 @@ impl World {
         } else {
             MatchRequest::new(node, ballot, config, believed.generation)
         };
+        self.node(node).campaign = Some(Campaign {
+            tally: Matchmaking::new(ballot, request.config.clone(), request.kind),
+            generation: believed.generation,
+            request: request.clone(),
+        });
         for m in believed.members().iter().copied() {
             self.send(Envelope::Register {
                 to: m,
@@ -874,25 +1475,32 @@ impl World {
         }
     }
 
-    /// A node probes every matchmaker of the pool with a registration at
-    /// its believed generation — how a node discovers a frozen or moved-on
-    /// matchmaker (the driver's matchmaking re-ask reaches its believed
-    /// members; the pool-wide probe stands in for the republish paths the
-    /// sim's spares exercise).
+    /// A node probes every matchmaker of the pool at its believed
+    /// generation — how a node discovers a frozen or moved-on matchmaker.
+    /// The believed members get the campaign (opened, or re-asked); every
+    /// other matchmaker gets a discovery probe at a fresh ballot that no
+    /// tally counts (the node ignores answers from outside its believed
+    /// set), the shape of the republish paths the sim's spares exercise.
     fn probe_pool(&mut self, node: NodeId) {
-        let n = self.node(node);
-        let round = n.next_round;
-        n.next_round += 1;
-        let generation = n.believed.generation;
+        self.register(node);
+        let (round, believed) = {
+            let n = self.node(node);
+            let round = n.next_round;
+            n.next_round += 1;
+            (round, n.believed.clone())
+        };
         let ballot = Ballot { round, node };
         let config = AcceptorConfig::new(
             vec![NodeId(0), NodeId(1), NodeId(2)],
             QuorumSystem::Majority,
         );
-        let request = MatchRequest::new(node, ballot, config, generation);
-        for m in 0..POOL {
+        let request = MatchRequest::new(node, ballot, config, believed.generation);
+        for m in (0..POOL).map(MatchmakerId) {
+            if believed.contains(m) {
+                continue;
+            }
             self.send(Envelope::Register {
-                to: MatchmakerId(m),
+                to: m,
                 request: request.clone(),
             });
         }
@@ -907,8 +1515,14 @@ impl World {
                 n.believed.members().to_vec(),
             )
         };
+        // Drawn from the upper half of this node's round space: a floor
+        // drawn uniformly below the frontier almost never rises above one
+        // already in force (91 raises in 60 seeds), and a floor that never
+        // moves between two pages of one answer never tests the cursor
+        // jump of claim 4.
+        let frontier = next_round.max(2);
         let watermark = Ballot {
-            round: self.rng.below(next_round.max(1)),
+            round: frontier / 2 + self.rng.below(frontier - frontier / 2),
             node,
         };
         for m in members.iter().copied() {
@@ -923,6 +1537,9 @@ impl World {
     fn tick_nodes(&mut self) {
         for i in 0..NODES {
             let node = NodeId(i);
+            // The election clock: an open matchmaking is re-asked, never
+            // abandoned (`ColocatedNode::tick`).
+            self.resend_campaign(node);
             let n = self.node(node);
             n.reconfigurer.tick();
             if n.reconfigurer.stalled_for() >= ABANDON_TICKS && n.reconfigurer.abandon() {
@@ -939,13 +1556,36 @@ impl World {
             // reconstruction — and a finish's proposal.
             let n = self.node(node);
             let was = n.reconfigurer.old().map(|s| s.members().len());
-            let shrank =
-                n.reconfigurer
-                    .close_stop()
-                    .zip(was)
-                    .is_some_and(|(reconstruction, len)| {
-                        reconstruction.bootstrap.set.members().len() < len
-                    });
+            // Claim 7, the other half: what the close proposes is exactly
+            // the operator's target, or — for a finish — every member that
+            // answered the freeze, and the close needs the quorum.
+            let expected = match n.reconfigurer.phase() {
+                ReconfigurerPhase::Stopping { target, acks, .. } => Some((
+                    target
+                        .clone()
+                        .unwrap_or_else(|| acks.keys().copied().collect()),
+                    n.reconfigurer.stop_quorum_reached(),
+                )),
+                _ => None,
+            };
+            let closed = n.reconfigurer.close_stop();
+            if let Some((proposed, quorum)) = expected {
+                match &closed {
+                    Some(reconstruction) => {
+                        assert!(quorum, "a freeze closes only once its quorum answered");
+                        assert!(
+                            reconstruction.bootstrap.set.members() == proposed.as_slice(),
+                            "a close proposes the target, or every member that answered a finish's freeze: {:?} vs {:?}",
+                            reconstruction.bootstrap.set.members(),
+                            proposed
+                        );
+                    }
+                    None => assert!(!quorum, "a freeze whose quorum answered closes on the beat"),
+                }
+            }
+            let shrank = closed.zip(was).is_some_and(|(reconstruction, len)| {
+                reconstruction.bootstrap.set.members().len() < len
+            });
             if shrank {
                 self.reach.finish_shrank_the_set += 1;
             }
@@ -989,6 +1629,7 @@ impl World {
                 n.reconfigurer = MatchmakerReconfigurer::new(node);
                 n.believed = bootstrap;
                 n.backoff = 0;
+                n.campaign = None;
             }
             87..=89 => {
                 let id = MatchmakerId(self.rng.below(POOL));
@@ -1032,6 +1673,14 @@ impl World {
         }
         if step.is_multiple_of(5) {
             self.tick_nodes();
+        }
+        // A leader's GC keeps running in the tail (chaos only churned the
+        // generations, which is where a floor is refused): the registries
+        // are large here and the generations stable, so this is where a
+        // floor rises between two pages of one answer.
+        if step % 90 == 45 {
+            let node = NodeId(self.rng.below(NODES));
+            self.gc(node);
         }
         if self.network.is_empty() {
             let node = NodeId(self.rng.below(NODES));
@@ -1187,6 +1836,42 @@ impl World {
             node.reconfigurer = MatchmakerReconfigurer::new(NodeId(i as u64));
             node.believed = bootstrap.clone();
             node.backoff = 0;
+            node.campaign = None;
+        }
+    }
+
+    /// The recovery tail's last liveness claim: with every matchmaker up
+    /// and no message lost, every open campaign reaches its quorum or its
+    /// refusal. The re-ask cadence gets a few beats, then a campaign still
+    /// open is a wedge — a member that will never answer completely, which
+    /// `ColocatedNode::tick` (never abandoning a pending matchmaking) turns
+    /// into a candidate that never leads.
+    fn settle_campaigns(&mut self, seed: u64) {
+        for _ in 0..8 {
+            if self.nodes.iter().all(|n| n.campaign.is_none()) {
+                break;
+            }
+            for i in 0..NODES {
+                self.resend_campaign(NodeId(i));
+            }
+            let mut guard = 0;
+            while !self.network.is_empty() && guard < DRAIN_STEPS {
+                self.deliver_random();
+                self.check_all();
+                guard += 1;
+            }
+        }
+        for (i, node) in self.nodes.iter().enumerate() {
+            assert!(
+                node.campaign.is_none(),
+                "seed {seed}: after quiescence every campaign closed; node{i}'s at {:?} against generation {} is still waiting on {:?}{}",
+                node.campaign.as_ref().map(|c| c.tally.ballot()),
+                node.campaign.as_ref().map_or(0, |c| c.generation.0),
+                node.campaign
+                    .as_ref()
+                    .map(|c| c.tally.unanswered(&node.believed)),
+                self.dump()
+            );
         }
     }
 
@@ -1223,6 +1908,7 @@ impl World {
             self.check_all();
             guard += 1;
         }
+        self.settle_campaigns(seed);
         self.assert_converged(seed);
         if self
             .ledger
@@ -1304,6 +1990,15 @@ fn handover_holds_under_seeded_chaos_and_converges() {
         total.crash_torn_prefix += reach.crash_torn_prefix;
         total.activated_with_local_floor += reach.activated_with_local_floor;
         total.concurrent_generations += reach.concurrent_generations;
+        total.campaign_completed += reach.campaign_completed;
+        total.campaign_paged += reach.campaign_paged;
+        total.campaign_page_jumped += reach.campaign_page_jumped;
+        total.campaign_stale_belief += reach.campaign_stale_belief;
+        total.campaign_refused += reach.campaign_refused;
+        total.completeness_across_handover += reach.completeness_across_handover;
+        total.effective_outlived_its_record += reach.effective_outlived_its_record;
+        total.reply_ignored += reach.reply_ignored;
+        total.chosen_resent_to_activated += reach.chosen_resent_to_activated;
     }
     eprintln!("handover model: {seeds} seeds x {chaos_steps} chaos steps: {total:?}");
     total.assert_all();

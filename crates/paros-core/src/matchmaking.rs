@@ -222,6 +222,15 @@ impl Matchmaking {
         self.disagreements
     }
 
+    /// The union of every history folded so far, ballot by ballot and
+    /// unfiltered — the read view a checker compares against what the
+    /// matchmakers durably hold. [`Self::prior`] is the filtered, deduplicated
+    /// form Phase 1 runs over; nothing in the core reads this.
+    #[must_use]
+    pub fn history(&self) -> &BTreeMap<Ballot, Vec<AcceptorConfig>> {
+        &self.history
+    }
+
     /// Whether this page counts at all: a matchmaker not already done, and
     /// a page whose shape and cursor are what that matchmaker owes next.
     /// Wire input, so a refusal is a `false`, never an assert — the twin of
@@ -232,13 +241,25 @@ impl Matchmaking {
         }
         // The first page starts wherever the matchmaker's own watermark is,
         // which the candidate cannot know; every later one must start at the
-        // cursor that page named.
-        if self
-            .page_next
-            .get(&matchmaker)
-            .is_some_and(|expected| *expected != page.from_ballot)
-        {
-            return false;
+        // cursor that page named — or *above* it, at the sender's own
+        // watermark, when a GC raise collected the cursor itself between two
+        // pages (`Matchmaker::page` starts every page at `max(cursor,
+        // watermark)`). What such a page skips sits below a floor `fold`
+        // maxes into the closing watermark, so the union filtered at closure
+        // loses nothing it would have kept. Refusing it instead wedged the
+        // campaign at that matchmaker for good: the candidate re-asked from
+        // the collected cursor on every election timeout, the matchmaker
+        // answered from its floor every time, and `ColocatedNode::tick`
+        // never abandons a pending matchmaking — the handover model's
+        // claim 4 found the wedge on seed 8 once its tail raised floors
+        // between pages.
+        if let Some(expected) = self.page_next.get(&matchmaker) {
+            let at_cursor = page.from_ballot == *expected;
+            let cursor_collected =
+                page.from_ballot > *expected && page.from_ballot == page.gc_watermark;
+            if !at_cursor && !cursor_collected {
+                return false;
+            }
         }
         // Only the lower bound, exactly as `promise_page_shape_valid` checks
         // its page: an entry above the request's ballot would merely add a

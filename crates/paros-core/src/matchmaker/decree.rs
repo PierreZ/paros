@@ -273,12 +273,15 @@ impl Decree {
     }
 
     /// A refusal: some matchmaker promised `promised` above this ballot. The
-    /// proposal is preempted and the caller reopens strictly above it.
+    /// proposal is preempted and the caller reopens strictly above it — above
+    /// the **highest** refusal seen, so a second Nack carrying a higher
+    /// promise raises the floor the reopen clears without being progress of
+    /// the (already dead) proposal.
     pub(super) fn on_nack(&mut self, promised: Ballot) {
         if promised <= self.ballot {
             return;
         }
-        self.preempted = Some(promised);
+        self.preempted = Some(self.preempted.map_or(promised, |held| held.max(promised)));
     }
 
     /// How many matchmakers have promised.

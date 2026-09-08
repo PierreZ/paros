@@ -838,8 +838,19 @@ impl MatchmakerReconfigurer {
                             return ReconfigurerStep::Ignored;
                         }
                         let ballot = decree.ballot();
+                        // A preempted decree is dead until the driver's next
+                        // [`Self::resend`] reopens it, so a second refusal —
+                        // the same Nack duplicated, or another member's —
+                        // moves nothing and is `Ignored`: reporting it as
+                        // `Preempted` again reset the stall clock on every
+                        // refusal a dueling finisher sent, which is exactly
+                        // the "duplicate keeps a dead phase alive" of review
+                        // finding P4 (the handover model's claim 6 caught it
+                        // on its first seed). The promise it carries still
+                        // raises the floor the reopen clears.
+                        let already_preempted = decree.preempted().is_some();
                         decree.on_nack(promised);
-                        if decree.preempted().is_none() {
+                        if already_preempted || decree.preempted().is_none() {
                             return ReconfigurerStep::Ignored;
                         }
                         // Preempted: the decree is reopened above the refusing
@@ -1450,6 +1461,79 @@ mod tests {
         }
         assert!(!r.is_busy());
         assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
+    }
+
+    /// Claim 6 of the handover model, at the decree: a preempted decree is
+    /// dead until the driver's next re-send reopens it, so a *second*
+    /// refusal — the same Nack duplicated, or another member's — moves
+    /// nothing, is `Ignored`, and never resets the stall clock. Answering
+    /// `Preempted` again did (the model caught it on its first seed, and in
+    /// the two-finisher case, where every refusal a dueling finisher sent
+    /// kept the dead decree's abandon timer from ever firing). The higher
+    /// promise a later refusal carries still raises the floor the reopen
+    /// clears.
+    #[test]
+    fn a_second_refusal_of_a_preempted_decree_is_ignored_and_raises_the_floor() {
+        let mut pool = pool(4, &[0, 1, 2]);
+        let mut r = MatchmakerReconfigurer::new(NodeId(1));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        exchange(&mut r, &mut pool, &[]);
+        for mm in pool.iter_mut().take(3) {
+            mm.step_reconfigure(ReconfigureRequest::DecreePrepare {
+                from: NodeId(9),
+                generation: MatchmakerGeneration(0),
+                ballot: Ballot {
+                    round: 5,
+                    node: NodeId(9),
+                },
+            });
+            mm.ready().advance();
+        }
+        exchange(&mut r, &mut pool, &[]);
+        // Only matchmaker 0 answers the decree's Phase 1: one Nack, one
+        // preemption.
+        let steps = exchange(&mut r, &mut pool, &[1, 2]);
+        assert!(
+            matches!(steps.as_slice(), [ReconfigurerStep::Preempted { promised, .. }] if promised.round == 5),
+            "{steps:?}"
+        );
+        r.tick();
+        r.tick();
+        assert_eq!(r.stalled_for(), 2);
+        let nack = |m: u64, promised: u64| ReconfigureReply::Nacked {
+            matchmaker: MatchmakerId(m),
+            generation: MatchmakerGeneration(0),
+            ballot: Ballot {
+                round: 1,
+                node: NodeId(1),
+            },
+            promised: Ballot {
+                round: promised,
+                node: NodeId(9),
+            },
+        };
+        assert_eq!(
+            r.on_reply(nack(0, 5)),
+            ReconfigurerStep::Ignored,
+            "the same refusal again moves nothing"
+        );
+        assert_eq!(
+            r.on_reply(nack(1, 8)),
+            ReconfigurerStep::Ignored,
+            "another member's refusal of a dead decree moves nothing"
+        );
+        assert_eq!(
+            r.stalled_for(),
+            2,
+            "a refusal of a dead decree is not progress"
+        );
+        // The reopen clears the highest refusal seen, not the first.
+        r.resend();
+        assert!(matches!(
+            r.phase(),
+            ReconfigurerPhase::Deciding { decree, .. } if decree.ballot().round == 9
+        ));
     }
 
     /// A decree opens strictly above the promises the stop quorum reports:

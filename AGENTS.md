@@ -388,7 +388,13 @@ dropped, duplicated or reordered, every matchmaker crashed at each durability se
 from its disk, every reconfigurer killed or abandoned at any step and every node rebooted to its
 bootstrap belief — asserting after each step that at most one set is authoritative per
 generation, that a chosen set is what a majority of `M_g` durably voted at one ballot, and that
-every activated registry carries the complete reconstruction; then that the pool converges and
+every activated registry carries the complete reconstruction — and, since the interaction
+verification (`docs/analysis/consensus/matchmaker-interaction-verification.md`), that every
+node's real `Matchmaking` tally closes complete and with the effective configuration, that a
+reply moving nothing is `Ignored` and `Ignored` moves nothing, that the freeze closes only on
+the driver's beat, that a publication needs a durable successor majority and a re-sent
+`Chosen` is idempotent, and that every reply is backed by the disk that answered it (claims
+4–9, each with the mutation that makes it red); then that the pool converges and
 that a node with no belief rediscovers the top generation from the bootstrap set. It bites:
 publishing the bootstrapped proposal without the decree is red on its first seed, and it found
 that a rebooted node's reconfigurer **reused the decree rounds of its earlier incarnation** (the

@@ -398,9 +398,15 @@ where
         vectored_writes: true,
     });
 
+    // One persistent accept future, re-created only once it completes: see
+    // the node driver (`run_node`) for why a `select!`-embedded
+    // `listener.accept()` starves under a request storm in the sim.
+    let mut accept = Box::pin(listener.accept());
+
     loop {
         moonpool_core::select! {
-            accepted = listener.accept() => {
+            accepted = &mut accept => {
+                accept = Box::pin(listener.accept());
                 let (stream, addr) = accepted
                     .map_err(|e| SimulationError::InvalidState(format!("matchmaker gRPC accept: {e}")))?;
                 let connection = grpc_server.serve_connection_with_shutdown(

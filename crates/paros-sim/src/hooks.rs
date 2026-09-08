@@ -60,7 +60,17 @@
 //! per-seed `StateHandle`, so the rebooted incarnation does not crash again),
 //! no probability drawn. It is consulted before the swarm sites and
 //! independently of the chaos window, and its fired gate is the same audit
-//! `crashed` report every seam has.
+//! `crashed` report every seam has. While the crash is still owed, every
+//! node also **withholds the whole-blob snapshot offer**
+//! (`skip_snapshot_offer`): a below-floor node with a lost application can
+//! heal two ways — the chunk repair plus the point restore that reaches the
+//! seam, or a peer's `InstallSnapshot` that never does — and which one wins
+//! is a race of the peers' beats against the repair plane. Left to timing,
+//! the seam was visited or not depending on when the node accepted its
+//! peers' connections (the persistent accept future of the node driver
+//! turned the case vacuous on its mask), so the race is scripted: no offer
+//! until the seam fired, then offers as usual, which is exactly the case's
+//! analytic outcome (the reboot after the crash heals through an offer).
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -89,6 +99,11 @@ impl ScriptedCrash {
             seam,
             armed: scripted_crash_flag(state),
         }
+    }
+
+    /// Whether the scripted crash is still owed.
+    fn armed(&self) -> bool {
+        *self.armed.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether `seam` is the scripted one and still owed; consumes it.
@@ -314,6 +329,12 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn skip_snapshot_offer(&self, _to: NodeId) -> bool {
+        // A corpus case with a scripted seam crash still owed: no whole-blob
+        // offer leaves any node until the seam fired, so the below-floor
+        // node heals through the repair plane that reaches it (module doc).
+        if self.scripted.as_ref().is_some_and(ScriptedCrash::armed) {
+            return true;
+        }
         // Consulted only when an offer is about to go out. Skipping costs the
         // requester one beat — it re-asks every tick, and any other custodian
         // may answer — so the rate can be generous: the state worth reaching is

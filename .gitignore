@@ -21,3 +21,6 @@ target
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Claude Code agent worktrees (nested checkouts, never project content)
+.claude/worktrees/
