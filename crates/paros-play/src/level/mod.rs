@@ -12,9 +12,11 @@
 
 pub mod act1;
 pub mod act2;
+mod script;
 
 use crate::action::{Action, ActionError, ActionKind};
 use crate::auto::AutomationFlag;
+use crate::narration::NarrationEvent;
 use crate::prompt::{Prompt, Verdict};
 use crate::view::{GoalView, LevelSummary, WorldView};
 use crate::world::decree::DecreeWorld;
@@ -52,6 +54,22 @@ impl WorldKind {
         match self {
             WorldKind::Decree(world) => world.set_policy(policy),
             WorldKind::Log(world) => world.set_policy(policy),
+        }
+    }
+
+    /// Start a fresh action's narration.
+    pub fn clear_narration(&mut self) {
+        match self {
+            WorldKind::Decree(world) => world.clear_narration(),
+            WorldKind::Log(world) => world.clear_narration(),
+        }
+    }
+
+    /// Take the narration the action just produced.
+    pub fn take_narration(&mut self) -> Vec<NarrationEvent> {
+        match self {
+            WorldKind::Decree(world) => world.take_narration(),
+            WorldKind::Log(world) => world.take_narration(),
         }
     }
 

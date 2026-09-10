@@ -60,14 +60,45 @@ impl PromptKind {
     #[must_use]
     pub fn flag(self) -> AutomationFlag {
         match self {
-            PromptKind::AcceptorPrepare
-            | PromptKind::AcceptorAccept
-            | PromptKind::CommitOverwrite => AutomationFlag::AcceptorReplies,
+            PromptKind::AcceptorPrepare | PromptKind::AcceptorAccept => {
+                AutomationFlag::AcceptorReplies
+            }
+            PromptKind::CommitOverwrite => AutomationFlag::CommitOverwrite,
             PromptKind::ProposerValue => AutomationFlag::ProposerP2c,
             PromptKind::LeaderRecovery => AutomationFlag::LeaderRecovery,
             PromptKind::ReplicaApply => AutomationFlag::ReplicaApply,
             PromptKind::PersistOrder => AutomationFlag::PersistOrder,
             PromptKind::ReadServe => AutomationFlag::ReadServe,
+        }
+    }
+}
+
+/// What a **right** answer confirms, in one clause. The narration says it back
+/// so the player reads the rule rather than only "correct".
+#[must_use]
+pub fn confirmation(kind: PromptKind) -> &'static str {
+    match kind {
+        PromptKind::AcceptorPrepare => {
+            "the promise is raised durably first, and the Promise reports whatever it accepted."
+        }
+        PromptKind::AcceptorAccept => {
+            "the vote is written down before the Accepted that reports it leaves."
+        }
+        PromptKind::ProposerValue => {
+            "a value the promise quorum reported is the only value this ballot may carry."
+        }
+        PromptKind::LeaderRecovery => {
+            "the slot is settled exactly as far as the promise quorum's report licenses."
+        }
+        PromptKind::ReplicaApply => {
+            "the application executes the log in order, and stops at the first hole."
+        }
+        PromptKind::PersistOrder => "the batch is durable before any claim about it is sent.",
+        PromptKind::CommitOverwrite => {
+            "the record the choosing ballot decided is what a restart will read back."
+        }
+        PromptKind::ReadServe => {
+            "a read is answered only on a proof of leadership newer than the read itself."
         }
     }
 }

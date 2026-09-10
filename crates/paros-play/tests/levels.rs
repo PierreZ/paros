@@ -5,8 +5,39 @@
 use std::collections::BTreeSet;
 
 use paros_play::action::{Action, ActionKind};
+use paros_play::auto::AutomationFlag;
 use paros_play::level::{Level, levels};
+use paros_play::prompt::PromptKind;
 use paros_play::{Game, GoalStatus};
+
+/// Every prompt kind, so a level's pinned-off flags can be turned into the
+/// questions it promises to ask.
+const ALL_PROMPTS: &[PromptKind] = &[
+    PromptKind::AcceptorPrepare,
+    PromptKind::AcceptorAccept,
+    PromptKind::ProposerValue,
+    PromptKind::LeaderRecovery,
+    PromptKind::ReplicaApply,
+    PromptKind::PersistOrder,
+    PromptKind::CommitOverwrite,
+    PromptKind::ReadServe,
+];
+
+/// The questions a level pins manual — the ones it exists to teach. A level may
+/// pin a flag that governs no prompt (heartbeat delivery, say); that promises
+/// no question.
+fn taught_prompts(level: &Level) -> Vec<PromptKind> {
+    ALL_PROMPTS
+        .iter()
+        .copied()
+        .filter(|kind| level.pinned_off.contains(&kind.flag()))
+        .collect()
+}
+
+/// Which flags a level pins off, for a message.
+fn pinned(level: &Level) -> Vec<AutomationFlag> {
+    level.pinned_off.to_vec()
+}
 
 /// The world half of the view, as JSON — what "the world did not move" means.
 fn world_json(game: &Game) -> String {
@@ -155,14 +186,44 @@ fn every_wrong_answer_is_refused_and_moves_nothing() {
             }
             game.act(action).expect("the reference replays");
         }
-        if level.pinned_off.is_empty() {
+        if taught_prompts(level).is_empty() {
             continue;
         }
         assert!(
             prompts_seen > 0,
-            "{}: a level that pins a role manual raises at least one prompt",
-            level.id
+            "{}: it pins {:?} manual, so its reference must answer at least one prompt",
+            level.id,
+            pinned(level)
         );
+    }
+}
+
+#[test]
+fn every_reference_asks_the_question_its_level_teaches() {
+    for level in levels() {
+        let taught = taught_prompts(level);
+        if taught.is_empty() {
+            continue;
+        }
+        let mut game = Game::new(level.id).expect("a registered level");
+        let mut seen: BTreeSet<PromptKind> = BTreeSet::new();
+        for action in (level.reference)() {
+            if let Some(prompt) = game.view().prompt {
+                seen.insert(prompt.kind);
+            }
+            game.act(action).expect("the reference replays");
+        }
+        if let Some(prompt) = game.view().prompt {
+            seen.insert(prompt.kind);
+        }
+        for kind in taught {
+            assert!(
+                seen.contains(&kind),
+                "{}: the level makes {kind:?} manual, but its reference never runs into that \
+                 question — it teaches nothing. Seen: {seen:?}",
+                level.id
+            );
+        }
     }
 }
 

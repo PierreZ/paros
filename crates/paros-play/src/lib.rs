@@ -30,11 +30,14 @@
 //! - [`prompt::Prompt`] — the questions a manual role is asked, and the judge.
 //! - [`auto::Automation`] — automation as reward, and the pump it enables.
 //! - [`level::Level`] — briefing, goal, hint, reference solution.
+//! - [`narration::NarrationEvent`] — what the game says just happened, derived
+//!   from the transition rather than scripted.
 //! - [`view`] — the one contract the browser reads.
 
 pub mod action;
 pub mod auto;
 pub mod level;
+pub mod narration;
 pub mod prompt;
 pub mod view;
 pub mod world;
@@ -46,6 +49,7 @@ pub use level::{GoalStatus, Level, WorldKind};
 pub use view::{GameView, LevelSummary};
 
 use auto::{ALL_FLAGS, Automation, AutomationFlag};
+use narration::{NarrationEvent, NarrationKind};
 use prompt::{PromptKind, Verdict};
 use view::{ActionView, AutomationFlagView, AutomationView, LevelView, PromptView};
 use world::WorldPolicy;
@@ -69,6 +73,9 @@ pub struct Game {
     world: WorldKind,
     automation: Automation,
     log: Vec<Action>,
+    /// What each logged action did, in Paxos — parallel to `log`, rebuilt by a
+    /// replay exactly as the world is.
+    narration: Vec<Vec<NarrationEvent>>,
     mistakes: u32,
 }
 
@@ -90,6 +97,7 @@ impl Game {
             world: (level.setup)(),
             automation: initial_automation(level),
             log: Vec::new(),
+            narration: Vec::new(),
             mistakes: 0,
         };
         game.sync_policy();
@@ -132,6 +140,18 @@ impl Game {
         &self.log
     }
 
+    /// What the last action did, in Paxos. Empty before the first move.
+    #[must_use]
+    pub fn narration(&self) -> &[NarrationEvent] {
+        self.narration.last().map_or(&[], Vec::as_slice)
+    }
+
+    /// Every action's narration, in play order — the whole stream.
+    #[must_use]
+    pub fn narration_log(&self) -> &[Vec<NarrationEvent>] {
+        &self.narration
+    }
+
     /// Play one move.
     ///
     /// A **wrong prompt answer is not an error**: it costs a mistake and an
@@ -150,8 +170,9 @@ impl Game {
                 format!("this level does not offer {}", action.label()),
             ));
         }
-        self.apply(&action)?;
+        let events = self.apply(&action)?;
         self.log.push(action);
+        self.narration.push(events);
         Ok(())
     }
 
@@ -164,12 +185,14 @@ impl Game {
         if self.log.pop().is_none() {
             return;
         }
+        self.narration.pop();
         self.rebuild();
     }
 
     /// Start the level again from its setup.
     pub fn reset(&mut self) {
         self.log.clear();
+        self.narration.clear();
         self.rebuild();
     }
 
@@ -211,6 +234,11 @@ impl Game {
                     index,
                     kind: action.kind(),
                     label: action.label(),
+                    narration: self
+                        .narration
+                        .get(index)
+                        .map(|events| events.iter().map(NarrationEvent::view).collect())
+                        .unwrap_or_default(),
                 })
                 .collect(),
             automation: AutomationView {
@@ -226,6 +254,7 @@ impl Game {
                     .collect(),
             },
             mistakes: self.mistakes,
+            narration: self.narration().iter().map(NarrationEvent::view).collect(),
         }
     }
 
@@ -237,17 +266,24 @@ impl Game {
         self.mistakes = 0;
         self.sync_policy();
         let replay = std::mem::take(&mut self.log);
+        self.narration.clear();
         for action in &replay {
             // Every action in the log was accepted once, from this same start
-            // state, by this same deterministic engine.
-            let _ = self.apply(action);
+            // state, by this same deterministic engine — narration included:
+            // every line is derived from the transition, and the transitions
+            // are the same ones.
+            let events = self.apply(action).unwrap_or_default();
+            self.narration.push(events);
         }
         self.log = replay;
     }
 
-    /// Derive the world's policy from the flag set, then run the action.
-    fn apply(&mut self, action: &Action) -> Result<(), ActionError> {
+    /// Derive the world's policy from the flag set, run the action, and take
+    /// the narration it produced.
+    fn apply(&mut self, action: &Action) -> Result<Vec<NarrationEvent>, ActionError> {
         self.sync_policy();
+        self.world.clear_narration();
+        let goal_before = self.goal().is_reached();
         match action {
             Action::Deliver { id } => self.world.deliver(*id)?,
             Action::Drop { id } => self.world.drop_message(*id)?,
@@ -290,7 +326,7 @@ impl Game {
             Action::Answer { prompt, choice } => {
                 if self.world.answer(*prompt, choice)? == Verdict::Wrong {
                     self.mistakes += 1;
-                    return Ok(());
+                    return Ok(self.world.take_narration());
                 }
             }
             Action::SetAutomation { flag, on } => {
@@ -299,7 +335,11 @@ impl Game {
             }
         }
         auto::pump(&mut self.world, &self.automation);
-        Ok(())
+        let mut events = self.world.take_narration();
+        if !goal_before && let GoalStatus::Reached(detail) = self.goal() {
+            events.push(NarrationEvent::new(NarrationKind::Goal, detail));
+        }
+        Ok(events)
     }
 
     fn set_automation(&mut self, flag: AutomationFlag, on: bool) -> Result<(), ActionError> {

@@ -3,4 +3,4 @@
 /**
  * One automated decision.
  */
-export type AutomationFlag = "acceptor_replies" | "proposer_p2c" | "replica_apply" | "leader_recovery" | "persist_order" | "read_serve" | "deliver_heartbeats" | "deliver_replies" | "resend_pending";
+export type AutomationFlag = "acceptor_replies" | "commit_overwrite" | "proposer_p2c" | "replica_apply" | "leader_recovery" | "persist_order" | "read_serve" | "deliver_heartbeats" | "deliver_replies" | "resend_pending";

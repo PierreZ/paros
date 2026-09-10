@@ -3,6 +3,7 @@ import type { ActionView } from "./ActionView";
 import type { AutomationView } from "./AutomationView";
 import type { GoalView } from "./GoalView";
 import type { LevelView } from "./LevelView";
+import type { NarrationView } from "./NarrationView";
 import type { PromptView } from "./PromptView";
 import type { WorldView } from "./WorldView";
 
@@ -37,4 +38,10 @@ automation: AutomationView,
 /**
  * How many prompts the player got wrong in this attempt.
  */
-mistakes: number, };
+mistakes: number, 
+/**
+ * What the **last** action did, derived from the transition itself. It is
+ * cleared and rebuilt on every action; the whole stream is kept per log
+ * entry in [`ActionView::narration`].
+ */
+narration: Array<NarrationView>, };

@@ -24,7 +24,9 @@ use paros_core::{
 };
 
 use crate::action::{ActionError, ActionErrorCode, Phase};
+use crate::narration::{NarrationEvent, NarrationKind, list_nodes, say};
 use crate::prompt::{Prompt, PromptKind, Verdict};
+use crate::view::{show_ballot, show_command};
 use crate::world::{InFlight, WorldPolicy};
 
 mod render;
@@ -107,6 +109,14 @@ pub struct DecreeWorld {
     prompt: Option<Prompt>,
     paused: Option<Paused>,
     next_prompt_id: u64,
+    /// What the action in progress has done so far, in Paxos.
+    narration: Vec<NarrationEvent>,
+}
+
+/// How this world names an acceptor. There is no colocation here: an acceptor
+/// is only ever an acceptor, and a proposer holds no vote of its own.
+fn actor(id: NodeId) -> String {
+    format!("acceptor {}", id.0)
 }
 
 /// A client value, tagged with the proposer that carries it. Single-decree
@@ -193,6 +203,7 @@ impl DecreeWorld {
             prompt: None,
             paused: None,
             next_prompt_id: 1,
+            narration: Vec::new(),
         }
     }
 
@@ -207,6 +218,26 @@ impl DecreeWorld {
     #[must_use]
     pub fn prompt(&self) -> Option<&Prompt> {
         self.prompt.as_ref()
+    }
+
+    /// What has been said since the last [`DecreeWorld::clear_narration`].
+    #[must_use]
+    pub fn narration(&self) -> &[NarrationEvent] {
+        &self.narration
+    }
+
+    /// Start a fresh action's narration.
+    pub fn clear_narration(&mut self) {
+        self.narration.clear();
+    }
+
+    /// Take this action's narration.
+    pub fn take_narration(&mut self) -> Vec<NarrationEvent> {
+        std::mem::take(&mut self.narration)
+    }
+
+    fn narrate(&mut self, kind: NarrationKind, text: impl Into<String>) {
+        self.narration.push(say(kind, text));
     }
 
     /// Everything in flight.
@@ -322,6 +353,20 @@ impl DecreeWorld {
             &BTreeMap::new(),
         );
         let reach = self.phase1_reach.clone();
+        let asked: Vec<NodeId> = targets
+            .iter()
+            .copied()
+            .filter(|to| reach.contains(to))
+            .collect();
+        self.narrate(
+            NarrationKind::Election,
+            format!(
+                "Proposer {proposer} opens ballot {} for {text:?} and sends Prepare to {}. Phase \
+                 1 names no value: it claims the ballot and asks what has already been accepted.",
+                show_ballot(ballot),
+                list_nodes(asked)
+            ),
+        );
         for to in targets {
             if !reach.contains(&to) {
                 continue;
@@ -355,10 +400,21 @@ impl DecreeWorld {
                 "a reach set is a non-empty subset of the acceptors",
             ));
         }
+        let named = list_nodes(members.clone());
         match phase {
             Phase::One => self.phase1_reach = members,
             Phase::Two => self.phase2_reach = members,
         }
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} now reaches {named} and nobody else.",
+                match phase {
+                    Phase::One => "Phase 1",
+                    Phase::Two => "Phase 2",
+                }
+            ),
+        );
         Ok(())
     }
 
@@ -372,7 +428,17 @@ impl DecreeWorld {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
+        let summary = entry.view().summary;
         if let Some(prompt) = self.prompt_for(entry.to, &entry.message) {
+            self.narrate(
+                NarrationKind::Info,
+                format!(
+                    "{summary} stops at {}: {} You answer for it, and the real state machine \
+                     marks the answer.",
+                    actor(entry.to),
+                    prompt.question
+                ),
+            );
             self.prompt = Some(prompt);
             self.paused = Some(Paused::Message {
                 to: entry.to,
@@ -393,7 +459,15 @@ impl DecreeWorld {
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
+        let summary = self.wire[position].view().summary;
         self.wire.remove(position);
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{summary} is lost. There is no partition object in this game: a partition is \
+                 you not delivering."
+            ),
+        );
         Ok(())
     }
 
@@ -408,8 +482,13 @@ impl DecreeWorld {
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
+        let summary = copy.view().summary;
         self.next_message_id += 1;
         self.wire.push(copy);
+        self.narrate(
+            NarrationKind::Info,
+            format!("A second copy of {summary} is on the wire."),
+        );
         Ok(())
     }
 
@@ -438,10 +517,21 @@ impl DecreeWorld {
                 format!("this prompt has no choice {choice:?}"),
             ));
         }
-        if prompt.judge(choice) == Verdict::Wrong {
+        let verdict = prompt.judge(choice);
+        let (kind, node) = (prompt.kind, prompt.node);
+        if verdict == Verdict::Wrong {
+            let feedback = prompt.feedback.clone().unwrap_or_default();
+            self.narrate(NarrationKind::Violation, feedback);
             return Ok(Verdict::Wrong);
         }
         self.prompt = None;
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "That is what `paros-core` does here, so node {node} really does it: {}",
+                crate::prompt::confirmation(kind)
+            ),
+        );
         match self.paused.take() {
             Some(Paused::Message { to, message }) => self.route(to, *message),
             Some(Paused::Phase2 { proposer }) => self.open_phase2(proposer),
@@ -495,6 +585,7 @@ impl DecreeWorld {
         let Some(index) = self.acceptor_index(to) else {
             return;
         };
+        let held = self.acceptors[index].role.promised();
         let reply = {
             let acceptor = &mut self.acceptors[index];
             match acceptor.role.prepare(ballot, DECREE, &mut acceptor.disk) {
@@ -516,6 +607,43 @@ impl DecreeWorld {
                 },
             }
         };
+        let reported = self.acceptors[index]
+            .role
+            .record(DECREE)
+            .map(|(at, command)| (*at, command.clone()));
+        let (kind, text) = match &reply {
+            Message::Nack { .. } => (
+                NarrationKind::Nack,
+                format!(
+                    "{} receives Prepare {}. It has already promised {}, so it refuses: a \
+                     promise is the only fence Paxos has, and un-saying one is how two values \
+                     get chosen for one slot.",
+                    actor(to),
+                    show_ballot(ballot),
+                    show_ballot(held)
+                ),
+            ),
+            _ => (
+                NarrationKind::Promise,
+                format!(
+                    "{} receives Prepare {}. Its promise was {}, so it promises {} and reports \
+                     what it accepted: {}.",
+                    actor(to),
+                    show_ballot(ballot),
+                    show_ballot(held),
+                    show_ballot(ballot),
+                    reported.map_or_else(
+                        || "nothing".to_string(),
+                        |(at, command)| format!(
+                            "{} at ballot {}",
+                            show_command(&command),
+                            show_ballot(at)
+                        )
+                    )
+                ),
+            ),
+        };
+        self.narrate(kind, text);
         self.send(to, ballot.node, reply);
     }
 
@@ -523,6 +651,7 @@ impl DecreeWorld {
         let Some(index) = self.acceptor_index(to) else {
             return;
         };
+        let held = self.acceptors[index].role.promised();
         let reply = {
             let acceptor = &mut self.acceptors[index];
             match acceptor.role.admit(ballot, slot) {
@@ -550,6 +679,33 @@ impl DecreeWorld {
                 },
             }
         };
+        let (kind, text) = match &reply {
+            Message::Nack { .. } => (
+                NarrationKind::Nack,
+                format!(
+                    "{} receives Accept {} for {}. It promised {}, which is higher, so it \
+                     refuses the vote — the ballot it is holding the fence for may already have \
+                     chosen something.",
+                    actor(to),
+                    show_ballot(ballot),
+                    show_command(command),
+                    show_ballot(held)
+                ),
+            ),
+            _ => (
+                NarrationKind::Accept,
+                format!(
+                    "{} votes for {} at ballot {} — its promise was {}, and the test for a vote \
+                     is `>=`, not `>`. It raises its promise and writes the record down before \
+                     the Accepted reports it.",
+                    actor(to),
+                    show_command(command),
+                    show_ballot(ballot),
+                    show_ballot(held)
+                ),
+            ),
+        };
+        self.narrate(kind, text);
         self.send(to, ballot.node, reply);
     }
 
@@ -573,6 +729,16 @@ impl DecreeWorld {
         acceptor
             .role
             .record_accepted(DECREE, ballot, command.clone(), &mut acceptor.disk);
+        self.narrate(
+            NarrationKind::Accept,
+            format!(
+                "{} learns the decision: it records {} at ballot {}, whether or not it ever \
+                 voted for it.",
+                actor(to),
+                show_command(command),
+                show_ballot(ballot)
+            ),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -600,9 +766,30 @@ impl DecreeWorld {
         if self.proposers[index].attempt != Attempt::Phase1 {
             return;
         }
+        let promised: Vec<NodeId> = self.proposers[index]
+            .role
+            .election()
+            .map(|election| election.promised().iter().copied().collect())
+            .unwrap_or_default();
+        let members = self.config.members().len();
         // A bare proposer holds no promise of its own, so the win gate's
         // promise argument is the zero ballot.
-        if !self.proposers[index].role.phase1_won(Ballot::zero()) {
+        let won = self.proposers[index].role.phase1_won(Ballot::zero());
+        self.narrate(
+            NarrationKind::Promise,
+            format!(
+                "Proposer {} holds Promises from {} — {} of {members}{}",
+                to.0,
+                list_nodes(promised.clone()),
+                promised.len(),
+                if won {
+                    ", a quorum. Phase 1 is complete."
+                } else {
+                    ". That is not a quorum yet, so nothing may be proposed."
+                }
+            ),
+        );
+        if !won {
             return;
         }
         if self.policy.manual.contains(&PromptKind::ProposerValue) {
@@ -648,6 +835,26 @@ impl DecreeWorld {
             .recovered
             .get(&DECREE)
             .map_or(own, |(_, command)| command.clone());
+        let adopted = outcome.recovered.get(&DECREE).cloned();
+        self.narrate(
+            NarrationKind::Info,
+            match &adopted {
+                Some((at, command)) => format!(
+                    "A promise reported {} accepted at ballot {}. The value-selection rule (P2c) \
+                     makes proposer {} propose that value back instead of its own: one report is \
+                     exactly what an already-chosen value looks like from here.",
+                    show_command(command),
+                    show_ballot(*at),
+                    proposer.0
+                ),
+                None => format!(
+                    "No acceptor reported a value, so proposer {} is free to propose its own: \
+                     quorum intersection says a value already chosen would have been reported by \
+                     someone in this quorum.",
+                    proposer.0
+                ),
+            },
+        );
         self.proposers[index]
             .role
             .open_round(DECREE, ballot, candidate.clone(), None, None);
@@ -659,6 +866,21 @@ impl DecreeWorld {
             proposed: candidate.clone(),
         });
         let reach = self.phase2_reach.clone();
+        let addressed: Vec<NodeId> = self
+            .config
+            .phase2_addressees(None)
+            .into_iter()
+            .filter(|to| reach.contains(to))
+            .collect();
+        self.narrate(
+            NarrationKind::Accept,
+            format!(
+                "Phase 2 begins: Accept {} at ballot {} to {}.",
+                show_command(&candidate),
+                show_ballot(ballot),
+                list_nodes(addressed)
+            ),
+        );
         for to in self.config.phase2_addressees(None) {
             if !reach.contains(&to) {
                 continue;
@@ -685,9 +907,34 @@ impl DecreeWorld {
             .role
             .fold_accepted(from, ballot, slot, vhash);
         let config = self.config.clone();
+        let voters = crate::narration::votes_of(self.proposers[index].role.rounds(), DECREE);
+        let members = config.members().len();
         let Some((at, command)) = self.proposers[index].role.decided(DECREE, &config) else {
+            let count = voters.len();
+            self.narrate(
+                NarrationKind::Info,
+                format!(
+                    "Proposer {} has {count} of {members} votes at ballot {}. Not a quorum yet: \
+                     nothing is chosen.",
+                    to.0,
+                    show_ballot(ballot)
+                ),
+            );
             return;
         };
+        self.narrate(
+            NarrationKind::Chosen,
+            format!(
+                "Slot {} is chosen: {} — {} of {members} — voted for {} at ballot {}. That is \
+                 final: every higher ballot's Phase 1 must intersect this quorum, so every \
+                 later proposer will be told about it and made to propose it back.",
+                DECREE.0,
+                list_nodes(voters.iter().copied()),
+                voters.len(),
+                show_command(&command),
+                show_ballot(at)
+            ),
+        );
         self.proposers[index].role.close_round(DECREE);
         self.proposers[index].attempt = Attempt::Won;
         if self.chosen.is_none() {
@@ -715,6 +962,16 @@ impl DecreeWorld {
             && self.proposers[index].attempt != Attempt::Won
         {
             self.proposers[index].attempt = Attempt::Preempted;
+            self.narrate(
+                NarrationKind::Nack,
+                format!(
+                    "Proposer {}'s ballot {} is preempted: somewhere an acceptor has promised \
+                     something higher. Notice what the Nack does *not* carry — the promise that \
+                     refused it. A proposer climbs one round at a time, from what it knows.",
+                    to.0,
+                    show_ballot(ballot)
+                ),
+            );
         }
     }
 

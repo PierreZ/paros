@@ -22,9 +22,12 @@ use crate::level::WorldKind;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationFlag {
-    /// The acceptor answers `Prepare`, `Accept` and a `Commit` that overwrites
-    /// a stale record on its own (the two rules: `>` to promise, `>=` to vote).
+    /// The acceptor answers `Prepare` and `Accept` on its own (the two rules:
+    /// `>` to promise, `>=` to vote).
     AcceptorReplies,
+    /// The acceptor replaces a stale lower-ballot record with what the
+    /// choosing ballot decided, on its own.
+    CommitOverwrite,
     /// A candidate applies the P2c value-selection rule on its own.
     ProposerP2c,
     /// The replica decides on its own whether a newly chosen slot extends the
@@ -47,6 +50,7 @@ pub enum AutomationFlag {
 /// Every flag, in the order the view lists them.
 pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
     AutomationFlag::ProposerP2c,
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
@@ -63,6 +67,7 @@ impl AutomationFlag {
     pub fn label(self) -> &'static str {
         match self {
             AutomationFlag::AcceptorReplies => "acceptor replies",
+            AutomationFlag::CommitOverwrite => "overwrite a stale record",
             AutomationFlag::ProposerP2c => "proposer P2c",
             AutomationFlag::ReplicaApply => "replica apply",
             AutomationFlag::LeaderRecovery => "leader recovery",

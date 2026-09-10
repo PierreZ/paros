@@ -33,13 +33,15 @@ mod render;
 use std::collections::BTreeSet;
 
 use paros_core::{
-    ClientId, ClientSeq, ColocatedNode, Config, Message, NodeId, ProposeResult, ReadIndexResult,
-    ReadState, Slot, Value,
+    Ballot, ClientId, ClientSeq, ColocatedNode, Config, Message, NodeId, ProposeResult,
+    ReadIndexResult, ReadState, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Seam};
+use crate::narration;
+use crate::narration::{NarrationEvent, NarrationKind, NodeSnapshot, many, say, who};
 use crate::prompt::{Prompt, PromptKind, Verdict};
-use crate::view::{MessageView, message_view};
+use crate::view::{MessageView, message_view, show_ballot};
 use crate::world::drain::Paused;
 
 pub use disk::Disk;
@@ -120,6 +122,21 @@ struct PendingRead {
     served: bool,
 }
 
+/// A narration the world owes the player once a prompt is answered.
+///
+/// The prompts that gate a **batch** — the persist order, the recovery page —
+/// are asked about work `paros-core` has already done: the batch exists, and
+/// the world is holding it. Narrating that batch while the question is open
+/// would print the answer above the question, so the diff is deferred to the
+/// point the node next reaches quiet, and taken from the state it was in
+/// before the question was asked.
+#[derive(Debug)]
+struct Deferred {
+    node: NodeId,
+    before: NodeSnapshot,
+    mark: usize,
+}
+
 /// One client.
 #[derive(Clone, Debug)]
 struct Client {
@@ -147,6 +164,20 @@ pub struct World {
     paused: Option<Paused>,
     next_prompt_id: u64,
     next_read_ctx: u64,
+    /// The highest promise each node has ever been seen to hold, live or on
+    /// disk. A durable promise that ends up **below** its own watermark is the
+    /// one thing a crash must never be able to do, and it is what the
+    /// restart-safety levels are judged on.
+    promise_watermarks: Vec<Ballot>,
+    /// Every durability seam that actually cut a batch, in the order they
+    /// fired: `(node, seam)`. A level's goal reads it to insist the player
+    /// really visited the seam rather than talking about it.
+    seams_fired: Vec<(NodeId, Seam)>,
+    /// A story the narration is not allowed to tell yet: see [`Deferred`].
+    deferred: Option<Deferred>,
+    /// What the action in progress has done so far, in Paxos. Cleared by the
+    /// [`crate::Game`] before every action and drained after it.
+    narration: Vec<NarrationEvent>,
 }
 
 impl World {
@@ -206,6 +237,10 @@ impl World {
             paused: None,
             next_prompt_id: 1,
             next_read_ctx: 1,
+            promise_watermarks: vec![Ballot::zero(); count],
+            seams_fired: Vec::new(),
+            deferred: None,
+            narration: Vec::new(),
         };
         for index in 0..count {
             if let Some(node) = world.nodes[index].as_mut() {
@@ -227,6 +262,92 @@ impl World {
     #[must_use]
     pub fn policy(&self) -> &WorldPolicy {
         &self.policy
+    }
+
+    // ---- narration ---------------------------------------------------------
+
+    /// What has been said since the last [`World::clear_narration`].
+    #[must_use]
+    pub fn narration(&self) -> &[NarrationEvent] {
+        &self.narration
+    }
+
+    /// Start a fresh action's narration.
+    pub fn clear_narration(&mut self) {
+        self.narration.clear();
+    }
+
+    /// Take this action's narration.
+    pub fn take_narration(&mut self) -> Vec<NarrationEvent> {
+        std::mem::take(&mut self.narration)
+    }
+
+    /// Say one line.
+    pub(crate) fn narrate(&mut self, kind: NarrationKind, text: impl Into<String>) {
+        self.narration.push(say(kind, text));
+    }
+
+    /// Say one already-built line.
+    pub(crate) fn narration_push(&mut self, event: NarrationEvent) {
+        self.narration.push(event);
+    }
+
+    /// Note that a durability seam actually cut a batch.
+    pub(crate) fn record_seam(&mut self, id: NodeId, seam: Seam) {
+        self.seams_fired.push((id, seam));
+        let text = match seam {
+            Seam::BeforeSync => format!(
+                "{} dies before the flush. The batch is gone whole: nothing was written and \
+                 nothing was sent, so its disk is exactly what it was — which is why this seam \
+                 is always safe.",
+                who(id)
+            ),
+            Seam::AfterSyncBeforeSend => format!(
+                "{} dies after the flush and before the send. The writes are durable and the \
+                 messages are lost: it now holds a promise (or a vote) that nobody in the \
+                 cluster has ever heard about. That is the safe half of the seam — the \
+                 dangerous half is the other order.",
+                who(id)
+            ),
+        };
+        self.narrate(NarrationKind::Crash, text);
+    }
+
+    /// Run `f` and narrate what it did to `id`, entirely from the diff of the
+    /// node's own role accessors and the messages its batches sent.
+    ///
+    /// This is the whole derivation: no caller tells the narration what it is
+    /// about to do, and a call that changes nothing says nothing.
+    pub(crate) fn observe<R>(&mut self, id: NodeId, f: impl FnOnce(&mut Self) -> R) -> R {
+        // A batch the core has already produced can be held back by a prompt
+        // (see `drain::gate_batch`). The story of that batch *is the answer to
+        // the question*, so it waits with the batch: the diff is deferred, and
+        // taken from where the node stood before the question was asked.
+        let (before, mark) = match self.deferred.take() {
+            Some(held) if held.node == id => (held.before, held.mark),
+            _ => (NodeSnapshot::capture(self.node(id)), self.wire.len()),
+        };
+        let members = self.index_of(id).map_or(self.pool.len(), |index| {
+            self.disks[index].config().peers.len()
+        });
+        let out = f(self);
+        if self.prompt.is_some() {
+            self.deferred = Some(Deferred {
+                node: id,
+                before,
+                mark,
+            });
+            return out;
+        }
+        let after = NodeSnapshot::capture(self.node(id));
+        let sent: Vec<(NodeId, Message)> = self.wire[mark..]
+            .iter()
+            .filter(|entry| entry.from == id)
+            .map(|entry| (entry.to, entry.message.clone()))
+            .collect();
+        let events = narration::describe(id, &before, &after, &sent, members);
+        self.narration.extend(events);
+        out
     }
 
     // ---- read views used by goals and the frontend --------------------------
@@ -298,6 +419,59 @@ impl World {
             .collect()
     }
 
+    /// The node whose durable promise sits **below** the highest promise it was
+    /// ever seen to hold — the regression a crash must never cause.
+    ///
+    /// `None` is the invariant holding. This is the game's own bookkeeping, not
+    /// the core's: the core cannot regress a promise, and the point of the
+    /// restart levels is to watch that hold across a crash the player chose.
+    #[must_use]
+    pub fn promise_regressed(&self) -> Option<NodeId> {
+        self.pool
+            .iter()
+            .copied()
+            .enumerate()
+            .find_map(|(index, id)| {
+                let durable = self.disks[index].hard_state().max_promised_ballot;
+                (durable < self.promise_watermarks[index]).then_some(id)
+            })
+    }
+
+    /// The highest promise `id` has ever been seen to hold.
+    #[must_use]
+    pub fn promise_watermark(&self, id: NodeId) -> Option<Ballot> {
+        self.index_of(id)
+            .map(|index| self.promise_watermarks[index])
+    }
+
+    /// Every durability seam that cut a batch, in firing order.
+    #[must_use]
+    pub fn seams_fired(&self) -> &[(NodeId, Seam)] {
+        &self.seams_fired
+    }
+
+    /// The highest slot a client write has been acknowledged at — the write a
+    /// later linearizable read must not read behind.
+    #[must_use]
+    pub fn highest_acked_slot(&self) -> Option<Slot> {
+        self.clients
+            .iter()
+            .flat_map(|client| client.proposals.iter())
+            .filter(|proposal| proposal.acked)
+            .filter_map(|proposal| proposal.slot)
+            .max()
+    }
+
+    /// Every read a client asked for, as `(node, index, served)`.
+    #[must_use]
+    pub fn reads(&self) -> Vec<(NodeId, Option<Slot>, bool)> {
+        self.clients
+            .iter()
+            .flat_map(|client| client.reads.iter())
+            .map(|read| (read.node, read.index, read.served))
+            .collect()
+    }
+
     /// The clients this level gave the player, in id order.
     #[must_use]
     pub fn clients(&self) -> Vec<u64> {
@@ -331,14 +505,33 @@ impl World {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
+        let summary = entry.view().summary;
         let Some(index) = self.index_of(entry.to) else {
             return Ok(());
         };
         if self.nodes[index].is_none() {
+            self.narrate(
+                NarrationKind::Info,
+                format!(
+                    "{summary} reaches {}, which is not running, so it is discarded. A message \
+                     to a machine that is not there is simply lost — that is the whole of this \
+                     failure model.",
+                    who(entry.to)
+                ),
+            );
             return Ok(());
         }
         self.note_ack(&entry);
         if let Some(prompt) = self.prompt_for(entry.to, &entry.message) {
+            self.narrate(
+                NarrationKind::Info,
+                format!(
+                    "{summary} stops at {}: {} You answer for it, and the real state machine \
+                     marks the answer.",
+                    who(entry.to),
+                    prompt.question
+                ),
+            );
             self.prompt = Some(prompt);
             self.paused = Some(Paused::Message {
                 node: entry.to,
@@ -359,7 +552,15 @@ impl World {
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
+        let summary = self.wire[position].view().summary;
         self.wire.remove(position);
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{summary} is lost. There is no partition object in this game: a partition is \
+                 you not delivering, and the protocol may not assume the difference."
+            ),
+        );
         Ok(())
     }
 
@@ -374,9 +575,17 @@ impl World {
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
+        let summary = copy.view().summary;
         self.next_message_id += 1;
         copy.sent_at = self.clock;
         self.wire.push(copy);
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "A second copy of {summary} is on the wire. Every rule in the protocol is stated \
+                 so that a message arriving twice changes nothing the first arrival did not."
+            ),
+        );
         Ok(())
     }
 
@@ -411,13 +620,16 @@ impl World {
         let index = self.require_live(id)?;
         self.clock += 1;
         let resend = self.policy.auto_resend;
-        if let Some(node) = self.nodes[index].as_mut() {
-            node.tick();
-            if resend {
-                node.resend_pending();
+        self.narrate_tick(id, index);
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.tick();
+                if resend {
+                    node.resend_pending();
+                }
             }
-        }
-        self.pump(id);
+            world.pump(id);
+        });
         Ok(())
     }
 
@@ -440,15 +652,19 @@ impl World {
             let Some(index) = self.index_of(id) else {
                 continue;
             };
-            if let Some(node) = self.nodes[index].as_mut() {
-                node.tick();
-                if resend {
-                    node.resend_pending();
-                }
-            } else {
+            if self.nodes[index].is_none() {
                 continue;
             }
-            self.pump(id);
+            self.narrate_tick(id, index);
+            self.observe(id, move |world| {
+                if let Some(node) = world.nodes[index].as_mut() {
+                    node.tick();
+                    if resend {
+                        node.resend_pending();
+                    }
+                }
+                world.pump(id);
+            });
         }
         Ok(())
     }
@@ -470,12 +686,23 @@ impl World {
         let index = self.require_live(id)?;
         self.clock += 1;
         let restore = self.election_timeouts[index];
-        if let Some(node) = self.nodes[index].as_mut() {
-            node.set_election_timeout(1);
-            node.tick();
-            node.set_election_timeout(restore);
-        }
-        self.pump(id);
+        self.narrate(
+            NarrationKind::Election,
+            format!(
+                "{}'s election timeout fires: it has waited long enough without hearing from a \
+                 leader. Nothing about that is a safety decision — a timeout only ever costs a \
+                 round.",
+                who(id)
+            ),
+        );
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.set_election_timeout(1);
+                node.tick();
+                node.set_election_timeout(restore);
+            }
+            world.pump(id);
+        });
         Ok(())
     }
 
@@ -507,6 +734,17 @@ impl World {
     pub fn crash(&mut self, id: NodeId) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
+        let disk = &self.disks[index];
+        let text = format!(
+            "{} crashes. Its disk keeps promise {} and {}; its role, its open rounds, its read \
+             rounds and its election timer are gone. Leadership in paros is entirely volatile, \
+             so a crash *is* an abdication and needs no durable fence — and the Phase-2 rounds \
+             that die with it are the ones nobody will ever re-send.",
+            who(id),
+            show_ballot(disk.hard_state().max_promised_ballot),
+            many(disk.records().len(), "accepted record")
+        );
+        self.narrate(NarrationKind::Crash, text);
         self.nodes[index] = None;
         self.armed_seams[index] = None;
         self.settle();
@@ -536,10 +774,29 @@ impl World {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.armed_seams[index] = Some(seam);
+        let text = match seam {
+            Seam::BeforeSync => format!(
+                "{} is armed to die before its next batch is durable: nothing will be written and \
+                 nothing will be sent, so the disk will be exactly what it is now.",
+                who(id)
+            ),
+            Seam::AfterSyncBeforeSend => format!(
+                "{} is armed to die after its next batch is durable but before it is sent: the \
+                 writes will survive and the messages will not. That is how a promise nobody \
+                 ever heard about ends up on a disk.",
+                who(id)
+            ),
+        };
+        self.narrate(NarrationKind::Info, text);
         Ok(())
     }
 
     /// Rebuild a crashed node from its disk.
+    ///
+    /// # Panics
+    ///
+    /// Never on a player-reachable path: the node is installed one line above
+    /// the read-back the narration uses.
     ///
     /// # Errors
     ///
@@ -558,7 +815,20 @@ impl World {
         node.set_election_timeout(self.election_timeouts[index]);
         self.nodes[index] = Some(node);
         self.armed_seams[index] = None;
-        self.pump(id);
+        let booted = self.nodes[index].as_ref().expect("just installed");
+        let text = format!(
+            "{} restarts from its disk: promise {}, {}, applied prefix ending at {}. It boots as \
+             a follower — the disk carries the promise and the log, never the leadership.",
+            who(id),
+            show_ballot(booted.acceptor().promised()),
+            many(booted.acceptor().records().len(), "accepted record"),
+            booted
+                .replica()
+                .chosen_index()
+                .map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
+        );
+        self.narrate(NarrationKind::Restart, text);
+        self.observe(id, move |world| world.pump(id));
         Ok(())
     }
 
@@ -571,10 +841,16 @@ impl World {
     pub fn step_down(&mut self, id: NodeId) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
-        if let Some(node) = self.nodes[index].as_mut() {
-            node.step_down();
-        }
-        self.pump(id);
+        self.narrate(
+            NarrationKind::Election,
+            format!("{} resigns its leadership.", who(id)),
+        );
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.step_down();
+            }
+            world.pump(id);
+        });
         Ok(())
     }
 
@@ -587,10 +863,20 @@ impl World {
     pub fn resend_pending(&mut self, id: NodeId) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
-        if let Some(node) = self.nodes[index].as_mut() {
-            node.resend_pending();
-        }
-        self.pump(id);
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} re-sends the Accepts it is still waiting on. Re-sending is always safe and \
+                 never necessary: an acceptor that already voted answers the same way twice.",
+                who(id)
+            ),
+        );
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.resend_pending();
+            }
+            world.pump(id);
+        });
         Ok(())
     }
 
@@ -616,11 +902,18 @@ impl World {
                 )
             })?;
         let seq = ClientSeq(self.clients[slot].next_seq);
-        let result = self.nodes[index]
-            .as_mut()
-            .map(|node| node.propose(ClientId(client), seq, Value(value.as_bytes().to_vec())));
+        let mark = self.narration.len();
+        let bytes = Value(value.as_bytes().to_vec());
+        let result = self.observe(id, move |world| {
+            let out = world.nodes[index]
+                .as_mut()
+                .map(|node| node.propose(ClientId(client), seq, bytes));
+            world.pump(id);
+            out
+        });
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {
+                self.narration.truncate(mark);
                 return Err(ActionError::new(
                     ActionErrorCode::NotLeader,
                     match hint {
@@ -650,7 +943,23 @@ impl World {
             slot: admitted,
             acked: false,
         });
-        self.pump(id);
+        let opening = say(
+            NarrationKind::Client,
+            format!(
+                "Client {client} asks {} to get {value:?} chosen. {}",
+                who(id),
+                admitted.map_or_else(
+                    || "It is not running, so nothing happens.".to_string(),
+                    |slot| format!(
+                        "The leader hands it the next free slot, {}, and goes straight to Phase \
+                         2 — one round trip, because the ballot it won already covers the whole \
+                         suffix.",
+                        slot.0
+                    )
+                )
+            ),
+        );
+        self.narration.insert(mark, opening);
         Ok(())
     }
 
@@ -681,9 +990,15 @@ impl World {
             let fence = node.proposer().read_floor();
             node.replica().chosen_index().max(fence)
         });
-        let outcome = self.nodes[index].as_mut().map(|node| node.read_index(ctx));
+        let mark = self.narration.len();
+        let outcome = self.observe(id, move |world| {
+            let out = world.nodes[index].as_mut().map(|node| node.read_index(ctx));
+            world.pump(id);
+            out
+        });
         match outcome {
             Some(ReadIndexResult::NotLeader(hint)) => {
+                self.narration.truncate(mark);
                 return Err(ActionError::new(
                     ActionErrorCode::NotLeader,
                     match hint {
@@ -718,7 +1033,21 @@ impl World {
             acks: BTreeSet::new(),
             served: false,
         });
-        self.pump(id);
+        let opening = say(
+            NarrationKind::Read,
+            format!(
+                "Client {client} asks {} for a linearizable read. The read captures {} and asks \
+                 for nothing to be written: what it needs is a fresh proof that {} still leads, \
+                 and a beat's acks are that proof.",
+                who(id),
+                captured.map_or_else(
+                    || "the empty prefix".to_string(),
+                    |s| format!("slot {} as its watermark", s.0)
+                ),
+                who(id)
+            ),
+        );
+        self.narration.insert(mark, opening);
         Ok(())
     }
 
@@ -752,10 +1081,21 @@ impl World {
                 format!("this prompt has no choice {choice:?}"),
             ));
         }
-        if prompt.judge(choice) == Verdict::Wrong {
+        let verdict = prompt.judge(choice);
+        let (kind, node) = (prompt.kind, prompt.node);
+        if verdict == Verdict::Wrong {
+            let feedback = prompt.feedback.clone().unwrap_or_default();
+            self.narrate(NarrationKind::Violation, feedback);
             return Ok(Verdict::Wrong);
         }
         self.prompt = None;
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "That is what `paros-core` does here, so node {node} really does it: {}",
+                crate::prompt::confirmation(kind)
+            ),
+        );
         if let Some(paused) = self.paused.take() {
             self.resume(paused);
         }
@@ -781,14 +1121,53 @@ impl World {
     }
 
     fn serve_read(&mut self, state: ReadState) {
+        let mut served = false;
         for client in &mut self.clients {
             for read in &mut client.reads {
                 if read.ctx == state.ctx {
                     read.served = true;
                     read.index = state.index;
+                    served = true;
                 }
             }
         }
+        if served {
+            self.narrate(
+                NarrationKind::Read,
+                format!(
+                    "The read at ctx {} is served at {}. A quorum acked a beat sent after the \
+                     read began, so no other node could have been committing behind this one's \
+                     back, and the applied prefix covers the watermark the read captured.",
+                    state.ctx,
+                    state.index.map_or_else(
+                        || "the empty prefix".to_string(),
+                        |s| format!("slot {}", s.0)
+                    )
+                ),
+            );
+        }
+    }
+
+    /// The line a tick gets, before anything is stepped.
+    fn narrate_tick(&mut self, id: NodeId, index: usize) {
+        let timeout = self.nodes[index]
+            .as_ref()
+            .map_or(0, ColocatedNode::election_timeout);
+        let clock = self.clock;
+        let text = if timeout == NO_CHECK_QUORUM {
+            format!(
+                "{} ticks (logical time {clock}). Its election clock is parked while you deliver \
+                 heartbeats by hand, so CheckQuorum will not depose it between your moves.",
+                who(id)
+            )
+        } else {
+            format!(
+                "{} ticks (logical time {clock}). Its election timeout is {timeout} tick(s) of \
+                 silence from a leader.",
+                who(id)
+            )
+        };
+        self.narrate(NarrationKind::Info, text);
     }
 
     /// Re-derive everything that is not the core's business: which writes the
@@ -809,6 +1188,16 @@ impl World {
                     proposal.acked = true;
                 }
             }
+        }
+        for index in 0..self.pool.len() {
+            let seen = self.nodes[index]
+                .as_ref()
+                .map_or_else(
+                    || self.disks[index].hard_state().max_promised_ballot,
+                    |node| node.acceptor().promised(),
+                )
+                .max(self.disks[index].hard_state().max_promised_ballot);
+            self.promise_watermarks[index] = self.promise_watermarks[index].max(seen);
         }
         let hold = self.policy.hold_leadership;
         for index in 0..self.pool.len() {

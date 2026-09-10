@@ -24,6 +24,7 @@ use paros_core::proposer::RecoveryStep;
 use paros_core::{Ballot, ColocatedNode, Command, Message, NodeId, ReadState, Slot, WriteOp};
 
 use crate::action::Seam;
+use crate::narration::{self, NodeSnapshot};
 use crate::prompt::{Prompt, PromptKind};
 use crate::world::{InFlight, World};
 
@@ -96,13 +97,23 @@ pub(super) enum Paused {
 }
 
 impl World {
+    /// Hand one message to a node, and narrate what it did about it.
+    ///
+    /// The receipt line says what arrived and what the node knew; everything
+    /// after it is the diff of the node's own accessors across the step (see
+    /// [`World::observe`]).
     pub(super) fn step(&mut self, id: NodeId, message: Message) {
-        if let Some(index) = self.index_of(id)
-            && let Some(node) = self.nodes[index].as_mut()
-        {
-            node.step(message);
-        }
-        self.pump(id);
+        let known = NodeSnapshot::capture(self.node(id));
+        let receipt = narration::receipt(id, &message, &known);
+        self.narration_push(receipt);
+        self.observe(id, move |world| {
+            if let Some(index) = world.index_of(id)
+                && let Some(node) = world.nodes[index].as_mut()
+            {
+                node.step(message);
+            }
+            world.pump(id);
+        });
     }
 
     /// Drain `id` until it is quiet, honouring the seams and the prompts.
@@ -238,6 +249,7 @@ impl World {
                 }
             }
             self.nodes[index] = None;
+            self.record_seam(id, seam);
             return None;
         }
         Some(batch)
@@ -305,9 +317,11 @@ impl World {
                 let Some(index) = self.index_of(node) else {
                     return;
                 };
-                if let Some(batch) = self.gate_batch(index, *batch, true) {
-                    self.release(index, batch);
-                }
+                self.observe(node, move |world| {
+                    if let Some(batch) = world.gate_batch(index, *batch, true) {
+                        world.release(index, batch);
+                    }
+                });
             }
             Paused::Recovery {
                 node,
@@ -318,11 +332,13 @@ impl World {
                     return;
                 };
                 steps.remove(0);
-                if steps.is_empty() {
-                    self.release(index, *batch);
-                } else {
-                    self.raise_recovery(index, batch, steps);
-                }
+                self.observe(node, move |world| {
+                    if steps.is_empty() {
+                        world.release(index, *batch);
+                    } else {
+                        world.raise_recovery(index, batch, steps);
+                    }
+                });
             }
         }
     }

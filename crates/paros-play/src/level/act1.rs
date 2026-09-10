@@ -34,6 +34,7 @@ const ACCEPTORS: &[u64] = &[1, 2, 3];
 /// answered for the player.
 const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
     AutomationFlag::ProposerP2c,
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
@@ -209,6 +210,7 @@ a higher ballot and then refuses a vote from the ballot it just fenced out.",
         "AcceptOutcome",
     ],
     automation_on: &[
+        AutomationFlag::CommitOverwrite,
         AutomationFlag::ProposerP2c,
         AutomationFlag::ReplicaApply,
         AutomationFlag::LeaderRecovery,
@@ -295,6 +297,7 @@ looks like from where you stand — so you must treat it as if it were.",
     ],
     automation_on: &[
         AutomationFlag::AcceptorReplies,
+        AutomationFlag::CommitOverwrite,
         AutomationFlag::ReplicaApply,
         AutomationFlag::LeaderRecovery,
         AutomationFlag::PersistOrder,

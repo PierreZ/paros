@@ -17,6 +17,7 @@ use ts_rs::TS;
 
 use crate::action::{ActionKind, Seam};
 use crate::auto::AutomationFlag;
+use crate::narration::NarrationKind;
 use crate::prompt::{Choice, PromptKind};
 
 /// A ballot as `round.node` — the notation the book and the levels use.
@@ -54,6 +55,19 @@ pub struct GameView {
     pub automation: AutomationView,
     /// How many prompts the player got wrong in this attempt.
     pub mistakes: u32,
+    /// What the **last** action did, derived from the transition itself. It is
+    /// cleared and rebuilt on every action; the whole stream is kept per log
+    /// entry in [`ActionView::narration`].
+    pub narration: Vec<NarrationView>,
+}
+
+/// One narration line: the game saying what just happened, in Paxos.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NarrationView {
+    /// What it is about — the caption's colour, and the log's grouping.
+    pub kind: NarrationKind,
+    /// The sentence, with this transition's own numbers in it.
+    pub text: String,
 }
 
 /// The level's static text and rules.
@@ -342,6 +356,9 @@ pub struct ActionView {
     pub kind: ActionKind,
     /// A one-line description.
     pub label: String,
+    /// What this action did, in Paxos — kept per entry so the log panel shows
+    /// the whole stream, not only the latest caption.
+    pub narration: Vec<NarrationView>,
 }
 
 /// The automation toggles.
