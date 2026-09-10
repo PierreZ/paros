@@ -1,0 +1,768 @@
+/* paros play — the book's palette, on the book's cream page.
+ *
+ * `done` green, `gap` red, `open` grey and `shared` orange are the four
+ * colours book/CLAUDE.md fixes for the diagrams, so a chosen slot here is the
+ * same green as a chosen slot there. Everything else is a tint of the page.
+ */
+
+:root {
+  color-scheme: light;
+
+  --page: #f9f5e9;
+  --panel: #f3ecd9;
+  --ink: #241f18;
+  --ink-soft: #5c5344;
+  --rule: #d9cfb4;
+  --accent: #7a4718;
+
+  --done: #3b6e47;
+  --done-dark: #244730;
+  --gap: #7a2f2f;
+  --gap-dark: #4d1f1f;
+  --open: #5a5a5a;
+  --open-dark: #333333;
+  --shared: #c97a2b;
+  --shared-dark: #7a4718;
+
+  --phase-prepare: #2f5d8a;
+  --phase-promise: #4a86c5;
+  --phase-accept: #3b6e47;
+  --phase-accepted: #6aa77f;
+  --phase-nack: #7a2f2f;
+  --phase-commit: #c97a2b;
+  --phase-heartbeat: #8a7a5c;
+  --phase-catchup: #6b4f8a;
+  --phase-snapshot: #2f7d7a;
+  --phase-read: #a05a9c;
+  --phase-handoff: #8a6b2f;
+  --phase-match: #4a6b8a;
+  --phase-gc: #6b6b4a;
+  --phase-reconfigure: #a0522d;
+  --phase-other: #5a5a5a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --page: #1a1814;
+    --panel: #221f19;
+    --ink: #ece5d5;
+    --ink-soft: #a89e8a;
+    --rule: #3a352b;
+    --accent: #d9a066;
+
+    --done: #5c9a70;
+    --done-dark: #8fc9a1;
+    --gap: #c05a5a;
+    --gap-dark: #e08a8a;
+    --open: #7d7d7d;
+    --open-dark: #b0b0b0;
+    --shared: #dfa05c;
+    --shared-dark: #f0c48c;
+
+    --phase-prepare: #7aa8d8;
+    --phase-promise: #a3c9ec;
+    --phase-accept: #6fb388;
+    --phase-accepted: #a6d8bb;
+    --phase-nack: #d97a7a;
+    --phase-commit: #e2a463;
+    --phase-heartbeat: #bda986;
+    --phase-catchup: #a98ad0;
+    --phase-snapshot: #63bdb9;
+    --phase-read: #d68fce;
+    --phase-handoff: #cfae6a;
+    --phase-match: #8fb2d6;
+    --phase-gc: #b3b37f;
+    --phase-reconfigure: #d68a63;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 15px/1.5 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.3rem;
+}
+
+h2 {
+  font-size: 1.02rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin: 0 0 0.4rem;
+}
+
+h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.35rem;
+  color: var(--ink-soft);
+}
+
+code,
+.wire-summary,
+.log-entry,
+.slot-label {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+.boot {
+  padding: 2rem;
+  color: var(--ink-soft);
+}
+
+/* ---- the two-column board ---- */
+
+.app.playing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(330px, 400px);
+  gap: 0;
+  min-height: 100vh;
+}
+
+@media (max-width: 900px) {
+  .app.playing {
+    grid-template-columns: 1fr;
+  }
+}
+
+.board {
+  padding: 1rem 1rem 3rem;
+  min-width: 0;
+}
+
+.panel {
+  border-left: 1px solid var(--rule);
+  background: var(--panel);
+  padding: 1rem 1.1rem 3rem;
+  min-width: 0;
+}
+
+.panel section {
+  margin-bottom: 1.2rem;
+}
+
+/* ---- the stage ---- */
+
+.stage-host {
+  background: color-mix(in srgb, var(--panel) 45%, transparent);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+.stage {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.node-disc {
+  fill: var(--panel);
+  stroke: var(--ink-soft);
+  stroke-width: 2;
+}
+
+.node.leader .node-disc {
+  stroke: var(--done);
+  stroke-width: 5;
+}
+
+.node.candidate .node-disc {
+  stroke: var(--shared);
+  stroke-width: 3;
+  stroke-dasharray: 7 5;
+}
+
+.node.crashed .node-disc {
+  fill: color-mix(in srgb, var(--open) 30%, var(--page));
+  stroke: var(--open);
+  stroke-dasharray: 3 4;
+}
+
+.node.crashed .node-id,
+.node.crashed .node-role {
+  fill: var(--ink-soft);
+}
+
+.node-id {
+  fill: var(--ink);
+  font-size: 20px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.node-role,
+.node-meta {
+  fill: var(--ink-soft);
+  font-size: 11px;
+  text-anchor: middle;
+}
+
+.election.held {
+  fill: none;
+  stroke: var(--open);
+  stroke-width: 2;
+  opacity: 0.35;
+}
+
+.election.armed {
+  fill: none;
+  stroke: var(--shared);
+  stroke-width: 2;
+  opacity: 0.75;
+}
+
+.link {
+  stroke: var(--rule);
+  stroke-width: 1.5;
+}
+
+.slot rect {
+  fill: color-mix(in srgb, var(--open) 22%, var(--page));
+  stroke: var(--open-dark);
+  stroke-width: 1;
+}
+
+.slot.chosen rect {
+  fill: color-mix(in srgb, var(--done) 60%, var(--page));
+  stroke: var(--done-dark);
+}
+
+.slot.applied rect {
+  fill: var(--done-dark);
+  stroke: var(--done-dark);
+}
+
+.slot.hole rect {
+  fill: var(--gap);
+  stroke: var(--gap-dark);
+}
+
+.slot-label {
+  fill: var(--ink);
+  font-size: 11px;
+}
+
+.slot.applied .slot-label,
+.slot.hole .slot-label {
+  fill: #fff;
+}
+
+.slot-more,
+.client-line,
+.client-id,
+.gutter-title {
+  fill: var(--ink-soft);
+  font-size: 11px;
+}
+
+.gutter-title {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.client-id {
+  fill: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chosen-banner rect {
+  fill: color-mix(in srgb, var(--done) 25%, var(--page));
+  stroke: var(--done);
+}
+
+.chosen-banner text {
+  fill: var(--ink);
+  font-size: 14px;
+  text-anchor: middle;
+}
+
+/* ---- messages in flight ---- */
+
+.wire-dot {
+  cursor: pointer;
+}
+
+.dot-hit {
+  fill: transparent;
+}
+
+.wire-dot .dot {
+  stroke-width: 2.5;
+}
+
+.wire-dot.request .dot {
+  stroke: none;
+}
+
+.wire-dot.reply .dot {
+  fill: var(--page);
+}
+
+.wire-dot:hover .dot,
+.wire-dot:focus .dot {
+  r: 9;
+}
+
+.wire-dot:focus {
+  outline: none;
+}
+
+.wire-dot:focus .dot-hit {
+  fill: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.phase-prepare .dot { fill: var(--phase-prepare); stroke: var(--phase-prepare); }
+.phase-promise .dot { fill: var(--phase-promise); stroke: var(--phase-promise); }
+.phase-accept .dot { fill: var(--phase-accept); stroke: var(--phase-accept); }
+.phase-accepted .dot { fill: var(--phase-accepted); stroke: var(--phase-accepted); }
+.phase-nack .dot { fill: var(--phase-nack); stroke: var(--phase-nack); }
+.phase-commit .dot { fill: var(--phase-commit); stroke: var(--phase-commit); }
+.phase-heartbeat .dot { fill: var(--phase-heartbeat); stroke: var(--phase-heartbeat); }
+.phase-catchup .dot { fill: var(--phase-catchup); stroke: var(--phase-catchup); }
+.phase-snapshot .dot { fill: var(--phase-snapshot); stroke: var(--phase-snapshot); }
+.phase-read .dot { fill: var(--phase-read); stroke: var(--phase-read); }
+.phase-handoff .dot { fill: var(--phase-handoff); stroke: var(--phase-handoff); }
+.phase-match .dot { fill: var(--phase-match); stroke: var(--phase-match); }
+.phase-gc .dot { fill: var(--phase-gc); stroke: var(--phase-gc); }
+.phase-reconfigure .dot { fill: var(--phase-reconfigure); stroke: var(--phase-reconfigure); }
+.phase-other .dot { fill: var(--phase-other); stroke: var(--phase-other); }
+
+.wire-dot.flying {
+  transition: transform 160ms ease-in;
+  opacity: 0.65;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wire-dot.flying {
+    transition: none;
+  }
+}
+
+/* ---- caption ---- */
+
+.caption {
+  margin: 0.7rem 0 1rem;
+  padding: 0.6rem 0.8rem;
+  border-left: 3px solid var(--rule);
+}
+
+.caption-line {
+  margin: 0.15rem 0;
+  color: var(--ink-soft);
+}
+
+.caption-line.latest {
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+
+/* The narration kinds that carry a colour: the book's four, and nothing else.
+ * `NarrationKind` has fifteen members; the rest read as plain prose. */
+.caption-line.kind-violation,
+.caption-line.kind-nack,
+.caption-line.kind-crash {
+  color: var(--gap);
+}
+
+.caption-line.kind-chosen,
+.caption-line.kind-applied,
+.caption-line.kind-accept {
+  color: var(--done);
+}
+
+.caption-line.kind-election,
+.caption-line.kind-leader {
+  color: var(--shared);
+}
+
+/* ---- controls and wire list ---- */
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.control-block {
+  flex: 1 1 260px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.control-row.crashed {
+  opacity: 0.65;
+}
+
+.control-label {
+  min-width: 5.5rem;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.control-button,
+.wire-button,
+.choice,
+.menu-item {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--page);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.control-button:hover,
+.wire-button:hover,
+.choice:hover,
+.menu-item:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.control-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.control-button.danger {
+  color: var(--gap);
+}
+
+.text-input {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--page);
+  color: var(--ink);
+  width: 9rem;
+}
+
+.text-input.tiny {
+  width: 4rem;
+}
+
+.node-select {
+  font: inherit;
+  font-size: 0.85rem;
+  background: var(--page);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.reach-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-right: 0.4rem;
+}
+
+.wire-list {
+  margin-top: 1.2rem;
+}
+
+.wire-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.wire-row td {
+  border-top: 1px solid var(--rule);
+  padding: 0.25rem 0.4rem;
+  vertical-align: middle;
+}
+
+.wire-route {
+  white-space: nowrap;
+}
+
+.wire-swatch {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  background: var(--phase-other);
+}
+
+.wire-swatch.phase-prepare { background: var(--phase-prepare); }
+.wire-swatch.phase-promise { background: var(--phase-promise); }
+.wire-swatch.phase-accept { background: var(--phase-accept); }
+.wire-swatch.phase-accepted { background: var(--phase-accepted); }
+.wire-swatch.phase-nack { background: var(--phase-nack); }
+.wire-swatch.phase-commit { background: var(--phase-commit); }
+.wire-swatch.phase-heartbeat { background: var(--phase-heartbeat); }
+.wire-swatch.phase-catchup { background: var(--phase-catchup); }
+.wire-swatch.phase-snapshot { background: var(--phase-snapshot); }
+.wire-swatch.phase-read { background: var(--phase-read); }
+.wire-swatch.phase-handoff { background: var(--phase-handoff); }
+.wire-swatch.phase-match { background: var(--phase-match); }
+.wire-swatch.phase-gc { background: var(--phase-gc); }
+.wire-swatch.phase-reconfigure { background: var(--phase-reconfigure); }
+
+.wire-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.wire-menu {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  box-shadow: 0 3px 12px rgb(0 0 0 / 0.18);
+}
+
+.menu-item {
+  border: none;
+  border-radius: 0;
+  text-align: left;
+}
+
+/* ---- the panel ---- */
+
+.act-label {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.level-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  margin-bottom: 1rem;
+}
+
+.nav-link.disabled {
+  color: var(--ink-soft);
+  opacity: 0.5;
+}
+
+.goal {
+  border-left: 3px solid var(--open);
+  padding-left: 0.7rem;
+}
+
+.goal-reached {
+  border-color: var(--done);
+}
+
+.goal-reached h2 {
+  color: var(--done);
+}
+
+.goal-failed {
+  border-color: var(--gap);
+}
+
+.goal-failed h2 {
+  color: var(--gap);
+}
+
+.mistakes,
+.small,
+.empty {
+  font-size: 0.83rem;
+  color: var(--ink-soft);
+}
+
+.prose p {
+  margin: 0 0 0.7rem;
+}
+
+.prompt-card {
+  border: 2px solid var(--accent);
+  border-radius: 7px;
+  padding: 0.7rem 0.8rem;
+  background: color-mix(in srgb, var(--shared) 12%, var(--panel));
+}
+
+.prompt-question {
+  margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+}
+
+.prompt-state {
+  margin: 0 0 0.6rem;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.prompt-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.prompt-feedback {
+  margin-top: 0.6rem;
+  border-left: 3px solid var(--gap);
+  background: color-mix(in srgb, var(--gap) 12%, transparent);
+  color: var(--ink);
+  padding: 0.5rem 0.6rem;
+  font-size: 0.88rem;
+}
+
+.error-banner {
+  border-left: 3px solid var(--gap);
+  background: color-mix(in srgb, var(--gap) 12%, transparent);
+  padding: 0.45rem 0.6rem;
+  margin-bottom: 0.9rem;
+  font-size: 0.86rem;
+}
+
+.hint {
+  border-left: 3px solid var(--shared);
+  padding-left: 0.7rem;
+}
+
+.auto-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  padding: 0.1rem 0;
+}
+
+.auto-toggle.disabled {
+  color: var(--ink-soft);
+  opacity: 0.6;
+}
+
+.log-buttons {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.log-list,
+.narration-list {
+  margin: 0;
+  padding-left: 1.4rem;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.narration-entry.kind-violation,
+.narration-entry.kind-nack,
+.narration-entry.kind-crash {
+  color: var(--gap);
+}
+
+.narration-entry.kind-chosen,
+.narration-entry.kind-applied {
+  color: var(--done);
+}
+
+.narration-entry.kind-election,
+.narration-entry.kind-leader {
+  color: var(--shared);
+}
+
+.footnote-block {
+  border-top: 1px solid var(--rule);
+  padding-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.symbol-list {
+  padding-left: 1.2rem;
+  font-size: 0.8rem;
+}
+
+/* ---- the level map ---- */
+
+.level-map {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.2rem 4rem;
+}
+
+.lede {
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+}
+
+.level-list {
+  padding-left: 1.2rem;
+}
+
+.level-entry {
+  margin-bottom: 0.35rem;
+}
+
+.level-link {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: baseline;
+  text-decoration: none;
+}
+
+.level-link:hover .level-title {
+  text-decoration: underline;
+}
+
+.level-title {
+  color: var(--ink);
+  font-size: 1.02rem;
+}
+
+.level-entry.passed .level-title::before {
+  content: "✓ ";
+  color: var(--done);
+}
+
+.level-id {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+}
+
+.level-status {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.footnote {
+  margin-top: 2rem;
+  font-size: 0.83rem;
+  color: var(--ink-soft);
+}
