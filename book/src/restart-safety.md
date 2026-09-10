@@ -1,23 +1,23 @@
 # Crash and restart safety
 
-Paxos assumes nodes crash and come back: a majority keeps serving while a minority is
-down, and a recovered node rejoins. But "come back" hides two separate requirements.
-The durable writes must be flushed **before** the replies they justify leave the wire,
-and the durable state must stay **consistent with what the cluster chose**, so that
-rebuilding from disk cannot resurrect a value nobody decided. paros got the second one
-wrong, and the simulation caught it.
+Paxos assumes that nodes crash and come back. A majority keeps serving while a
+minority is down, and a recovered node rejoins. The words "come back" hide two
+separate requirements. The node must flush its durable writes **before** the replies
+that they justify leave the wire. And its durable state must stay **consistent with
+what the cluster chose**, so that a rebuild from disk cannot resurrect a value that
+nobody decided. paros got the second requirement wrong, and the simulation caught
+it.
 
-> **Play it.** Two Act II levels — one requirement each.
+> **Play it.** Two Act II levels, one requirement each.
 >
-> - [`act2/persist-before-send`](play/#act2/persist-before-send) — a `Ready` batch
->   holds writes and messages and you say which goes first, on every batch. Then you
->   crash the node *at* each seam — before the fsync, and after the fsync but before
->   the send — and read off what survived.
+> - [`act2/persist-before-send`](play/#act2/persist-before-send) — order the writes
+>   and the messages of every `Ready` batch. Then crash the node at each seam,
+>   before the fsync and after the fsync, and read off what survived.
 > - [`act2/what-survives-a-crash`](play/#act2/what-survives-a-crash) — crash and
->   restart at each step of a decision. The prompt that matters: a `Commit` says slot 5
->   is `Y`, your own durable record says `X` at a lower ballot. Keep `X` or take `Y`?
->   Goal: the restarted node's `HardState` never regressed and the chosen value is
->   intact.
+>   restart at each step of a decision. The prompt that matters: a `Commit` says
+>   slot 5 holds `Y`, and your own durable record says `X` at a lower ballot. Keep
+>   `X` or take `Y`? The goal is a restarted node whose `HardState` never regressed
+>   and whose chosen value is intact.
 
 <!-- toc -->
 

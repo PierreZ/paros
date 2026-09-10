@@ -1,26 +1,26 @@
 # The stable leader
 
-A log of independent Paxos instances is correct but naive: every slot would cost two
-round trips, and competing proposers would collide on every one. Multi-Paxos becomes
-efficient by electing **one stable leader** that runs Phase 1 a single time — for the
-whole log suffix — and then streams nothing but Phase 2 for as long as it stays up.
-That optimization brings three obligations: the new leader must recover what the old
-one left half-decided, it must account for the slots its promise quorum said *nothing*
-about, and something must stop two nodes from campaigning forever.
+A log of independent Paxos instances is correct and wasteful. Every slot costs two
+round trips, and competing proposers collide on each one. Multi-Paxos gets its
+efficiency from **one stable leader**. That leader runs Phase 1 once, for the whole
+log suffix, and then sends nothing but Phase 2 for as long as it stays up. The
+optimization brings three obligations. The new leader must recover what the old one
+left half-decided. It must account for the slots its promise quorum reported
+**nothing** about. And something must stop two nodes from campaigning forever.
 
 > **Play it.** Three Act II levels, in order.
 >
 > - [`act2/elect-a-leader`](play/#act2/elect-a-leader) — tick a follower to its
->   election timeout, drive its single `Prepare(from_slot)` by hand, read what the
->   Promises reported, and answer the recovery prompt: re-propose that slot, or go
->   straight to new work?
-> - [`act2/steady-state`](play/#act2/steady-state) — one Accept round per command,
->   slot 7's Accept fired before slot 6 comes back, and the Heartbeat carrying the
->   commit index. Reward: heartbeat delivery stops being your job.
-> - [`act2/the-permanent-gap`](play/#act2/the-permanent-gap) — drop exactly slot 1's
->   Accepts, let slot 2 be chosen, crash the leader so the volatile proposer map dies
->   with it, then elect a successor and decide what to do about slot 1. Goal:
->   `chosen_gap()` back to `None`, every client command applied.
+>   election timeout, drive its single `Prepare(from_slot)` by hand, and read what
+>   the Promises report. Then answer the recovery prompt: re-propose that slot, or
+>   start new work?
+> - [`act2/steady-state`](play/#act2/steady-state) — deliver one Accept round per
+>   command, fire slot 7's Accept before slot 6 comes back, and carry the commit
+>   index on the Heartbeat. The reward is automatic heartbeat delivery.
+> - [`act2/the-permanent-gap`](play/#act2/the-permanent-gap) — drop exactly slot
+>   1's Accepts, let slot 2 be chosen, and crash the leader with its volatile
+>   proposer map. Then elect a successor and decide what to do about slot 1. The
+>   goal is `chosen_gap()` back to `None`, with every client command applied.
 
 <!-- toc -->
 

@@ -1,24 +1,24 @@
 # Why one value is safe
 
-The previous chapter showed *how* a value gets chosen; this one shows *why* the
-choice can never be contradicted. Single-decree Paxos is famous because the
-algorithm is not really invented — it is **derived** from the safety properties it
-must satisfy. Lamport's [Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
-walks that derivation, and it is worth following once, because every line of
-`paros-core` is a consequence of it.
+The previous chapter shows *how* a value gets chosen. This chapter shows *why*
+nothing can contradict that choice. Single-decree Paxos is famous because nobody
+invented the algorithm: it is **derived** from the safety properties it must
+satisfy. Lamport's [Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
+walks through that derivation. Follow it once, because every line of `paros-core`
+is a consequence of it.
 
 > **Play it.** Three Act I levels put you on the wrong side of this argument.
 >
-> - [`act1/adopt-the-value`](play/#act1/adopt-the-value) — a second proposer opens a
->   higher ballot after a value was accepted at a lower one, and you pick what goes
->   in its Accept. Picking your own gets the double-choose explanation.
-> - [`act1/quorum-intersection`](play/#act1/quorum-intersection) — you pick the
->   Phase-1 and Phase-2 reach sets, and try to choose a value with a Phase-1 quorum
->   that misses the acceptor that voted. Unreachable by construction; the win is the
->   explanation of *why*.
-> - [`act1/recovery-is-not-catch-up`](play/#act1/recovery-is-not-catch-up) — one
->   acceptor accepted a value, nothing was chosen, nobody is behind, and you must
->   still adopt it.
+> - [`act1/adopt-the-value`](play/#act1/adopt-the-value) — choose what a second
+>   proposer puts in its Accept, after a lower ballot already accepted a value.
+>   Choose its own value and the game explains the double choice.
+> - [`act1/quorum-intersection`](play/#act1/quorum-intersection) — pick the Phase-1
+>   and Phase-2 reach sets, and try to choose a value with a Phase-1 quorum that
+>   misses the acceptor that voted. The set does not exist, and the explanation of
+>   *why* is the win.
+> - [`act1/recovery-is-not-catch-up`](play/#act1/recovery-is-not-catch-up) — adopt
+>   a value that one acceptor accepted, when nothing is chosen and nobody is
+>   behind.
 
 <!-- toc -->
 

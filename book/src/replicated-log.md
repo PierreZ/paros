@@ -1,20 +1,20 @@
 # From one value to a log
 
-Single-decree Paxos agrees on **one** value; a real system needs a *sequence*,
-applied in the same order on every node so every replica of a deterministic state
-machine ends up in the same state. That sequence is the **replicated log**, and
-Multi-Paxos fills it by running an independent single-decree instance **per slot**.
-Safety does not change — a slot is still "at most one value chosen" — but two new
-facts appear: slots can be decided out of order, and a log may only be *applied* as
-a contiguous prefix.
+Single-decree Paxos agrees on **one** value, and a real system needs a *sequence*.
+Every node applies that sequence in the same order, so every replica of a
+deterministic state machine reaches the same state. The sequence is the
+**replicated log**, and Multi-Paxos fills it with one independent single-decree
+instance **per slot**. Safety does not change, because a slot still chooses at most
+one value. Two new facts appear: slots decide out of order, and a node applies the
+log only as a contiguous prefix.
 
 > **Play it.**
 >
 > - [`act2/a-log-of-decisions`](play/#act2/a-log-of-decisions) — propose three
 >   commands, deliver their Accepts and Accepteds by hand, and deliver slot 3's
->   Accepted before slot 2's. Then you answer the apply question: slot 4 is chosen
->   and `chosen_index` is 2 — may it apply? The level ends when you have watched a
->   hole stop the walk and then seen it filled.
+>   Accepted before slot 2's. Then answer the apply question: slot 4 is chosen and
+>   `chosen_index` is 2, so may it apply? The level ends when a hole stops the walk
+>   and you fill it.
 
 <!-- toc -->
 

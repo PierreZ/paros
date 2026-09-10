@@ -1,21 +1,22 @@
 # How Paxos chooses one value
 
-Single-decree Paxos agrees on one value, and never disagrees, over a network that
-drops, delays and reorders, with several proposers competing. It does it with two
-round trips over a majority: a proposer claims a **ballot** and learns what the
-acceptors already accepted (Phase 1), then asks them to accept a value at that
-ballot (Phase 2). A value accepted by a majority is **chosen**, and a chosen value
-never changes.
+Single-decree Paxos agrees on one value over a network that drops, delays and
+reorders messages, while several proposers compete. It needs two round trips over
+a majority. In Phase 1 a proposer claims a **ballot** and learns what the
+acceptors have already accepted. In Phase 2 it asks them to accept a value at that
+ballot. A value that a majority accepts is **chosen**, and a chosen value does not
+change.
 
-> **Play it.** Act I runs this by hand — three acceptors, one slot, no clock, no disk.
+> **Play it.** Act I runs this by hand: three acceptors, one slot, no clock and no
+> disk.
 >
 > - [`act1/choose-a-value`](play/#act1/choose-a-value) — deliver the Prepare,
->   Promise, Accept and Accepted one message at a time, with one acceptor kept
->   silent, until a value is chosen by two of three.
-> - [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) — you answer every Prepare
->   and every Accept; the acceptor rule below is the whole level.
-> - [`act1/the-duel`](play/#act1/the-duel) — two proposers preempting each other:
->   get a value chosen anyway, and count the rounds it took.
+>   Promise, Accept and Accepted one message at a time, with one acceptor silent,
+>   until two of three choose a value.
+> - [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) — answer every Prepare and
+>   every Accept yourself. The acceptor rule below is the whole level.
+> - [`act1/the-duel`](play/#act1/the-duel) — run two proposers that preempt each
+>   other, get a value chosen anyway, and count the rounds it costs.
 
 <!-- toc -->
 

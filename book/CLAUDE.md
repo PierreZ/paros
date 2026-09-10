@@ -100,3 +100,18 @@ chapter edit:
 
 Do not add demo iframes, `runSeed` references, or wasm build steps to a chapter: the game is
 a separate page, linked, never embedded.
+
+## Book text written for the game follows ASD-STE100
+
+The game's own text is Simplified Technical English, and the book pages written for it match
+it: `play.md`, the "How to play, then read" callout in `index.md`, every "Play it" callout, the
+one-paragraph mechanism statement that opens a chapter, and all of `beyond-multi-paxos.md`. The
+rules are one instruction per sentence, active voice, present tense, at most 20 words in a
+procedural sentence and 25 in a descriptive one, at most six sentences per paragraph, no idioms
+and no figurative language, no noun cluster longer than three words, articles always written,
+and `must` for an obligation. Technical names stay technical names — ballot, promise, quorum,
+slot, Prepare, Promise, Accept, Accepted, Nack, Commit, Heartbeat, and every `paros-core`
+symbol. Two things are exempt, because rewriting them changes their meaning: text quoted from a
+paper or a design note, and the wording of the safety derivations and the audit's assertion
+message strings. The rest of a chapter — the derivations, the doctrine sections, the symbol
+maps — is ordinary prose, and a rewrite of it is not part of an STE pass.
