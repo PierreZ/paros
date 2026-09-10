@@ -5,8 +5,19 @@
 // `crash` stops rendering a Crash button, and a level the engine adds
 // tomorrow gets its controls for free.
 
-import type { Action, ActionKind, ClientView, GameView, NodeView, Phase, Seam } from '../types';
+import type {
+  Action,
+  ActionKind,
+  ClientView,
+  GameView,
+  MessageView,
+  NodeView,
+  Phase,
+  Seam,
+} from '../types';
 import { h } from '../render/dom';
+import { gridOf } from '../render/grid';
+import { memberCount, phaseSize, quorumOf } from './quorum';
 
 type Dispatch = (action: Action) => void;
 
@@ -32,6 +43,17 @@ export interface ControlState {
   retryNode: number | null;
   /** The election timeout box, per node. */
   timeouts: Map<number, string>;
+  /**
+   * The column the next write's Accept goes to, as the player typed it. An
+   * empty box lets the level ask, which is what a grid level does.
+   */
+  proposeColumn: string;
+  /** The client that reads without a leader, or `null` for the first client. */
+  quorumReadClient: number | null;
+  /** The peer each leader offers its authority to. */
+  handoffTargets: Map<number, number>;
+  /** The slot each node's next corruption damages. */
+  corruptSlots: Map<number, string>;
 }
 
 /** A fresh control state. */
@@ -47,7 +69,95 @@ export function newControlState(): ControlState {
     compactUpTo: null,
     retryNode: null,
     timeouts: new Map(),
+    proposeColumn: '',
+    quorumReadClient: null,
+    handoffTargets: new Map(),
+    corruptSlots: new Map(),
   };
+}
+
+// ---- what this level offers -------------------------------------------------
+
+/** One per-node control. */
+export type NodeControl =
+  | 'tick'
+  | 'start_election'
+  | 'resend_pending'
+  | 'step_down'
+  | 'quorum_read'
+  | 'relinquish'
+  | 'corrupt'
+  | 'wipe'
+  | 'crash'
+  | 'crash_at'
+  | 'restart';
+
+/**
+ * Which controls this level offers for this node.
+ *
+ * Two rules, and no third: the level must list the action, and the node must
+ * be in a state where the action means something. A crashed node is not
+ * ticked and a running node is not restarted. Everything else — whether this
+ * node leads, whether it holds a record for a slot — is the engine's answer,
+ * and the refusal it sends is what the player reads.
+ */
+export function nodeControlsFor(view: GameView, node: NodeView): NodeControl[] {
+  const offered = (kind: ActionKind): boolean => allowed(view, kind);
+  const live: NodeControl[] = [
+    'tick',
+    'start_election',
+    'resend_pending',
+    'step_down',
+    'quorum_read',
+    'relinquish',
+    'crash',
+    'crash_at',
+  ];
+  const controls: NodeControl[] = [];
+  for (const control of live) {
+    if (offered(control) && node.alive) controls.push(control);
+  }
+  // A disk is damaged and erased whether the node runs or not: the damage
+  // shows up at the next boot, which is what these two levels are about.
+  if (offered('corrupt')) controls.push('corrupt');
+  if (offered('wipe')) controls.push('wipe');
+  if (offered('restart') && !node.alive) controls.push('restart');
+  return controls;
+}
+
+/**
+ * The peers a leader may be asked to hand its authority to.
+ *
+ * Every other node is offered. Whether the hand-off is legal is the engine's
+ * answer: it refuses with `handoff_refused` and names the rule.
+ */
+export function handoffTargets(view: GameView, node: NodeView): number[] {
+  return view.world.nodes.filter((peer) => peer.id !== node.id).map((peer) => peer.id);
+}
+
+/**
+ * The nodes a copy of `message` may be misrouted to.
+ *
+ * A misrouted message is a thing networks do, and every rule in the protocol
+ * is written to survive one, so every node except the addressee is offered.
+ */
+export function misrouteTargets(view: GameView, message: MessageView): number[] {
+  if (!allowed(view, 'duplicate')) return [];
+  return view.world.nodes.filter((node) => node.id !== message.to).map((node) => node.id);
+}
+
+/**
+ * The columns a write may be addressed to, or `null` when the deployment runs
+ * no grid.
+ *
+ * The shape comes from the engine's own quorum view. An empty choice lets the
+ * configuration derive the column, which is what every deployment that is not
+ * a grid does — and what a grid level asks the player about.
+ */
+export function proposeColumns(view: GameView): number[] | null {
+  const shape = gridOf(view.world);
+  if (!shape) return null;
+  return Array.from({ length: shape.cols }, (_, column) => column);
 }
 
 function textInput(
@@ -172,6 +282,10 @@ function reachPicker(view: GameView, dispatch: Dispatch): HTMLElement | null {
   const acceptors = view.world.nodes.filter((node) => node.flavour === 'acceptor');
   const all = acceptors.map((node) => node.id);
   const reach = view.world.reach;
+  // The sizes the two phases need come from the engine's quorum view. A
+  // majority sends no numbers, so the picker prints none.
+  const quorum = quorumOf(acceptors);
+  const members = memberCount(acceptors);
   const phases: { phase: Phase; label: string; hint: string; nodes: number[] }[] = [
     {
       phase: 'one',
@@ -192,30 +306,41 @@ function reachPicker(view: GameView, dispatch: Dispatch): HTMLElement | null {
     h('h3', {}, 'Reach'),
     ...phases.map(({ phase, label, hint, nodes }) => {
       const set = new Set(nodes);
+      const need = phaseSize(quorum, phase);
+      const size =
+        need === null
+          ? null
+          : h(
+              'span',
+              { class: 'control-hint' },
+              `${set.size} of ${members} · this phase needs ${need}`,
+            );
+      const boxes = acceptors.map((acceptor) => {
+        const box = h('input', {
+          type: 'checkbox',
+          class: 'reach-box',
+          id: `reach-${phase}-${acceptor.id}`,
+          checked: set.has(acceptor.id),
+        });
+        box.addEventListener('change', () => {
+          const next = new Set(set);
+          if (box.checked) next.add(acceptor.id);
+          else next.delete(acceptor.id);
+          dispatch({ kind: 'set_reach', phase, nodes: [...next].sort((a, b) => a - b) });
+        });
+        return h(
+          'label',
+          { class: 'reach-label', for: `reach-${phase}-${acceptor.id}` },
+          box,
+          String(acceptor.id),
+        );
+      });
       return h(
         'div',
         { class: 'control-row reach-row' },
         h('span', { class: 'control-label', title: hint }, label),
-        ...acceptors.map((acceptor) => {
-          const box = h('input', {
-            type: 'checkbox',
-            class: 'reach-box',
-            id: `reach-${phase}-${acceptor.id}`,
-            checked: set.has(acceptor.id),
-          });
-          box.addEventListener('change', () => {
-            const next = new Set(set);
-            if (box.checked) next.add(acceptor.id);
-            else next.delete(acceptor.id);
-            dispatch({ kind: 'set_reach', phase, nodes: [...next].sort((a, b) => a - b) });
-          });
-          return h(
-            'label',
-            { class: 'reach-label', for: `reach-${phase}-${acceptor.id}` },
-            box,
-            String(acceptor.id),
-          );
-        }),
+        h('span', { class: 'reach-boxes' }, ...boxes),
+        size,
       );
     }),
   );
@@ -237,15 +362,19 @@ function proposeRow(view: GameView, state: ControlState, dispatch: Dispatch): HT
   const input = textInput('propose-value', state.proposeValue, 'the command', (next) => {
     state.proposeValue = next;
   });
+  const columns = proposeColumns(view);
+  const column = columns === null ? null : columnSelect(state, columns);
   const submit = (): void => {
+    const picked = column === null || column.value === '' ? null : Number(column.value);
     dispatch({
       kind: 'propose',
       node: Number(select.value),
       client: who ? Number(who.value) : client,
       value: input.value.trim() || 'x=1',
-      // The engine derives the column of a grid deployment; a level that
-      // makes the player pick one has its own control.
-      column: null,
+      // An empty box lets the configuration derive the column, which is what
+      // every deployment that is not a grid does — and what makes a grid level
+      // ask the player.
+      column: picked,
     });
   };
   input.addEventListener('keydown', (event) => {
@@ -259,7 +388,62 @@ function proposeRow(view: GameView, state: ControlState, dispatch: Dispatch): HT
     who ? h('span', { class: 'control-hint' }, 'to') : null,
     select,
     input,
+    column ? h('span', { class: 'control-hint' }, 'column') : null,
+    column,
     action('Write', 'The client asks this node to get the command chosen.', submit),
+  );
+}
+
+/**
+ * Which column of the grid the next write's Accept goes to.
+ *
+ * The empty option is the default: it sends no column, and the configuration
+ * derives the one the rule gives. A level that teaches the rule asks the
+ * player instead, through the prompt card.
+ */
+function columnSelect(state: ControlState, columns: readonly number[]): HTMLSelectElement {
+  const select = h('select', {
+    class: 'node-select column-select',
+    'data-focus-key': 'propose-column',
+    title: 'The column that votes for this slot. Leave it empty and the level asks you.',
+  });
+  select.append(
+    h('option', { value: '', selected: state.proposeColumn === '' }, 'let the level ask'),
+  );
+  for (const column of columns) {
+    select.append(
+      h(
+        'option',
+        { value: column, selected: state.proposeColumn === String(column) },
+        `column ${column}`,
+      ),
+    );
+  }
+  select.addEventListener('change', () => {
+    state.proposeColumn = select.value;
+  });
+  return select;
+}
+
+function quorumReadRow(view: GameView, state: ControlState): HTMLElement | null {
+  if (!allowed(view, 'quorum_read')) return null;
+  const clients = view.world.clients;
+  if (clients.length < 2) return null;
+  const client = state.quorumReadClient ?? clients[0]?.id ?? 0;
+  const who = clientSelect('quorum-read-client', clients, client, (id) => {
+    state.quorumReadClient = id;
+  });
+  if (!who) return null;
+  return h(
+    'div',
+    { class: 'control-row' },
+    h('span', { class: 'control-label' }, 'a leaderless read comes from'),
+    who,
+    h(
+      'span',
+      { class: 'control-hint' },
+      'Ask a node for a quorum read with the button in its own row.',
+    ),
   );
 }
 
@@ -383,6 +567,7 @@ function clientControls(view: GameView, state: ControlState, dispatch: Dispatch)
   const rows = [
     proposeRow(view, state, dispatch),
     readRow(view, state, dispatch),
+    quorumReadRow(view, state),
     compactRow(view, state, dispatch),
     ...retryRows(view, state, dispatch),
   ].filter((row): row is HTMLElement => row !== null);
@@ -409,6 +594,66 @@ function seamButtons(node: NodeView, dispatch: Dispatch): HTMLElement[] {
   );
 }
 
+/** The select that names the peer a leader offers its authority to. */
+function handoffBox(
+  view: GameView,
+  node: NodeView,
+  state: ControlState,
+  dispatch: Dispatch,
+): HTMLElement | null {
+  const targets = handoffTargets(view, node);
+  if (targets.length === 0) return null;
+  const chosen = state.handoffTargets.get(node.id) ?? targets[0] ?? 0;
+  const select = h('select', {
+    class: 'node-select',
+    'data-focus-key': `handoff-${node.id}`,
+  });
+  for (const id of targets) {
+    select.append(h('option', { value: id, selected: id === chosen }, `node ${id}`));
+  }
+  select.addEventListener('change', () => {
+    state.handoffTargets.set(node.id, Number(select.value));
+  });
+  return h(
+    'span',
+    { class: 'handoff-box' },
+    action(
+      'Hand off to',
+      'The leader gives its authority to this peer, under the same ballot and with no Phase 1.',
+      () => dispatch({ kind: 'relinquish', node: node.id, to: Number(select.value) }),
+    ),
+    select,
+  );
+}
+
+/** The box that names the slot whose record rots on this node's disk. */
+function corruptBox(node: NodeView, state: ControlState, dispatch: Dispatch): HTMLElement {
+  const value = state.corruptSlots.get(node.id) ?? '0';
+  const input = textInput(`corrupt-${node.id}`, value, 'slot', (next) => {
+    state.corruptSlots.set(node.id, next);
+  });
+  input.classList.add('tiny');
+  const submit = (): void => {
+    const slot = Number.parseInt(input.value, 10);
+    if (!Number.isFinite(slot) || slot < 0) return;
+    dispatch({ kind: 'corrupt', node: node.id, slot });
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+  return h(
+    'span',
+    { class: 'corrupt-box' },
+    action(
+      'Corrupt slot',
+      'The value of this record is lost. The slot and the ballot beside it survive.',
+      submit,
+      'control-button danger',
+    ),
+    input,
+  );
+}
+
 function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
   const kinds: ActionKind[] = [
     'tick',
@@ -419,6 +664,10 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
     'resend_pending',
     'step_down',
     'set_election_timeout',
+    'quorum_read',
+    'relinquish',
+    'corrupt',
+    'wipe',
   ];
   if (!kinds.some((kind) => allowed(view, kind)) && !allowed(view, 'tick_all')) return null;
 
@@ -437,28 +686,39 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
         )
       : null,
     ...nodes.map((node) => {
+      const offered = new Set(nodeControlsFor(view, node));
+      const readClient =
+        state.quorumReadClient ?? view.world.clients[0]?.id ?? null;
       const buttons: (HTMLElement | null)[] = [
-        allowed(view, 'tick') && node.alive
+        offered.has('tick')
           ? action('Tick', 'Move the clock of this node forward one tick.', () =>
               dispatch({ kind: 'tick', node: node.id }),
             )
           : null,
-        allowed(view, 'start_election') && node.alive
+        offered.has('start_election')
           ? action('Elect', 'Campaign at a new, higher ballot.', () =>
               dispatch({ kind: 'start_election', node: node.id }),
             )
           : null,
-        allowed(view, 'resend_pending') && node.alive
+        offered.has('resend_pending')
           ? action('Resend', 'Send every Accept that still waits for its quorum again.', () =>
               dispatch({ kind: 'resend_pending', node: node.id }),
             )
           : null,
-        allowed(view, 'step_down') && node.alive
+        offered.has('step_down')
           ? action('Step down', 'The node gives up the leadership.', () =>
               dispatch({ kind: 'step_down', node: node.id }),
             )
           : null,
-        allowed(view, 'crash') && node.alive
+        offered.has('quorum_read')
+          ? action(
+              'Quorum read',
+              'The client asks this node for a read. The node asks a row, and no leader is involved.',
+              () => dispatch({ kind: 'quorum_read', node: node.id, client: readClient }),
+            )
+          : null,
+        offered.has('relinquish') ? handoffBox(view, node, state, dispatch) : null,
+        offered.has('crash')
           ? action(
               'Crash',
               'Stop the node. Its disk stays.',
@@ -466,12 +726,21 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
               'control-button danger',
             )
           : null,
-        allowed(view, 'restart') && !node.alive
+        offered.has('restart')
           ? action('Restart', 'Start the node again from its disk.', () =>
               dispatch({ kind: 'restart', node: node.id }),
             )
           : null,
-        ...(allowed(view, 'crash_at') && node.alive ? seamButtons(node, dispatch) : []),
+        offered.has('corrupt') ? corruptBox(node, state, dispatch) : null,
+        offered.has('wipe')
+          ? action(
+              'Wipe',
+              'Erase the whole disk. The promise goes with it, and it cannot come back.',
+              () => dispatch({ kind: 'wipe', node: node.id }),
+              'control-button danger',
+            )
+          : null,
+        ...(offered.has('crash_at') ? seamButtons(node, dispatch) : []),
       ];
       const timeoutBox = allowed(view, 'set_election_timeout')
         ? (() => {

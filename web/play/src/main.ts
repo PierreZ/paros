@@ -12,13 +12,19 @@ import { parseHash, type Route } from './route';
 import { h, replace } from './render/dom';
 import { renderStage } from './render/stage';
 import { renderCaption } from './ui/caption';
-import { renderControls, newControlState, type ControlState } from './ui/controls';
+import {
+  misrouteTargets,
+  newControlState,
+  renderControls,
+  type ControlState,
+} from './ui/controls';
 import { renderHistory } from './ui/history';
 import { renderLevelMap } from './ui/levelmap';
 import { renderPanel } from './ui/panel';
+import { renderRefusal } from './ui/refusal';
 import { renderWire } from './ui/wire';
 import { load, recordAttempt, recordPass, type Progress } from './progress';
-import type { Action, GameView, LevelSummary } from './types';
+import type { Action, ActionKind, GameView, LevelSummary } from './types';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('the page has no #app to render into');
@@ -101,6 +107,10 @@ function render(): void {
     { class: 'board' },
     h('div', { class: 'stage-host' }, renderStage(view)),
     renderCaption(view),
+    // A refused move leaves the board alone, so the reason belongs beside the
+    // controls that made it — and above them, because the controls of a
+    // six-node level are longer than the screen.
+    renderRefusal(game.lastError),
     renderControls(view, controls, dispatch),
     renderHistory(view),
     renderWire(view, dispatch),
@@ -112,7 +122,6 @@ function render(): void {
       view,
       levels,
       progress,
-      error: game.lastError,
       dispatch,
       undo: () => {
         game?.undo();
@@ -182,23 +191,41 @@ function deliver(id: number, dot: Element | null): void {
 
 function openMenu(id: number, x: number, y: number): void {
   closeMenu();
-  const item = (label: string, action: Action): HTMLButtonElement => {
-    const button = h('button', { class: 'menu-item', type: 'button' }, label);
+  if (!game) return;
+  const view = game.view;
+  const message = view.world.wire.find((entry) => entry.id === id);
+  if (!message) return;
+  const offers = (kind: ActionKind): boolean => view.level.allowed_actions.includes(kind);
+  const item = (label: string, action: Action, title?: string): HTMLButtonElement => {
+    const button = h(
+      'button',
+      { class: 'menu-item', type: 'button', title: title ?? null },
+      label,
+    );
     button.addEventListener('click', () => {
       closeMenu();
       dispatch(action);
     });
     return button;
   };
-  const element = h(
-    'div',
-    { class: 'wire-menu', style: `left:${x}px; top:${y}px` },
-    item('Deliver', { kind: 'deliver', id }),
-    item('Drop', { kind: 'drop', id }),
-    // `to: null` keeps the copy's addressee. A level that teaches a
-    // misrouted message names the other node itself.
-    item('Duplicate', { kind: 'duplicate', id, to: null }),
-  );
+  const items: (HTMLElement | null)[] = [
+    offers('deliver') ? item('Deliver', { kind: 'deliver', id }) : null,
+    offers('drop') ? item('Drop', { kind: 'drop', id }) : null,
+    // `to: null` keeps the copy's addressee; a named node misroutes the copy,
+    // which is a thing networks do and which every rule in the protocol is
+    // written to survive.
+    offers('duplicate') ? item('Duplicate', { kind: 'duplicate', id, to: null }) : null,
+    ...misrouteTargets(view, message).map((to) =>
+      item(
+        `Duplicate to node ${to}`,
+        { kind: 'duplicate', id, to },
+        'Send a copy to a node that this message was not addressed to.',
+      ),
+    ),
+  ];
+  const kept = items.filter((entry): entry is HTMLElement => entry !== null);
+  if (kept.length === 0) return;
+  const element = h('div', { class: 'wire-menu', style: `left:${x}px; top:${y}px` }, ...kept);
   document.body.append(element);
   menu = element;
 }

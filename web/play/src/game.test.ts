@@ -274,4 +274,99 @@ describe.skipIf(!built)('the real engine (wasm)', () => {
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.status === 'acked')).toBe(true);
   });
+
+  it('plays act4/the-grid to its goal, and reads the column off the engine', async () => {
+    const game = await engine('act4/the-grid');
+    const client = game.view.world.clients[0]?.id ?? 0;
+
+    // The deployment is a grid, and the engine says so as numbers the stage
+    // can draw — never as a sentence the frontend parses.
+    const quorum = game.view.world.nodes[0]?.quorum;
+    expect(quorum?.kind).toBe('grid');
+    expect(quorum?.rows).toBe(2);
+    expect(quorum?.cols).toBe(3);
+    expect(game.view.world.nodes).toHaveLength(6);
+    for (const node of game.view.world.nodes) {
+      expect(node.grid_cell).not.toBeNull();
+      expect(node.grid_cell?.row).toBeLessThan(2);
+      expect(node.grid_cell?.column).toBeLessThan(3);
+    }
+
+    expect(game.act({ kind: 'start_election', node: 0 })).toBe(true);
+    settle(game);
+
+    // A grid level asks the player which column takes the slot, so the write
+    // carries no column of its own.
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'alpha', column: null })).toBe(true);
+    expect(game.view.prompt?.kind).toBe('grid_column');
+    const first = game.view.prompt;
+    expect(first?.choices.map((choice) => choice.id)).toEqual([
+      'column_0',
+      'column_1',
+      'column_2',
+    ]);
+    expect(game.act({ kind: 'answer', prompt: first?.id ?? 0, choice: 'column_0' })).toBe(true);
+
+    // Slot 0 goes to column 0, and the message says which column it went to.
+    const accept = game.view.world.wire.find((message) => message.kind === 'Accept');
+    expect(accept?.slot).toBe(0);
+    expect(accept?.column).toBe(0);
+
+    // A copy addressed to a node outside the column: it votes, and its vote
+    // counts for nothing.
+    expect(game.act({ kind: 'duplicate', id: accept?.id ?? 0, to: 4 })).toBe(true);
+    settle(game);
+
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'bravo', column: null })).toBe(true);
+    const second = game.view.prompt;
+    expect(second?.kind).toBe('grid_column');
+    expect(game.act({ kind: 'answer', prompt: second?.id ?? 0, choice: 'column_1' })).toBe(true);
+    expect(game.view.world.wire.find((message) => message.kind === 'Accept')?.column).toBe(1);
+    settle(game);
+
+    expect(game.view.goal.status, game.view.goal.detail).toBe('reached');
+    expect(game.view.mistakes).toBe(0);
+  });
+
+  it('refuses a second hop of a handed-off leadership, with a reason to show', async () => {
+    const game = await engine('act4/the-handoff');
+    const client = game.view.world.clients[0]?.id ?? 0;
+    expect(game.act({ kind: 'start_election', node: 0 })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'alpha', column: null })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'relinquish', node: 0, to: 1 })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'propose', node: 1, client, value: 'bravo', column: null })).toBe(true);
+    settle(game);
+
+    // One hop only: the successor may not pass the authority on.
+    expect(game.act({ kind: 'relinquish', node: 1, to: 2 })).toBe(false);
+    expect(game.lastError?.code).toBe('handoff_refused');
+    expect(game.lastError?.error.length).toBeGreaterThan(0);
+    expect(game.view.goal.status, game.view.goal.detail).toBe('reached');
+  });
+
+  it('refuses the boot of a node whose disk was erased', async () => {
+    const game = await engine('act4/the-wiped-node');
+    const client = game.view.world.clients[0]?.id ?? 0;
+    expect(game.view.level.allowed_actions).toContain('wipe');
+    expect(game.act({ kind: 'start_election', node: 0 })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'alpha', column: null })).toBe(true);
+    settle(game);
+
+    expect(game.act({ kind: 'wipe', node: 2 })).toBe(true);
+    const erased = game.view.world.nodes.find((node) => node.id === 2);
+    expect(erased?.alive).toBe(false);
+    expect(erased?.accepted).toEqual([]);
+    expect(game.view.log.some((entry) => entry.kind === 'wipe')).toBe(true);
+
+    // The boot raises the operator's question, and the answer is a refusal.
+    expect(game.act({ kind: 'restart', node: 2 })).toBe(true);
+    const prompt = game.view.prompt;
+    expect(prompt?.kind).toBe('wiped_rejoin');
+    expect(game.act({ kind: 'answer', prompt: prompt?.id ?? 0, choice: 'refuse' })).toBe(true);
+    expect(game.view.world.nodes.find((node) => node.id === 2)?.alive).toBe(false);
+  });
 });

@@ -7,7 +7,18 @@
 
 import type { GameView, MessageView, NodeView, SlotView, WorldView } from '../types';
 import { svg } from './dom';
-import { circleLayout, dotPositions, groupByLink, trim, type Point } from './layout';
+import { wipedNodes } from './disk';
+import { cellBadge, columnClass, columnOf, gridCells, gridOf } from './grid';
+import {
+  circleLayout,
+  dotPositions,
+  gridPoint,
+  groupByLink,
+  trim,
+  type Cell,
+  type GridShape,
+  type Point,
+} from './layout';
 
 const WIDTH = 960;
 const HEIGHT = 620;
@@ -15,6 +26,23 @@ const NODE_RADIUS = 32;
 const SLOT_WIDTH = 92;
 const SLOT_HEIGHT = 19;
 const MAX_SLOTS = 6;
+
+/**
+ * How far apart two neighbour cells of a grid sit.
+ *
+ * The horizontal gap holds a log column (`SLOT_WIDTH`) and two node radii, so
+ * a node's log never lands on the node beside it. The vertical gap holds six
+ * slot boxes and the meta lines below a node.
+ */
+const GRID_GAP = { x: 180, y: 176 };
+
+/**
+ * How far left of a node the row label sits.
+ *
+ * A node in the left column draws its log on its left, so the label must clear
+ * the whole log column. A label the log covers names nothing.
+ */
+const ROW_LABEL_OFFSET = NODE_RADIUS + 10 + SLOT_WIDTH + 16;
 
 /**
  * Whether a message answers one.
@@ -90,7 +118,8 @@ export function slotClass(slot: SlotView): string {
  * role, but it has an attempt, and that is what the player watches. A node
  * with neither prints what it is.
  */
-export function roleLabel(node: NodeView): string {
+export function roleLabel(node: NodeView, wiped = false): string {
+  if (wiped) return 'wiped';
   if (!node.alive) return 'crashed';
   if (node.role) return node.role;
   const attempts: Record<string, string> = {
@@ -104,8 +133,9 @@ export function roleLabel(node: NodeView): string {
   return node.flavour;
 }
 
-function nodeStateClass(node: NodeView): string {
+function nodeStateClass(node: NodeView, wiped = false): string {
   const parts = ['node'];
+  if (wiped) parts.push('wiped');
   if (!node.alive) parts.push('crashed');
   if (node.role === 'leader' || node.attempt === 'won') parts.push('leader');
   if (node.role === 'candidate' || node.attempt === 'phase1' || node.attempt === 'phase2') {
@@ -229,53 +259,108 @@ function electionRing(node: NodeView): SVGElement | null {
   });
 }
 
-function nodeGroup(node: NodeView, at: Point): SVGGElement {
+function nodeGroup(node: NodeView, at: Point, cell: Cell | null, wiped: boolean): SVGGElement {
   const under: string[] = [];
-  if (node.promised) under.push(`promised ${node.promised}`);
-  if (node.ballot) under.push(`ballot ${node.ballot}`);
-  if (node.chosen_index !== null) under.push(`chosen ≤ ${node.chosen_index}`);
-  if (node.leader !== null) under.push(`leader ${node.leader}`);
+  const badge = cellBadge(cell);
+  if (badge) under.push(badge);
+  if (wiped) {
+    under.push('the disk is empty');
+  } else {
+    if (node.promised) under.push(`promised ${node.promised}`);
+    if (node.ballot) under.push(`ballot ${node.ballot}`);
+    if (node.chosen_index !== null) under.push(`chosen ≤ ${node.chosen_index}`);
+    if (node.leader !== null) under.push(`leader ${node.leader}`);
+  }
 
-  const ring = electionRing(node);
+  const ring = wiped ? null : electionRing(node);
   const labels = under.map((line, index) =>
-    svg('text', { class: 'node-meta', x: 0, y: NODE_RADIUS + 16 + index * 12 }, line),
+    svg(
+      'text',
+      {
+        class: index === 0 && badge ? 'node-meta cell-badge' : 'node-meta',
+        x: 0,
+        y: NODE_RADIUS + 16 + index * 12,
+      },
+      line,
+    ),
   );
+  const title = wiped
+    ? `node ${node.id} lost its disk. It must not start again: a promise cannot come back.`
+    : `node ${node.id} is ${roleLabel(node)}${node.promised ? `, and it promised ${node.promised}` : ''}`;
 
   return svg(
     'g',
     {
-      class: nodeStateClass(node),
+      class: nodeStateClass(node, wiped),
       transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
       'data-node': node.id,
     },
     ring,
     svg('circle', { class: 'node-disc', r: NODE_RADIUS, cx: 0, cy: 0 }),
     svg('text', { class: 'node-id', x: 0, y: -2 }, String(node.id)),
-    svg('text', { class: 'node-role', x: 0, y: 14 }, roleLabel(node)),
+    svg('text', { class: 'node-role', x: 0, y: 14 }, roleLabel(node, wiped)),
     ...labels,
-    svg(
-      'title',
-      {},
-      `node ${node.id} is ${roleLabel(node)}${node.promised ? `, and it promised ${node.promised}` : ''}`,
-    ),
+    svg('title', {}, title),
   );
 }
 
 function messageDot(message: MessageView, at: Point): SVGGElement {
+  // The column an Accept was addressed to colours the dot's edge: a grid
+  // decides a slot by one whole column, so the player must see which one a
+  // message belongs to. The engine names it (`MessageView.column`); the
+  // frontend never works it out from the slot.
+  const column = columnOf(message);
+  const columnClasses = column === null ? '' : ` column ${columnClass(column)}`;
+  const where = column === null ? '' : `, column ${column}`;
   return svg(
     'g',
     {
-      class: `wire-dot ${phaseClass(message.phase)} ${isReply(message) ? 'reply' : 'request'}`,
+      class: `wire-dot ${phaseClass(message.phase)} ${isReply(message) ? 'reply' : 'request'}${columnClasses}`,
       'data-msg': message.id,
       transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
       tabindex: 0,
       role: 'button',
-      'aria-label': `${message.summary}, from node ${message.from} to node ${message.to}. Click to deliver it.`,
+      'aria-label': `${message.summary}, from node ${message.from} to node ${message.to}${where}. Click to deliver it.`,
     },
     svg('circle', { class: 'dot-hit', r: 13, cx: 0, cy: 0 }),
     svg('circle', { class: 'dot', r: 7, cx: 0, cy: 0 }),
-    svg('title', {}, `${message.summary} (${message.from} → ${message.to}). Click to deliver it.`),
+    svg(
+      'title',
+      {},
+      `${message.summary} (${message.from} → ${message.to})${where}. Click to deliver it.`,
+    ),
   );
+}
+
+/** The row and column labels that name a grid's quorums. */
+function gridLabels(shape: GridShape, centre: Point): SVGGElement {
+  const marks: SVGElement[] = [];
+  for (let row = 0; row < shape.rows; row += 1) {
+    const at = gridPoint({ row, column: 0 }, shape, centre, GRID_GAP);
+    marks.push(
+      svg(
+        'text',
+        { class: 'grid-axis grid-row', x: at.x - ROW_LABEL_OFFSET, y: at.y + 4 },
+        `row ${row}`,
+      ),
+      svg(
+        'title',
+        {},
+        `row ${row} is a Phase-1 quorum: a whole row answers a Prepare.`,
+      ),
+    );
+  }
+  for (let column = 0; column < shape.cols; column += 1) {
+    const at = gridPoint({ row: 0, column }, shape, centre, GRID_GAP);
+    marks.push(
+      svg(
+        'text',
+        { class: `grid-axis grid-col ${columnClass(column)}`, x: at.x, y: at.y - GRID_GAP.y * 0.5 },
+        `col ${column}`,
+      ),
+    );
+  }
+  return svg('g', { class: 'grid-axes' }, ...marks);
 }
 
 function clientColumn(world: WorldView): SVGGElement | null {
@@ -330,13 +415,28 @@ function chosenBanner(world: WorldView): SVGGElement | null {
 export function renderStage(view: GameView): SVGSVGElement {
   const world = view.world;
   const hasClients = world.clients.length > 0;
-  const centre: Point = { x: hasClients ? 560 : 480, y: 320 };
-  const radius = world.nodes.length > 4 ? 210 : 185;
-  const positions = circleLayout(world.nodes.length, centre, radius);
+  // A grid deployment is laid out as a grid: a row is a Phase-1 quorum and a
+  // column is a Phase-2 quorum, and neither is legible on a ring. Every other
+  // quorum system keeps the circle. A grid sits further right than a ring: it
+  // spends its left margin on the row labels and on the leftmost logs.
+  const shape = gridOf(world);
+  const centre: Point = shape
+    ? { x: hasClients ? 600 : 520, y: 320 }
+    : { x: hasClients ? 560 : 480, y: 320 };
+  const cells = shape ? gridCells(world, shape) : null;
   const at = new Map<number, Point>();
-  world.nodes.forEach((node, index) => {
-    at.set(node.id, positions[index] ?? centre);
-  });
+  if (shape && cells) {
+    for (const node of world.nodes) {
+      at.set(node.id, gridPoint(cells.get(node.id) ?? { row: 0, column: 0 }, shape, centre, GRID_GAP));
+    }
+  } else {
+    const radius = world.nodes.length > 4 ? 210 : 185;
+    const positions = circleLayout(world.nodes.length, centre, radius);
+    world.nodes.forEach((node, index) => {
+      at.set(node.id, positions[index] ?? centre);
+    });
+  }
+  const wiped = wipedNodes(view);
 
   const links: SVGElement[] = [];
   const dots: SVGElement[] = [];
@@ -364,7 +464,12 @@ export function renderStage(view: GameView): SVGSVGElement {
 
   const nodes = world.nodes.map((node) => {
     const point = at.get(node.id) ?? centre;
-    return svg('g', {}, logColumn(node, point, centre), nodeGroup(node, point));
+    return svg(
+      'g',
+      {},
+      logColumn(node, point, centre),
+      nodeGroup(node, point, cells?.get(node.id) ?? null, wiped.has(node.id)),
+    );
   });
 
   return svg(
@@ -378,6 +483,7 @@ export function renderStage(view: GameView): SVGSVGElement {
     },
     chosenBanner(world),
     clientColumn(world),
+    shape ? gridLabels(shape, centre) : null,
     svg('g', { class: 'links' }, ...links),
     svg('g', { class: 'nodes' }, ...nodes),
     svg('g', { class: 'wire' }, ...dots),

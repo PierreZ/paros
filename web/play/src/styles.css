@@ -39,6 +39,15 @@
   --phase-gc: #6b6b4a;
   --phase-reconfigure: #a0522d;
   --phase-other: #5a5a5a;
+
+  /* One colour per grid column. A column is a Phase-2 quorum, so a slot's
+     Accept and the Accepted that answers it wear the same edge. */
+  --column-0: #2f5d8a;
+  --column-1: #b0552b;
+  --column-2: #3b6e47;
+  --column-3: #6b4f8a;
+  --column-4: #2f7d7a;
+  --column-5: #8a6b2f;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -75,6 +84,13 @@
     --phase-match: #8fb2d6;
     --phase-gc: #b3b37f;
     --phase-reconfigure: #d68a63;
+
+    --column-0: #7aa8d8;
+    --column-1: #e29a6b;
+    --column-2: #6fb388;
+    --column-3: #a98ad0;
+    --column-4: #63bdb9;
+    --column-5: #cfae6a;
   }
 }
 
@@ -640,12 +656,31 @@ code,
   font-size: 0.88rem;
 }
 
-.error-banner {
+.refusal {
   border-left: 3px solid var(--gap);
   background: color-mix(in srgb, var(--gap) 12%, transparent);
-  padding: 0.45rem 0.6rem;
-  margin-bottom: 0.9rem;
+  padding: 0.5rem 0.7rem;
+  margin: 0 0.9rem 0.6rem;
   font-size: 0.86rem;
+}
+
+.refusal h2 {
+  font-size: 0.86rem;
+  margin: 0 0 0.3rem;
+  color: var(--gap);
+}
+
+.refusal p {
+  margin: 0 0 0.25rem;
+}
+
+.refusal-advice {
+  color: var(--ink-soft);
+}
+
+.refusal-code {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
 }
 
 .hint {
@@ -916,3 +951,105 @@ code,
 .wire-swatch.reply.phase-gc { color: var(--phase-gc); }
 .wire-swatch.reply.phase-reconfigure { color: var(--phase-reconfigure); }
 .wire-swatch.reply.phase-other { color: var(--phase-other); }
+
+/* ---- the acceptor grid ---------------------------------------------------- */
+
+/* A grid deployment lays its nodes out as a grid: a row is a Phase-1 quorum
+   and a column is a Phase-2 quorum, and the axes name both. */
+.grid-axis {
+  fill: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.grid-row {
+  text-anchor: end;
+}
+
+.grid-col {
+  text-anchor: middle;
+}
+
+.grid-col.column-0 { fill: var(--column-0); }
+.grid-col.column-1 { fill: var(--column-1); }
+.grid-col.column-2 { fill: var(--column-2); }
+.grid-col.column-3 { fill: var(--column-3); }
+.grid-col.column-4 { fill: var(--column-4); }
+.grid-col.column-5 { fill: var(--column-5); }
+
+.cell-badge {
+  font-weight: 600;
+  fill: var(--ink);
+}
+
+/* The edge of a dot carries the column its Accept was addressed to. The width
+   matches every other dot, so the phase colour inside stays readable. */
+.wire-dot.column .dot {
+  stroke-width: 2.5;
+}
+
+.wire-dot.column-0 .dot { stroke: var(--column-0); }
+.wire-dot.column-1 .dot { stroke: var(--column-1); }
+.wire-dot.column-2 .dot { stroke: var(--column-2); }
+.wire-dot.column-3 .dot { stroke: var(--column-3); }
+.wire-dot.column-4 .dot { stroke: var(--column-4); }
+.wire-dot.column-5 .dot { stroke: var(--column-5); }
+
+/* ---- a node that lost its disk -------------------------------------------- */
+
+/* A wipe takes the promise with the disk, so the node does not come back. It
+   is drawn hollow: there is nothing on that disk to draw. */
+.node.wiped .node-disc {
+  fill: none;
+  stroke: var(--gap);
+  stroke-width: 2.5;
+  stroke-dasharray: 6 5;
+}
+
+.node.wiped .node-id,
+.node.wiped .node-role {
+  fill: var(--gap);
+}
+
+.node.wiped .node-meta {
+  fill: var(--gap);
+  opacity: 0.8;
+}
+
+/* ---- the quorums in force ------------------------------------------------- */
+
+.quorum-block {
+  border-left: 3px solid var(--phase-prepare);
+  padding-left: 0.7rem;
+}
+
+.quorum-headline {
+  font-weight: 600;
+  margin: 0 0 0.3rem;
+}
+
+.quorum-list {
+  margin: 0 0 0.35rem;
+  padding-left: 1.1rem;
+  font-size: 0.86rem;
+}
+
+/* ---- Act IV's own controls ------------------------------------------------ */
+
+.column-select {
+  min-width: 8.5rem;
+}
+
+.handoff-box,
+.corrupt-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.reach-boxes {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+}

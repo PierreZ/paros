@@ -28,6 +28,44 @@ export function circleLayout(count: number, centre: Point, radius: number): Poin
   return points;
 }
 
+/** The shape of an acceptor grid: how many rows, and how many columns. */
+export interface GridShape {
+  readonly rows: number;
+  readonly cols: number;
+}
+
+/** Where one acceptor sits in a grid. */
+export interface Cell {
+  readonly row: number;
+  readonly column: number;
+}
+
+/** How far apart two neighbour cells sit, in SVG user units. */
+export interface Gap {
+  readonly x: number;
+  readonly y: number;
+}
+
+/**
+ * Where one cell of a `rows × cols` grid sits, with the whole grid centred on
+ * `centre`.
+ *
+ * A grid deployment is not a ring: a row is a Phase-1 quorum and a column is a
+ * Phase-2 quorum, so the player must see the rows and the columns. A cell
+ * outside the grid is clamped into it, because a bogus cell must still draw
+ * somewhere the player can click.
+ */
+export function gridPoint(cell: Cell, shape: GridShape, centre: Point, gap: Gap): Point {
+  const cols = Math.max(1, Math.floor(shape.cols));
+  const rows = Math.max(1, Math.floor(shape.rows));
+  const column = Math.min(Math.max(Math.floor(cell.column), 0), cols - 1);
+  const row = Math.min(Math.max(Math.floor(cell.row), 0), rows - 1);
+  return {
+    x: centre.x + (column - (cols - 1) / 2) * gap.x,
+    y: centre.y + (row - (rows - 1) / 2) * gap.y,
+  };
+}
+
 /** Shorten a segment at both ends so it starts and stops outside the node discs. */
 export function trim(from: Point, to: Point, gap: number): { from: Point; to: Point } {
   const dx = to.x - from.x;

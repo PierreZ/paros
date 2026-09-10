@@ -37,8 +37,8 @@ is `nix develop --command scripts/build-play.sh`, after `mdbook build`.
 | `src/progress.ts` | `localStorage`: levels passed, mistakes, automation unlocked |
 | `src/narration.ts` | narration: the last move's lines (the caption) and the log's whole stream |
 | `src/types.ts` | re-exports of the generated contract |
-| `src/render/` | the SVG stage: `layout.ts` is the geometry, `stage.ts` draws |
-| `src/ui/` | the panel, the prompt card, the wire list, the controls, the client history, the level map |
+| `src/render/` | the SVG stage: `layout.ts` is the geometry, `grid.ts` reads the acceptor grid, `disk.ts` says which disks are gone, `stage.ts` draws |
+| `src/ui/` | the panel, the prompt card, the wire list, the controls, the quorum sentences, the refusal, the client history, the level map |
 | `src/generated/` | **the contract — never hand-edited** (see below) |
 | `src/wasm/` | wasm-bindgen output, gitignored, produced by the build script |
 | `src/fixtures/` | one captured `GameView`, for the tests |
@@ -70,6 +70,20 @@ Four facts arrive as fields, and the frontend must read them there:
   copy of them.
 - **A node's role** is `NodeView.role`, and a single-decree proposer holds
   `NodeView.attempt` instead.
+- **The quorum system** is `NodeView.quorum`, a structure: `kind` plus `q1`/`q2`
+  for a flexible split and `rows`/`cols` for a grid. `NodeView.quorum_system` is
+  a sentence for a human and is never parsed. A majority sends no numbers, so
+  the panel prints no count for one.
+- **Where an acceptor sits in a grid** is `NodeView.grid_cell`, and **which
+  column an Accept was addressed to** is `MessageView.column`. The frontend
+  works neither out from the slot, even though the rule is public.
+
+One fact has no field yet. A node whose disk the player **erased** is drawn
+hollow, and `src/render/disk.ts` reads `NodeView.wiped` first — the field the
+contract should grow. Until it does, the fallback is two things the engine
+already reports together: the action log holds a `wipe` entry naming the node,
+and that node's disk reads empty. A node that merely crashed is therefore never
+drawn as a lost disk.
 
 ## What the UI must not decide
 

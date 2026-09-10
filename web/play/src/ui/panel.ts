@@ -11,6 +11,7 @@ import { narrationStream } from '../narration';
 import { h } from '../render/dom';
 import { markdown } from './markdown';
 import { renderPrompt } from './prompt';
+import { memberCount, quorumOf, quorumPanel } from './quorum';
 
 type Dispatch = (action: Action) => void;
 
@@ -18,7 +19,6 @@ export interface PanelDeps {
   view: GameView;
   levels: readonly LevelSummary[];
   progress: Progress;
-  error: { code: string; error: string } | null;
   dispatch: Dispatch;
   undo: () => void;
   reset: () => void;
@@ -44,6 +44,32 @@ function goalBlock(view: GameView): HTMLElement {
           `You gave ${view.mistakes} wrong answer${view.mistakes === 1 ? '' : 's'}. The world did not move for them.`,
         )
       : null,
+  );
+}
+
+/**
+ * Which quorums are in force.
+ *
+ * Act IV takes the majority apart, so the panel says what counts here. Every
+ * number comes from the engine's `NodeView.quorum`; the frontend works no
+ * quorum size out for itself, and a majority prints no count at all.
+ */
+function quorumBlock(view: GameView): HTMLElement | null {
+  const nodes = Array.isArray(view.world?.nodes) ? view.world.nodes : [];
+  const panel = quorumPanel(quorumOf(nodes), memberCount(nodes));
+  if (!panel) return null;
+  return h(
+    'section',
+    { class: 'quorum-block' },
+    h('h2', {}, 'The quorums'),
+    h('p', { class: 'quorum-headline' }, panel.headline),
+    h(
+      'ul',
+      { class: 'quorum-list' },
+      h('li', {}, panel.phaseOne),
+      h('li', {}, panel.phaseTwo),
+    ),
+    panel.note ? h('p', { class: 'small' }, panel.note) : null,
   );
 }
 
@@ -216,11 +242,9 @@ export function renderPanel(deps: PanelDeps): HTMLElement {
       h('h1', {}, view.level.title),
     ),
     navBlock(deps),
-    deps.error
-      ? h('div', { class: 'error-banner', role: 'status' }, deps.error.error)
-      : null,
     renderPrompt(view, deps.dispatch),
     goalBlock(view),
+    quorumBlock(view),
     h(
       'section',
       { class: 'briefing' },
