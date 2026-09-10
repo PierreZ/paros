@@ -26,8 +26,16 @@ violation a wrong rule would cause, undo a decision — is exactly what this gam
   same GitHub Pages site under `/play/`. Chapters shrink to short reference pages (the safety
   proof ladder, the symbol map, the doctrine) that levels link to; the removed mechanism prose
   becomes level briefings. Shrinking happens per act, in the PR that lands the act's levels.
-- **PR per act.** PR 1: engine, level DSL, frontend, deploy, Act I + Act II. PR 2: Act III.
-  PR 3: Act IV. Each reviewed and merged before the next.
+- **One PR, all four acts** (revised the same day: the acts were first planned as one PR
+  each). The acts still land in order inside the branch — engine, Act I, Act II, Act III,
+  Act IV — and each is verified before the next starts.
+- **The goal is to understand Paxos, not to read paros-core.** Every briefing, prompt, wrong-
+  answer explanation, hint and narration line is written in Paxos terms — ballots, promises,
+  quorums, what a node knows and does not know — and would make sense to someone who has never
+  opened the crate. A paros-core symbol appears only in the level's "in the code" footnote
+  and the field-guide link. A level is judged by the question it leaves the player able to
+  answer ("why must the new proposer adopt a value nobody chose?"), never by the API it
+  exercised.
 - **Frontend: full TypeScript + npm (vite, vitest), every tool from Nix.** `nodejs_22` from the
   flake; `package-lock.json` committed; `npm ci` in CI. No global installs, ever.
 - **Levels and goals live in Rust.** The wasm crate owns the world, the action log, the level
@@ -212,22 +220,81 @@ the tests replay. Level ids are stable strings (`act1/choose-a-value`), never in
     with no ack quorum must not be served. Goal: the client's read watermark never regresses.
     (Read-index proper, `read_floor` and linearizability are Act III.)
 
-### Act III (PR 2) — truncation, snapshots, reads
+### Act III — truncation, snapshots, reads (log world; 3 nodes, 2 clients)
 
-Truncate as a decided control command; the stranded node and `InstallSnapshot`
-(`max(promise, ballot)`); read-index capture/confirm/serve; the fresh-leader trap and
-`read_floor`; linearizability as three client-side conditions; the write-ack bug (chosen ≠
-applied).
+14. `act3/truncate-by-consensus` — a client asks the leader to compact; the leader proposes
+    `Truncate` as a control command; deliver it; every node drops its prefix only when it
+    *applies* that slot. Goal: one cluster-wide floor, no node stranded. Teaches why pruning
+    per node fails and why the floor is a decided value.
+15. `act3/the-stranded-node` — crash a node, let the cluster truncate past it, restart it:
+    catch-up is refused below the floor; the peer offers a snapshot; `SnapshotPromise` prompt:
+    the node adopts `max(promise, snapshot ballot)`, never lower. Goal: the node rejoins with
+    its promise intact.
+16. `act3/read-index` — a read must prove leadership *now*: capture the chosen index, confirm
+    with a quorum of acks to the *current* beat, serve once applied. `ReadServe` prompt: acks
+    to an older beat prove nothing. Reward: automation of the confirm step.
+17. `act3/the-fresh-leader-trap` — a new leader with a quorum in hand but a lagging chosen
+    index: `ReadServe` prompt says wait for the read floor; slot re-decides; the read fires.
+18. `act3/linearizable-or-not` — two clients, one leader change; the player produces a history
+    and the game judges it by the three conditions (a committed read sees every write acked
+    before it began; watermarks never go backwards; a later write lands above an earlier
+    read). Goal: a history with a read across the leader change that is linearizable, and one
+    deliberately broken attempt the game refuses to certify.
+19. `act3/chosen-is-not-applied` — pipelining: slot 6 is chosen while slot 5 is open; a client
+    retry for slot 6's command arrives. `AckWrite` prompt: acked as applied, held in flight,
+    or given a fresh slot? Teaches the difference between chosen and applied and why both
+    dedup tables move together.
 
-### Act IV (PR 3) — everything the book never wrote
+### Act IV — everything the book never wrote
 
-Flexible quorums (`q1 + q2 > n`, the cross-phase intersection); the acceptor grid (row =
-Phase 1, column = Phase 2, `slot % cols`); quorum reads (leaderless, `vote_watermark`); DPaxos
-handoff (same ballot, no Phase 1, one hop only); matchmakers (matchmaking then Phase 1, `H_b`,
-a quorum of *every* configuration, a reconfiguration is a round change); the GC watermark and
-`Retire` carrying its evidence; matchmaker-set generations and the decree as `Proposer` +
-`Acceptor` at slot zero; CTRL faulty records and the repair probe; the wiped node and the format
-marker. The matchmaker plane (`world/matchmakers.rs`) lands here.
+20. `act4/flexible-quorums` — decree world, 4 acceptors, `q1 = 3`, `q2 = 2`. The player
+    picks the Phase-1 and Phase-2 reach sets; goal: a value chosen by two acceptors, then
+    recovered by a later ballot. Teaches `q1 + q2 > n`: the intersection that matters is
+    between phases, not within one.
+21. `act4/the-grid` — log world, 6 nodes as a 2 × 3 grid. A row elects, a column decides;
+    each slot's Accept goes to `slot % cols`. Goal: two slots decided on two different columns;
+    a stray Accepted from outside the column does not count (the game shows the tally).
+22. `act4/quorum-reads` — a follower serves a linearizable read with no leader involved: ask a
+    row for their vote watermarks, take the max, serve once covered. `QuorumReadServe` prompt.
+23. `act4/the-handoff` — the leader relinquishes to a peer: same ballot, no Phase 1, the tail
+    tiles exactly, gap fill off. Then try to hand on again: refused, one hop only, and the
+    explanation of the replayed-Relinquish hazard.
+24. `act4/matchmaking` — matchmakers on: the candidate registers `(b, C_b)`, gets the
+    histories, and fans Phase 1 to every configuration in `H_b`. `Phase1Complete` prompt: a
+    quorum of *every* configuration, not of the union.
+25. `act4/reconfigure` — grow onto a spare: a reconfiguration is a round change; the joining
+    node promises the new ballot before Phase 2 reaches it; the removed node keeps answering
+    Phase 1. Goal: a command chosen under the new configuration.
+26. `act4/garbage-collection` — when may the old configuration be forgotten? `MayRetire`
+    prompt: installed is not collected; the retire request must carry the effective
+    watermark. Goal: the removed acceptor retired with evidence.
+27. `act4/matchmaker-generations` — replace the matchmaker set: stop, reconstruct, bootstrap,
+    decide (single-decree Paxos again — Act I's roles at slot zero), publish. Goal: the new
+    generation active and a campaign registered with it.
+28. `act4/faulty-records` — corrupt one accepted record on one disk; the node boots with a
+    faulty slot; the leader's repair probe re-decides it. `RepairVerdict` prompt: which CTRL
+    case is this, and what may be re-proposed?
+29. `act4/the-wiped-node` — wipe a disk: the node cannot rejoin (its promise is gone); the
+    cluster heals around it by reconfiguration. Goal: a new command chosen without the wiped
+    identity, and the wiped node's refusal explained.
+
+The Act III world adds snapshots and truncation to `Disk` and the driver-side snapshot offer;
+the Act IV world adds the matchmaker plane (`world/matchmakers.rs`), the grid column choice,
+quorum reads, handoff, faulty records and the wipe.
+
+## Narration: the game explains what just happened
+
+The Raft visualisation's captions are what made it teach; here they are generated, not
+scripted. Every action produces a list of **narration events** the engine derives from the
+transition it just made, in Paxos vocabulary, with the concrete numbers: "B receives Prepare
+2.1. Its promise was 1.0, so it promises 2.1 and reports what it accepted: nothing." · "A holds
+Promises from A and B — two of three, a quorum. Phase 1 is complete; no acceptor reported a
+value, so A may propose its own." · "Slot 4 is chosen: two of three acceptors accepted it at
+ballot 2.1." · "C applies slot 3. Slot 4 is chosen but slot 3 was not, so C waits." · "A ticks:
+its election timer is at 3 of 5." The events ride the view (`GameView.narration`, newest last,
+also kept per action in the log) and the frontend shows the latest ones as the caption under
+the stage and the full stream in the log. A wrong prompt answer's explanation is a narration
+event of kind `violation`. Narration never changes the world and draws nothing.
 
 ## The view contract
 
@@ -278,7 +345,7 @@ with undo, hints, the automation toggles, the field-guide link. A level map with
   npm test && npm run build` under `nix develop`.
 - Local: `npm run dev` (vite) after `scripts/build-play.sh --wasm-only`.
 
-## Book changes in PR 1
+## Book changes
 
 - `SUMMARY.md` gains a "Play" entry (a short `play.md` pointing at `/play/` with the level
   map) at the top; the index's "How to read this book" becomes "How to play, then read".
@@ -289,9 +356,11 @@ with undo, hints, the automation toggles, the field-guide link. A level map with
   (`SafetyOracle` and friends, deleted in #128) are replaced by the audit's message strings.
 - `book/CLAUDE.md`'s "Live demos" section is rewritten: the game is the live surface, built
   on the core driven by hand, never on a trace.
-- Act III and IV chapters are untouched until their PRs.
+- `truncation-and-snapshots.md` and `linearizable-reads.md` shrink the same way once Act III
+  lands; Act IV has no chapter to shrink — `play.md` carries its level map and a short field
+  guide section per mechanism links to the design notes under `docs/analysis/`.
 
-## Verification per PR
+## Verification
 
 Before a PR opens: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo nextest
 run`, the wasm check for `paros-core` and `paros-play`, `npm run check`, `npm test`, `npm run
