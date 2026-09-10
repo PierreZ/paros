@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, PrepareOutcome};
 use paros_core::proposer::RecoveryStep;
-use paros_core::{Ballot, Command, NodeId, Slot};
+use paros_core::{Ballot, Command, MatchmakerId, NodeId, Slot};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -65,6 +65,17 @@ pub enum PromptKind {
     RepairVerdict,
     /// A wiped node asks to rejoin. Boot it fresh, or refuse?
     WipedRejoin,
+    /// Promises are in and `H_b` names one or more configurations. Is the
+    /// cross-configuration Phase 1 complete?
+    Phase1Complete,
+    /// The matchmakers name a configuration this campaign did not register.
+    /// Abandon the campaign, or carry on?
+    StaleConfiguration,
+    /// A registration for one generation reaches a matchmaker at another.
+    /// Serve it, or refuse it?
+    GenerationFence,
+    /// An operator asks a node to shut down for good. May it?
+    MayRetire,
 }
 
 impl PromptKind {
@@ -87,6 +98,10 @@ impl PromptKind {
             PromptKind::QuorumReadServe => AutomationFlag::QuorumReadServe,
             PromptKind::RepairVerdict => AutomationFlag::RepairVerdict,
             PromptKind::WipedRejoin => AutomationFlag::WipedRejoin,
+            PromptKind::Phase1Complete => AutomationFlag::Phase1Complete,
+            PromptKind::StaleConfiguration => AutomationFlag::StaleConfiguration,
+            PromptKind::GenerationFence => AutomationFlag::GenerationFence,
+            PromptKind::MayRetire => AutomationFlag::MayRetire,
         }
     }
 }
@@ -109,6 +124,10 @@ pub const ALL_PROMPTS: &[PromptKind] = &[
     PromptKind::QuorumReadServe,
     PromptKind::RepairVerdict,
     PromptKind::WipedRejoin,
+    PromptKind::Phase1Complete,
+    PromptKind::StaleConfiguration,
+    PromptKind::GenerationFence,
+    PromptKind::MayRetire,
 ];
 
 /// What a **right** answer confirms, in one clause. The narration says it back
@@ -158,6 +177,22 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
         PromptKind::WipedRejoin => {
             "a node that lost its promise does not rejoin, and the acceptor set changes \
              instead."
+        }
+        PromptKind::Phase1Complete => {
+            "Phase 1 is complete only with a quorum of every configuration the matchmakers \
+             named, and never with a quorum of their union."
+        }
+        PromptKind::StaleConfiguration => {
+            "a campaign that registered a superseded acceptor set adopts the one in force and \
+             starts again."
+        }
+        PromptKind::GenerationFence => {
+            "a matchmaker answers its own generation, and refuses every other one with what it \
+             knows."
+        }
+        PromptKind::MayRetire => {
+            "a node retires on evidence that no future leader can need it, never on a belief \
+             about the set in force."
         }
     }
 }
@@ -749,13 +784,23 @@ impl Prompt {
     /// after crediting this ack: a read confirms only once a **Phase-2 quorum**
     /// has acked a beat broadcast at or after the read began *and* the applied
     /// prefix covers the captured index.
+    ///
+    /// `acks` is the tally **this node's own vote included**. A read round is
+    /// seeded with the leader itself, because a leader is an acceptor of its
+    /// own configuration and its own state is the first evidence it has. The
+    /// card used to print the peer acks alone, and a player who read "1" and
+    /// waited for a third was marked wrong for waiting.
     #[must_use]
+    // Every argument is one line of the card, and bundling them would only
+    // rename them.
+    #[allow(clippy::too_many_arguments)]
     pub fn read_serve(
         id: u64,
         node: NodeId,
         ctx: u64,
         index: Option<Slot>,
         acks: usize,
+        members: usize,
         chosen_index: Option<Slot>,
         confirmed: bool,
     ) -> Self {
@@ -770,8 +815,9 @@ impl Prompt {
         explanations.insert(
             "serve".to_string(),
             format!(
-                "The acks in hand ({acks}) are not a Phase-2 quorum of this ballot's \
-                 configuration for a beat broadcast at or after the read began, or the applied \
+                "The acks in hand ({acks} of {members}, this node's own vote included) are not a \
+                 Phase-2 quorum of this ballot's configuration for a beat broadcast at or after \
+                 the read began, or the applied \
                  prefix ({applied}) does not yet cover {at}. Serving now serves whatever this \
                  node happens to hold — and a leader cannot tell \"my followers are slow\" \
                  from \"I was deposed and a newer leader has been committing without me\". A \
@@ -787,7 +833,7 @@ impl Prompt {
             question: format!("The client's read (#{ctx}) captured {at}. Serve it, or wait?"),
             state_summary: vec![
                 format!("read index captured: {at}"),
-                format!("heartbeat acks credited to the round: {acks}"),
+                format!("acks with this node's own vote: {acks} of {members}"),
                 format!("applied prefix ends at: {applied}"),
             ],
             choices: vec![
@@ -1287,6 +1333,319 @@ impl Prompt {
             feedback: None,
         }
     }
+}
+
+impl Prompt {
+    // ---- the four matchmaker kinds -----------------------------------------
+
+    /// Promises are in, and the matchmakers named `prior` as the
+    /// configurations this ballot must cover. Is Phase 1 complete?
+    ///
+    /// Judged on a **clone of the proposer**: the arriving `Promise` is folded
+    /// into it and
+    /// [`phase1_won`](paros_core::proposer::Proposer::phase1_won) answers.
+    /// That predicate is "every configuration in `H_b` holds a Phase-1 quorum
+    /// of its own", never "the union holds one".
+    #[must_use]
+    pub fn phase1_complete(
+        id: u64,
+        node: NodeId,
+        ballot: Ballot,
+        promised: &[NodeId],
+        prior: &[Vec<NodeId>],
+        complete: bool,
+    ) -> Self {
+        let b = show_ballot(ballot);
+        let held = show_ids(promised);
+        let union: Vec<NodeId> = {
+            let mut all: Vec<NodeId> = prior.iter().flatten().copied().collect();
+            all.sort_unstable();
+            all.dedup();
+            all
+        };
+        let named: Vec<String> = prior
+            .iter()
+            .enumerate()
+            .map(|(index, members)| format!("C{index} = {}", show_ids(members)))
+            .collect();
+        let listed = if named.is_empty() {
+            "no configuration at all".to_string()
+        } else {
+            named.join(", ")
+        };
+        let expected = if complete { "complete" } else { "open" };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "complete".to_string(),
+            format!(
+                "The promises in hand are {held}, and the matchmakers named {listed}. At least \
+                 one of those configurations does not hold a Phase-1 quorum of its own. It is not \
+                 enough that the promises are a quorum of the union {}: a large set drawn mostly \
+                 from one configuration is a quorum of the union and still misses a Phase-2 \
+                 quorum of another. A value that other configuration already chose then stays \
+                 invisible, this ballot proposes a different one, and one slot holds two chosen \
+                 values. Ask the configuration that is short. Phase 1 needs a quorum of every \
+                 configuration, one at a time.",
+                show_ids(&union)
+            ),
+        );
+        explanations.insert(
+            "open".to_string(),
+            format!(
+                "Every configuration the matchmakers named — {listed} — already holds a Phase-1 \
+                 quorum of its own, and the promises are {held}. Waiting longer buys nothing. \
+                 Anything an earlier ballot chose was chosen by a Phase-2 quorum of one of those \
+                 configurations, and a Phase-1 quorum of that same configuration shares an \
+                 acceptor with it, so this candidate has been told about it."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::Phase1Complete,
+            node: node.0,
+            question: format!("Is Phase 1 at ballot {b} complete?"),
+            state_summary: vec![
+                format!("promises held: {held}"),
+                format!("configurations the matchmakers named: {listed}"),
+                "a quorum of every one of them, never a quorum of their union".to_string(),
+            ],
+            choices: vec![
+                Choice::new("complete", "Phase 1 is complete"),
+                Choice::new("open", "Phase 1 is still open"),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A matchmaker quorum has answered, and its histories name a
+    /// reconfiguration to a configuration this ordinary campaign did not
+    /// register. Abandon the campaign, or carry on?
+    ///
+    /// Judged on the core's own
+    /// [`Matchmaking`](paros_core::matchmaking::Matchmaking) role, driven with
+    /// the same answers the node is given, through
+    /// [`stale_belief`](paros_core::matchmaking::Matchmaking::stale_belief).
+    #[must_use]
+    pub fn stale_configuration(
+        id: u64,
+        node: NodeId,
+        ballot: Ballot,
+        believed: &[NodeId],
+        effective: Option<(Ballot, &[NodeId])>,
+    ) -> Self {
+        let b = show_ballot(ballot);
+        let mine = show_ids(believed);
+        let expected = if effective.is_some() {
+            "abandon"
+        } else {
+            "carry_on"
+        };
+        let told = match effective {
+            Some((at, members)) => format!(
+                "an operator changed the acceptor set to {} at ballot {}",
+                show_ids(members),
+                show_ballot(at)
+            ),
+            None => "no operator has changed the acceptor set below this ballot".to_string(),
+        };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "carry_on".to_string(),
+            match effective {
+                Some((at, members)) => format!(
+                    "This campaign registered {mine}, and the matchmakers report that an operator \
+                     put {} in force at ballot {}. Carrying on elects a leader under a set the \
+                     cluster has already replaced, and that rolls the operator's change back \
+                     without anybody asking. Abandon the campaign, adopt {}, and register it at \
+                     the next round. The registration this campaign made stays in the registry \
+                     and costs a later Phase 1 a few extra promises; it costs nothing else.",
+                    show_ids(members),
+                    show_ballot(at),
+                    show_ids(members)
+                ),
+                None => String::new(),
+            },
+        );
+        explanations.insert(
+            "abandon".to_string(),
+            format!(
+                "The matchmakers report no operator change below ballot {b}, so {mine} is the set \
+                 in force and this campaign registered the right one. Abandoning it costs an \
+                 election for nothing. Only a **reconfiguration** record decides here. The \
+                 registry also holds what every earlier candidate merely believed, and a campaign \
+                 that adopted the newest belief would swap beliefs with the next candidate, one \
+                 round per election timeout, for ever."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::StaleConfiguration,
+            node: node.0,
+            question: format!("A matchmaker quorum has answered ballot {b}. What now?"),
+            state_summary: vec![
+                format!("the set this campaign registered: {mine}"),
+                format!("what the histories say: {told}"),
+            ],
+            choices: vec![
+                Choice::new("carry_on", "Open Phase 1 with the set I registered"),
+                Choice::new("abandon", "Abandon the campaign and adopt the set in force"),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A registration for one generation reaches a matchmaker that holds
+    /// another. Serve it, or refuse it?
+    ///
+    /// Judged on a **clone of the matchmaker**: the clone is stepped with this
+    /// very request and its own reply is read back.
+    #[must_use]
+    pub fn generation_fence(
+        id: u64,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        asked: u64,
+        held: u64,
+        phase: paros_core::MatchmakerPhase,
+        refusal: Option<&paros_core::MatchRefusal>,
+    ) -> Self {
+        let b = show_ballot(ballot);
+        let standing = match phase {
+            paros_core::MatchmakerPhase::Active => format!("it serves generation {held}"),
+            paros_core::MatchmakerPhase::Stopped => {
+                format!("it is frozen for generation {held}")
+            }
+            paros_core::MatchmakerPhase::Inactive => {
+                "it serves no generation: it is a spare".to_string()
+            }
+            paros_core::MatchmakerPhase::Fresh => "nothing has ever been written here".to_string(),
+        };
+        let expected = if refusal.is_some() { "refuse" } else { "serve" };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "serve".to_string(),
+            format!(
+                "This request addresses generation {asked}, and {standing}. Serving it writes a \
+                 registration into a registry the cluster has stopped reading. A candidate would \
+                 then be told its ballot is safe, while the generation that answers every later \
+                 campaign has never heard of it — and a configuration missing from a later \
+                 history is a configuration whose chosen values nobody asks about. Refuse, and \
+                 say what you know: the candidate adopts the set you name and asks again."
+            ),
+        );
+        explanations.insert(
+            "refuse".to_string(),
+            format!(
+                "This request addresses generation {asked}, which is exactly the generation this \
+                 matchmaker serves. Refusing it costs the candidate an election for nothing. \
+                 Register ballot {b}, write it down, and report the configurations you hold below \
+                 it."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::GenerationFence,
+            node: matchmaker.0,
+            question: format!("A registration for generation {asked} arrives. Serve, or refuse?"),
+            state_summary: vec![
+                format!("the generation the request addresses: {asked}"),
+                format!("where this matchmaker stands: {standing}"),
+                format!("the ballot it asks to register: {b}"),
+            ],
+            choices: vec![
+                Choice::new("serve", format!("Register {b}")),
+                Choice::new("refuse", "Refuse, and say what I hold"),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// An operator asks a node to shut down for good, showing a
+    /// garbage-collection watermark. May it retire?
+    ///
+    /// Judged by [`ColocatedNode::may_retire`](paros_core::ColocatedNode::may_retire)
+    /// on the node itself: the call takes `&self` and changes nothing, so there
+    /// is nothing to clone.
+    #[must_use]
+    pub fn may_retire(
+        id: u64,
+        node: NodeId,
+        watermark: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+        leader: bool,
+        may: bool,
+    ) -> Self {
+        let shown = show_ballot(watermark);
+        let held = effective.map_or_else(
+            || "no floor is in force yet".to_string(),
+            |ballot| format!("the floor in force is {}", show_ballot(ballot)),
+        );
+        let standing = if leader {
+            "it is the leader"
+        } else if member {
+            "it is a member of the acceptor set in force"
+        } else {
+            "it is not a member of the acceptor set in force"
+        };
+        let expected = if may { "retire" } else { "refuse" };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "retire".to_string(),
+            format!(
+                "The watermark shown is {shown}, and {held}. Retiring on that is retiring on a \
+                 belief. \"I am not in the set in force\" is volatile: this node loses it at every \
+                 crash and comes back believing the set it was deployed with. An operator that \
+                 installed a successor configuration has not collected the old one — the old \
+                 configuration's Phase-1 quorum can still be asked, and a leader that asks it \
+                 must find this node's promise. What licenses a retirement is a watermark \
+                 strictly above every ballot a configuration naming this node was bound to: only \
+                 then does a matchmaker quorum durably refuse every campaign that could ask. \
+                 Refuse, and answer \"not collected\"."
+            ),
+        );
+        explanations.insert(
+            "refuse".to_string(),
+            format!(
+                "The watermark {shown} is above every ballot a configuration naming this node was \
+                 bound to, {standing}, and it does not lead. A matchmaker quorum wrote that floor \
+                 down, so no future campaign can register below it and no future leader can ask \
+                 this node for a promise. Refusing costs the operator a machine that will never \
+                 be used again."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::MayRetire,
+            node: node.0,
+            question: format!("May node {} retire?", node.0),
+            state_summary: vec![
+                format!("where this node stands: {standing}"),
+                format!("the watermark the operator shows: {shown}"),
+                format!("what the leader reports: {held}"),
+            ],
+            choices: vec![
+                Choice::new("retire", "Shut down for good"),
+                Choice::new("refuse", "Refuse: not collected"),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+}
+
+/// A list of node ids, as every player-facing sentence names one.
+#[must_use]
+fn show_ids(ids: &[NodeId]) -> String {
+    let ids: Vec<String> = ids.iter().map(|id| id.0.to_string()).collect();
+    format!("{{{}}}", ids.join(", "))
 }
 
 /// Which CTRL case a repair probe's answers put a faulty slot in — the shape

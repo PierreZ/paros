@@ -56,16 +56,31 @@ Two corollaries that bite in review:
     the same function), `Disk::corrupt` rots one record into the tri-state
     `Storage::faulty_entries` reports at the next boot, and `Disk::wipe` erases a
     disk while keeping the operator's record that the identity was provisioned —
-    which is what lets `World::restart` refuse the boot. `world/matchmakers.rs`
-    is part two's.
+    which is what lets `World::restart` refuse the boot.
+  - `world/matchmakers.rs` — **the matchmaker plane**, Act IV part two. A
+    `MatchmakerProcess` is `examples/matchmaker.rs`'s node: a `Matchmaker` role, a
+    `MatchmakerConfig`, and a `MemRegistry` disk it reboots from, driven **step →
+    persist → reply → advance**. One `MatchmakerReconfigurer` per node (it is a
+    *driver* object, as in `paros::driver::handover`), the operator's verbs
+    (`reconfigure`, `retire`, `reconfigure_matchmakers`, the three re-sends, the two
+    matchmaker crash verbs), and the two decisions the **driver** owns rather than an
+    ack: closing a freeze and abandoning a stalled handover, both on a beat.
+  - The wire is one queue of `InFlight { from: Party, to: Party, envelope: Envelope }`.
+    A `Party` is a node **or** a matchmaker: the two identity spaces are distinct, so
+    nothing may compare a node id with a matchmaker id, and a duplicate is re-addressed
+    inside its own tier. `Envelope::Node` carries the node protocol; the six other
+    variants are the matchmaker plane's, and a matchmaker is never stepped with a
+    `Message`.
 - `src/prompt.rs` — the questions, the choices, the judge, and one authored explanation
   per **wrong** choice (nothing is explained when nothing broke).
 - `src/auto.rs` — automation as reward: one flag per decision, and the deterministic
   pump the delivery flags enable.
 - `src/narration.rs` — what the game says just happened, **derived from the transition**.
-- `src/level/` — the level DSL and one module per act. `act4.rs` holds part one's
-  six levels and a marked place for part two's four matchmaker levels; the two
-  numbered 28 and 29 stay last in `levels()`.
+- `src/level/` — the level DSL and one module per act. `act4.rs` holds all ten Act IV
+  levels: part one's four, then the four matchmaker levels of part two
+  (`act4/matchmaking`, `act4/reconfigure`, `act4/garbage-collection`,
+  `act4/matchmaker-generations`), then the two the plan numbers 28 and 29, which stay
+  last in `levels()`.
 - `src/view.rs` — the one contract the browser reads.
 
 ## The drain contract
@@ -115,6 +130,17 @@ cases) and `WipedRejoin` — the third prompt whose answer is a **constant**,
 because a store with no promise on it has no role to clone, and the library
 refuses such a boot rather than branching on it.
 
+Part two's four: `Phase1Complete` (a `Proposer` clone folded with the arriving
+`Promise`, then `phase1_won` — the completion predicate is per configuration, never
+over the union), `MayRetire` (`ColocatedNode::may_retire` on the target itself; it
+takes `&self`, so there is nothing to clone), `GenerationFence` (a `Matchmaker` clone
+stepped with the very request, and its own reply read back) and `StaleConfiguration`
+— the one prompt whose oracle is **not** read off the node. `ColocatedNode` hands out
+no reference to its own `Matchmaking`, so the world drives a second instance of the
+same core role with the same answers (`World::matchmaking_shadow`, synced in
+`settle`, folded in `fold_match_reply` before the node is). If the core ever exposes
+`matchmaking()` as a role rather than a triple, delete the shadow and clone it.
+
 ## Narration is derived, never scripted
 
 `World::observe` diffs the node's own role accessors across a call and reads the
@@ -141,9 +167,12 @@ engine queues one more message, and cannot teach the wrong answer.
 
 `src/view.rs` is the only thing JS reads. Every type derives `Serialize` + `ts_rs::TS`;
 `cargo test -p paros-play --test bindings` writes `web/play/src/generated/`, which is
-**committed** and diffed in CI. Conventions: a ballot is `round.node`; a value in prose
-is quoted (`show_command`) and a value in the view is plain text (`value_text`) beside
-`control_kind`; enums cross the boundary as enums, never as free-form strings.
+**committed** and diffed in CI. Conventions: a ballot is `round.node`; **a value is
+plain text everywhere** — `show_command` and `value_text` agree, and neither prints
+Rust's `Debug` quoting, because the frontend's monospace face is what marks a value —
+beside `control_kind`; enums cross the boundary as enums, never as free-form strings.
+A node id and a matchmaker id are different spaces, so `MessageView` says which tier
+each end belongs to (`from_party` / `to_party`).
 
 ## The gate
 

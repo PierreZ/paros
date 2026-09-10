@@ -32,8 +32,69 @@ impl World {
             .or_else(|| self.learn_prompt(to, index, message))
             .or_else(|| self.read_prompt(to, index, message))
             .or_else(|| self.quorum_read_prompt(to, index, message))
+            .or_else(|| self.phase1_prompt(to, index, message))
             .or_else(|| self.repair_prompt(to, index, message))
             .or_else(|| self.snapshot_prompt(to, index, message))
+    }
+
+    /// The question a `Promise` raises at a candidate whose matchmaking phase
+    /// named prior configurations: is Phase 1 complete?
+    ///
+    /// Judged on a **clone of the proposer**, folded with this very `Promise`
+    /// and asked [`phase1_won`](paros_core::proposer::Proposer::phase1_won).
+    /// Only a matchmaker deployment reaches here: a plain one has one
+    /// configuration and Act II already taught that question.
+    fn phase1_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::Phase1Complete) {
+            return None;
+        }
+        let Message::Promise {
+            from,
+            ballot,
+            from_slot,
+            accepted,
+            faulty,
+            next_from_slot,
+        } = message
+        else {
+            return None;
+        };
+        let node = self.nodes[index].as_ref()?;
+        if node.role() != paros_core::NodeRole::Candidate {
+            return None;
+        }
+        let election = node.proposer().election()?;
+        if election.ballot() != *ballot {
+            return None;
+        }
+        let prior = self.campaign_prior[index].clone();
+        if prior.is_empty() {
+            // `H_b` is empty: the matchmakers alone proved nothing came
+            // before, and there is no configuration to be short of.
+            return None;
+        }
+        let mut clone = node.proposer().clone();
+        clone.fold_promise(
+            *from,
+            *ballot,
+            *from_slot,
+            accepted.clone(),
+            faulty.clone(),
+            *next_from_slot,
+        );
+        let complete = clone.phase1_won(node.acceptor().promised());
+        let promised: Vec<NodeId> = clone
+            .election()
+            .map(|election| election.promised().iter().copied().collect())
+            .unwrap_or_default();
+        let members: Vec<Vec<NodeId>> = prior
+            .iter()
+            .map(|config| config.members().to_vec())
+            .collect();
+        let id = self.take_prompt_id();
+        Some(Prompt::phase1_complete(
+            id, to, *ballot, &promised, &members, complete,
+        ))
     }
 
     /// The question a grid leader is asked before it proposes: which column
@@ -420,6 +481,10 @@ impl World {
             .flat_map(|client| client.reads.iter())
             .find(|read| read.node == to && !read.served)?;
         let (ctx, captured, acks) = (read.ctx, read.index, read.acks.len());
+        // The round is seeded with the leader's own vote, so the card counts
+        // it: the world only sees the acks that arrive on the wire.
+        let acks = acks + usize::from(node.is_acceptor());
+        let members = node.acceptors().members().len();
         let id = self.take_prompt_id();
         Some(Prompt::read_serve(
             id,
@@ -427,6 +492,7 @@ impl World {
             ctx,
             captured,
             acks,
+            members,
             chosen_index,
             confirmed,
         ))

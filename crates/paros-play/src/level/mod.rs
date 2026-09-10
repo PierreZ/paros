@@ -140,10 +140,10 @@ impl WorldKind {
 
     /// The next message an automation pump would deliver.
     #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool) -> Option<u64> {
+    pub fn next_auto_delivery(&self, beats: bool, replies: bool, matchmaker: bool) -> Option<u64> {
         match self {
             WorldKind::Decree(world) => world.next_auto_delivery(beats, replies),
-            WorldKind::Log(world) => world.next_auto_delivery(beats, replies),
+            WorldKind::Log(world) => world.next_auto_delivery(beats, replies, matchmaker),
         }
     }
 

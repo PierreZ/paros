@@ -95,6 +95,14 @@ impl DecreeWorld {
             grid_cell: None::<GridCellView>,
             applied: Vec::new(),
             armed_seam: None,
+            // The single-decree world runs bare roles: no configuration
+            // ballot, no matchmakers, no floor, no retirement.
+            acceptors_since: None,
+            matchmakers: None,
+            matchmaking: None,
+            gc: None,
+            handover: None,
+            retired: false,
         }
     }
 
@@ -147,6 +155,14 @@ impl DecreeWorld {
             grid_cell: None::<GridCellView>,
             applied: Vec::new(),
             armed_seam: None,
+            // The single-decree world runs bare roles: no configuration
+            // ballot, no matchmakers, no floor, no retirement.
+            acceptors_since: None,
+            matchmakers: None,
+            matchmaking: None,
+            gc: None,
+            handover: None,
+            retired: false,
         }
     }
 }

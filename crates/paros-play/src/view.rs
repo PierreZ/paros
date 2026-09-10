@@ -7,12 +7,18 @@
 //! derived from the world on every read, so the renderer never has to keep
 //! animation state of its own.
 //!
-//! Three rendering conventions, fixed here so every surface agrees: a **ballot**
-//! is `round.node` ([`show_ballot`]); a value **in prose** is quoted
-//! ([`show_command`], for a prompt or a narration line); and a value **in the
-//! view** is plain text ([`value_text`]) beside the control command's own kind
-//! ([`control_kind`]), so the renderer styles a `Truncate` differently from a
-//! client's `"alpha"` without parsing either.
+//! Three rendering conventions, fixed here so every surface agrees.
+//!
+//! A **ballot** is `round.node` ([`show_ballot`]). A **value is plain text
+//! everywhere** — in a prompt, in a narration line, in a goal, and in the view
+//! ([`show_command`] and [`value_text`] agree, and neither ever prints Rust's
+//! `Debug` quoting): the frontend sets a value in its monospace face, which is
+//! what tells the reader "this is the client's bytes", and a caption that said
+//! `Accept "alpha"` beside a slot box that said `alpha` was reading as two
+//! different things. A **control command names itself in words** (`Noop`,
+//! `Truncate up to 3`), and the view carries that name beside the control's own
+//! discriminant ([`control_kind`]) so the renderer styles a `Truncate`
+//! differently from a client's `alpha` without parsing either.
 
 use paros_core::{Ballot, Command, Control, NodeRole, QuorumSystem, Slot};
 use serde::{Deserialize, Serialize};
@@ -29,17 +35,15 @@ pub fn show_ballot(ballot: Ballot) -> String {
     format!("{}.{}", ballot.round, ballot.node.0)
 }
 
-/// A command **in prose**: a client value is its quoted UTF-8 text, a control
-/// command names itself. Prompts and narration lines use this; the view uses
-/// [`value_text`] plus [`control_kind`] instead.
+/// A command **in prose** — a prompt, a narration line, a goal.
+///
+/// The same plain text the view carries ([`value_text`]): a client value is its
+/// UTF-8 bytes as written, and a control command names itself in words. There
+/// is one convention, and this function exists only to say where a value is
+/// being read rather than rendered.
 #[must_use]
 pub fn show_command(command: &Command) -> String {
-    match command {
-        Command::User(entry) => format!("{:?}", String::from_utf8_lossy(&entry.value.0)),
-        Command::Control(Control::Noop) => "Noop".to_string(),
-        Command::Control(Control::Truncate { up_to }) => format!("Truncate(up to {})", up_to.0),
-        Command::Control(Control::Snap { at_index }) => format!("Snap(at {})", at_index.0),
-    }
+    value_text(command)
 }
 
 /// A command **in the view**: plain text, never Rust's `Debug` quoting. A
@@ -278,6 +282,23 @@ pub struct NodeView {
     pub applied: Vec<SlotView>,
     /// An armed durability seam, if the player set one.
     pub armed_seam: Option<Seam>,
+    /// The ballot the acceptor configuration in force here was bound to, as
+    /// `round.node`. A configuration is never edited: it belongs to one
+    /// ballot, and this is that ballot.
+    pub acceptors_since: Option<String>,
+    /// The matchmaker set this node believes authoritative. `None` on a plain
+    /// deployment, which names no matchmakers at all.
+    pub matchmakers: Option<MatchmakerSetView>,
+    /// The open matchmaking phase, if this node is a candidate that has not
+    /// finished registering.
+    pub matchmaking: Option<MatchmakingView>,
+    /// The garbage-collection floor this leadership made effective.
+    pub gc: Option<GcView>,
+    /// Which step of a matchmaker-set handover this node is driving.
+    pub handover: Option<HandoverPhaseView>,
+    /// Whether an operator retired this node: it answered the evidence, shut
+    /// down, and it never comes back.
+    pub retired: bool,
 }
 
 /// Which family of quorums a configuration counts with.
@@ -402,6 +423,18 @@ pub struct SlotView {
     pub applied: bool,
 }
 
+/// Which tier a message's endpoint belongs to. Node ids and matchmaker ids are
+/// **different identity spaces**, so a renderer must be told which one a number
+/// names before it can draw the link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PartyView {
+    /// A node of the acceptor pool.
+    Node,
+    /// A matchmaker of the registry tier.
+    Matchmaker,
+}
+
 /// One message in flight.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct MessageView {
@@ -411,8 +444,12 @@ pub struct MessageView {
     pub kind: String,
     /// The sender.
     pub from: u64,
+    /// Which tier [`MessageView::from`] names.
+    pub from_party: PartyView,
     /// The addressee.
     pub to: u64,
+    /// Which tier [`MessageView::to`] names.
+    pub to_party: PartyView,
     /// The ballot it carries, as `round.node`.
     pub ballot: Option<String>,
     /// The slot it names.
@@ -460,6 +497,17 @@ pub struct ProposalView {
     pub slot: Option<u64>,
     /// Whether that node has applied it (the write is acknowledged).
     pub acked: bool,
+    /// Whether the client may send this write again.
+    ///
+    /// Always true for a write, and that is a property of the protocol rather
+    /// than of this write's state: a retry repeats the same
+    /// `(client, sequence number, bytes)`, and the leader answers it from two
+    /// ledgers in a fixed order — applied here (ack the slot it executed at),
+    /// chosen or in flight at a slot (wait on **that** slot), never seen (take
+    /// the next free slot). So a write that was acknowledged, one still
+    /// waiting, and one whose answer was lost are all safe to ask for again,
+    /// and none of them can be executed twice.
+    pub retryable: bool,
 }
 
 /// One client read.
@@ -473,14 +521,117 @@ pub struct ReadView {
     pub index: Option<u64>,
     /// Whether it has been served.
     pub served: bool,
+    /// Always false: a read carries no identity the cluster remembers, so
+    /// asking again is a **new** read at a new watermark, not a retry. The
+    /// field is here so the frontend has one rule for every client operation.
+    pub retryable: bool,
 }
 
-/// A matchmaker. Act IV fills this in; the field exists so the view contract
-/// does not change under the frontend when it lands.
+/// Where a matchmaker stands in the generation it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchmakerPhaseView {
+    /// A fresh store: nothing has ever been written here.
+    Fresh,
+    /// Authoritative for no generation: a spare, or a proposed member whose
+    /// decree has not been decided yet.
+    Inactive,
+    /// Serving matchmaking for its generation.
+    Active,
+    /// Frozen for its generation: it registers nothing more, it still votes in
+    /// the successor decree, and it points late candidates at the successor.
+    Stopped,
+}
+
+/// Why a registration was made: what a candidate believed, or what an operator
+/// changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationKindView {
+    /// A candidate registered the configuration it believed was in force.
+    Belief,
+    /// A leader registered an operator's explicit change. The highest of these
+    /// is the effective configuration.
+    Reconfiguration,
+}
+
+/// One matchmaker set: which generation, and who is in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct MatchmakerSetView {
+    /// The generation number. Generation 0 is the deployment's bootstrap set.
+    pub generation: u64,
+    /// The matchmakers in it, in id order.
+    pub members: Vec<u64>,
+}
+
+/// One `ballot -> configuration` record in a matchmaker's registry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RegistrationView {
+    /// The ballot the configuration was registered under, as `round.node`.
+    pub ballot: String,
+    /// The acceptors of that configuration, in id order.
+    pub members: Vec<u64>,
+    /// Whether the record is a belief or a reconfiguration.
+    pub kind: RegistrationKindView,
+}
+
+/// One matchmaker: a registry, never an acceptor.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct MatchmakerView {
     /// The matchmaker's id.
     pub id: u64,
+    /// False while it is crashed (its registry survives).
+    pub alive: bool,
+    /// The generation it holds.
+    pub generation: u64,
+    /// Where it stands in that generation.
+    pub phase: MatchmakerPhaseView,
+    /// The floor below which it has forgotten its registrations for good, as
+    /// `round.node`.
+    pub gc_watermark: String,
+    /// Its registry, in ballot order.
+    pub registrations: Vec<RegistrationView>,
+    /// The chosen successor of its generation, once it has learned one.
+    pub successor: Option<MatchmakerSetView>,
+}
+
+/// A candidate's open matchmaking phase: what it is registering, and how many
+/// matchmakers still have to answer.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct MatchmakingView {
+    /// The ballot being registered, as `round.node`.
+    pub ballot: String,
+    /// The acceptor configuration this campaign intends to run the ballot
+    /// with, in id order.
+    pub config: Vec<u64>,
+    /// Whether the campaign registers a belief or a reconfiguration.
+    pub kind: RegistrationKindView,
+    /// How many more matchmakers must answer before the quorum holds.
+    pub remaining: usize,
+}
+
+/// A leader's garbage-collection floor, once a matchmaker quorum has made it
+/// effective. `None` before that: nothing is retirable until the acks are in.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct GcView {
+    /// The floor a matchmaker quorum durably acked, as `round.node`.
+    pub effective_watermark: String,
+    /// The acceptors this floor released: they answer no future Phase 1.
+    pub retirable: Vec<u64>,
+}
+
+/// Which step of a matchmaker-set handover a node is driving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoverPhaseView {
+    /// Freezing a quorum of the current generation.
+    Stopping,
+    /// Handing the reconstructed registry to every proposed member.
+    Bootstrapping,
+    /// Running the successor decree over the current generation.
+    Deciding,
+    /// Telling both generations which set was chosen.
+    Publishing,
 }
 
 /// The open prompt.
@@ -614,6 +765,48 @@ impl SlotView {
             chosen: true,
             applied: true,
         }
+    }
+}
+
+/// A matchmaker set, rendered.
+#[must_use]
+pub fn matchmaker_set_view(set: &paros_core::MatchmakerSet) -> MatchmakerSetView {
+    MatchmakerSetView {
+        generation: set.generation.0,
+        members: set.members().iter().map(|m| m.0).collect(),
+    }
+}
+
+/// The [`RegistrationKindView`] for a core registration kind.
+#[must_use]
+pub fn registration_kind_view(kind: paros_core::RegistrationKind) -> RegistrationKindView {
+    match kind {
+        paros_core::RegistrationKind::Belief => RegistrationKindView::Belief,
+        paros_core::RegistrationKind::Reconfiguration => RegistrationKindView::Reconfiguration,
+    }
+}
+
+/// One registry record, rendered.
+#[must_use]
+pub fn registration_view(
+    ballot: Ballot,
+    registration: &paros_core::Registration,
+) -> RegistrationView {
+    RegistrationView {
+        ballot: show_ballot(ballot),
+        members: registration.config.members().iter().map(|n| n.0).collect(),
+        kind: registration_kind_view(registration.kind),
+    }
+}
+
+/// The [`MatchmakerPhaseView`] for a core matchmaker phase.
+#[must_use]
+pub fn matchmaker_phase_view(phase: paros_core::MatchmakerPhase) -> MatchmakerPhaseView {
+    match phase {
+        paros_core::MatchmakerPhase::Fresh => MatchmakerPhaseView::Fresh,
+        paros_core::MatchmakerPhase::Inactive => MatchmakerPhaseView::Inactive,
+        paros_core::MatchmakerPhase::Active => MatchmakerPhaseView::Active,
+        paros_core::MatchmakerPhase::Stopped => MatchmakerPhaseView::Stopped,
     }
 }
 
@@ -854,7 +1047,9 @@ pub fn message_view(
         id,
         kind: kind.to_string(),
         from,
+        from_party: PartyView::Node,
         to,
+        to_party: PartyView::Node,
         ballot: ballot.map(show_ballot),
         slot: slot.map(|s| s.0),
         column: column.map(as_u64),

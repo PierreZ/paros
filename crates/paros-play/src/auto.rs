@@ -52,10 +52,22 @@ pub enum AutomationFlag {
     RepairVerdict,
     /// The engine refuses a wiped node's boot on its own.
     WipedRejoin,
+    /// A candidate decides on its own whether its cross-configuration Phase 1
+    /// is complete.
+    Phase1Complete,
+    /// A candidate abandons a stale belief on its own.
+    StaleConfiguration,
+    /// A matchmaker fences a request from another generation on its own.
+    GenerationFence,
+    /// The engine decides on its own whether a node may retire.
+    MayRetire,
     /// Heartbeats and their acks are delivered without being clicked.
     DeliverHeartbeats,
     /// `Promise`, `Accepted` and `Nack` are delivered without being clicked.
     DeliverReplies,
+    /// Matchmaker requests and their answers are delivered without being
+    /// clicked.
+    DeliverMatchmakerReplies,
     /// A leader re-sends its pending `Accept`s on every tick.
     ResendPending,
 }
@@ -75,8 +87,13 @@ pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::QuorumReadServe,
     AutomationFlag::RepairVerdict,
     AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
     AutomationFlag::DeliverHeartbeats,
     AutomationFlag::DeliverReplies,
+    AutomationFlag::DeliverMatchmakerReplies,
     AutomationFlag::ResendPending,
 ];
 
@@ -98,8 +115,13 @@ impl AutomationFlag {
             AutomationFlag::QuorumReadServe => "serve a quorum read",
             AutomationFlag::RepairVerdict => "settle a damaged slot",
             AutomationFlag::WipedRejoin => "refuse a wiped node",
+            AutomationFlag::Phase1Complete => "judge a cross-configuration Phase 1",
+            AutomationFlag::StaleConfiguration => "abandon a stale belief",
+            AutomationFlag::GenerationFence => "fence a matchmaker generation",
+            AutomationFlag::MayRetire => "answer a retire request",
             AutomationFlag::DeliverHeartbeats => "deliver heartbeats",
             AutomationFlag::DeliverReplies => "deliver replies",
+            AutomationFlag::DeliverMatchmakerReplies => "deliver matchmaker messages",
             AutomationFlag::ResendPending => "re-send pending accepts",
         }
     }
@@ -150,7 +172,10 @@ const PUMP_BUDGET: usize = 4096;
 /// 2. `DeliverHeartbeats`: deliver the lowest-id `Heartbeat` / `HeartbeatAck`
 ///    on the wire.
 /// 3. `DeliverReplies`: deliver the lowest-id `Promise` / `Accepted` / `Nack`.
-/// 4. Back to 1 until no delivery was made.
+/// 4. `DeliverMatchmakerReplies`: deliver the lowest-id matchmaker-plane
+///    message — a registration, a garbage-collection request, a handover step,
+///    or any of their answers.
+/// 5. Back to 1 until no delivery was made.
 ///
 /// `ResendPending` is not a pump: re-sending happens on a tick, so the world
 /// does it inside [`crate::world::World::tick`] when the flag is on (see
@@ -164,7 +189,8 @@ const PUMP_BUDGET: usize = 4096;
 pub fn pump(world: &mut WorldKind, automation: &Automation) {
     let beats = automation.is_on(AutomationFlag::DeliverHeartbeats);
     let replies = automation.is_on(AutomationFlag::DeliverReplies);
-    if !beats && !replies {
+    let matchmaker = automation.is_on(AutomationFlag::DeliverMatchmakerReplies);
+    if !beats && !replies && !matchmaker {
         return;
     }
     let mut budget = PUMP_BUDGET;
@@ -172,7 +198,7 @@ pub fn pump(world: &mut WorldKind, automation: &Automation) {
         if world.prompt().is_some() {
             return;
         }
-        let Some(id) = world.next_auto_delivery(beats, replies) else {
+        let Some(id) = world.next_auto_delivery(beats, replies, matchmaker) else {
             return;
         };
         assert!(budget > 0, "the automation pump reaches quiescence");

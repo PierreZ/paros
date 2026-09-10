@@ -186,7 +186,7 @@ fn crashed(world: &WorldKind) -> Vec<u64> {
 
 /// Whether every node has executed exactly `expected`, in order.
 fn everyone_applied(world: &WorldKind, expected: &[&str]) -> Result<(), String> {
-    let want: Vec<String> = expected.iter().map(|text| format!("{text:?}")).collect();
+    let want: Vec<String> = expected.iter().map(|text| (*text).to_string()).collect();
     for node in pool(world) {
         let got = applied(world, node);
         if got != want {
@@ -786,8 +786,8 @@ is not ignorance — it is a licence.",
         }
         let executed = applied(world, 1);
         let filled = executed.iter().any(|command| command == "Noop");
-        let alpha = executed.iter().any(|command| command == "\"alpha\"");
-        let bravo = executed.iter().any(|command| command == "\"bravo\"");
+        let alpha = executed.iter().any(|command| command == "alpha");
+        let bravo = executed.iter().any(|command| command == "bravo");
         match (filled, alpha && bravo) {
             (true, true) => GoalStatus::Reached(format!(
                 "No hole anywhere, and the client's commands are executed: {}. The Noop is not a \
@@ -922,7 +922,7 @@ the contradiction arrives, decide which record the disk keeps.",
                 log.disk(**id).is_none_or(|disk| {
                     disk.records()
                         .get(&Slot(0))
-                        .is_none_or(|(_, command)| show_command(command) != "\"fresh\"")
+                        .is_none_or(|(_, command)| show_command(command) != "fresh")
                 })
             })
             .map(|id| id.0)

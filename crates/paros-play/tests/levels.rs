@@ -281,24 +281,84 @@ fn every_act_is_registered_in_play_order() {
 }
 
 #[test]
-fn act_four_registers_the_six_levels_of_part_one() {
-    // Part two appends the four matchmaker levels to the same module. These
-    // six are the ones part one owns, and they stay in this order.
+fn act_four_registers_its_ten_levels_in_play_order() {
+    // Part one's six, with part two's four matchmaker levels between the
+    // hand-off and the two the plan numbers 28 and 29.
     let act4: Vec<&str> = levels()
         .into_iter()
         .filter(|level| level.act == 4)
         .map(|level| level.id)
         .collect();
-    for id in [
-        "act4/flexible-quorums",
-        "act4/the-grid",
-        "act4/quorum-reads",
-        "act4/the-handoff",
-        "act4/faulty-records",
-        "act4/the-wiped-node",
+    assert_eq!(
+        act4,
+        vec![
+            "act4/flexible-quorums",
+            "act4/the-grid",
+            "act4/quorum-reads",
+            "act4/the-handoff",
+            "act4/matchmaking",
+            "act4/reconfigure",
+            "act4/garbage-collection",
+            "act4/matchmaker-generations",
+            "act4/faulty-records",
+            "act4/the-wiped-node",
+        ]
+    );
+}
+
+#[test]
+fn the_matchmaker_levels_ask_their_question_the_hard_way() {
+    // A prompt whose answer is the same every time teaches only half a rule.
+    // Each of these levels must reach the answer that costs something: a
+    // Phase 1 that is complete across two named sets, a belief the cluster has
+    // replaced, a frozen generation, a retirement with evidence behind it.
+    for (id, kind, wanted) in [
+        ("act4/matchmaking", PromptKind::Phase1Complete, "complete"),
+        (
+            "act4/reconfigure",
+            PromptKind::StaleConfiguration,
+            "abandon",
+        ),
+        ("act4/garbage-collection", PromptKind::MayRetire, "retire"),
+        (
+            "act4/matchmaker-generations",
+            PromptKind::GenerationFence,
+            "refuse",
+        ),
     ] {
-        assert!(act4.contains(&id), "{id} is registered; act 4 has {act4:?}");
+        let level = paros_play::level::level(id).expect("a registered level");
+        let mut game = Game::new(id).expect("a registered level");
+        let mut seen = false;
+        for action in (level.reference)() {
+            if let Some(prompt) = game.world().prompt()
+                && prompt.kind == kind
+                && prompt.expected() == wanted
+            {
+                seen = true;
+            }
+            game.act(action).expect("the reference replays");
+        }
+        assert!(seen, "{id}: no {kind:?} prompt ever expected {wanted:?}");
     }
+}
+
+#[test]
+fn the_retire_refusal_is_played_before_the_retirement() {
+    // The level's whole point is that an installed successor set is not a
+    // collected predecessor, so the reference must be refused once.
+    let level = paros_play::level::level("act4/garbage-collection").expect("registered");
+    let mut game = Game::new(level.id).expect("registered");
+    let mut refusals = 0;
+    for action in (level.reference)() {
+        if let Some(prompt) = game.world().prompt()
+            && prompt.kind == PromptKind::MayRetire
+            && prompt.expected() == "refuse"
+        {
+            refusals += 1;
+        }
+        game.act(action).expect("the reference replays");
+    }
+    assert!(refusals > 0, "the refusal leg is never played");
 }
 
 #[test]
@@ -355,4 +415,38 @@ fn a_levels_unlocks_are_flags_it_pins_manual() {
             );
         }
     }
+}
+
+#[test]
+fn the_matchmaker_pump_delivers_the_plane_for_the_player() {
+    // The reward level 24 hands out: with the flag on, a registration and its
+    // answer land without being clicked.
+    let mut game = Game::new("act4/reconfigure").expect("a registered level");
+    game.act(Action::SetAutomation {
+        flag: AutomationFlag::DeliverMatchmakerReplies,
+        on: true,
+    })
+    .expect("the level offers the toggle");
+    game.act(Action::StartElection { node: 0 })
+        .expect("node 0 campaigns");
+    let view = game.view();
+    assert!(
+        view.world
+            .wire
+            .iter()
+            .all(|message| !matches!(message.phase.as_str(), "match" | "gc" | "reconfigure")),
+        "the pump delivered every matchmaker-plane message: {:?}",
+        view.world
+            .wire
+            .iter()
+            .map(|m| m.kind.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        view.world
+            .matchmakers
+            .iter()
+            .all(|m| m.registrations.len() == 1),
+        "both matchmakers registered the ballot"
+    );
 }

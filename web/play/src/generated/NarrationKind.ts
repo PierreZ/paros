@@ -4,4 +4,4 @@
  * What a narration line is about. The frontend colours the caption by this,
  * and the log panel groups by it.
  */
-export type NarrationKind = "info" | "promise" | "nack" | "accept" | "chosen" | "applied" | "election" | "leader" | "heartbeat" | "crash" | "restart" | "read" | "truncate" | "snapshot" | "client" | "violation" | "goal";
+export type NarrationKind = "info" | "promise" | "nack" | "accept" | "chosen" | "applied" | "election" | "leader" | "heartbeat" | "crash" | "restart" | "read" | "truncate" | "snapshot" | "client" | "matchmaking" | "reconfigure" | "gc" | "generation" | "violation" | "goal";

@@ -15,14 +15,15 @@
 //! plays the level and answers every prompt with the answer `paros-core`
 //! itself gives.
 
-use paros_core::{Command, Config, NodeId, QuorumSystem, Slot};
+use paros_core::{Command, Config, MatchmakerId, NodeId, QuorumSystem, Slot};
 
-use crate::action::{Action, ActionKind, Phase};
+use crate::action::{Action, ActionKind, BallotSpec, Phase};
 use crate::auto::AutomationFlag;
-use crate::level::script::{Script, kind, kind_at};
+use crate::level::script::{Script, kind, kind_at, phase};
 use crate::level::{GoalStatus, Level, WorldKind};
 use crate::view::{MessageView, show_command};
 use crate::world::decree::DecreeWorld;
+use crate::world::matchmakers::MatchmakerProcess;
 use crate::world::{Disk, World};
 
 /// Act IV's levels, in play order.
@@ -33,11 +34,12 @@ pub fn levels() -> Vec<&'static Level> {
         &THE_GRID,
         &QUORUM_READS,
         &THE_HANDOFF,
-        // part two: matchmakers — levels 24 to 27 (`act4/matchmaking`,
-        // `act4/reconfigure`, `act4/garbage-collection`,
-        // `act4/matchmaker-generations`) are appended here, in play order,
-        // together with the matchmaker plane they need. The two levels below
-        // stay last: they are numbered 28 and 29 in the plan.
+        // Part two: the matchmaker plane. The two levels below stay last —
+        // they are numbered 28 and 29 in the plan.
+        &MATCHMAKING,
+        &RECONFIGURE,
+        &GARBAGE_COLLECTION,
+        &MATCHMAKER_GENERATIONS,
         &FAULTY_RECORDS,
         &THE_WIPED_NODE,
     ]
@@ -71,6 +73,10 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::QuorumReadServe,
     AutomationFlag::RepairVerdict,
     AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
 ];
 
 /// Every role but the column a grid slot goes to.
@@ -87,6 +93,10 @@ const NO_GRID_COLUMN: &[AutomationFlag] = &[
     AutomationFlag::QuorumReadServe,
     AutomationFlag::RepairVerdict,
     AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
 ];
 
 /// Every role but serving a leaderless read.
@@ -103,6 +113,10 @@ const NO_QUORUM_READ_SERVE: &[AutomationFlag] = &[
     AutomationFlag::GridColumn,
     AutomationFlag::RepairVerdict,
     AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
 ];
 
 /// Every role but settling a damaged slot.
@@ -119,6 +133,10 @@ const NO_REPAIR_VERDICT: &[AutomationFlag] = &[
     AutomationFlag::GridColumn,
     AutomationFlag::QuorumReadServe,
     AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
 ];
 
 /// Every role but the answer a wiped node's boot gets.
@@ -135,6 +153,90 @@ const NO_WIPED_REJOIN: &[AutomationFlag] = &[
     AutomationFlag::GridColumn,
     AutomationFlag::QuorumReadServe,
     AutomationFlag::RepairVerdict,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
+];
+
+/// Every role but judging a cross-configuration Phase 1.
+const NO_PHASE1_COMPLETE: &[AutomationFlag] = &[
+    AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
+    AutomationFlag::ProposerP2c,
+    AutomationFlag::ReplicaApply,
+    AutomationFlag::LeaderRecovery,
+    AutomationFlag::PersistOrder,
+    AutomationFlag::ReadServe,
+    AutomationFlag::SnapshotPromise,
+    AutomationFlag::AckWrite,
+    AutomationFlag::GridColumn,
+    AutomationFlag::QuorumReadServe,
+    AutomationFlag::RepairVerdict,
+    AutomationFlag::WipedRejoin,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
+];
+
+/// Every role but fencing a matchmaker generation.
+const NO_GENERATION_FENCE: &[AutomationFlag] = &[
+    AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
+    AutomationFlag::ProposerP2c,
+    AutomationFlag::ReplicaApply,
+    AutomationFlag::LeaderRecovery,
+    AutomationFlag::PersistOrder,
+    AutomationFlag::ReadServe,
+    AutomationFlag::SnapshotPromise,
+    AutomationFlag::AckWrite,
+    AutomationFlag::GridColumn,
+    AutomationFlag::QuorumReadServe,
+    AutomationFlag::RepairVerdict,
+    AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::MayRetire,
+];
+
+/// Every role but answering a retire request.
+const NO_MAY_RETIRE: &[AutomationFlag] = &[
+    AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
+    AutomationFlag::ProposerP2c,
+    AutomationFlag::ReplicaApply,
+    AutomationFlag::LeaderRecovery,
+    AutomationFlag::PersistOrder,
+    AutomationFlag::ReadServe,
+    AutomationFlag::SnapshotPromise,
+    AutomationFlag::AckWrite,
+    AutomationFlag::GridColumn,
+    AutomationFlag::QuorumReadServe,
+    AutomationFlag::RepairVerdict,
+    AutomationFlag::WipedRejoin,
+    AutomationFlag::Phase1Complete,
+    AutomationFlag::StaleConfiguration,
+    AutomationFlag::GenerationFence,
+];
+
+/// Every role but the two a reconfiguration teaches: judging a
+/// cross-configuration Phase 1, and abandoning a stale belief.
+const NO_PHASE1_NOR_STALE: &[AutomationFlag] = &[
+    AutomationFlag::AcceptorReplies,
+    AutomationFlag::CommitOverwrite,
+    AutomationFlag::ProposerP2c,
+    AutomationFlag::ReplicaApply,
+    AutomationFlag::LeaderRecovery,
+    AutomationFlag::PersistOrder,
+    AutomationFlag::ReadServe,
+    AutomationFlag::SnapshotPromise,
+    AutomationFlag::AckWrite,
+    AutomationFlag::GridColumn,
+    AutomationFlag::QuorumReadServe,
+    AutomationFlag::RepairVerdict,
+    AutomationFlag::WipedRejoin,
+    AutomationFlag::GenerationFence,
+    AutomationFlag::MayRetire,
 ];
 
 /// The convenience toggles the log-world levels offer.
@@ -145,6 +247,14 @@ const TOGGLES: &[AutomationFlag] = &[
 
 /// The one toggle a level that pins beats off may still offer.
 const REPLIES_ONLY: &[AutomationFlag] = &[AutomationFlag::DeliverReplies];
+
+/// The toggles a matchmaker level offers once the player has earned the
+/// matchmaker pump.
+const MATCHMAKER_TOGGLES: &[AutomationFlag] = &[
+    AutomationFlag::DeliverReplies,
+    AutomationFlag::DeliverHeartbeats,
+    AutomationFlag::DeliverMatchmakerReplies,
+];
 
 // ---- worlds -----------------------------------------------------------------
 
@@ -168,6 +278,56 @@ fn fresh(size: u64, system: QuorumSystem) -> WorldKind {
         .map(|id| Disk::new(config(id, size, system)))
         .collect();
     WorldKind::Log(Box::new(World::from_disks(disks, &[CLIENT], TIMEOUT)))
+}
+
+/// A cluster that **names matchmakers**: `pool` is every node that may ever be
+/// an acceptor, `bootstrap` the acceptor set in force before any ballot was
+/// registered, `matchmakers` the registry tier of generation 0, and `spares`
+/// the matchmakers a generation handover may pull in.
+///
+/// A node outside `bootstrap` is a spare acceptor: it is addressable, it
+/// answers Phase 1 for the ballots it takes part in, and it becomes an acceptor
+/// only when a reconfiguration names it.
+fn deployed(pool: &[u64], bootstrap: &[u64], matchmakers: &[u64], spares: &[u64]) -> WorldKind {
+    let nodes: Vec<NodeId> = pool.iter().copied().map(NodeId).collect();
+    let members: Vec<NodeId> = bootstrap.iter().copied().map(NodeId).collect();
+    let set: Vec<MatchmakerId> = matchmakers.iter().copied().map(MatchmakerId).collect();
+    let mut all = set.clone();
+    all.extend(spares.iter().copied().map(MatchmakerId));
+    all.sort_unstable();
+    let disks: Vec<Disk> = nodes
+        .iter()
+        .map(|id| {
+            Disk::new(Config {
+                id: *id,
+                peers: members.clone(),
+                quorum_system: QuorumSystem::Majority,
+                nodes: nodes.clone(),
+                matchmakers: set.clone(),
+                matchmaker_pool: all.clone(),
+            })
+        })
+        .collect();
+    let processes = all
+        .iter()
+        .map(|id| MatchmakerProcess::new(*id, set.clone()))
+        .collect();
+    WorldKind::Log(Box::new(
+        World::from_disks(disks, &[CLIENT], TIMEOUT).with_matchmakers(processes),
+    ))
+}
+
+/// What a node's application has executed, with the protocol's own control
+/// commands taken out: what a level means when it says "a command".
+fn commands(world: &WorldKind, node: u64) -> Vec<String> {
+    applied(world, node)
+        .into_iter()
+        .filter(|command| {
+            !command.starts_with("Noop")
+                && !command.starts_with("Truncate")
+                && !command.starts_with("Snap")
+        })
+        .collect()
 }
 
 // ---- reading the world for a goal -------------------------------------------
@@ -298,7 +458,7 @@ election gets dearer, because it needs three answers instead of three of four \
 being enough at two.
 
 You control the reach of each phase: which acceptors a `Prepare` gets to, and \
-which acceptors an `Accept` gets to. Get `\"alpha\"` chosen with two acceptors. \
+which acceptors an `Accept` gets to. Get `alpha` chosen with two acceptors. \
 Then run a second ballot with three, and watch it come back with the same \
 value. Try to pick three acceptors that miss both voters. Three plus two is \
 five, and there are only four acceptors, so no such set exists.",
@@ -340,7 +500,7 @@ five, and there are only four acceptors, so no such set exists.",
             .find(|campaign| Some(campaign.ballot) > first);
         match later {
             Some(campaign) if text(&campaign.proposed) == chosen => GoalStatus::Reached(format!(
-                "Two acceptors chose {chosen:?}, and three had to be asked to find it again. \
+                "Two acceptors chose {chosen}, and three had to be asked to find it again. \
                  Ballot {}.{} reached {:?}, and every set of three acceptors here contains one \
                  of the two that voted. That is the whole of `q1 + q2 > n`.",
                 campaign.ballot.round,
@@ -348,11 +508,11 @@ five, and there are only four acceptors, so no such set exists.",
                 campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
             )),
             Some(campaign) => GoalStatus::Failed(format!(
-                "A campaign proposed {:?} over the chosen {chosen:?}.",
+                "A campaign proposed {} over the chosen {chosen}.",
                 text(&campaign.proposed)
             )),
             None => GoalStatus::Open(format!(
-                "{chosen:?} is chosen. Now run a second ballot and see what its promises report."
+                "{chosen} is chosen. Now run a second ballot and see what its promises report."
             )),
         }
     },
@@ -763,6 +923,601 @@ to hand it on again.",
     },
 };
 
+// ---- 24. matchmaking --------------------------------------------------------
+
+const MATCHMAKING_ACTIONS: &[ActionKind] = &[
+    ActionKind::Deliver,
+    ActionKind::Drop,
+    ActionKind::Tick,
+    ActionKind::StartElection,
+    ActionKind::Propose,
+    ActionKind::Crash,
+    ActionKind::Restart,
+    ActionKind::CrashMatchmaker,
+    ActionKind::RestartMatchmaker,
+    ActionKind::ResendMatchmaking,
+    ActionKind::Answer,
+    ActionKind::SetAutomation,
+];
+
+/// `act4/matchmaking`.
+pub static MATCHMAKING: Level = Level {
+    id: "act4/matchmaking",
+    act: 4,
+    title: "Matchmaking",
+    briefing: "\
+Every level so far kept one thing fixed: the acceptors never changed. Let \
+them change and the safety argument breaks in a way that is easy to miss. \
+Say the acceptors are `{0, 1, 2}` and a leader gets a slot chosen with nodes \
+0 and 1, then dies before it tells anybody. An operator moves the cluster to \
+`{2, 3, 4}`. A new leader asks that set, hears from nodes 3 and 4, and both \
+report nothing — truthfully, because neither was there. It decides something \
+else, and one slot holds two values.
+
+So a new leader must ask a Phase-1 quorum of **every** acceptor set that may \
+still hold a value it has not seen. That raises a question: how does a \
+candidate learn which sets existed? A separate small service answers it. A \
+**matchmaker** keeps one durable map from a ballot to an acceptor set. It \
+holds no log, it votes on no slot, and nothing on the command path asks it \
+anything.
+
+A candidate registers `(my ballot, my acceptor set)` with a quorum of \
+matchmakers before it sends one `Prepare`. Each of them answers with every \
+set it holds below that ballot. A quorum is enough, and the reason is the \
+intersection you already know. Every earlier ballot registered with a quorum \
+of the same matchmakers before it could accept anything, and two quorums \
+share a matchmaker. So the union of the answers names every set an earlier \
+ballot could have chosen under.
+
+Elect node 0, get a command chosen, then take node 0 away and elect node 1. \
+Node 1's matchmakers will tell it about node 0's set, and you say whether \
+its Phase 1 is complete.",
+    field_guide: "play.html",
+    symbols: &[
+        "ColocatedNode::on_match_reply",
+        "Ready::match_requests",
+        "Matchmaking",
+        "MatchStep::Completed",
+        "Proposer::phase1_won",
+        "docs/references/papers — Whittaker et al., Matchmaker Paxos §3",
+    ],
+    automation_on: NO_PHASE1_COMPLETE,
+    pinned_off: &[
+        AutomationFlag::Phase1Complete,
+        AutomationFlag::DeliverMatchmakerReplies,
+    ],
+    unlocked: TOGGLES,
+    unlocks: &[
+        AutomationFlag::Phase1Complete,
+        AutomationFlag::DeliverMatchmakerReplies,
+    ],
+    allowed_actions: MATCHMAKING_ACTIONS,
+    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]),
+    goal: |world| {
+        let Some(log) = log_world(world) else {
+            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
+        };
+        let Some(leader) = log.leader() else {
+            return GoalStatus::Open(
+                "Elect a leader. A candidate asks the matchmakers first.".to_string(),
+            );
+        };
+        let prior = log.prior_configurations(leader);
+        if prior.is_empty() {
+            return GoalStatus::Open(format!(
+                "Node {} leads, and the matchmakers told it nothing came before. Get a command \
+                 chosen, then take node {} away and elect somebody else.",
+                leader.0, leader.0
+            ));
+        }
+        let executed = commands(world, leader.0);
+        if executed.len() < 2 {
+            return GoalStatus::Open(format!(
+                "Node {} was elected across a set the matchmakers named. Get one more command \
+                 chosen under it.",
+                leader.0
+            ));
+        }
+        GoalStatus::Reached(format!(
+            "Node {} leads, and it was elected across the acceptor set the matchmakers reported \
+             for the earlier ballot. It has executed {} commands. No Prepare left before a \
+             matchmaker quorum answered, and Phase 1 closed only once that set held a quorum of \
+             its own.",
+            leader.0,
+            executed.len()
+        ))
+    },
+    hint: |_world, mistakes| match mistakes {
+        0 => None,
+        1..=2 => Some(
+            "Read the card's first two lines: who has promised, and which sets the matchmakers \
+             named."
+                .to_string(),
+        ),
+        _ => Some(
+            "One set is named, and two of its three acceptors have promised. Two of three is a \
+             Phase-1 quorum of that set."
+                .to_string(),
+        ),
+    },
+    reference: || {
+        let mut script = Script::new("act4/matchmaking");
+        // The first campaign: the matchmakers report that nothing came before,
+        // so Phase 1 has nothing to recover and closes at once.
+        script.play(start_election(0)).settle_all();
+        script.play(propose(0, "alpha")).settle_all();
+        // Node 0 goes, and node 1 campaigns. Its matchmakers name node 0's set.
+        script.play(crash(0));
+        script.play(start_election(1)).settle_all();
+        script.play(propose(1, "bravo")).settle_all();
+        script.finish()
+    },
+};
+
+// ---- 25. reconfigure --------------------------------------------------------
+
+const RECONFIGURE_ACTIONS: &[ActionKind] = &[
+    ActionKind::Deliver,
+    ActionKind::Drop,
+    ActionKind::Tick,
+    ActionKind::StartElection,
+    ActionKind::Propose,
+    ActionKind::Reconfigure,
+    ActionKind::Crash,
+    ActionKind::Restart,
+    ActionKind::ResendMatchmaking,
+    ActionKind::Answer,
+    ActionKind::SetAutomation,
+];
+
+/// `act4/reconfigure`.
+pub static RECONFIGURE: Level = Level {
+    id: "act4/reconfigure",
+    act: 4,
+    title: "Reconfigure",
+    briefing: "\
+An acceptor set belongs to a ballot, and it is never edited. Edit it under a \
+live ballot and every quorum count in flight changes meaning. The \
+matchmakers' map from a ballot to a set becomes a lie as well. So there is \
+exactly one way to change the acceptors. The leader picks a **fresh ballot** \
+and registers the new set with it: a reconfiguration is a round change.
+
+That has a price and a shape. The price is a stall. The leader abandons its \
+open rounds and admits no new command. It leads again after one matchmaking \
+round trip and one Phase 1. The shape is that the new ballot's Phase 1 must \
+cover the **old** set, which the matchmakers now report. Its Phase 2 \
+addresses the new set alone.
+
+A joining node is sent the `Prepare` too, so it promises the ballot and \
+learns the set before any `Accept` reaches it. A removed node keeps \
+answering Phase 1 for the ballots it took part in: removed is not shut down. \
+(A cluster with no matchmakers refuses a reconfiguration outright — there is \
+nowhere to record a second set, so plain Multi-Paxos keeps one for life.)
+
+Grow the cluster onto the spare, node 3. Then take the leader away and elect \
+somebody else. That campaign is told about **two** sets, the one before the \
+change and the one after, and it must hold a Phase-1 quorum of each. A \
+quorum of everything the two sets name together is not the same claim, and \
+the card will ask you which one Phase 1 needs.",
+    field_guide: "play.html",
+    symbols: &[
+        "ColocatedNode::reconfigure",
+        "ReconfigureResult",
+        "ReconfigureRefusal::NoMatchmakers",
+        "Election::covered",
+        "Registration::reconfiguration",
+        "docs/references/papers — Whittaker et al., Matchmaker Paxos §4.2",
+    ],
+    automation_on: NO_PHASE1_NOR_STALE,
+    pinned_off: &[
+        AutomationFlag::Phase1Complete,
+        AutomationFlag::StaleConfiguration,
+    ],
+    unlocked: MATCHMAKER_TOGGLES,
+    unlocks: &[AutomationFlag::StaleConfiguration],
+    allowed_actions: RECONFIGURE_ACTIONS,
+    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]),
+    goal: |world| {
+        let Some(log) = log_world(world) else {
+            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
+        };
+        let Some(leader) = log.leader() else {
+            return GoalStatus::Open("Elect a leader, then grow onto node 3.".to_string());
+        };
+        let Some(node) = log.node(leader) else {
+            return GoalStatus::Open("The leader is not running.".to_string());
+        };
+        let members = node.acceptors().members().len();
+        if members < 4 {
+            return GoalStatus::Open(format!(
+                "Node {} leads a set of {members}. Ask it to run with the acceptors 0, 1, 2 and 3.",
+                leader.0
+            ));
+        }
+        let prior = log.prior_configurations(leader);
+        if prior.len() < 2 {
+            return GoalStatus::Open(format!(
+                "The new set is in force. Now take node {} away and elect somebody else: that \
+                 campaign is told about both sets.",
+                leader.0
+            ));
+        }
+        if !commands(world, 3).iter().any(|command| command == "bravo") {
+            return GoalStatus::Open(
+                "Get one more command chosen under the new set, and let node 3 execute it."
+                    .to_string(),
+            );
+        }
+        GoalStatus::Reached(format!(
+            "Node {} leads a set of four at ballot {}, which is above the ballot the set of three \
+             was bound to. Node 3 promised that ballot before any Accept reached it, and it has \
+             executed the command chosen under the new set. The campaign that elected node {} had \
+             to hold a Phase-1 quorum of both sets, not of the {} acceptors they name together.",
+            leader.0,
+            crate::view::show_ballot(node.acceptors_since()),
+            leader.0,
+            prior
+                .iter()
+                .flat_map(|config| config.members().iter().copied())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        ))
+    },
+    hint: |_world, mistakes| match mistakes {
+        0 => None,
+        1..=2 => Some(
+            "Count the promises against each named set on its own, not against the two of them \
+             together."
+                .to_string(),
+        ),
+        _ => Some(
+            "The set of three needs two of its own members to have promised. Check that one \
+             first."
+                .to_string(),
+        ),
+    },
+    reference: || {
+        let mut script = Script::new("act4/reconfigure");
+        script.play(start_election(0)).settle_all();
+        script.play(propose(0, "alpha")).settle_all();
+        // Node 2 is away for the change, so it will come back believing the
+        // set of three — a belief this cluster has already replaced.
+        script.play(crash(2));
+        // The set grows onto the spare. Phase 1 covers the set of three.
+        script
+            .play(Action::Reconfigure {
+                node: 0,
+                members: vec![0, 1, 2, 3],
+                quorum: None,
+            })
+            .settle_all();
+        script.play(propose(0, "bravo")).settle_all();
+        // Node 2 comes back on its bootstrap belief and campaigns on it. The
+        // matchmakers report the change, so the campaign is abandoned; the
+        // next one registers the set in force and is told about both.
+        script.play(restart(2)).settle_all();
+        script.play(crash(0));
+        script.play(start_election(2)).settle_all();
+        script.play(start_election(2)).settle_all();
+        script.play(propose(2, "charlie")).settle_all();
+        script.finish()
+    },
+};
+
+// ---- 26. garbage collection -------------------------------------------------
+
+const GC_ACTIONS: &[ActionKind] = &[
+    ActionKind::Deliver,
+    ActionKind::Drop,
+    ActionKind::Tick,
+    ActionKind::StartElection,
+    ActionKind::Propose,
+    ActionKind::Reconfigure,
+    ActionKind::Retire,
+    ActionKind::ResendGc,
+    ActionKind::Answer,
+    ActionKind::SetAutomation,
+];
+
+/// `act4/garbage-collection`.
+pub static GARBAGE_COLLECTION: Level = Level {
+    id: "act4/garbage-collection",
+    act: 4,
+    title: "Garbage collection",
+    briefing: "\
+Every reconfiguration adds a set the matchmakers must keep, and every later \
+Phase 1 must cover every set they report. Left alone, elections get slower \
+for ever and a removed machine can never be switched off. So a set has to \
+become forgettable — and the condition for that is exact. A set may be \
+forgotten only when **no future leader can need its Phase-1 quorum to learn \
+a value its Phase-2 quorum may have chosen**.
+
+A leader can prove that about the log it holds. Above its election fence, \
+its own Phase 1 already reported that nothing was accepted, so no older set \
+is relevant there. Between the fence and its applied prefix, everything was \
+re-proposed or filled under its own ballot and set. Below that, a node that \
+learns a slot chosen writes the value down as its accepted record. A member \
+of the current set therefore answers a later Phase 1 with it.
+
+So the condition is this. The leadership must be settled, and a **Phase-2 \
+quorum of the current set must report a chosen index at or past the fence**. The leader \
+then asks the matchmakers to raise their floor to its own ballot. The floor \
+is in force only once a matchmaker **quorum** has written it down.
+
+Only then may a removed acceptor be switched off, and the request must carry \
+the floor as evidence. \"I am not in the set in force\" is a belief this node \
+forgets at every crash. A floor above every ballot a set naming it was bound \
+to is a fact. Take the cluster down to three acceptors, and beat until the \
+floor is in force. Then answer for node 3 twice: once with no evidence, once \
+with the watermark the leader reports.",
+    field_guide: "play.html",
+    symbols: &[
+        "ColocatedNode::gc_effective",
+        "ColocatedNode::may_retire",
+        "GcStep::Effective",
+        "Ready::gc_requests",
+        "docs/analysis/consensus/matchmaker-gc-and-generations.md",
+    ],
+    automation_on: NO_MAY_RETIRE,
+    pinned_off: &[AutomationFlag::MayRetire],
+    unlocked: MATCHMAKER_TOGGLES,
+    unlocks: &[AutomationFlag::MayRetire],
+    allowed_actions: GC_ACTIONS,
+    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[]),
+    goal: |world| {
+        let Some(log) = log_world(world) else {
+            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
+        };
+        let refused = !log.refused_retires().is_empty();
+        if !log.retired(NodeId(3)) {
+            let floor = log.leader().and_then(|leader| log.gc_effective(leader));
+            return match floor {
+                Some((watermark, retirable)) if retirable.contains(&NodeId(3)) => {
+                    GoalStatus::Open(format!(
+                        "The floor {} is in force and it releases node 3. Ask node 3 to retire, \
+                         and show it that watermark.",
+                        crate::view::show_ballot(watermark)
+                    ))
+                }
+                _ => GoalStatus::Open(
+                    "Take node 3 out of the acceptor set, then beat until a matchmaker quorum \
+                     holds the floor."
+                        .to_string(),
+                ),
+            };
+        }
+        if !refused {
+            return GoalStatus::Failed(
+                "Node 3 retired, and no request was ever refused for want of evidence. The point \
+                 of this level is the refusal."
+                    .to_string(),
+            );
+        }
+        GoalStatus::Reached(
+            "Node 3 is retired, and the first request — the one that carried no watermark — was \
+             refused with \"not collected\". An installed successor set is not a collected \
+             predecessor: what licenses the shutdown is a floor a matchmaker quorum wrote down, \
+             above every ballot a set naming node 3 was bound to."
+                .to_string(),
+        )
+    },
+    hint: |world, mistakes| {
+        let effective = log_world(world)
+            .and_then(|log| log.leader().and_then(|leader| log.gc_effective(leader)));
+        (mistakes > 0).then(|| match effective {
+            Some(_) => "The leader reports a floor now. Compare it with the ballots node 3's own \
+                        sets were bound to."
+                .to_string(),
+            None => "No floor is in force yet. A request with no evidence behind it is refused."
+                .to_string(),
+        })
+    },
+    reference: || {
+        let mut script = Script::new("act4/garbage-collection");
+        script.play(start_election(0)).settle_all();
+        script.play(propose(0, "alpha")).settle_all();
+        // Node 3 leaves the acceptor set. It stays running, and it keeps
+        // answering Phase 1 for the ballots it took part in.
+        script
+            .play(Action::Reconfigure {
+                node: 0,
+                members: vec![0, 1, 2],
+                quorum: None,
+            })
+            .settle_all();
+        // No floor yet: the request carries no evidence and is refused.
+        script
+            .play(Action::Retire {
+                node: 0,
+                target: 3,
+                gc_watermark: None,
+            })
+            .answer_all();
+        // Beat until a matchmaker quorum holds the floor.
+        let mut watermark = None;
+        for _ in 0..12 {
+            watermark = script
+                .world()
+                .log()
+                .and_then(|log| log.gc_effective(NodeId(0)))
+                .map(|(ballot, _)| ballot);
+            if watermark.is_some() {
+                break;
+            }
+            script.play(tick(0)).settle_all();
+        }
+        let watermark = watermark.expect("a matchmaker quorum holds the floor");
+        script
+            .play(Action::Retire {
+                node: 0,
+                target: 3,
+                gc_watermark: Some(BallotSpec {
+                    round: watermark.round,
+                    node: watermark.node.0,
+                }),
+            })
+            .answer_all();
+        script.finish()
+    },
+};
+
+// ---- 27. matchmaker generations ---------------------------------------------
+
+const GENERATIONS_ACTIONS: &[ActionKind] = &[
+    ActionKind::Deliver,
+    ActionKind::Drop,
+    ActionKind::Tick,
+    ActionKind::StartElection,
+    ActionKind::Propose,
+    ActionKind::ReconfigureMatchmakers,
+    ActionKind::ResendReconfigurer,
+    ActionKind::CrashMatchmaker,
+    ActionKind::RestartMatchmaker,
+    ActionKind::Answer,
+    ActionKind::SetAutomation,
+];
+
+/// `act4/matchmaker-generations`.
+pub static MATCHMAKER_GENERATIONS: Level = Level {
+    id: "act4/matchmaker-generations",
+    act: 4,
+    title: "Matchmaker generations",
+    briefing: "\
+The matchmakers are now the source of truth about membership. Their own \
+membership cannot be frozen for ever: one of them loses a disk and must be \
+replaced. Asking a higher tier of matchmakers for the matchmakers never \
+bottoms out. The answer is that the matchmaker set carries a **generation**. \
+Generation `g + 1` is chosen by single-decree Paxos whose acceptors are the \
+members of generation `g`. That decree is Act I again — the same proposer, \
+the same acceptor, one slot — with a list of matchmakers as its value.
+
+The handover has five steps, and their order is the argument. **Stop**: a \
+quorum of the old generation freezes, durably. A frozen matchmaker registers \
+nothing more, so the copy taken next is a still picture.
+
+**Reconstruct**: take the highest floor the frozen members report and the \
+union of their registries above it. **Bootstrap**: every proposed member \
+writes that reconstruction down, marked pending. **Decide**: the decree \
+chooses one successor, so two operators racing cannot install two. \
+**Publish**: the old members record the link and point stragglers at it; the \
+new members activate what they held pending.
+
+Every message names the generation it is for, and a matchmaker answers only \
+its own. Replace matchmaker 2 by matchmaker 3. A campaign that started \
+before the handover still has a registration in flight for the old \
+generation. When that registration reaches a frozen matchmaker, you say what \
+the matchmaker does with it.",
+    field_guide: "play.html",
+    symbols: &[
+        "MatchmakerReconfigurer",
+        "MatchmakerSet",
+        "Matchmaker::step_reconfigure",
+        "MatchRefusal::Stopped",
+        "ColocatedNode::learn_matchmakers",
+        "docs/analysis/consensus/matchmaker-gc-and-generations.md",
+    ],
+    automation_on: NO_GENERATION_FENCE,
+    pinned_off: &[AutomationFlag::GenerationFence],
+    unlocked: MATCHMAKER_TOGGLES,
+    unlocks: &[AutomationFlag::GenerationFence],
+    allowed_actions: GENERATIONS_ACTIONS,
+    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]),
+    goal: |world| {
+        let Some(log) = log_world(world) else {
+            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
+        };
+        let active: Vec<u64> = log
+            .matchmakers()
+            .iter()
+            .filter(|process| {
+                process.role().is_some_and(|role| {
+                    role.set().generation.0 == 1
+                        && role.phase() == paros_core::MatchmakerPhase::Active
+                })
+            })
+            .map(|process| process.id().0)
+            .collect();
+        if active.len() < 3 {
+            return GoalStatus::Open(format!(
+                "Generation 1 is active at {} of its three members. Drive the handover: stop, \
+                 bootstrap, decide, publish.",
+                active.len()
+            ));
+        }
+        let registered = log.pool().iter().copied().find(|id| {
+            log.node(*id).is_some_and(|node| {
+                node.matchmaker_set()
+                    .is_some_and(|set| set.generation.0 == 1)
+            }) && !log.prior_configurations(*id).is_empty()
+        });
+        let Some(leader) = log.leader() else {
+            return GoalStatus::Open(
+                "Generation 1 serves. Now elect a leader through it.".to_string(),
+            );
+        };
+        if registered.is_none()
+            || log
+                .node(leader)
+                .and_then(|node| node.matchmaker_set().map(|set| set.generation.0))
+                != Some(1)
+        {
+            return GoalStatus::Open(
+                "Elect a leader that registers its ballot with generation 1.".to_string(),
+            );
+        }
+        if commands(world, leader.0).is_empty() {
+            return GoalStatus::Open(format!(
+                "Node {} leads through generation 1. Get a command chosen.",
+                leader.0
+            ));
+        }
+        GoalStatus::Reached(format!(
+            "Generation 1 = {active:?} serves matchmaking at every member, the matchmaker it \
+             replaced stays alive to point late candidates at it, node {} was elected through the \
+             new generation, and a command is chosen under that leadership. One successor was \
+             chosen, by a decree over the generation it replaced.",
+            leader.0
+        ))
+    },
+    hint: |_world, mistakes| match mistakes {
+        0 => None,
+        1..=2 => Some(
+            "Read the card's second line: it says which generation this matchmaker holds, and \
+             whether it is frozen."
+                .to_string(),
+        ),
+        _ => Some(
+            "This matchmaker is frozen for the generation the request names. A frozen matchmaker \
+             registers nothing more; it answers with the successor it knows."
+                .to_string(),
+        ),
+    },
+    reference: || {
+        let mut script = Script::new("act4/matchmaker-generations");
+        script.play(start_election(0)).settle_all();
+        // Node 1 opens a campaign against generation 0 and its registrations
+        // stay in flight: this is the straggler the fence will refuse.
+        script.play(start_election(1));
+        // The handover runs while they wait.
+        script.play(Action::ReconfigureMatchmakers {
+            node: 0,
+            members: vec![0, 1, 3],
+        });
+        for _ in 0..10 {
+            script.settle(phase("reconfigure"));
+            script.play(tick(0));
+        }
+        script.settle(phase("reconfigure"));
+        // The straggler reaches the matchmaker that was left behind.
+        script.settle(|message| message.kind == "MatchRequest" && message.to == 2);
+        script.settle(|message| message.kind == "MatchReply");
+        // Node 1 adopts the new generation and campaigns through it.
+        script.play(start_election(1)).settle_all();
+        script.play(propose(1, "alpha")).settle_all();
+        script.finish()
+    },
+};
+
 // ---- 28. faulty records -----------------------------------------------------
 
 const FAULTY_ACTIONS: &[ActionKind] = &[
@@ -835,8 +1590,8 @@ here, bring the node back, and say which case each report puts the slot in.",
             .node(NodeId(2))
             .and_then(|node| node.replica().chosen_at(Slot(0)).map(show_command));
         match (damaged, blocked, repaired, value) {
-            (None, 0, true, Some(value)) if value == "\"alpha\"" => GoalStatus::Reached(
-                "Slot 0 holds \"alpha\", the value the damaged acceptor had voted for and could \
+            (None, 0, true, Some(value)) if value == "alpha" => GoalStatus::Reached(
+                "Slot 0 holds alpha, the value the damaged acceptor had voted for and could \
                  no longer read. The record is readable again on every node, because the \
                  acceptor wrote it back as it voted for the leader's proposal."
                     .to_string(),

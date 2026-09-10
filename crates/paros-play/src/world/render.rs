@@ -5,13 +5,16 @@
 //! survives a crash — so the stage never blanks a node out and the player can
 //! see what a restart is about to read back.
 
-use paros_core::{NodeId, QuorumSystem};
+use paros_core::{NodeId, QuorumSystem, ReconfigurerPhase};
 
 use crate::view::{
-    AttemptView, ChosenView, ClientView, ElectionView, GapView, GridCellView, MatchmakerView,
-    NodeFlavour, NodeView, ProposalView, ReachView, ReadRoundView, ReadView, SlotView,
-    WorldFlavour, WorldView, quorum_view, show_ballot, show_role,
+    AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,
+    HandoverPhaseView, MatchmakerView, MatchmakingView, NodeFlavour, NodeView, ProposalView,
+    ReachView, ReadRoundView, ReadView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
+    matchmaker_set_view, quorum_view, registration_kind_view, registration_view, show_ballot,
+    show_role,
 };
+use crate::world::matchmakers::MatchmakerProcess;
 use crate::world::{Client, NO_CHECK_QUORUM, World, quorum_name};
 
 impl World {
@@ -24,7 +27,7 @@ impl World {
             nodes: (0..self.pool.len()).map(|i| self.node_view(i)).collect(),
             wire: self.wire.iter().map(|entry| self.render(entry)).collect(),
             clients: self.clients.iter().map(client_view).collect(),
-            matchmakers: Vec::<MatchmakerView>::new(),
+            matchmakers: self.matchmakers().iter().map(matchmaker_view).collect(),
             chosen: None::<ChosenView>,
             // The log world has no reach: a partition here is the player not
             // delivering, message by message.
@@ -75,6 +78,12 @@ impl World {
                     .map(|(slot, command)| SlotView::applied_entry(*slot, command))
                     .collect(),
                 armed_seam: self.armed_seams[index],
+                acceptors_since: None,
+                matchmakers: None,
+                matchmaking: None,
+                gc: None,
+                handover: handover_view(&self.reconfigurers[index]),
+                retired: self.retired[index],
             };
         };
         let accepted = node
@@ -132,6 +141,31 @@ impl World {
                 .map(|(slot, command)| SlotView::applied_entry(*slot, command))
                 .collect(),
             armed_seam: self.armed_seams[index],
+            acceptors_since: Some(show_ballot(node.acceptors_since())),
+            matchmakers: node.matchmaker_set().map(matchmaker_set_view),
+            // How many more matchmakers must answer is the role's own count,
+            // and the role is not handed out: the shadow the world drives with
+            // the same answers reports it.
+            matchmaking: node
+                .matchmaking()
+                .map(|(ballot, config, kind)| MatchmakingView {
+                    ballot: show_ballot(ballot),
+                    config: config.members().iter().map(|n| n.0).collect(),
+                    kind: registration_kind_view(kind),
+                    remaining: match (
+                        self.matchmaking_shadow[index].as_ref(),
+                        node.matchmaker_set(),
+                    ) {
+                        (Some(shadow), Some(set)) => shadow.remaining(set),
+                        _ => 0,
+                    },
+                }),
+            gc: node.gc_effective().map(|(watermark, retired)| GcView {
+                effective_watermark: show_ballot(watermark),
+                retirable: retired.iter().map(|n| n.0).collect(),
+            }),
+            handover: handover_view(&self.reconfigurers[index]),
+            retired: self.retired[index],
         }
     }
 
@@ -164,6 +198,53 @@ fn grid_cell(members: &[NodeId], system: QuorumSystem, id: NodeId) -> Option<Gri
     })
 }
 
+/// Which step of a handover a node is driving, if it is driving one.
+fn handover_view(reconfigurer: &paros_core::MatchmakerReconfigurer) -> Option<HandoverPhaseView> {
+    match reconfigurer.phase() {
+        ReconfigurerPhase::Idle => None,
+        ReconfigurerPhase::Stopping { .. } => Some(HandoverPhaseView::Stopping),
+        ReconfigurerPhase::Bootstrapping { .. } => Some(HandoverPhaseView::Bootstrapping),
+        ReconfigurerPhase::Deciding { .. } => Some(HandoverPhaseView::Deciding),
+        ReconfigurerPhase::Publishing { .. } => Some(HandoverPhaseView::Publishing),
+    }
+}
+
+/// One matchmaker, rendered from its live role when it is running and from its
+/// disk when it is not — exactly as a crashed node renders from its disk.
+fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
+    let disk = process.disk();
+    let scalars = disk.hard_state();
+    let (generation, phase, successor) = process.role().map_or_else(
+        || {
+            (
+                scalars.generation.0,
+                matchmaker_phase_view(scalars.phase),
+                scalars.successor.as_ref().map(matchmaker_set_view),
+            )
+        },
+        |role| {
+            (
+                role.set().generation.0,
+                matchmaker_phase_view(role.phase()),
+                role.successor().map(matchmaker_set_view),
+            )
+        },
+    );
+    MatchmakerView {
+        id: process.id().0,
+        alive: process.alive(),
+        generation,
+        phase,
+        gc_watermark: show_ballot(scalars.gc_watermark),
+        registrations: disk
+            .registrations()
+            .iter()
+            .map(|(ballot, registration)| registration_view(*ballot, registration))
+            .collect(),
+        successor,
+    }
+}
+
 fn client_view(client: &Client) -> ClientView {
     ClientView {
         id: client.id.0,
@@ -176,6 +257,9 @@ fn client_view(client: &Client) -> ClientView {
                 node: p.node.0,
                 slot: p.slot.map(|s| s.0),
                 acked: p.acked,
+                // Every write the client sent may be sent again: the identity
+                // travels with it, and the two dedup ledgers answer it.
+                retryable: true,
             })
             .collect(),
         reads: client
@@ -186,6 +270,8 @@ fn client_view(client: &Client) -> ClientView {
                 node: r.node.0,
                 index: r.index.map(|s| s.0),
                 served: r.served,
+                // A read is never a retry: asking again is a new read.
+                retryable: false,
             })
             .collect(),
     }

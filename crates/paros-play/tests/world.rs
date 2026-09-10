@@ -8,10 +8,13 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{Ballot, Command, Config, Control, Message, NodeId, NodeRole, QuorumSystem, Slot};
+use paros_core::{
+    Ballot, Command, Config, Control, MatchmakerId, Message, NodeId, NodeRole, QuorumSystem, Slot,
+};
 use paros_play::action::Seam;
 use paros_play::prompt::{PromptKind, Verdict};
-use paros_play::world::{Disk, NO_CHECK_QUORUM, World, WorldPolicy};
+use paros_play::world::matchmakers::MatchmakerProcess;
+use paros_play::world::{Disk, NO_CHECK_QUORUM, Party, World, WorldPolicy};
 
 const CLIENT: u64 = 7;
 
@@ -49,7 +52,7 @@ fn deliver_where(world: &mut World, keep: impl Fn(&Message) -> bool) {
         let Some(id) = world
             .wire()
             .iter()
-            .filter(|entry| keep(&entry.message))
+            .filter(|entry| entry.message().is_some_and(&keep))
             .map(|entry| entry.id)
             .min()
         else {
@@ -70,7 +73,7 @@ fn drop_where(world: &mut World, hit: impl Fn(&Message) -> bool) {
     while let Some(id) = world
         .wire()
         .iter()
-        .filter(|entry| hit(&entry.message))
+        .filter(|entry| entry.message().is_some_and(&hit))
         .map(|entry| entry.id)
         .min()
     {
@@ -88,7 +91,7 @@ fn isolate(world: &mut World, isolated: NodeId) {
         while let Some(id) = world
             .wire()
             .iter()
-            .filter(|entry| entry.to == isolated)
+            .filter(|entry| entry.to_node() == Some(isolated))
             .map(|entry| entry.id)
             .min()
         {
@@ -141,7 +144,7 @@ fn a_three_node_election_by_hand() {
     let prepares = world
         .wire()
         .iter()
-        .filter(|entry| matches!(entry.message, Message::Prepare { .. }))
+        .filter(|entry| matches!(entry.message(), Some(Message::Prepare { .. })))
         .count();
     assert_eq!(prepares, 2, "one Prepare per peer");
     assert_eq!(
@@ -299,14 +302,17 @@ fn delivering_to_a_crashed_node_discards_the_message() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     world
         .deliver(to_one)
         .expect("delivery to a dead node is legal");
     assert!(
-        world.wire().iter().all(|entry| entry.from != NodeId(1)),
+        world
+            .wire()
+            .iter()
+            .all(|entry| entry.from_node() != Some(NodeId(1))),
         "a dead node answers nothing"
     );
 }
@@ -324,7 +330,7 @@ fn the_before_sync_seam_loses_the_whole_batch() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     world.deliver(to_one).expect("delivered");
@@ -335,7 +341,10 @@ fn the_before_sync_seam_loses_the_whole_batch() {
         "nothing became durable"
     );
     assert!(
-        world.wire().iter().all(|entry| entry.from != NodeId(1)),
+        world
+            .wire()
+            .iter()
+            .all(|entry| entry.from_node() != Some(NodeId(1))),
         "nothing was sent"
     );
 }
@@ -350,7 +359,7 @@ fn the_after_sync_seam_keeps_the_writes_and_loses_the_messages() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     world.deliver(to_one).expect("delivered");
@@ -365,7 +374,10 @@ fn the_after_sync_seam_keeps_the_writes_and_loses_the_messages() {
         "the promise is durable, and nobody ever heard about it"
     );
     assert!(
-        world.wire().iter().all(|entry| entry.from != NodeId(1)),
+        world
+            .wire()
+            .iter()
+            .all(|entry| entry.from_node() != Some(NodeId(1))),
         "the batch's messages never left"
     );
     // And the promise survives the reboot, which is the whole point.
@@ -398,7 +410,7 @@ fn a_read_index_round_trips_through_heartbeat_acks() {
         world
             .wire()
             .iter()
-            .any(|entry| matches!(entry.message, Message::Heartbeat { .. })),
+            .any(|entry| matches!(entry.message(), Some(Message::Heartbeat { .. }))),
         "opening a read beats immediately"
     );
     deliver_all(&mut world);
@@ -430,7 +442,7 @@ fn the_acceptor_prompts_judge_both_rules() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     world.deliver(to_one).expect("delivered");
@@ -471,7 +483,7 @@ fn the_acceptor_prompts_judge_both_rules() {
     let accept = world
         .wire()
         .iter()
-        .find(|entry| matches!(entry.message, Message::Accept { .. }))
+        .find(|entry| matches!(entry.message(), Some(Message::Accept { .. })))
         .map(|entry| entry.id)
         .expect("an Accept is in flight");
     world.deliver(accept).expect("delivered");
@@ -492,7 +504,7 @@ fn the_persist_order_prompt_holds_the_batch_back() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     let before = world.disk(NodeId(1)).expect("a disk").hard_state();
@@ -525,7 +537,10 @@ fn the_persist_order_prompt_holds_the_batch_back() {
         "the promise is durable"
     );
     assert!(
-        world.wire().iter().any(|entry| entry.from == NodeId(1)),
+        world
+            .wire()
+            .iter()
+            .any(|entry| entry.from_node() == Some(NodeId(1))),
         "and only then did the Promise leave"
     );
 }
@@ -624,7 +639,7 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| stray(&entry.message) && entry.to == NodeId(1))
+        .find(|entry| entry.message().is_some_and(stray) && entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("an Accept for node 1");
     world.deliver(to_one).expect("delivered");
@@ -663,7 +678,10 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     while let Some(id) = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1) && matches!(entry.message, Message::Accept { .. }))
+        .find(|entry| {
+            entry.to_node() == Some(NodeId(1))
+                && matches!(entry.message(), Some(Message::Accept { .. }))
+        })
         .map(|entry| entry.id)
     {
         world.drop_message(id).expect("in flight");
@@ -697,7 +715,7 @@ fn the_read_serve_prompt_waits_without_an_ack_quorum() {
     let ack = world
         .wire()
         .iter()
-        .find(|entry| matches!(entry.message, Message::HeartbeatAck { .. }))
+        .find(|entry| matches!(entry.message(), Some(Message::HeartbeatAck { .. })))
         .map(|entry| entry.id)
         .expect("an ack is in flight");
     world.deliver(ack).expect("delivered");
@@ -722,7 +740,7 @@ fn a_prompt_blocks_every_other_move() {
     let to_one = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1))
+        .find(|entry| entry.to_node() == Some(NodeId(1)))
         .map(|entry| entry.id)
         .expect("a Prepare for node 1");
     world.deliver(to_one).expect("delivered");
@@ -859,14 +877,14 @@ fn a_below_floor_catch_up_is_answered_with_a_snapshot() {
         world
             .wire()
             .iter()
-            .all(|entry| !matches!(entry.message, Message::CatchUpResponse { .. })),
+            .all(|entry| !matches!(entry.message(), Some(Message::CatchUpResponse { .. }))),
         "no peer replays a range it has truncated: those entries are gone"
     );
     assert!(
         world
             .wire()
             .iter()
-            .any(|entry| matches!(entry.message, Message::InstallSnapshot { .. })),
+            .any(|entry| matches!(entry.message(), Some(Message::InstallSnapshot { .. }))),
         "the peer offers the application's state instead"
     );
     deliver_all(&mut world);
@@ -909,8 +927,8 @@ fn a_snapshot_install_never_lowers_the_promise() {
         world
             .wire()
             .iter()
-            .find_map(|entry| match entry.message {
-                Message::InstallSnapshot { ballot, .. } => Some(ballot),
+            .find_map(|entry| match entry.message() {
+                Some(Message::InstallSnapshot { ballot, .. }) => Some(*ballot),
                 _ => None,
             })
             .expect("a snapshot is offered")
@@ -923,7 +941,7 @@ fn a_snapshot_install_never_lowers_the_promise() {
     let id = world
         .wire()
         .iter()
-        .find(|entry| matches!(entry.message, Message::InstallSnapshot { .. }))
+        .find(|entry| matches!(entry.message(), Some(Message::InstallSnapshot { .. })))
         .map(|entry| entry.id)
         .expect("in flight");
     world.deliver(id).expect("delivered");
@@ -976,7 +994,10 @@ fn the_after_sync_seam_loses_the_truncate_with_the_batch() {
     let commit = world
         .wire()
         .iter()
-        .find(|entry| entry.to == NodeId(1) && matches!(entry.message, Message::Commit { .. }))
+        .find(|entry| {
+            entry.to_node() == Some(NodeId(1))
+                && matches!(entry.message(), Some(Message::Commit { .. }))
+        })
         .map(|entry| entry.id)
         .expect("a Commit for node 1");
     world.deliver(commit).expect("delivered");
@@ -1191,8 +1212,8 @@ fn a_grid_addresses_each_slot_to_its_own_column() {
     let accepts: Vec<u64> = world
         .wire()
         .iter()
-        .filter(|entry| matches!(entry.message, Message::Accept { slot: Slot(0), .. }))
-        .map(|entry| entry.to.0)
+        .filter(|entry| matches!(entry.message(), Some(Message::Accept { slot: Slot(0), .. })))
+        .filter_map(|entry| entry.to_node().map(|id| id.0))
         .collect();
     assert_eq!(accepts, vec![3], "slot 0 is addressed to column 0 alone");
     deliver_all(&mut world);
@@ -1202,8 +1223,8 @@ fn a_grid_addresses_each_slot_to_its_own_column() {
     let accepts: Vec<u64> = world
         .wire()
         .iter()
-        .filter(|entry| matches!(entry.message, Message::Accept { slot: Slot(1), .. }))
-        .map(|entry| entry.to.0)
+        .filter(|entry| matches!(entry.message(), Some(Message::Accept { slot: Slot(1), .. })))
+        .filter_map(|entry| entry.to_node().map(|id| id.0))
         .collect();
     assert_eq!(accepts, vec![1, 4], "slot 1 is addressed to column 1");
     deliver_all(&mut world);
@@ -1238,7 +1259,7 @@ fn a_vote_from_outside_the_column_does_not_count() {
     let accept = world
         .wire()
         .iter()
-        .find(|entry| matches!(entry.message, Message::Accept { slot: Slot(0), .. }))
+        .find(|entry| matches!(entry.message(), Some(Message::Accept { slot: Slot(0), .. })))
         .map(|entry| entry.id)
         .expect("slot 0's Accept");
     world
@@ -1248,7 +1269,8 @@ fn a_vote_from_outside_the_column_does_not_count() {
         .wire()
         .iter()
         .find(|entry| {
-            entry.to == NodeId(4) && matches!(entry.message, Message::Accept { slot: Slot(0), .. })
+            entry.to_node() == Some(NodeId(4))
+                && matches!(entry.message(), Some(Message::Accept { slot: Slot(0), .. }))
         })
         .map(|entry| entry.id)
         .expect("the misrouted copy");
@@ -1260,12 +1282,12 @@ fn a_vote_from_outside_the_column_does_not_count() {
         .iter()
         .find(|entry| {
             matches!(
-                entry.message,
-                Message::Accepted {
+                entry.message(),
+                Some(Message::Accepted {
                     from: NodeId(4),
                     slot: Slot(0),
                     ..
-                }
+                })
             )
         })
         .map(|entry| entry.id)
@@ -1335,14 +1357,14 @@ fn a_follower_serves_a_quorum_read_with_no_leader_involved() {
         world
             .wire()
             .iter()
-            .all(|entry| !matches!(entry.message, Message::Heartbeat { .. })),
+            .all(|entry| !matches!(entry.message(), Some(Message::Heartbeat { .. }))),
         "a quorum read broadcasts no beat"
     );
     assert!(
         world
             .wire()
             .iter()
-            .any(|entry| matches!(entry.message, Message::PreRead { .. })),
+            .any(|entry| matches!(entry.message(), Some(Message::PreRead { .. }))),
         "it asks its row for their vote watermarks"
     );
     deliver_all(&mut world);
@@ -1438,7 +1460,7 @@ fn a_handoff_moves_the_authority_without_a_second_phase_one() {
             .wire()
             .iter()
             .chain(std::iter::empty())
-            .all(|entry| !matches!(entry.message, Message::Prepare { .. })),
+            .all(|entry| !matches!(entry.message(), Some(Message::Prepare { .. }))),
         "no Prepare was ever sent"
     );
     // And it can lead: a command decided under the inherited ballot.
@@ -1500,7 +1522,8 @@ fn a_rotted_record_is_reported_faulty_and_repaired_in_place() {
         .wire()
         .iter()
         .find(|entry| {
-            entry.to == NodeId(2) && matches!(entry.message, Message::Accept { slot: Slot(0), .. })
+            entry.to_node() == Some(NodeId(2))
+                && matches!(entry.message(), Some(Message::Accept { slot: Slot(0), .. }))
         })
         .map(|entry| entry.id)
         .expect("slot 0's Accept for node 2");
@@ -1592,4 +1615,510 @@ fn a_wiped_node_may_never_rejoin() {
         None,
         "no node's durable promise came back lower than one it had made"
     );
+}
+
+// ---- the matchmaker plane ---------------------------------------------------
+
+fn matchmaker_ids(ids: &[u64]) -> Vec<MatchmakerId> {
+    ids.iter().map(|id| MatchmakerId(*id)).collect()
+}
+
+/// A cluster that names matchmakers: `bootstrap` is the acceptor set in force
+/// before any ballot was registered, `pool` every node that may ever be one.
+fn matchmaker_cluster(
+    pool: &[u64],
+    bootstrap: &[u64],
+    matchmakers: &[u64],
+    spares: &[u64],
+) -> World {
+    let nodes: Vec<NodeId> = pool.iter().map(|id| NodeId(*id)).collect();
+    let peers: Vec<NodeId> = bootstrap.iter().map(|id| NodeId(*id)).collect();
+    let set = matchmaker_ids(matchmakers);
+    let mut all = set.clone();
+    all.extend(matchmaker_ids(spares));
+    all.sort_unstable();
+    let disks = nodes
+        .iter()
+        .map(|id| {
+            Disk::new(Config {
+                id: *id,
+                peers: peers.clone(),
+                quorum_system: QuorumSystem::Majority,
+                nodes: nodes.clone(),
+                matchmakers: set.clone(),
+                matchmaker_pool: all.clone(),
+            })
+        })
+        .collect();
+    let processes = all
+        .iter()
+        .map(|id| MatchmakerProcess::new(*id, set.clone()))
+        .collect();
+    let mut world = World::from_disks(disks, &[CLIENT], 10).with_matchmakers(processes);
+    world.set_policy(policy(&[]));
+    world
+}
+
+/// Deliver every wire entry, whatever tier it belongs to.
+fn deliver_everything(world: &mut World) {
+    for _ in 0..2000 {
+        if world.prompt().is_some() {
+            return;
+        }
+        let Some(id) = world.wire().iter().map(|entry| entry.id).min() else {
+            return;
+        };
+        world.deliver(id).expect("a message that is in flight");
+    }
+    panic!("delivery reached quiescence");
+}
+
+#[test]
+fn a_campaign_registers_with_the_matchmakers_before_it_prepares() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    // Nothing has been prepared yet: the batch carries registrations only.
+    assert!(
+        world.wire().iter().all(|entry| entry.message().is_none()),
+        "no Prepare leaves before a matchmaker quorum has answered"
+    );
+    assert_eq!(world.wire().len(), 2, "one registration per matchmaker");
+    deliver_everything(&mut world);
+    assert_eq!(world.leader(), Some(NodeId(0)), "node 0 leads");
+    // The registry holds the ballot it registered.
+    let held = world
+        .matchmaker(MatchmakerId(0))
+        .expect("matchmaker 0")
+        .disk()
+        .registrations()
+        .len();
+    assert_eq!(held, 1, "the registration is durable");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    assert_eq!(applied_text(&world, 2), vec!["0:alpha".to_string()]);
+}
+
+#[test]
+fn a_second_campaign_is_told_about_the_first_configuration() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world.crash(NodeId(0)).expect("crashed");
+    world.start_election(NodeId(1)).expect("node 1 campaigns");
+    deliver_everything(&mut world);
+    let prior = world.prior_configurations(NodeId(1));
+    assert_eq!(prior.len(), 1, "H_b names the first ballot's configuration");
+    assert_eq!(world.leader(), Some(NodeId(1)));
+}
+
+#[test]
+fn a_matchmaker_rebooted_from_its_registry_keeps_what_it_answered() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    let before = world
+        .matchmaker(MatchmakerId(0))
+        .expect("matchmaker 0")
+        .disk()
+        .registrations()
+        .clone();
+    world
+        .crash_matchmaker(MatchmakerId(0))
+        .expect("a running matchmaker");
+    world
+        .restart_matchmaker(MatchmakerId(0))
+        .expect("a crashed matchmaker");
+    let after = world
+        .matchmaker(MatchmakerId(0))
+        .expect("matchmaker 0")
+        .role()
+        .expect("running")
+        .registry()
+        .clone();
+    assert_eq!(
+        after, before,
+        "the rebooted role is what the disk described"
+    );
+}
+
+#[test]
+fn a_reconfiguration_is_refused_without_matchmakers() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    let config = world
+        .compose(&[0, 1], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world
+        .reconfigure(NodeId(0), &config)
+        .expect("the request is answered, not an error");
+    // Nothing moved: the acceptor set in force is still the bootstrap one.
+    assert_eq!(
+        world
+            .node(NodeId(0))
+            .expect("running")
+            .acceptors()
+            .members()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn a_reconfiguration_grows_onto_a_spare_and_covers_the_old_set() {
+    // Node 3 is in the pool and outside the bootstrap configuration.
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    let before = world.node(NodeId(0)).expect("running").ballot();
+    let config = world
+        .compose(&[0, 1, 2, 3], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    deliver_everything(&mut world);
+    let node = world.node(NodeId(0)).expect("running");
+    assert!(node.is_leader(), "node 0 leads again under the new set");
+    assert!(
+        node.ballot() > before,
+        "a reconfiguration is a round change"
+    );
+    assert_eq!(node.acceptors().members().len(), 4);
+    // The joining node promised the new ballot before Phase 2 reached it.
+    assert_eq!(
+        world
+            .node(NodeId(3))
+            .expect("running")
+            .acceptor()
+            .promised(),
+        node.ballot()
+    );
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    assert!(applied_text(&world, 3).iter().any(|c| c.ends_with("bravo")));
+}
+
+#[test]
+fn a_removed_acceptor_retires_only_on_the_effective_watermark() {
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    let config = world
+        .compose(&[0, 1, 2], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    deliver_everything(&mut world);
+    assert!(world.gc_effective(NodeId(0)).is_none(), "no floor yet");
+    // A retire with no evidence is refused.
+    world
+        .retire(NodeId(0), NodeId(3), Ballot::zero())
+        .expect("the request is answered");
+    assert!(world.node(NodeId(3)).is_some(), "node 3 stays");
+    // Beats carry the chosen index the GC condition needs.
+    for _ in 0..3 {
+        world.tick(NodeId(0)).expect("a live node");
+        deliver_everything(&mut world);
+    }
+    let (watermark, retirable) = world
+        .gc_effective(NodeId(0))
+        .expect("a matchmaker quorum acked the floor");
+    assert_eq!(
+        retirable,
+        vec![NodeId(3)],
+        "the removed acceptor is released"
+    );
+    world
+        .retire(NodeId(0), NodeId(3), watermark)
+        .expect("the request is answered");
+    assert!(world.retired(NodeId(3)), "node 3 retired on the evidence");
+}
+
+#[test]
+fn a_matchmaker_set_handover_chooses_one_successor() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    for _ in 0..8 {
+        deliver_everything(&mut world);
+        world.tick(NodeId(0)).expect("a live node");
+    }
+    deliver_everything(&mut world);
+    for id in [0, 1, 3] {
+        let role = world
+            .matchmaker(MatchmakerId(id))
+            .expect("deployed")
+            .role()
+            .expect("running");
+        assert_eq!(role.set().generation.0, 1, "matchmaker {id} serves g1");
+        assert_eq!(role.phase(), paros_core::MatchmakerPhase::Active);
+    }
+    let departed = world
+        .matchmaker(MatchmakerId(2))
+        .expect("deployed")
+        .role()
+        .expect("running");
+    assert_eq!(departed.phase(), paros_core::MatchmakerPhase::Stopped);
+    assert!(departed.successor().is_some(), "m2 points at the successor");
+    assert_eq!(
+        world
+            .node(NodeId(0))
+            .expect("running")
+            .matchmaker_set()
+            .expect("a matchmaker deployment")
+            .generation
+            .0,
+        1,
+        "the node that drove the handover adopted the new generation"
+    );
+}
+
+#[test]
+fn a_campaign_on_a_stale_belief_abandons_and_adopts_the_set_in_force() {
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]);
+    world.set_policy(policy(&[PromptKind::StaleConfiguration]));
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    answer_through(&mut world);
+    // Node 2 is away while the set changes, so it comes back on its bootstrap
+    // belief: `acceptors` is volatile, and a reboot regresses it.
+    world.crash(NodeId(2)).expect("running");
+    let config = world
+        .compose(&[0, 1, 2, 3], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    answer_through(&mut world);
+    world.restart(NodeId(2)).expect("crashed");
+    answer_through(&mut world);
+    assert_eq!(
+        world
+            .node(NodeId(2))
+            .expect("running")
+            .acceptors()
+            .members()
+            .len(),
+        3,
+        "node 2 believes the set it was deployed with"
+    );
+    world.crash(NodeId(0)).expect("running");
+    world.start_election(NodeId(2)).expect("node 2 campaigns");
+    // The quorum's histories name the change: the campaign is abandoned.
+    deliver_everything(&mut world);
+    let prompt = world.prompt().expect("the staleness question is raised");
+    assert_eq!(prompt.kind, PromptKind::StaleConfiguration);
+    assert_eq!(prompt.expected(), "abandon");
+    let id = prompt.id;
+    assert_eq!(
+        world.answer(id, "carry_on").expect("a legal move"),
+        Verdict::Wrong
+    );
+    assert_eq!(
+        world.answer(id, "abandon").expect("a legal move"),
+        Verdict::Right
+    );
+    answer_through(&mut world);
+    assert_eq!(
+        world
+            .node(NodeId(2))
+            .expect("running")
+            .acceptors()
+            .members()
+            .len(),
+        4,
+        "it adopted the set in force"
+    );
+    assert!(
+        world.node(NodeId(2)).expect("running").role() != NodeRole::Leader,
+        "an abandoned campaign never becomes a leadership"
+    );
+}
+
+#[test]
+fn a_frozen_matchmaker_refuses_a_registration_for_the_generation_it_left() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    // A campaign against generation 0 whose registrations stay in flight.
+    world.start_election(NodeId(1)).expect("node 1 campaigns");
+    let straggler = world
+        .wire()
+        .iter()
+        .find(|entry| entry.to == Party::Matchmaker(MatchmakerId(2)))
+        .map(|entry| entry.id)
+        .expect("a registration for matchmaker 2");
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    for _ in 0..8 {
+        deliver_where_plane(&mut world, "reconfigure");
+        world.tick(NodeId(0)).expect("a live node");
+    }
+    deliver_where_plane(&mut world, "reconfigure");
+    world.set_policy(policy(&[PromptKind::GenerationFence]));
+    world.deliver(straggler).expect("in flight");
+    let prompt = world.prompt().expect("the fence question is raised");
+    assert_eq!(prompt.kind, PromptKind::GenerationFence);
+    assert_eq!(
+        prompt.expected(),
+        "refuse",
+        "a frozen generation registers nothing"
+    );
+    let id = prompt.id;
+    assert_eq!(
+        world.answer(id, "serve").expect("a legal move"),
+        Verdict::Wrong
+    );
+    assert_eq!(
+        world.answer(id, "refuse").expect("a legal move"),
+        Verdict::Right
+    );
+    // The refusal names the successor, and the candidate adopts it.
+    answer_through(&mut world);
+    assert_eq!(
+        world
+            .node(NodeId(1))
+            .expect("running")
+            .matchmaker_set()
+            .expect("a matchmaker deployment")
+            .generation
+            .0,
+        1
+    );
+}
+
+#[test]
+fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    let config = world
+        .compose(&[0, 1, 2], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    deliver_everything(&mut world);
+    for _ in 0..3 {
+        world.tick(NodeId(0)).expect("a live node");
+        deliver_everything(&mut world);
+    }
+    let before = world
+        .matchmaker(MatchmakerId(0))
+        .expect("deployed")
+        .disk()
+        .hard_state()
+        .clone();
+    assert!(before.gc_watermark > Ballot::zero(), "the floor rose");
+    world.crash_matchmaker(MatchmakerId(0)).expect("running");
+    world.restart_matchmaker(MatchmakerId(0)).expect("crashed");
+    let role = world
+        .matchmaker(MatchmakerId(0))
+        .expect("deployed")
+        .role()
+        .expect("running");
+    assert_eq!(role.hard_state().gc_watermark, before.gc_watermark);
+    assert_eq!(role.set().generation, before.generation);
+}
+
+#[test]
+fn a_floor_is_in_force_only_once_a_matchmaker_quorum_acked_it() {
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1, 2], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    let config = world
+        .compose(&[0, 1, 2], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    deliver_everything(&mut world);
+    // Beat until the leader asks for the floor, delivering everything but the
+    // matchmakers' acks.
+    for _ in 0..6 {
+        world.tick(NodeId(0)).expect("a live node");
+        deliver_where(&mut world, |_| true);
+        deliver_where_plane(&mut world, "reconfigure");
+        // The requests go out; the acks stay on the wire.
+        let requests: Vec<u64> = world
+            .wire()
+            .iter()
+            .filter(|entry| entry.to.node().is_none())
+            .map(|entry| entry.id)
+            .collect();
+        for id in requests {
+            world.deliver(id).expect("in flight");
+        }
+    }
+    let acks: Vec<u64> = world
+        .wire()
+        .iter()
+        .filter(|entry| world.render(entry).kind == "GcAck")
+        .map(|entry| entry.id)
+        .collect();
+    assert!(acks.len() >= 2, "every matchmaker answered: {}", acks.len());
+    assert!(
+        world.gc_effective(NodeId(0)).is_none(),
+        "no ack has reached the leader yet, so no floor is in force"
+    );
+    world.deliver(acks[0]).expect("in flight");
+    assert!(
+        world.gc_effective(NodeId(0)).is_none(),
+        "one of three matchmakers is not a quorum"
+    );
+    world.deliver(acks[1]).expect("in flight");
+    assert!(
+        world.gc_effective(NodeId(0)).is_some(),
+        "two of three is, and the floor is in force"
+    );
+}
+
+/// Deliver every matchmaker-plane entry of one render family.
+fn deliver_where_plane(world: &mut World, family: &str) {
+    for _ in 0..2000 {
+        if world.prompt().is_some() {
+            return;
+        }
+        let Some(id) = world
+            .wire()
+            .iter()
+            .filter(|entry| world.render(entry).phase == family)
+            .map(|entry| entry.id)
+            .min()
+        else {
+            return;
+        };
+        world.deliver(id).expect("a message that is in flight");
+    }
+    panic!("delivery reached quiescence");
+}
+
+/// Deliver everything, answering every prompt with the core's own answer.
+fn answer_through(world: &mut World) {
+    for _ in 0..2000 {
+        if let Some(prompt) = world.prompt() {
+            let (id, choice) = (prompt.id, prompt.expected().to_string());
+            world.answer(id, &choice).expect("a legal move");
+            continue;
+        }
+        let Some(id) = world.wire().iter().map(|entry| entry.id).min() else {
+            return;
+        };
+        world.deliver(id).expect("a message that is in flight");
+    }
+    panic!("delivery reached quiescence");
 }

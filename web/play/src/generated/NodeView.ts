@@ -2,7 +2,11 @@
 import type { AttemptView } from "./AttemptView";
 import type { ElectionView } from "./ElectionView";
 import type { GapView } from "./GapView";
+import type { GcView } from "./GcView";
 import type { GridCellView } from "./GridCellView";
+import type { HandoverPhaseView } from "./HandoverPhaseView";
+import type { MatchmakerSetView } from "./MatchmakerSetView";
+import type { MatchmakingView } from "./MatchmakingView";
 import type { NodeFlavour } from "./NodeFlavour";
 import type { QuorumSystemView } from "./QuorumSystemView";
 import type { ReadRoundView } from "./ReadRoundView";
@@ -116,4 +120,33 @@ applied: Array<SlotView>,
 /**
  * An armed durability seam, if the player set one.
  */
-armed_seam: Seam | null, };
+armed_seam: Seam | null, 
+/**
+ * The ballot the acceptor configuration in force here was bound to, as
+ * `round.node`. A configuration is never edited: it belongs to one
+ * ballot, and this is that ballot.
+ */
+acceptors_since: string | null, 
+/**
+ * The matchmaker set this node believes authoritative. `None` on a plain
+ * deployment, which names no matchmakers at all.
+ */
+matchmakers: MatchmakerSetView | null, 
+/**
+ * The open matchmaking phase, if this node is a candidate that has not
+ * finished registering.
+ */
+matchmaking: MatchmakingView | null, 
+/**
+ * The garbage-collection floor this leadership made effective.
+ */
+gc: GcView | null, 
+/**
+ * Which step of a matchmaker-set handover this node is driving.
+ */
+handover: HandoverPhaseView | null, 
+/**
+ * Whether an operator retired this node: it answered the evidence, shut
+ * down, and it never comes back.
+ */
+retired: boolean, };

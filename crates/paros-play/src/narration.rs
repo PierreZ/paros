@@ -65,6 +65,17 @@ pub enum NarrationKind {
     Snapshot,
     /// A client asked for something.
     Client,
+    /// A candidate registered a configuration with the matchmakers, or learned
+    /// what came before it.
+    Matchmaking,
+    /// The acceptor set changed: a reconfiguration opened, completed, or was
+    /// refused.
+    Reconfigure,
+    /// A garbage-collection floor moved, or an acceptor was retired.
+    Gc,
+    /// The matchmaker set itself changed: a generation was frozen, decided, or
+    /// activated.
+    Generation,
     /// The rule the player's answer would have broken.
     Violation,
     /// The level's goal is reached.

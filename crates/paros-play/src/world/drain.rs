@@ -24,13 +24,14 @@ use std::collections::BTreeMap;
 
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    Ballot, ColocatedNode, Command, Control, Message, NodeId, ReadState, Slot, WriteOp,
+    Ballot, ColocatedNode, Command, Control, GcRequest, MatchReply, MatchRequest, MatchmakerId,
+    Message, NodeId, ReadState, Slot, WriteOp,
 };
 
 use crate::action::Seam;
 use crate::narration::{self, NarrationKind, NodeSnapshot, many, who};
 use crate::prompt::{Prompt, PromptKind};
-use crate::world::{InFlight, World};
+use crate::world::{Envelope, Party, World};
 
 /// How many drain rounds one action may take before the engine calls it a
 /// non-terminating loop.
@@ -51,6 +52,14 @@ pub(super) struct Batch {
     /// `(started, gap fills, remaining)` when this batch carried a
     /// leader-recovery page — the marker the `LeaderRecovery` prompt gates on.
     recovery: Option<(usize, usize, usize)>,
+    /// The registrations this batch owes the matchmakers. They travel with the
+    /// batch's other messages, after its writes, for the same reason: a
+    /// registration is a claim about the promise the candidate has just made
+    /// durable. Always empty on plain Multi-Paxos.
+    match_requests: Vec<(MatchmakerId, MatchRequest)>,
+    /// The garbage-collection requests this batch owes the matchmakers.
+    /// Always empty on plain Multi-Paxos.
+    gc_requests: Vec<(MatchmakerId, GcRequest)>,
 }
 
 impl Batch {
@@ -60,6 +69,8 @@ impl Batch {
             && self.committed.is_empty()
             && self.read_states.is_empty()
             && self.snapshot_offers.is_empty()
+            && self.match_requests.is_empty()
+            && self.gc_requests.is_empty()
     }
 
     /// What this batch's recovery page did, one entry per slot in slot order.
@@ -116,6 +127,19 @@ pub(super) enum Paused {
     },
     /// A wiped node's boot, waiting on the operator's answer.
     Boot { node: NodeId },
+    /// A registration waiting on the matchmaker's generation answer.
+    Registration {
+        from: Party,
+        to: MatchmakerId,
+        request: Box<MatchRequest>,
+    },
+    /// A matchmaker's answer waiting on the candidate's staleness answer.
+    MatchReply {
+        node: NodeId,
+        reply: Box<MatchReply>,
+    },
+    /// An operator's retire request waiting on the target's answer.
+    Retire { target: NodeId, watermark: Ballot },
     /// A drained batch waiting on the persist-order answer.
     Batch { node: NodeId, batch: Box<Batch> },
     /// A drained recovery batch, and the slots still to be quizzed on.
@@ -383,6 +407,8 @@ impl World {
             read_states: ready.read_states().to_vec(),
             snapshot_offers: ready.snapshot_offers().to_vec(),
             recovery: ready.recovery_batch(),
+            match_requests: ready.match_requests().to_vec(),
+            gc_requests: ready.gc_requests().to_vec(),
         };
         ready.advance();
         if let Some(seam) = self.armed_seams[index].take() {
@@ -435,14 +461,21 @@ impl World {
             if matches!(message, Message::Heartbeat { .. }) {
                 self.beats_broadcast = self.beats_broadcast.saturating_add(1);
             }
-            self.wire.push(InFlight {
-                id: self.next_message_id,
-                from: id,
-                to,
-                message,
-                sent_at: self.clock,
-            });
-            self.next_message_id += 1;
+            self.send(Party::Node(id), Party::Node(to), Envelope::Node(message));
+        }
+        for (to, request) in batch.match_requests {
+            self.send(
+                Party::Node(id),
+                Party::Matchmaker(to),
+                Envelope::Match(request),
+            );
+        }
+        for (to, request) in batch.gc_requests {
+            self.send(
+                Party::Node(id),
+                Party::Matchmaker(to),
+                Envelope::Gc(request),
+            );
         }
         for (slot, command) in batch.committed {
             let marker = match &command {
@@ -563,20 +596,17 @@ impl World {
                     at.0
                 ),
             );
-            self.wire.push(InFlight {
-                id: self.next_message_id,
-                from: id,
-                to,
-                message: Message::InstallSnapshot {
+            self.send(
+                Party::Node(id),
+                Party::Node(to),
+                Envelope::Node(Message::InstallSnapshot {
                     from: id,
                     ballot,
                     chosen_index: at,
                     snapshot,
                     sessions,
-                },
-                sent_at: self.clock,
-            });
-            self.next_message_id += 1;
+                }),
+            );
         }
     }
 
@@ -612,6 +642,14 @@ impl World {
                 value,
             } => self.propose_answered(node, client, &value),
             Paused::Boot { node } => self.boot_refused(node),
+            Paused::Registration { from, to, request } => self.register_now(from, to, *request),
+            Paused::MatchReply { node, reply } => {
+                let Some(index) = self.index_of(node) else {
+                    return;
+                };
+                self.fold_match_reply(node, index, *reply);
+            }
+            Paused::Retire { target, watermark } => self.retire_now(target, watermark),
             Paused::Batch { node, batch } => {
                 let Some(index) = self.index_of(node) else {
                     return;

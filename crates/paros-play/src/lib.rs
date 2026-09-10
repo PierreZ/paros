@@ -277,6 +277,7 @@ impl Game {
 
     /// Derive the world's policy from the flag set, run the action, and take
     /// the narration it produced.
+    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, action: &Action) -> Result<Vec<NarrationEvent>, ActionError> {
         self.sync_policy();
         self.world.clear_narration();
@@ -339,6 +340,52 @@ impl Game {
                     .corrupt(NodeId(*node), paros_core::Slot(*slot))?;
             }
             Action::Wipe { node } => self.log_world()?.wipe(NodeId(*node))?,
+            Action::CrashMatchmaker { matchmaker } => {
+                self.log_world()?
+                    .crash_matchmaker(paros_core::MatchmakerId(*matchmaker))?;
+            }
+            Action::RestartMatchmaker { matchmaker } => {
+                self.log_world()?
+                    .restart_matchmaker(paros_core::MatchmakerId(*matchmaker))?;
+            }
+            Action::Reconfigure {
+                node,
+                members,
+                quorum,
+            } => {
+                let system = quorum.map_or(
+                    paros_core::QuorumSystem::Majority,
+                    action::QuorumSpec::system,
+                );
+                let world = self.log_world()?;
+                let config = world.compose(members, system)?;
+                world.reconfigure(NodeId(*node), &config)?;
+            }
+            Action::Retire {
+                node,
+                target,
+                gc_watermark,
+            } => {
+                let watermark =
+                    gc_watermark.map_or_else(paros_core::Ballot::zero, action::BallotSpec::ballot);
+                self.log_world()?
+                    .retire(NodeId(*node), NodeId(*target), watermark)?;
+            }
+            Action::ReconfigureMatchmakers { node, members } => {
+                let members = members
+                    .iter()
+                    .map(|id| paros_core::MatchmakerId(*id))
+                    .collect();
+                self.log_world()?
+                    .reconfigure_matchmakers(NodeId(*node), members)?;
+            }
+            Action::ResendMatchmaking { node } => {
+                self.log_world()?.resend_matchmaking(NodeId(*node))?;
+            }
+            Action::ResendGc { node } => self.log_world()?.resend_gc(NodeId(*node))?,
+            Action::ResendReconfigurer { node } => {
+                self.log_world()?.resend_reconfigurer(NodeId(*node))?;
+            }
             Action::Retry { node, client, seq } => {
                 self.log_world()?.retry(NodeId(*node), *client, *seq)?;
             }

@@ -666,9 +666,7 @@ own, out of the very batch that applied it.",
             .filter(|(_, _, served)| *served)
             .map(|(_, index, _)| index)
             .collect();
-        let recovered = applied(world, 1)
-            .iter()
-            .any(|command| command == "\"alpha\"");
+        let recovered = applied(world, 1).iter().any(|command| command == "alpha");
         match (served.first(), recovered) {
             (Some(index), true) => GoalStatus::Reached(format!(
                 "The read was refused while the recovered slot was still in flight, and served \
@@ -929,11 +927,11 @@ once after it closes — and you answer for the leader both times.",
         let executed = applied(world, 0);
         let bravo = executed
             .iter()
-            .filter(|command| *command == "\"bravo\"")
+            .filter(|command| *command == "bravo")
             .count();
         if bravo > 1 {
             return GoalStatus::Failed(
-                "\"bravo\" was executed twice. A retry that misses both dedup tables gets a \
+                "The command bravo was executed twice. A retry that misses both dedup tables gets a \
                  fresh slot, and the command runs again."
                     .to_string(),
             );

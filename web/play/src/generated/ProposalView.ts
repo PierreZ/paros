@@ -23,4 +23,17 @@ slot: number | null,
 /**
  * Whether that node has applied it (the write is acknowledged).
  */
-acked: boolean, };
+acked: boolean, 
+/**
+ * Whether the client may send this write again.
+ *
+ * Always true for a write, and that is a property of the protocol rather
+ * than of this write's state: a retry repeats the same
+ * `(client, sequence number, bytes)`, and the leader answers it from two
+ * ledgers in a fixed order — applied here (ack the slot it executed at),
+ * chosen or in flight at a slot (wait on **that** slot), never seen (take
+ * the next free slot). So a write that was acknowledged, one still
+ * waiting, and one whose answer was lost are all safe to ask for again,
+ * and none of them can be executed twice.
+ */
+retryable: boolean, };

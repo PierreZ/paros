@@ -58,6 +58,13 @@ impl Script {
         self.game.view().world.wire
     }
 
+    /// The world as it stands, for a recording that has to read a fact off it
+    /// — the garbage-collection watermark an operator passes to a `Retire`, for
+    /// one. Reading is not playing: nothing here is recorded.
+    pub(crate) fn world(&self) -> &crate::WorldKind {
+        self.game.world()
+    }
+
     /// Whether a prompt is open.
     fn prompt_open(&self) -> bool {
         self.game.view().prompt.is_some()

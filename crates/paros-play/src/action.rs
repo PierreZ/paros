@@ -42,6 +42,73 @@ impl Seam {
     }
 }
 
+/// A ballot an operator types: the round, and the node that minted it.
+///
+/// The one place a player writes a ballot down is the evidence a `Retire`
+/// carries, and that evidence has to be exact — an operator reads it from a
+/// leader's report and passes it on unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BallotSpec {
+    /// The round.
+    pub round: u64,
+    /// The node that minted the ballot.
+    pub node: u64,
+}
+
+impl BallotSpec {
+    /// The core ballot it names.
+    #[must_use]
+    pub fn ballot(self) -> paros_core::Ballot {
+        paros_core::Ballot {
+            round: self.round,
+            node: paros_core::NodeId(self.node),
+        }
+    }
+}
+
+/// The quorum system a new acceptor configuration runs.
+///
+/// A configuration and its quorum system are one thing: the membership must
+/// admit the system, and a set that does not is refused rather than repaired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuorumSpec {
+    /// More than half the acceptors, in both phases.
+    Majority,
+    /// A split: `q1` acceptors answer Phase 1 and `q2` vote in Phase 2.
+    Flexible {
+        /// How many answer Phase 1.
+        q1: u64,
+        /// How many vote in Phase 2.
+        q2: u64,
+    },
+    /// A grid: a full row answers Phase 1 and a full column votes in Phase 2.
+    Grid {
+        /// The rows.
+        rows: u64,
+        /// The columns.
+        cols: u64,
+    },
+}
+
+impl QuorumSpec {
+    /// The core quorum system it names.
+    #[must_use]
+    pub fn system(self) -> paros_core::QuorumSystem {
+        match self {
+            QuorumSpec::Majority => paros_core::QuorumSystem::Majority,
+            QuorumSpec::Flexible { q1, q2 } => paros_core::QuorumSystem::Flexible {
+                q1: usize::try_from(q1).unwrap_or(usize::MAX),
+                q2: usize::try_from(q2).unwrap_or(usize::MAX),
+            },
+            QuorumSpec::Grid { rows, cols } => paros_core::QuorumSystem::Grid {
+                rows: usize::try_from(rows).unwrap_or(usize::MAX),
+                cols: usize::try_from(cols).unwrap_or(usize::MAX),
+            },
+        }
+    }
+}
+
 /// Which Paxos phase an [`Action::SetReach`] restricts (the Act I
 /// quorum-intersection level).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
@@ -83,6 +150,7 @@ pub enum Action {
         /// which is a thing networks do and which every rule in the protocol
         /// is written to survive. Omitted (or `null`) keeps the addressee.
         #[serde(default)]
+        #[ts(optional = nullable)]
         to: Option<u64>,
     },
     /// Advance one node's logical clock by one tick.
@@ -122,6 +190,7 @@ pub enum Action {
         /// Omitted (or `null`) lets the configuration derive it, which is
         /// what every deployment that is not a grid does.
         #[serde(default)]
+        #[ts(optional = nullable)]
         column: Option<u64>,
     },
     /// Force `node`'s election timeout to fire on the spot.
@@ -144,6 +213,7 @@ pub enum Action {
         /// first client, which is what every single-client level wants and
         /// what the field meant before there were two of them.
         #[serde(default)]
+        #[ts(optional = nullable)]
         client: Option<u64>,
     },
     /// A client asks `node` for a **leaderless** read: `node` asks a Phase-1
@@ -155,6 +225,7 @@ pub enum Action {
         /// Which client is reading. Omitted (or `null`) means the level's
         /// first client.
         #[serde(default)]
+        #[ts(optional = nullable)]
         client: Option<u64>,
     },
     /// A leader hands its Phase-2 authority to a peer, under the same ballot
@@ -177,6 +248,69 @@ pub enum Action {
     /// provisioned that identity, which is what makes the refusal possible.
     Wipe {
         /// The node whose disk is erased.
+        node: u64,
+    },
+    /// Drop a matchmaker's volatile role, keeping its registry.
+    ///
+    /// A matchmaker is not a node — it holds no log and votes on no slot, and
+    /// its ids are their own space — so it gets its own verb rather than an
+    /// overloaded [`Action::Crash`].
+    CrashMatchmaker {
+        /// The matchmaker's id.
+        matchmaker: u64,
+    },
+    /// Rebuild a crashed matchmaker from its registry.
+    RestartMatchmaker {
+        /// The matchmaker's id.
+        matchmaker: u64,
+    },
+    /// A client asks the leader at `node` to put a new acceptor set in force.
+    Reconfigure {
+        /// The node the client asks (must be the leader).
+        node: u64,
+        /// The acceptors of the new configuration.
+        members: Vec<u64>,
+        /// The quorum system it runs. Omitted (or `null`) is a majority, which
+        /// is what every deployment runs unless it says otherwise.
+        #[serde(default)]
+        #[ts(optional = nullable)]
+        quorum: Option<QuorumSpec>,
+    },
+    /// An operator asks `target` to shut down for good, showing the effective
+    /// garbage-collection watermark read from `node`'s report.
+    Retire {
+        /// The leader whose report the operator read the watermark from.
+        node: u64,
+        /// The acceptor asked to retire.
+        target: u64,
+        /// The evidence. Omitted (or `null`) sends none, which is refused:
+        /// an installed successor is not a collected predecessor.
+        #[serde(default)]
+        #[ts(optional = nullable)]
+        gc_watermark: Option<BallotSpec>,
+    },
+    /// `node` drives a handover of the matchmaker set onto `members`.
+    ReconfigureMatchmakers {
+        /// The node that drives the handover.
+        node: u64,
+        /// The matchmakers of the proposed successor.
+        members: Vec<u64>,
+    },
+    /// Re-send a candidate's open registration to every matchmaker that has
+    /// not answered.
+    ResendMatchmaking {
+        /// The node's id.
+        node: u64,
+    },
+    /// Re-send a leader's open garbage-collection request.
+    ResendGc {
+        /// The node's id.
+        node: u64,
+    },
+    /// Re-issue a handover's current step, and close a freeze whose quorum has
+    /// answered.
+    ResendReconfigurer {
+        /// The node's id.
         node: u64,
     },
     /// A client asks `node` again for a write it already sent — same client,
@@ -273,6 +407,22 @@ pub enum ActionKind {
     Corrupt,
     /// [`Action::Wipe`].
     Wipe,
+    /// [`Action::CrashMatchmaker`].
+    CrashMatchmaker,
+    /// [`Action::RestartMatchmaker`].
+    RestartMatchmaker,
+    /// [`Action::Reconfigure`].
+    Reconfigure,
+    /// [`Action::Retire`].
+    Retire,
+    /// [`Action::ReconfigureMatchmakers`].
+    ReconfigureMatchmakers,
+    /// [`Action::ResendMatchmaking`].
+    ResendMatchmaking,
+    /// [`Action::ResendGc`].
+    ResendGc,
+    /// [`Action::ResendReconfigurer`].
+    ResendReconfigurer,
     /// [`Action::Retry`].
     Retry,
     /// [`Action::Compact`].
@@ -312,6 +462,14 @@ impl Action {
             Action::Relinquish { .. } => ActionKind::Relinquish,
             Action::Corrupt { .. } => ActionKind::Corrupt,
             Action::Wipe { .. } => ActionKind::Wipe,
+            Action::CrashMatchmaker { .. } => ActionKind::CrashMatchmaker,
+            Action::RestartMatchmaker { .. } => ActionKind::RestartMatchmaker,
+            Action::Reconfigure { .. } => ActionKind::Reconfigure,
+            Action::Retire { .. } => ActionKind::Retire,
+            Action::ReconfigureMatchmakers { .. } => ActionKind::ReconfigureMatchmakers,
+            Action::ResendMatchmaking { .. } => ActionKind::ResendMatchmaking,
+            Action::ResendGc { .. } => ActionKind::ResendGc,
+            Action::ResendReconfigurer { .. } => ActionKind::ResendReconfigurer,
             Action::Retry { .. } => ActionKind::Retry,
             Action::Compact { .. } => ActionKind::Compact,
             Action::ResendPending { .. } => ActionKind::ResendPending,
@@ -347,9 +505,9 @@ impl Action {
                 column,
             } => match column {
                 Some(column) => {
-                    format!("client {client} proposes {value:?} at node {node}, to column {column}")
+                    format!("client {client} proposes {value} at node {node}, to column {column}")
                 }
-                None => format!("client {client} proposes {value:?} at node {node}"),
+                None => format!("client {client} proposes {value} at node {node}"),
             },
             Action::StartElection { node } => format!("node {node} campaigns"),
             Action::SetElectionTimeout { node, ticks } => {
@@ -370,6 +528,32 @@ impl Action {
                 format!("rot node {node}'s record for slot {slot}")
             }
             Action::Wipe { node } => format!("wipe node {node}'s disk"),
+            Action::CrashMatchmaker { matchmaker } => format!("crash matchmaker {matchmaker}"),
+            Action::RestartMatchmaker { matchmaker } => format!("restart matchmaker {matchmaker}"),
+            Action::Reconfigure { node, members, .. } => {
+                format!("ask node {node} to run with the acceptors {members:?}")
+            }
+            Action::Retire {
+                target,
+                gc_watermark,
+                ..
+            } => match gc_watermark {
+                Some(watermark) => format!(
+                    "retire node {target}, showing the watermark {}.{}",
+                    watermark.round, watermark.node
+                ),
+                None => format!("retire node {target}, showing no watermark"),
+            },
+            Action::ReconfigureMatchmakers { node, members } => {
+                format!("ask node {node} to make the matchmakers {members:?}")
+            }
+            Action::ResendMatchmaking { node } => {
+                format!("node {node} asks the matchmakers again")
+            }
+            Action::ResendGc { node } => format!("node {node} asks for the floor again"),
+            Action::ResendReconfigurer { node } => {
+                format!("node {node} beats its handover forward")
+            }
             Action::Retry { node, client, seq } => {
                 format!("client {client} retries write #{seq} at node {node}")
             }
@@ -379,7 +563,7 @@ impl Action {
             Action::ResendPending { node } => format!("node {node} re-sends its accepts"),
             Action::StepDown { node } => format!("node {node} resigns"),
             Action::OpenBallot { proposer, value } => {
-                format!("proposer {proposer} opens a ballot for {value:?}")
+                format!("proposer {proposer} opens a ballot for {value}")
             }
             Action::SetReach { phase, nodes } => {
                 let phase = match phase {
@@ -435,6 +619,13 @@ pub enum ActionErrorCode {
     /// The store was provisioned once and no longer carries its format
     /// marker: the node's promise is gone, and it may never rejoin.
     Amnesia,
+    /// This deployment names no matchmakers, so it has no matchmaker set to
+    /// change and no reconfiguration to honour.
+    NoMatchmakers,
+    /// The node is already driving a matchmaker-set handover.
+    HandoverBusy,
+    /// The node is driving no matchmaker-set handover.
+    NoHandover,
     /// The level pins this automation flag off.
     PinnedOff,
     /// The automation flag is not unlocked in this level.

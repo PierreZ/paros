@@ -147,7 +147,7 @@ sight of the acceptor you cut off.",
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5]))),
     goal: |world| match chosen_text(world) {
         Some(value) => GoalStatus::Reached(format!(
-            "{value:?} is chosen: a majority of the three acceptors voted for it at one ballot, \
+            "{value} is chosen: a majority of the three acceptors voted for it at one ballot, \
              and no later ballot can change it."
         )),
         None => GoalStatus::Open("Get a value chosen with two of the three acceptors.".to_string()),
@@ -234,7 +234,7 @@ because votes are judged more harshly than promises.",
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5, 8]))),
     goal: |world| match chosen_text(world) {
         Some(value) => GoalStatus::Reached(format!(
-            "{value:?} is chosen, and every promise and vote behind it was yours."
+            "{value} is chosen, and every promise and vote behind it was yours."
         )),
         None => GoalStatus::Open(
             "Answer every Prepare and Accept correctly until a value is chosen.".to_string(),
@@ -412,11 +412,11 @@ attacker picks.",
         let campaigns = decree.completed_phase1().len();
         match (chosen_text(world), campaigns) {
             (Some(value), n) if n >= 2 => GoalStatus::Reached(format!(
-                "{n} ballots completed Phase 1 and exactly one value — {value:?} — was chosen. \
+                "{n} ballots completed Phase 1 and exactly one value — {value} — was chosen. \
                  The duel cost rounds, never safety."
             )),
             (Some(value), _) => GoalStatus::Open(format!(
-                "{value:?} is chosen, but only one proposer ever got that far. Let the other \
+                "{value} is chosen, but only one proposer ever got that far. Let the other \
                  one run a ballot too."
             )),
             (None, _) => GoalStatus::Open(
@@ -461,7 +461,7 @@ pub static QUORUM_INTERSECTION: Level = Level {
     act: 1,
     title: "Quorum intersection",
     briefing: "\
-`\"alpha\"` is chosen. Acceptors 1 and 2 voted for it at ballot `1.5`, which is a \
+`alpha` is chosen. Acceptors 1 and 2 voted for it at ballot `1.5`, which is a \
 majority, so the decision is final — whether or not acceptor 3 has ever heard of \
 it.
 
@@ -472,7 +472,7 @@ Phase-1 quorum that avoids the acceptors holding the vote, and propose \
 
 You cannot. A Phase-1 quorum is two of three, and `{1, 2}` is two of three, so \
 every quorum you can pick shares at least one acceptor with the one that voted \
-— the **pivot**. That acceptor's promise reports `\"alpha\"`, and P2c makes you \
+— the **pivot**. That acceptor's promise reports `alpha`, and P2c makes you \
 propose it back. This is the entire safety argument of Paxos, and it is a \
 counting fact about sets, not about code: any two majorities of `n` intersect. \
 Act IV takes the same fact apart and shows that only *cross-phase* intersection \

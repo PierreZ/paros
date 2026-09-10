@@ -4,4 +4,4 @@
  * Which question a [`Prompt`] asks. Each kind is governed by one
  * [`AutomationFlag`]: the prompt is raised exactly while that flag is off.
  */
-export type PromptKind = "acceptor_prepare" | "acceptor_accept" | "proposer_value" | "leader_recovery" | "replica_apply" | "persist_order" | "commit_overwrite" | "read_serve" | "snapshot_promise" | "ack_write" | "grid_column" | "quorum_read_serve" | "repair_verdict" | "wiped_rejoin";
+export type PromptKind = "acceptor_prepare" | "acceptor_accept" | "proposer_value" | "leader_recovery" | "replica_apply" | "persist_order" | "commit_overwrite" | "read_serve" | "snapshot_promise" | "ack_write" | "grid_column" | "quorum_read_serve" | "repair_verdict" | "wiped_rejoin" | "phase1_complete" | "stale_configuration" | "generation_fence" | "may_retire";

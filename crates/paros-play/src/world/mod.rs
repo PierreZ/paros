@@ -28,16 +28,19 @@
 pub mod decree;
 pub mod disk;
 mod drain;
+pub mod matchmakers;
 mod prompts;
 mod render;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use paros_core::matchmaking::Matchmaking;
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Control, HANDOFF_BATCH,
-    LeadershipOrigin, Message, NodeId, ProposeResult, QuorumSystem, ReadIndexResult, ReadState,
-    Slot, Value,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Control, GcAck,
+    GcRequest, HANDOFF_BATCH, LeadershipOrigin, MatchReply, MatchRequest, MatchmakerId,
+    MatchmakerReconfigurer, Message, NodeId, ProposeResult, QuorumSystem, ReadIndexResult,
+    ReadState, ReconfigureReply, ReconfigureRequest, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Seam};
@@ -46,8 +49,10 @@ use crate::narration::{NarrationEvent, NarrationKind, NodeSnapshot, many, say, w
 use crate::prompt::{Prompt, PromptKind, Verdict};
 use crate::view::{MessageView, message_view, show_ballot};
 use crate::world::drain::Paused;
+use crate::world::matchmakers::plane_view;
 
 pub use disk::Disk;
+pub use matchmakers::{MatchmakerProcess, RegistryDisk};
 
 /// The election timeout a hand-stepped leader holds.
 ///
@@ -60,35 +65,105 @@ pub use disk::Disk;
 /// flows on every tick and the level's real timeout is restored.
 pub const NO_CHECK_QUORUM: u64 = 1_000_000;
 
+/// One endpoint of the wire.
+///
+/// Node ids and matchmaker ids are **different identity spaces**: node 1 and
+/// matchmaker 1 are not the same party, and no guard anywhere may confuse them.
+/// So the wire addresses a party rather than a number, and the operator's
+/// crash verbs come in two families for the same reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Party {
+    /// A node of the acceptor pool.
+    Node(NodeId),
+    /// A matchmaker of the registry tier.
+    Matchmaker(MatchmakerId),
+}
+
+/// What one wire entry carries.
+///
+/// The node protocol and the matchmaker plane are two contracts, and the
+/// registry tier is never stepped with a node's [`Message`]: a matchmaker holds
+/// no log and votes on no slot. Keeping them apart in the type is what makes
+/// that true by construction.
+#[derive(Clone, Debug)]
+pub enum Envelope {
+    /// One node's message to another node.
+    Node(Message),
+    /// A candidate registers a ballot and its configuration.
+    Match(MatchRequest),
+    /// A matchmaker's answer to a registration.
+    MatchReply(MatchReply),
+    /// A leader asks a matchmaker to raise its watermark.
+    Gc(GcRequest),
+    /// A matchmaker's answer to a garbage-collection request.
+    GcAck(GcAck),
+    /// One step of a matchmaker-set handover.
+    Reconfigure(ReconfigureRequest),
+    /// A matchmaker's answer to a handover step.
+    ReconfigureReply(ReconfigureReply),
+}
+
 /// One message in flight: what the wire is made of.
 #[derive(Clone, Debug)]
 pub struct InFlight {
     /// The id every player action names.
     pub id: u64,
     /// The sender.
-    pub from: NodeId,
+    pub from: Party,
     /// The addressee.
-    pub to: NodeId,
-    /// The message itself — a real [`Message`], never a game-local imitation.
-    pub message: Message,
+    pub to: Party,
+    /// What it carries — a real core message, never a game-local imitation.
+    pub envelope: Envelope,
     /// The clock reading when it was queued.
     pub sent_at: u64,
 }
 
 impl InFlight {
+    /// The node message this entry carries, if it carries one.
+    #[must_use]
+    pub fn message(&self) -> Option<&Message> {
+        match &self.envelope {
+            Envelope::Node(message) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// The node this entry is addressed to, if it is addressed to one.
+    #[must_use]
+    pub fn to_node(&self) -> Option<NodeId> {
+        self.to.node()
+    }
+
+    /// The node that sent this entry, if a node sent it.
+    #[must_use]
+    pub fn from_node(&self) -> Option<NodeId> {
+        self.from.node()
+    }
+
     /// Render it for the wire list and the stage, under the quorum system the
     /// **sender** runs: that is what decides which column an `Accept` was
     /// addressed to, and a message carries no column of its own.
+    ///
+    /// # Panics
+    ///
+    /// Never on a player-reachable path: every envelope is either a node
+    /// message or one the matchmaker plane's renderer covers, and the match
+    /// below is exhaustive over both.
     #[must_use]
     pub fn view(&self, system: QuorumSystem) -> MessageView {
-        message_view(
-            self.id,
-            self.from.0,
-            self.to.0,
-            self.sent_at,
-            &self.message,
-            system,
-        )
+        match &self.envelope {
+            Envelope::Node(message) => message_view(
+                self.id,
+                self.from.number(),
+                self.to.number(),
+                self.sent_at,
+                message,
+                system,
+            ),
+            // Every other envelope is the matchmaker plane's, and none of them
+            // names a slot or a column.
+            _ => plane_view(self).expect("a matchmaker-plane entry renders"),
+        }
     }
 }
 
@@ -320,6 +395,35 @@ pub struct World {
     /// Every boot the engine refused because the node's disk was erased:
     /// `(node, the promise it last made)`.
     refused_boots: Vec<(NodeId, Ballot)>,
+    /// The matchmakers this level deployed, in id order. Empty is plain
+    /// Multi-Paxos, which is Act I to Act III and every Act IV level before
+    /// this act's second half.
+    matchmakers: Vec<MatchmakerProcess>,
+    /// One handover driver per node. The reconfigurer is a **driver** object,
+    /// not a role of the core's node: the node that drives a handover is the
+    /// node the operator asked, and it holds no durable state of its own.
+    reconfigurers: Vec<MatchmakerReconfigurer>,
+    /// Per node, a second [`Matchmaking`] fed exactly the answers the node is
+    /// fed — the oracle the `StaleConfiguration` prompt reads. `ColocatedNode`
+    /// hands out no reference to its own, so this is the one prompt whose
+    /// answer is computed on a parallel instance of the core's role rather
+    /// than on a clone of the node's.
+    matchmaking_shadow: Vec<Option<Matchmaking>>,
+    /// Per node, the prior configurations its last completed matchmaking
+    /// phase reported — `H_b`. `Election` keeps them private, so the world
+    /// records what `MatchStep::Completed` handed it.
+    campaign_prior: Vec<Vec<AcceptorConfig>>,
+    /// Per node, whether an operator retired it for good.
+    retired: Vec<bool>,
+    /// Every retire request the engine refused for want of evidence:
+    /// `(node, the watermark the operator showed)`.
+    refused_retires: Vec<(NodeId, Ballot)>,
+    /// How many beats a handover phase may make no progress for before the
+    /// driver gives it up. **Driver policy, never a constant inside the state
+    /// machine**, so it is a level tunable. Its floor is structural: a phase
+    /// must get more beats than one round trip needs, or a handover that is
+    /// simply slow is abandoned every time. `0` disables it.
+    reconfigure_timeout_ticks: u64,
     /// The history's own clock: a monotone counter stamped on every client
     /// operation as it is issued and again as it completes. It is **not** the
     /// tick clock — a level may never tick at all — and it never goes
@@ -359,6 +463,11 @@ impl World {
         sorted.sort_unstable();
         sorted.dedup();
         assert!(sorted.len() == pool.len(), "node ids are distinct");
+        let reconfigurers: Vec<MatchmakerReconfigurer> = pool
+            .iter()
+            .copied()
+            .map(MatchmakerReconfigurer::new)
+            .collect();
         let nodes: Vec<Option<ColocatedNode>> = disks
             .iter()
             .map(|disk| Some(ColocatedNode::new(disk)))
@@ -396,6 +505,13 @@ impl World {
             handoffs: Vec::new(),
             beats_broadcast: 0,
             refused_boots: Vec::new(),
+            matchmakers: Vec::new(),
+            reconfigurers: reconfigurers.into_iter().collect(),
+            matchmaking_shadow: (0..count).map(|_| None).collect(),
+            campaign_prior: vec![Vec::new(); count],
+            retired: vec![false; count],
+            refused_retires: Vec::new(),
+            reconfigure_timeout_ticks: 0,
             next_event: 1,
             narration: Vec::new(),
         };
@@ -405,6 +521,35 @@ impl World {
             }
         }
         world
+    }
+
+    /// Deploy `matchmakers` beside the pool: the registry tier this level's
+    /// nodes name in their configuration.
+    ///
+    /// A level whose disks name no matchmakers must not call this, and a level
+    /// that names them must: the two halves are one deployment, and a node
+    /// that names a matchmaker nobody deployed would campaign into silence.
+    ///
+    /// # Panics
+    ///
+    /// If two matchmakers share an id.
+    #[must_use]
+    pub fn with_matchmakers(mut self, matchmakers: Vec<MatchmakerProcess>) -> Self {
+        let mut ids: Vec<MatchmakerId> = matchmakers.iter().map(MatchmakerProcess::id).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert!(ids.len() == count, "matchmaker ids are distinct");
+        self.matchmakers = matchmakers;
+        self
+    }
+
+    /// How many beats a handover phase may stall for before the driver gives
+    /// it up (see the handover stall timeout).
+    #[must_use]
+    pub fn with_reconfigure_timeout(mut self, ticks: u64) -> Self {
+        self.reconfigure_timeout_ticks = ticks;
+        self
     }
 
     // ---- policy ------------------------------------------------------------
@@ -502,10 +647,16 @@ impl World {
             return out;
         }
         let after = NodeSnapshot::capture(self.node(id));
+        // Only the node protocol's own messages: the matchmaker plane has its
+        // own narration, because the diff of a node's role accessors says
+        // nothing about a registry.
         let sent: Vec<(NodeId, Message)> = self.wire[mark..]
             .iter()
-            .filter(|entry| entry.from == id)
-            .map(|entry| (entry.to, entry.message.clone()))
+            .filter(|entry| entry.from == Party::Node(id))
+            .filter_map(|entry| match (&entry.envelope, entry.to) {
+                (Envelope::Node(message), Party::Node(to)) => Some((to, message.clone())),
+                _ => None,
+            })
             .collect();
         let events = narration::describe(id, &before, &after, &sent, system, members);
         self.narration.extend(events);
@@ -553,10 +704,16 @@ impl World {
         )
     }
 
-    /// Render one in-flight message under its sender's quorum system.
+    /// Render one in-flight message under its sender's quorum system. A
+    /// matchmaker runs none of its own — its quorums are majorities of a
+    /// matchmaker set, and nothing it sends names a column.
     #[must_use]
     pub fn render(&self, entry: &InFlight) -> MessageView {
-        entry.view(self.system(entry.from))
+        let system = entry
+            .from
+            .node()
+            .map_or(QuorumSystem::Majority, |id| self.system(id));
+        entry.view(system)
     }
 
     /// The live node with `id`, if it is running.
@@ -985,7 +1142,20 @@ impl World {
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
         let summary = self.render(&entry).summary;
-        let Some(index) = self.index_of(entry.to) else {
+        // Three addressees, three contracts: a node's own protocol, a
+        // matchmaker's registry, and the answers the registry sends back.
+        if matches!(entry.to, Party::Matchmaker(_)) {
+            self.deliver_to_matchmaker(entry);
+            return Ok(());
+        }
+        if !matches!(entry.envelope, Envelope::Node(_)) {
+            self.deliver_matchmaker_reply(entry);
+            return Ok(());
+        }
+        let (Party::Node(to), Envelope::Node(message)) = (entry.to, entry.envelope) else {
+            return Ok(());
+        };
+        let Some(index) = self.index_of(to) else {
             return Ok(());
         };
         if self.nodes[index].is_none() {
@@ -995,30 +1165,30 @@ impl World {
                     "{summary} reaches {}, which is not running, so it is discarded. A message \
                      to a machine that is not there is simply lost — that is the whole of this \
                      failure model.",
-                    who(entry.to)
+                    who(to)
                 ),
             );
             return Ok(());
         }
-        self.note_ack(&entry);
-        if let Some(prompt) = self.prompt_for(entry.to, &entry.message) {
+        self.note_ack(to, &message);
+        if let Some(prompt) = self.prompt_for(to, &message) {
             self.narrate(
                 NarrationKind::Info,
                 format!(
                     "{summary} stops at {}: {} You answer for it, and the real state machine \
                      marks the answer.",
-                    who(entry.to),
+                    who(to),
                     prompt.question
                 ),
             );
             self.prompt = Some(prompt);
             self.paused = Some(Paused::Message {
-                node: entry.to,
-                message: Box::new(entry.message),
+                node: to,
+                message: Box::new(message),
             });
             return Ok(());
         }
-        self.step(entry.to, entry.message);
+        self.step(to, message);
         Ok(())
     }
 
@@ -1055,11 +1225,29 @@ impl World {
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
         if let Some(to) = to {
-            let to = NodeId(to);
-            if self.index_of(to).is_none() {
-                return Err(unknown_node(to));
-            }
-            copy.to = to;
+            // A copy is re-addressed inside its own tier: a node's message
+            // misroutes to another node, a registration to another matchmaker.
+            // Crossing the two would be a message the receiver has no contract
+            // for, which is not something a network does.
+            copy.to = match copy.to {
+                Party::Node(_) => {
+                    let to = NodeId(to);
+                    if self.index_of(to).is_none() {
+                        return Err(unknown_node(to));
+                    }
+                    Party::Node(to)
+                }
+                Party::Matchmaker(_) => {
+                    let to = MatchmakerId(to);
+                    if self.matchmaker(to).is_none() {
+                        return Err(ActionError::new(
+                            ActionErrorCode::UnknownParty,
+                            format!("there is no matchmaker {} in this level", to.0),
+                        ));
+                    }
+                    Party::Matchmaker(to)
+                }
+            };
         }
         let summary = self.render(&copy).summary;
         self.next_message_id += 1;
@@ -1079,7 +1267,7 @@ impl World {
                      misroute messages, and the protocol answers for it: every guard asks who a \
                      message is *from* and what the configuration says about them. No guard \
                      asks what the transport did with it.",
-                    who(misrouted)
+                    name(misrouted)
                 ),
             },
         );
@@ -1087,17 +1275,19 @@ impl World {
     }
 
     /// The next message an automation pump would deliver: the lowest-id
-    /// heartbeat (when `beats`) or reply (when `replies`) on the wire.
+    /// heartbeat (when `beats`), node reply (when `replies`) or
+    /// matchmaker-plane message (when `matchmaker`) on the wire.
     #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool) -> Option<u64> {
+    pub fn next_auto_delivery(&self, beats: bool, replies: bool, matchmaker: bool) -> Option<u64> {
         self.wire
             .iter()
-            .filter(|entry| match &entry.message {
-                Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => beats,
-                Message::Promise { .. } | Message::Accepted { .. } | Message::Nack { .. } => {
-                    replies
-                }
-                _ => false,
+            .filter(|entry| match &entry.envelope {
+                Envelope::Node(Message::Heartbeat { .. } | Message::HeartbeatAck { .. }) => beats,
+                Envelope::Node(
+                    Message::Promise { .. } | Message::Accepted { .. } | Message::Nack { .. },
+                ) => replies,
+                Envelope::Node(_) => false,
+                _ => matchmaker,
             })
             .map(|entry| entry.id)
             .min()
@@ -1127,6 +1317,10 @@ impl World {
             }
             world.pump(id);
         });
+        // A tick is the driver's beat, and the handover is driver policy: the
+        // stall clock advances, a freeze whose quorum answered is closed, and
+        // a phase that has stopped moving is given up.
+        self.beat_reconfigurer(index);
         Ok(())
     }
 
@@ -1162,6 +1356,7 @@ impl World {
                 }
                 world.pump(id);
             });
+            self.beat_reconfigurer(index);
         }
         Ok(())
     }
@@ -1430,7 +1625,7 @@ impl World {
             self.narrate(
                 NarrationKind::Client,
                 format!(
-                    "Client {client} asks {} to get {value:?} chosen. {} You answer for it, and \
+                    "Client {client} asks {} to get {value} chosen. {} You answer for it, and \
                      the configuration marks the answer.",
                     who(id),
                     prompt.question
@@ -1515,7 +1710,7 @@ impl World {
         let opening = say(
             NarrationKind::Client,
             format!(
-                "Client {client} asks {} to get {value:?} chosen. {}",
+                "Client {client} asks {} to get {value} chosen. {}",
                 who(id),
                 match (admitted, fresh) {
                     (None, _) => "It is not running, so nothing happens.".to_string(),
@@ -2179,13 +2374,13 @@ impl World {
 
     /// Note a heartbeat ack against the read rounds it qualifies for — display
     /// only (see [`PendingRead::acks`]).
-    fn note_ack(&mut self, entry: &InFlight) {
-        let Message::HeartbeatAck { from, seq, .. } = &entry.message else {
+    fn note_ack(&mut self, to: NodeId, message: &Message) {
+        let Message::HeartbeatAck { from, seq, .. } = message else {
             return;
         };
         for client in &mut self.clients {
             for read in &mut client.reads {
-                if read.node == entry.to && !read.served && *seq >= read.required_seq {
+                if read.node == to && !read.served && *seq >= read.required_seq {
                     read.acks.insert(*from);
                 }
             }
@@ -2289,6 +2484,9 @@ impl World {
                 )
                 .max(self.disks[index].hard_state().max_promised_ballot);
             self.promise_watermarks[index] = self.promise_watermarks[index].max(seen);
+        }
+        for index in 0..self.pool.len() {
+            self.sync_matchmaking_shadow(index);
         }
         let hold = self.policy.hold_leadership;
         for index in 0..self.pool.len() {
@@ -2442,6 +2640,15 @@ fn at(slot: Option<Slot>) -> String {
         || "the empty prefix".to_string(),
         |s| format!("slot {}", s.0),
     )
+}
+
+/// How the game names one endpoint of the wire.
+#[must_use]
+pub fn name(party: Party) -> String {
+    match party {
+        Party::Node(id) => who(id),
+        Party::Matchmaker(id) => matchmakers::which(id),
+    }
 }
 
 fn unknown_node(id: NodeId) -> ActionError {

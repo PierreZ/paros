@@ -19,4 +19,10 @@ index: number | null,
 /**
  * Whether it has been served.
  */
-served: boolean, };
+served: boolean, 
+/**
+ * Always false: a read carries no identity the cluster remembers, so
+ * asking again is a **new** read at a new watermark, not a retry. The
+ * field is here so the frontend has one rule for every client operation.
+ */
+retryable: boolean, };

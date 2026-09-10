@@ -27,7 +27,7 @@ use crate::action::{ActionError, ActionErrorCode, Phase};
 use crate::narration::{NarrationEvent, NarrationKind, list_nodes, phase1_note, phase2_note, say};
 use crate::prompt::{Prompt, PromptKind, Verdict};
 use crate::view::{show_ballot, show_command};
-use crate::world::{InFlight, WorldPolicy};
+use crate::world::{Envelope, InFlight, Party, WorldPolicy};
 
 mod render;
 
@@ -335,8 +335,12 @@ impl DecreeWorld {
             .filter(|entry| {
                 replies
                     && matches!(
-                        entry.message,
-                        Message::Promise { .. } | Message::Accepted { .. } | Message::Nack { .. }
+                        entry.envelope,
+                        Envelope::Node(
+                            Message::Promise { .. }
+                                | Message::Accepted { .. }
+                                | Message::Nack { .. }
+                        )
                     )
             })
             .map(|entry| entry.id)
@@ -476,24 +480,29 @@ impl DecreeWorld {
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
         let summary = entry.view(self.config.quorum_system()).summary;
-        if let Some(prompt) = self.prompt_for(entry.to, &entry.message) {
+        // The single-decree world runs bare roles: every entry on its wire is
+        // a node message, and it has no matchmaker plane at all.
+        let (Party::Node(to), Envelope::Node(message)) = (entry.to, entry.envelope) else {
+            return Ok(());
+        };
+        if let Some(prompt) = self.prompt_for(to, &message) {
             self.narrate(
                 NarrationKind::Info,
                 format!(
                     "{summary} stops at {}: {} You answer for it, and the real state machine \
                      marks the answer.",
-                    actor(entry.to),
+                    actor(to),
                     prompt.question
                 ),
             );
             self.prompt = Some(prompt);
             self.paused = Some(Paused::Message {
-                to: entry.to,
-                message: Box::new(entry.message),
+                to,
+                message: Box::new(message),
             });
             return Ok(());
         }
-        self.route(entry.to, entry.message);
+        self.route(to, message);
         Ok(())
     }
 
@@ -539,7 +548,7 @@ impl DecreeWorld {
                     format!("there is no node {} in this world", to.0),
                 ));
             }
-            copy.to = to;
+            copy.to = Party::Node(to);
         }
         let summary = copy.view(self.config.quorum_system()).summary;
         self.next_message_id += 1;
@@ -1112,9 +1121,9 @@ impl DecreeWorld {
     fn send(&mut self, from: NodeId, to: NodeId, message: Message) {
         self.wire.push(InFlight {
             id: self.next_message_id,
-            from,
-            to,
-            message,
+            from: Party::Node(from),
+            to: Party::Node(to),
+            envelope: Envelope::Node(message),
             sent_at: 0,
         });
         self.next_message_id += 1;

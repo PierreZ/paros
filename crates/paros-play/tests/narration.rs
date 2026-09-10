@@ -54,7 +54,7 @@ fn choosing_a_value_is_narrated_once_with_its_numbers() {
         line.contains("acceptors 1 and 2"),
         "and which acceptors voted for it: {line}"
     );
-    assert!(line.contains("\"alpha\""), "and the value itself: {line}");
+    assert!(line.contains("alpha"), "and the value itself: {line}");
     assert!(
         matches!(game.goal(), GoalStatus::Reached(_)),
         "the reference reaches the goal"
