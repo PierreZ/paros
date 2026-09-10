@@ -44,6 +44,14 @@ pub enum AutomationFlag {
     SnapshotPromise,
     /// A leader answers a client's retry from its two dedup tables, on its own.
     AckWrite,
+    /// A grid leader addresses each slot to its own column, on its own.
+    GridColumn,
+    /// A node serves a completed quorum read on its own.
+    QuorumReadServe,
+    /// A leader's repair probe settles a damaged slot on its own.
+    RepairVerdict,
+    /// The engine refuses a wiped node's boot on its own.
+    WipedRejoin,
     /// Heartbeats and their acks are delivered without being clicked.
     DeliverHeartbeats,
     /// `Promise`, `Accepted` and `Nack` are delivered without being clicked.
@@ -63,6 +71,10 @@ pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::ReadServe,
     AutomationFlag::SnapshotPromise,
     AutomationFlag::AckWrite,
+    AutomationFlag::GridColumn,
+    AutomationFlag::QuorumReadServe,
+    AutomationFlag::RepairVerdict,
+    AutomationFlag::WipedRejoin,
     AutomationFlag::DeliverHeartbeats,
     AutomationFlag::DeliverReplies,
     AutomationFlag::ResendPending,
@@ -82,6 +94,10 @@ impl AutomationFlag {
             AutomationFlag::ReadServe => "serve reads",
             AutomationFlag::SnapshotPromise => "promise across a snapshot",
             AutomationFlag::AckWrite => "answer a client retry",
+            AutomationFlag::GridColumn => "address a slot to its column",
+            AutomationFlag::QuorumReadServe => "serve a quorum read",
+            AutomationFlag::RepairVerdict => "settle a damaged slot",
+            AutomationFlag::WipedRejoin => "refuse a wiped node",
             AutomationFlag::DeliverHeartbeats => "deliver heartbeats",
             AutomationFlag::DeliverReplies => "deliver replies",
             AutomationFlag::ResendPending => "re-send pending accepts",

@@ -2,7 +2,9 @@
 import type { AttemptView } from "./AttemptView";
 import type { ElectionView } from "./ElectionView";
 import type { GapView } from "./GapView";
+import type { GridCellView } from "./GridCellView";
 import type { NodeFlavour } from "./NodeFlavour";
+import type { QuorumSystemView } from "./QuorumSystemView";
 import type { ReadRoundView } from "./ReadRoundView";
 import type { RoleView } from "./RoleView";
 import type { Seam } from "./Seam";
@@ -99,6 +101,14 @@ acceptors: Array<number>,
  * Its quorum system, e.g. `majority`.
  */
 quorum_system: string, 
+/**
+ * The same quorum system, as numbers the stage can draw.
+ */
+quorum: QuorumSystemView, 
+/**
+ * Where this acceptor sits in the grid, when the configuration runs one.
+ */
+grid_cell: GridCellView | null, 
 /**
  * A one-line summary of what this node's application has applied.
  */

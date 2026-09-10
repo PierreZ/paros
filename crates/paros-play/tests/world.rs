@@ -172,7 +172,7 @@ fn a_proposal_reaches_the_application_log() {
     let mut world = cluster(3);
     elect(&mut world, 0);
     world
-        .propose(NodeId(0), CLIENT, "alpha")
+        .propose(NodeId(0), CLIENT, "alpha", None)
         .expect("the leader admits a proposal");
     deliver_all(&mut world);
     assert_eq!(applied_text(&world, 0), vec!["0:alpha".to_string()]);
@@ -198,7 +198,7 @@ fn a_proposal_to_a_follower_is_refused_with_a_redirect() {
     world.tick(NodeId(0)).expect("the leader beats");
     deliver_all(&mut world);
     let err = world
-        .propose(NodeId(1), CLIENT, "alpha")
+        .propose(NodeId(1), CLIENT, "alpha", None)
         .expect_err("a follower does not admit proposals");
     assert_eq!(err.code, paros_play::ActionErrorCode::NotLeader);
     assert!(err.message.contains("node 0"), "it names the leader: {err}");
@@ -208,8 +208,12 @@ fn a_proposal_to_a_follower_is_refused_with_a_redirect() {
 fn an_out_of_order_delivery_leaves_a_hole_then_heals() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     // Everything except slot 0's Phase 2, so slot 1 decides first.
     let slot0 = |message: &Message| {
         matches!(
@@ -251,7 +255,9 @@ fn an_out_of_order_delivery_leaves_a_hole_then_heals() {
 fn a_restart_keeps_the_hard_state() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     let before = world.node(NodeId(1)).expect("running").hard_state();
     let records = world.disk(NodeId(1)).expect("a disk").records().clone();
@@ -380,7 +386,9 @@ fn the_after_sync_seam_keeps_the_writes_and_loses_the_messages() {
 fn a_read_index_round_trips_through_heartbeat_acks() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     world
         .read_index(NodeId(0), CLIENT)
@@ -457,7 +465,9 @@ fn the_acceptor_prompts_judge_both_rules() {
             .is_some_and(paros_core::ColocatedNode::is_leader),
         "the hand-answered promises elected node 0"
     );
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     let accept = world
         .wire()
         .iter()
@@ -524,8 +534,12 @@ fn the_persist_order_prompt_holds_the_batch_back() {
 fn the_replica_apply_prompt_refuses_to_skip_a_hole() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     world.set_policy(policy(&[PromptKind::ReplicaApply]));
     let slot0 = |message: &Message| {
         matches!(
@@ -554,8 +568,12 @@ fn the_replica_apply_prompt_refuses_to_skip_a_hole() {
 fn the_leader_recovery_prompt_fills_the_permanent_gap() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     // Slot 0's Accepts are lost entirely; slot 1 is chosen. Then the leader
     // crashes with its volatile proposer map, and the gap is nobody's.
     let slot0_accept = |message: &Message| matches!(message, Message::Accept { slot: Slot(0), .. });
@@ -598,7 +616,9 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     // Five nodes, so a promise quorum can miss the one acceptor that voted.
     let mut world = cluster(5);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     // Only node 1 hears the Accept; two of five is not a decision.
     let stray = |message: &Message| matches!(message, Message::Accept { slot: Slot(0), .. });
     let to_one = world
@@ -637,7 +657,9 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     // Accept and hears about the decision only from the Commit — which
     // contradicts, at a higher ballot, the record it has been holding.
     world.set_policy(policy(&[PromptKind::CommitOverwrite]));
-    world.propose(NodeId(2), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(2), CLIENT, "bravo", None)
+        .expect("admitted");
     while let Some(id) = world
         .wire()
         .iter()
@@ -660,7 +682,9 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
 fn the_read_serve_prompt_waits_without_an_ack_quorum() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     world.set_policy(policy(&[PromptKind::ReadServe]));
     world.read_index(NodeId(0), CLIENT).expect("a read opens");
@@ -727,8 +751,12 @@ fn truncate_through(world: &mut World, leader: u64, up_to: u64) {
 fn a_truncate_is_refused_until_a_quorum_holds_a_snapshot_point() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     deliver_all(&mut world);
     // Nothing has been snapshotted, so the coupling rule refuses: past the
     // floor the entries are gone everywhere, and a snapshot nobody holds
@@ -764,7 +792,9 @@ fn a_truncate_is_refused_until_a_quorum_holds_a_snapshot_point() {
 fn a_truncate_is_applied_lazily_by_every_node() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     world.compact(NodeId(0), 8).expect("answers");
     deliver_all(&mut world);
@@ -798,8 +828,12 @@ fn a_below_floor_catch_up_is_answered_with_a_snapshot() {
     let mut world = cluster(3);
     world.crash(NodeId(2)).expect("a live node may crash");
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     deliver_all(&mut world);
     truncate_through(&mut world, 0, 8);
     let floor = world.disk(NodeId(0)).expect("a disk").floor();
@@ -848,7 +882,9 @@ fn a_snapshot_install_never_lowers_the_promise() {
     let mut world = cluster(3);
     world.crash(NodeId(2)).expect("crashes");
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     truncate_through(&mut world, 0, 8);
     world.restart(NodeId(2)).expect("restarts");
@@ -920,7 +956,9 @@ fn a_snapshot_install_never_lowers_the_promise() {
 fn the_after_sync_seam_loses_the_truncate_with_the_batch() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     world.compact(NodeId(0), 8).expect("answers");
     deliver_all(&mut world);
@@ -1034,8 +1072,12 @@ fn ballot(round: u64, node: u64) -> Ballot {
 fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
-    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
     // Slot 1 decides while slot 0 is still open: chosen above a hole.
     let slot0 = |message: &Message| {
         matches!(
@@ -1085,7 +1127,9 @@ fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
 fn a_read_across_a_leader_change_is_linearizable() {
     let mut world = cluster(3);
     elect(&mut world, 0);
-    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
     deliver_all(&mut world);
     // Node 1 takes over with node 2; node 0 hears none of it.
     world.start_election(NodeId(1)).expect("campaigns");
@@ -1111,5 +1155,441 @@ fn a_read_across_a_leader_change_is_linearizable() {
             .iter()
             .any(|op| !op.write && op.completed.is_some()),
         "the history records the read's completion"
+    );
+}
+
+// ---- Act IV: the grid -------------------------------------------------------
+
+/// A cluster of `size` nodes under `system`, with one client.
+fn cluster_with(size: u64, system: QuorumSystem) -> World {
+    let peers: Vec<NodeId> = (0..size).map(NodeId).collect();
+    let configs = peers
+        .iter()
+        .map(|id| Config {
+            id: *id,
+            peers: peers.clone(),
+            quorum_system: system,
+            ..Config::default()
+        })
+        .collect();
+    let mut world = World::new(configs, &[CLIENT], 10);
+    world.set_policy(policy(&[]));
+    world
+}
+
+const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
+
+#[test]
+fn a_grid_addresses_each_slot_to_its_own_column() {
+    let mut world = cluster_with(6, GRID);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    // Slot 0 goes to column 0 = {0, 3}; the leader is in it, so exactly one
+    // Accept leaves.
+    let accepts: Vec<u64> = world
+        .wire()
+        .iter()
+        .filter(|entry| matches!(entry.message, Message::Accept { slot: Slot(0), .. }))
+        .map(|entry| entry.to.0)
+        .collect();
+    assert_eq!(accepts, vec![3], "slot 0 is addressed to column 0 alone");
+    deliver_all(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("admitted");
+    let accepts: Vec<u64> = world
+        .wire()
+        .iter()
+        .filter(|entry| matches!(entry.message, Message::Accept { slot: Slot(1), .. }))
+        .map(|entry| entry.to.0)
+        .collect();
+    assert_eq!(accepts, vec![1, 4], "slot 1 is addressed to column 1");
+    deliver_all(&mut world);
+    assert_eq!(
+        applied_text(&world, 5),
+        vec!["0:alpha".to_string(), "1:bravo".to_string()],
+        "every node applies both slots, whichever column decided them"
+    );
+    // And the view says which column an Accept was addressed to.
+    world
+        .propose(NodeId(0), CLIENT, "charlie", None)
+        .expect("admitted");
+    let column = world
+        .view()
+        .wire
+        .into_iter()
+        .find(|message| message.kind == "Accept" && message.slot == Some(2))
+        .and_then(|message| message.column);
+    assert_eq!(column, Some(2), "slot 2 is column 2");
+}
+
+#[test]
+fn a_vote_from_outside_the_column_does_not_count() {
+    let mut world = cluster_with(6, GRID);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    // Slot 0 belongs to column 0 = {0, 3}. Misroute a copy of its Accept to
+    // node 4, which is in row 1 and column 1: a member of the configuration,
+    // and not one of this slot's acceptors.
+    let accept = world
+        .wire()
+        .iter()
+        .find(|entry| matches!(entry.message, Message::Accept { slot: Slot(0), .. }))
+        .map(|entry| entry.id)
+        .expect("slot 0's Accept");
+    world
+        .duplicate(accept, Some(4))
+        .expect("a misrouted copy is legal");
+    let stray = world
+        .wire()
+        .iter()
+        .find(|entry| {
+            entry.to == NodeId(4) && matches!(entry.message, Message::Accept { slot: Slot(0), .. })
+        })
+        .map(|entry| entry.id)
+        .expect("the misrouted copy");
+    world.deliver(stray).expect("in flight");
+    // Node 4 votes: it is an acceptor, and the ballot is not below its
+    // promise. Its Accepted goes back to the leader.
+    let vote = world
+        .wire()
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.message,
+                Message::Accepted {
+                    from: NodeId(4),
+                    slot: Slot(0),
+                    ..
+                }
+            )
+        })
+        .map(|entry| entry.id)
+        .expect("node 4 answered the copy it was handed");
+    world.deliver(vote).expect("in flight");
+    assert!(
+        world
+            .node(NodeId(0))
+            .expect("running")
+            .replica()
+            .chosen_at(Slot(0))
+            .is_none(),
+        "a vote from outside the column decides nothing, whoever cast it"
+    );
+    assert!(
+        world
+            .narration()
+            .iter()
+            .any(|event| event.text.contains("does not count that vote")),
+        "and the game says why"
+    );
+    // Node 3 — the other half of column 0 — is what the slot waits for.
+    deliver_all(&mut world);
+    assert!(
+        world
+            .node(NodeId(0))
+            .expect("running")
+            .replica()
+            .chosen_at(Slot(0))
+            .is_some(),
+        "the column completes and the slot is chosen"
+    );
+}
+
+#[test]
+fn a_column_a_grid_does_not_have_is_refused() {
+    let mut world = cluster_with(6, GRID);
+    elect(&mut world, 0);
+    let err = world
+        .propose(NodeId(0), CLIENT, "alpha", Some(3))
+        .expect_err("this grid has three columns, numbered 0 to 2");
+    assert_eq!(err.code, paros_play::ActionErrorCode::BadColumn);
+    let mut plain = cluster(3);
+    elect(&mut plain, 0);
+    let err = plain
+        .propose(NodeId(0), CLIENT, "alpha", Some(0))
+        .expect_err("a majority names no columns");
+    assert_eq!(err.code, paros_play::ActionErrorCode::BadColumn);
+}
+
+// ---- Act IV: quorum reads ---------------------------------------------------
+
+#[test]
+fn a_follower_serves_a_quorum_read_with_no_leader_involved() {
+    let mut world = cluster_with(6, GRID);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_all(&mut world);
+    let beats_before = world.clock();
+    // Node 4 is a follower, and node 2 is in another row entirely.
+    world
+        .quorum_read(NodeId(4), CLIENT)
+        .expect("any node may open a quorum read");
+    assert!(
+        world
+            .wire()
+            .iter()
+            .all(|entry| !matches!(entry.message, Message::Heartbeat { .. })),
+        "a quorum read broadcasts no beat"
+    );
+    assert!(
+        world
+            .wire()
+            .iter()
+            .any(|entry| matches!(entry.message, Message::PreRead { .. })),
+        "it asks its row for their vote watermarks"
+    );
+    deliver_all(&mut world);
+    let served = world.served_reads();
+    assert_eq!(served.len(), 1, "the row answered and the read was served");
+    assert_eq!(served[0].1, Some(Slot(0)), "at the highest slot voted");
+    assert_eq!(world.clock(), beats_before, "no tick was needed");
+    assert!(
+        world
+            .node(NodeId(0))
+            .expect("running")
+            .proposer()
+            .read_rounds()
+            .is_empty(),
+        "the leader opened no read round"
+    );
+    world.linearizable().expect("the history is linearizable");
+}
+
+#[test]
+fn a_quorum_read_waits_until_the_replica_covers_the_watermark() {
+    let mut world = cluster_with(6, GRID);
+    world.set_policy(policy(&[PromptKind::QuorumReadServe]));
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    // Node 3 votes for slot 0 and the decision never comes back, so node 3's
+    // watermark is above everybody's applied prefix.
+    deliver_where(&mut world, |message| {
+        matches!(message, Message::Accept { .. })
+    });
+    drop_where(&mut world, |message| {
+        matches!(message, Message::Accepted { .. })
+    });
+    // A read from row 1 = {3, 4, 5}: node 3 reports slot 0, nobody has applied
+    // anything.
+    world
+        .quorum_read(NodeId(4), CLIENT)
+        .expect("a follower opens a read");
+    deliver_all(&mut world);
+    let prompt = world.prompt().expect("the row answered: serve or wait?");
+    assert_eq!(prompt.kind, PromptKind::QuorumReadServe);
+    assert_eq!(prompt.expected(), "wait", "the prefix is behind the row");
+    let id = prompt.id;
+    assert_eq!(
+        world.answer(id, "serve").expect("a legal move"),
+        Verdict::Wrong
+    );
+    assert_eq!(
+        world.answer(id, "wait").expect("a legal move"),
+        Verdict::Right
+    );
+    assert_eq!(world.unserved_reads(), 1, "the read is still waiting");
+    // Let the slot decide, and the read fires on its own.
+    world.resend_pending(NodeId(0)).expect("a leader re-sends");
+    deliver_all(&mut world);
+    assert_eq!(world.served_reads().len(), 1, "covered, and served");
+}
+
+// ---- Act IV: the cooperative handoff ---------------------------------------
+
+#[test]
+fn a_handoff_moves_the_authority_without_a_second_phase_one() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_all(&mut world);
+    let ballot = world.node(NodeId(0)).expect("running").ballot();
+    world
+        .relinquish(NodeId(0), NodeId(1))
+        .expect("a settled leader may hand its authority on");
+    // The abdication is synchronous with the decision.
+    assert!(
+        !world.node(NodeId(0)).expect("running").is_leader(),
+        "the outgoing leader stopped leading in the same call"
+    );
+    deliver_all(&mut world);
+    let successor = world.node(NodeId(1)).expect("running");
+    assert!(
+        successor.is_leader(),
+        "the successor installed the authority"
+    );
+    assert_eq!(
+        successor.ballot(),
+        ballot,
+        "under the same ballot: no second Phase 1"
+    );
+    assert!(
+        world
+            .wire()
+            .iter()
+            .chain(std::iter::empty())
+            .all(|entry| !matches!(entry.message, Message::Prepare { .. })),
+        "no Prepare was ever sent"
+    );
+    // And it can lead: a command decided under the inherited ballot.
+    world
+        .propose(NodeId(1), CLIENT, "bravo", None)
+        .expect("the successor admits a proposal");
+    deliver_all(&mut world);
+    assert_eq!(
+        applied_text(&world, 1),
+        vec!["0:alpha".to_string(), "1:bravo".to_string()]
+    );
+}
+
+#[test]
+fn an_authority_is_handed_on_only_once() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world
+        .relinquish(NodeId(0), NodeId(1))
+        .expect("the minter may hand its ballot on");
+    deliver_all(&mut world);
+    let reason = world
+        .handoff_refusal(NodeId(1))
+        .expect("a successor may not hand an inherited authority on");
+    assert!(
+        reason.contains("moves") || reason.contains("once"),
+        "the reason is the one-hop rule: {reason}"
+    );
+    let err = world
+        .relinquish(NodeId(1), NodeId(2))
+        .expect_err("one hop only");
+    assert_eq!(err.code, paros_play::ActionErrorCode::HandoffRefused);
+    // A follower is refused too, with its own reason.
+    let err = world
+        .relinquish(NodeId(2), NodeId(0))
+        .expect_err("a follower has no authority to give");
+    assert_eq!(err.code, paros_play::ActionErrorCode::HandoffRefused);
+}
+
+// ---- Act IV: a faulty record -----------------------------------------------
+
+#[test]
+fn a_rotted_record_is_reported_faulty_and_repaired_in_place() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    // Node 2 alone votes, and nothing comes back: accepted at one node, chosen
+    // nowhere. Node 1 never hears of the slot at all, which is what leaves the
+    // election with nothing to go on later.
+    drop_where(&mut world, |message| {
+        matches!(message, Message::Accept { .. })
+    });
+    world
+        .resend_pending(NodeId(0))
+        .expect("a leader re-sends its pending accepts");
+    let to_two = world
+        .wire()
+        .iter()
+        .find(|entry| {
+            entry.to == NodeId(2) && matches!(entry.message, Message::Accept { slot: Slot(0), .. })
+        })
+        .map(|entry| entry.id)
+        .expect("slot 0's Accept for node 2");
+    world.deliver(to_two).expect("in flight");
+    drop_where(&mut world, |message| {
+        matches!(
+            message,
+            Message::Accept { .. } | Message::Accepted { .. } | Message::Commit { .. }
+        )
+    });
+    world.crash(NodeId(0)).expect("crashes");
+    world.crash(NodeId(1)).expect("crashes");
+    world.crash(NodeId(2)).expect("crashes");
+    world
+        .corrupt(NodeId(2), Slot(0))
+        .expect("node 2 holds a record for slot 0");
+    world.restart(NodeId(2)).expect("restarts");
+    world.restart(NodeId(1)).expect("restarts");
+    assert_eq!(
+        world.faulty_records(NodeId(2)).len(),
+        1,
+        "the boot scan classified the rotted record"
+    );
+    // Node 1 campaigns with node 2. Node 2 reports the slot faulty, so the
+    // election cannot settle it: the probe opens.
+    world.start_election(NodeId(1)).expect("campaigns");
+    deliver_all(&mut world);
+    assert_eq!(
+        world.blocked_repairs(NodeId(1)),
+        1,
+        "the damaged slot went to the repair probe"
+    );
+    // Node 0 comes back holding the value; the probe re-queries it on the next
+    // beat and re-proposes what it reports.
+    world.restart(NodeId(0)).expect("restarts");
+    world.tick(NodeId(1)).expect("the leader beats");
+    deliver_all(&mut world);
+    assert_eq!(world.blocked_repairs(NodeId(1)), 0, "the probe closed");
+    assert_eq!(
+        applied_text(&world, 2),
+        vec!["0:alpha".to_string()],
+        "the slot re-decided as the value that was accepted there"
+    );
+    assert!(
+        world.faulty_records(NodeId(2)).is_empty(),
+        "and the damaged record was repaired in place"
+    );
+}
+
+// ---- Act IV: the wiped node -------------------------------------------------
+
+#[test]
+fn a_wiped_node_may_never_rejoin() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_all(&mut world);
+    let promised = world.promise_watermark(NodeId(2)).expect("a node");
+    assert!(promised > Ballot::zero(), "node 2 has promised something");
+    world.wipe(NodeId(2)).expect("a disk may be erased");
+    assert_eq!(
+        world
+            .disk(NodeId(2))
+            .expect("the disk is still there")
+            .hard_state()
+            .max_promised_ballot,
+        Ballot::zero(),
+        "the promise is gone from the only place it was written"
+    );
+    let err = world
+        .restart(NodeId(2))
+        .expect_err("a wiped member may not boot");
+    assert_eq!(err.code, paros_play::ActionErrorCode::Amnesia);
+    assert!(world.node(NodeId(2)).is_none(), "it stays out");
+    assert_eq!(world.refused_boots().len(), 1);
+    // The survivors keep going, and nothing regressed.
+    world
+        .propose(NodeId(0), CLIENT, "bravo", None)
+        .expect("two of three is still a quorum");
+    deliver_all(&mut world);
+    assert_eq!(
+        applied_text(&world, 0),
+        vec!["0:alpha".to_string(), "1:bravo".to_string()]
+    );
+    assert_eq!(
+        world.promise_regressed(),
+        None,
+        "no node's durable promise came back lower than one it had made"
     );
 }

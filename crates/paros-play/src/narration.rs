@@ -21,7 +21,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
-    Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, proposer::Round,
+    Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, QuorumSystem,
+    Slot, proposer::Round,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -137,6 +138,46 @@ pub(crate) fn list_nodes(ids: impl IntoIterator<Item = NodeId>) -> String {
     }
 }
 
+/// What a **Phase-1** quorum is here, in one clause — the configuration's own
+/// answer, never a threshold this crate computed. Under a majority it is a
+/// count; under a flexible split it is the split's own `q1`; under a grid it
+/// is a shape, and no count describes it.
+pub(crate) fn phase1_note(system: QuorumSystem, members: usize) -> String {
+    match system {
+        QuorumSystem::Majority => format!(
+            "A Phase-1 quorum here is {} of {members}.",
+            system.phase1_quorum_size(members)
+        ),
+        QuorumSystem::Flexible { q1, q2 } => format!(
+            "A Phase-1 quorum here is {q1} of {members}, because Phase 2 takes only {q2}: the \
+             two must add up to more than {members}, and nothing else is required of either."
+        ),
+        QuorumSystem::Grid { rows, cols } => format!(
+            "A Phase-1 quorum here is one whole row of the {rows} by {cols} grid — those \
+             acceptors, not any {cols} of them."
+        ),
+    }
+}
+
+/// What a **Phase-2** quorum is here, in one clause. See [`phase1_note`].
+pub(crate) fn phase2_note(system: QuorumSystem, members: usize) -> String {
+    match system {
+        QuorumSystem::Majority => format!(
+            "A Phase-2 quorum here is {} of {members}.",
+            system.phase2_quorum_size(members)
+        ),
+        QuorumSystem::Flexible { q1, q2 } => format!(
+            "A Phase-2 quorum here is {q2} of {members}. Two of them need not share an acceptor \
+             at all; what safety needs is that every Phase-1 quorum of {q1} meets every one of \
+             them."
+        ),
+        QuorumSystem::Grid { rows, cols } => format!(
+            "A Phase-2 quorum here is one whole column of the {rows} by {cols} grid — {rows} \
+             named acceptors, and every row meets every column in exactly one of them."
+        ),
+    }
+}
+
 // ---- the log world's snapshot ----------------------------------------------
 
 /// Everything the narration diffs across a call into a node: the role
@@ -159,6 +200,10 @@ pub(crate) struct NodeSnapshot {
     votes: BTreeMap<Slot, usize>,
     gap: Option<(Slot, Slot)>,
     recovery_remaining: usize,
+    /// Where this node's leadership came from: won at its own ballot, or
+    /// handed over by the node that minted one. The two produce very
+    /// different sentences, and only the node knows which it is.
+    origin: LeadershipOrigin,
 }
 
 impl NodeSnapshot {
@@ -189,6 +234,7 @@ impl NodeSnapshot {
                 .collect(),
             gap: node.replica().chosen_gap(),
             recovery_remaining: node.proposer().recovery_remaining(),
+            origin: node.leadership_origin(),
         }
     }
 
@@ -354,11 +400,37 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             chosen_index.0,
             show_ballot(*ballot)
         ),
-        Message::Relinquish { from, ballot, .. } => format!(
-            "{node} receives a hand-off from node {}: it is offered ballot {} without a Phase 1 \
-             of its own.",
+        Message::Relinquish {
+            from,
+            ballot,
+            next_slot,
+            decided,
+            pending,
+            ..
+        } => format!(
+            "{node} receives a hand-off from node {}: ballot {}, the frontier at slot {}, and \
+             the tail below it — {} already chosen and {} still in flight. Its own promise was \
+             {p}.",
             from.0,
-            show_ballot(*ballot)
+            show_ballot(*ballot),
+            next_slot.0,
+            many(decided.len(), "slot"),
+            many(pending.len(), "slot")
+        ),
+        Message::PreRead { reply_to, ctx } => format!(
+            "{node} is asked one question by node {} for read #{ctx}: what is the highest slot \
+             you have voted in? Answering writes nothing down and moves no promise.",
+            reply_to.0
+        ),
+        Message::PreReadAck {
+            from,
+            ctx,
+            watermark,
+            ..
+        } => format!(
+            "{node} hears node {}'s answer to read #{ctx}: it has voted up to {}.",
+            from.0,
+            at(*watermark)
         ),
         _ => format!("{node} receives a message."),
     };
@@ -383,6 +455,7 @@ pub(crate) fn describe(
     before: &NodeSnapshot,
     after: &NodeSnapshot,
     sent: &Sent,
+    system: QuorumSystem,
     members: usize,
 ) -> Vec<NarrationEvent> {
     let mut out = Vec::new();
@@ -408,19 +481,41 @@ pub(crate) fn describe(
                 NarrationKind::Election,
                 format!("{node} becomes a candidate at ballot {b}: it wants the whole log suffix."),
             ),
-            NodeRole::Leader => say(
-                NarrationKind::Leader,
-                format!(
-                    "{node} wins ballot {b}. A promise quorum answered, so no ballot below {b} \
-                     can decide anything any more, and {node} may run Phase 2 alone."
+            NodeRole::Leader => match after.origin {
+                LeadershipOrigin::Handoff { from } => say(
+                    NarrationKind::Leader,
+                    format!(
+                        "{node} takes ballot {b} over from node {}. It runs no Phase 1 of its \
+                         own: node {} already holds the promises for {b}, and it has told {node} \
+                         where the frontier is and what sits below it. That is the saving — a \
+                         leader change without a round trip.",
+                        from.0, from.0
+                    ),
                 ),
-            ),
+                LeadershipOrigin::Elected => say(
+                    NarrationKind::Leader,
+                    format!(
+                        "{node} wins ballot {b}. A promise quorum answered, so no ballot below \
+                         {b} can decide anything any more, and {node} may run Phase 2 alone."
+                    ),
+                ),
+            },
             NodeRole::Follower => say(
                 NarrationKind::Election,
-                format!(
-                    "{node} falls back to follower. Its rounds are volatile and go with the \
-                     leadership: nothing it had in flight is re-sent by anybody now."
-                ),
+                match before.origin {
+                    LeadershipOrigin::Handoff { .. } if before.role == Some(NodeRole::Leader) => {
+                        format!(
+                            "{node} gives up the leadership it was handed. It skipped Phase 1, \
+                             so it never recovered the slots below the frontier it inherited — \
+                             and it has waited long enough for them to arrive by ordinary \
+                             replication. An election does run Phase 1, and that is the fallback."
+                        )
+                    }
+                    _ => format!(
+                        "{node} falls back to follower. Its rounds are volatile and go with the \
+                         leadership: nothing it had in flight is re-sent by anybody now."
+                    ),
+                },
             ),
         });
     }
@@ -480,7 +575,7 @@ pub(crate) fn describe(
     }
 
     // ---- what it sent ------------------------------------------------------
-    out.extend(describe_sent(id, after, sent));
+    out.extend(describe_sent(id, after, sent, system));
 
     // ---- what it decided ---------------------------------------------------
     for (slot, command) in &after.chosen {
@@ -490,12 +585,13 @@ pub(crate) fn describe(
         let ballot = after.records.get(slot).map_or(after.ballot, |(b, _)| *b);
         let text = if let Some(votes) = before.votes.get(slot) {
             format!(
-                "Slot {} is chosen: {} of the {members} acceptors voted for {} at ballot {}. \
+                "Slot {} is chosen: {} of the {members} acceptors voted for {} at ballot {}. {} \
                  That is final — no later ballot can decide it differently.",
                 slot.0,
                 votes + 1,
                 show_command(command),
-                show_ballot(ballot)
+                show_ballot(ballot),
+                phase2_note(system, members)
             )
         } else {
             format!(
@@ -568,7 +664,12 @@ pub(crate) fn describe(
 
 /// The messages the batches put on the wire, grouped by what they are.
 #[allow(clippy::too_many_lines)]
-fn describe_sent(id: NodeId, after: &NodeSnapshot, sent: &Sent) -> Vec<NarrationEvent> {
+fn describe_sent(
+    id: NodeId,
+    after: &NodeSnapshot,
+    sent: &Sent,
+    system: QuorumSystem,
+) -> Vec<NarrationEvent> {
     let mut out = Vec::new();
     let node = who(id);
 
@@ -627,6 +728,27 @@ fn describe_sent(id: NodeId, after: &NodeSnapshot, sent: &Sent) -> Vec<Narration
         });
     for (slot, (ballot, command, fan_out)) in accepts {
         let noop = matches!(command, Command::Control(paros_core::Control::Noop));
+        if let Some(column) = system.column_of(slot) {
+            let voters: Vec<NodeId> = sent
+                .iter()
+                .filter(|(_, m)| matches!(m, Message::Accept { slot: at, .. } if *at == slot))
+                .map(|(to, _)| *to)
+                .collect();
+            out.push(say(
+                NarrationKind::Accept,
+                format!(
+                    "{node} proposes {} for slot {} at ballot {}, to column {column} — {}. The \
+                     column is not on the wire. It is slot {} modulo the number of columns, so \
+                     every node that re-proposes this slot derives the same column.",
+                    show_command(&command),
+                    slot.0,
+                    show_ballot(ballot),
+                    list_nodes(voters),
+                    slot.0
+                ),
+            ));
+            continue;
+        }
         out.push(say(
             NarrationKind::Accept,
             if noop {

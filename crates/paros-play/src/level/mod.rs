@@ -13,6 +13,7 @@
 pub mod act1;
 pub mod act2;
 pub mod act3;
+pub mod act4;
 mod script;
 
 use crate::action::{Action, ActionError, ActionKind};
@@ -117,10 +118,10 @@ impl WorldKind {
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`crate::action::ActionErrorCode`].
-    pub fn duplicate(&mut self, id: u64) -> Result<(), ActionError> {
+    pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
         match self {
-            WorldKind::Decree(world) => world.duplicate(id),
-            WorldKind::Log(world) => world.duplicate(id),
+            WorldKind::Decree(world) => world.duplicate(id, to),
+            WorldKind::Log(world) => world.duplicate(id, to),
         }
     }
 
@@ -282,6 +283,7 @@ pub fn levels() -> Vec<&'static Level> {
     let mut all = act1::levels();
     all.extend(act2::levels());
     all.extend(act3::levels());
+    all.extend(act4::levels());
     all
 }
 

@@ -6,7 +6,8 @@ import { describe, expect, it } from 'vitest';
 import { Game, decode, decodeLevels, isErrorView, type Engine } from './game';
 import { latestNarration, narration, narrationStream } from './narration';
 import fixture from './fixtures/game-view.json';
-import type { Action, GameView } from './types';
+import { clientOps } from './ui/history';
+import type { Action, GameView, MessageView } from './types';
 
 const FIXTURE = JSON.stringify(fixture);
 
@@ -25,7 +26,18 @@ describe('decoding what the engine hands back', () => {
     expect(typeof view.world.wire[0]?.id).toBe('number');
     for (const message of view.world.wire) {
       if (message.ballot !== null) expect(message.ballot).toMatch(/^\d+\.\d+$/);
+      expect(typeof message.reply).toBe('boolean');
     }
+    // The decree world carries its reach sets, and a bare role holds an
+    // attempt instead of a role.
+    expect(view.world.reach?.one).toEqual([1, 2, 3]);
+    expect(view.world.reach?.two).toEqual([1, 2, 3]);
+    const proposer = view.world.nodes.find((entry) => entry.flavour === 'proposer');
+    expect(proposer?.role).toBeNull();
+    expect(proposer?.attempt).toBe('phase1');
+    // The field guide is a bare book filename the frontend prefixes.
+    expect(view.level.field_guide).not.toContain('/');
+    expect(Array.isArray(view.level.unlocks)).toBe(true);
   });
 
   it('round-trips a view through JSON unchanged', () => {
@@ -170,8 +182,10 @@ describe.skipIf(!built)('the real engine (wasm)', () => {
     }
 
     expect(game.view.goal.status).toBe('reached');
-    // The engine renders a command with Rust's `Debug`, quotes and all.
-    expect(game.view.world.chosen?.value).toBe('"alpha"');
+    // A value is plain text in the view: no Rust quoting, and no control
+    // command, because a client wrote it.
+    expect(game.view.world.chosen?.value).toBe('alpha');
+    expect(game.view.world.chosen?.control).toBeNull();
     expect(game.view.mistakes).toBe(0);
   });
 
@@ -191,5 +205,73 @@ describe.skipIf(!built)('the real engine (wasm)', () => {
     game.reset();
     expect(game.view.log).toHaveLength(0);
     expect(game.view.world.wire).toHaveLength(0);
+  });
+
+  /**
+   * Deliver every message the filter keeps, lowest id first, until nothing is
+   * left — the frontend's copy of the engine's own `settle`. A level that
+   * answers every role itself raises no prompt, so this loop needs none.
+   */
+  function settle(game: Game, keep: (message: MessageView) => boolean = () => true): void {
+    for (let step = 0; step < 512; step += 1) {
+      expect(game.view.prompt, 'this level answers every role itself').toBeNull();
+      const ids = game.view.world.wire
+        .filter(keep)
+        .map((message) => message.id)
+        .sort((a, b) => a - b);
+      const next = ids[0];
+      if (next === undefined) return;
+      expect(game.act({ kind: 'deliver', id: next }), game.lastError?.error).toBe(true);
+    }
+    throw new Error('the world did not settle');
+  }
+
+  it('plays act3/truncate-by-consensus to its goal', async () => {
+    const game = await engine('act3/truncate-by-consensus');
+    expect(game.view.level.allowed_actions).toContain('compact');
+    expect(game.view.world.clients).toHaveLength(1);
+    const client = game.view.world.clients[0]?.id ?? 0;
+
+    expect(game.act({ kind: 'start_election', node: 0 })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'alpha', column: null })).toBe(true);
+    expect(game.act({ kind: 'propose', node: 0, client, value: 'bravo', column: null })).toBe(true);
+    settle(game);
+
+    // No quorum holds a decided snapshot point yet, so the first request is
+    // refused — and the refusal seeds the point the retry needs.
+    expect(game.act({ kind: 'compact', node: 0, up_to: 8 })).toBe(true);
+    settle(game);
+    expect(game.act({ kind: 'compact', node: 0, up_to: 8 })).toBe(true);
+    settle(game);
+
+    expect(game.view.goal.status, game.view.goal.detail).toBe('reached');
+
+    // One cluster-wide floor, and every node computed it by applying the same
+    // decided command.
+    const floors = new Set(game.view.world.nodes.map((node) => node.floor));
+    expect(floors.size).toBe(1);
+    expect([...floors][0]).toBeGreaterThan(0);
+
+    // The control commands the act is about reach the view as control
+    // commands, not as opaque client values.
+    const controls = new Set(
+      game.view.world.nodes.flatMap((node) =>
+        node.accepted.map((slot) => slot.control).filter((control) => control !== null),
+      ),
+    );
+    expect(controls).toContain('snap');
+    expect([...controls].every((control) => ['noop', 'truncate', 'snap'].includes(control))).toBe(
+      true,
+    );
+    expect(game.view.log.some((entry) => entry.kind === 'compact')).toBe(true);
+    const said = game.view.log.flatMap((entry) => entry.narration.map((line) => line.kind));
+    expect(said).toContain('truncate');
+
+    // The client's writes are acknowledged, which is what the history panel
+    // shows the player.
+    const rows = clientOps(game.view);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.status === 'acked')).toBe(true);
   });
 });

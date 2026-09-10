@@ -5,7 +5,7 @@
 // `crash` stops rendering a Crash button, and a level the engine adds
 // tomorrow gets its controls for free.
 
-import type { Action, ActionKind, GameView, NodeView, Phase, Seam } from '../types';
+import type { Action, ActionKind, ClientView, GameView, NodeView, Phase, Seam } from '../types';
 import { h } from '../render/dom';
 
 type Dispatch = (action: Action) => void;
@@ -14,12 +14,22 @@ type Dispatch = (action: Action) => void;
 export interface ControlState {
   /** The value each proposer's next ballot carries. */
   ballotValues: Map<number, string>;
-  /** The command the client's next proposal carries. */
+  /** The command the client's next write carries. */
   proposeValue: string;
-  /** The node the client asks, or `null` for "whoever leads". */
+  /** The client that writes, or `null` for the first client. */
+  proposeClient: number | null;
+  /** The node the client asks, or `null` for the leader. */
   proposeNode: number | null;
-  /** The acceptors each phase reaches, in the quorum-intersection level. */
-  reach: Map<Phase, Set<number>>;
+  /** The client that reads, or `null` for the first client. */
+  readClient: number | null;
+  /** The node the read goes to, or `null` for the leader. */
+  readNode: number | null;
+  /** The node the compaction request goes to, or `null` for the leader. */
+  compactNode: number | null;
+  /** The last slot the client permits dropping, or `null` for the default. */
+  compactUpTo: string | null;
+  /** The node a retry goes to, or `null` for the leader. */
+  retryNode: number | null;
   /** The election timeout box, per node. */
   timeouts: Map<number, string>;
 }
@@ -29,8 +39,13 @@ export function newControlState(): ControlState {
   return {
     ballotValues: new Map(),
     proposeValue: 'x=1',
+    proposeClient: null,
     proposeNode: null,
-    reach: new Map(),
+    readClient: null,
+    readNode: null,
+    compactNode: null,
+    compactUpTo: null,
+    retryNode: null,
     timeouts: new Map(),
   };
 }
@@ -67,6 +82,52 @@ function allowed(view: GameView, kind: ActionKind): boolean {
   return view.level.allowed_actions.includes(kind);
 }
 
+/** The node a client request goes to first: the leader, or anything alive. */
+function defaultTarget(view: GameView, chosen: number | null): number {
+  if (chosen !== null) return chosen;
+  const leader = view.world.nodes.find((node) => node.role === 'leader');
+  return leader?.id ?? view.world.nodes.find((node) => node.alive)?.id ?? 0;
+}
+
+/** A select of every node, with the leader marked. */
+function nodeSelect(
+  key: string,
+  nodes: readonly NodeView[],
+  target: number,
+  onChange: (id: number) => void,
+): HTMLSelectElement {
+  const select = h('select', { class: 'node-select', 'data-focus-key': key });
+  for (const node of nodes) {
+    select.append(
+      h(
+        'option',
+        { value: node.id, selected: node.id === target },
+        `node ${node.id}${node.role === 'leader' ? ' (leader)' : ''}${node.alive ? '' : ' (down)'}`,
+      ),
+    );
+  }
+  select.addEventListener('change', () => onChange(Number(select.value)));
+  return select;
+}
+
+/** A select of every client. One client needs no select. */
+function clientSelect(
+  key: string,
+  clients: readonly ClientView[],
+  target: number,
+  onChange: (id: number) => void,
+): HTMLSelectElement | null {
+  if (clients.length < 2) return null;
+  const select = h('select', { class: 'client-select', 'data-focus-key': key });
+  for (const client of clients) {
+    select.append(
+      h('option', { value: client.id, selected: client.id === target }, `client ${client.id}`),
+    );
+  }
+  select.addEventListener('change', () => onChange(Number(select.value)));
+  return select;
+}
+
 // ---- the single-decree world ------------------------------------------------
 
 function ballotForms(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
@@ -93,30 +154,44 @@ function ballotForms(view: GameView, state: ControlState, dispatch: Dispatch): H
         { class: 'control-row' },
         h('span', { class: 'control-label' }, `proposer ${proposer.id}`),
         input,
-        action('Open', `Run Phase 1 at a fresh ballot from proposer ${proposer.id}`, submit),
+        action('Open', `Run Phase 1 at a new ballot from proposer ${proposer.id}`, submit),
       );
     }),
   );
 }
 
-function reachPicker(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
+/**
+ * The reach picker.
+ *
+ * The boxes are drawn from `WorldView.reach` — the sets that are in force in
+ * the engine — so an undo or a reset moves them back with the world. The
+ * frontend keeps no copy.
+ */
+function reachPicker(view: GameView, dispatch: Dispatch): HTMLElement | null {
   if (!allowed(view, 'set_reach')) return null;
   const acceptors = view.world.nodes.filter((node) => node.flavour === 'acceptor');
-  const phases: { phase: Phase; label: string; hint: string }[] = [
-    { phase: 'one', label: 'Phase 1 reaches', hint: 'which acceptors a Prepare is sent to' },
-    { phase: 'two', label: 'Phase 2 reaches', hint: 'which acceptors an Accept is sent to' },
+  const all = acceptors.map((node) => node.id);
+  const reach = view.world.reach;
+  const phases: { phase: Phase; label: string; hint: string; nodes: number[] }[] = [
+    {
+      phase: 'one',
+      label: 'Phase 1 reaches',
+      hint: 'The acceptors that receive a Prepare.',
+      nodes: reach?.one ?? all,
+    },
+    {
+      phase: 'two',
+      label: 'Phase 2 reaches',
+      hint: 'The acceptors that receive an Accept.',
+      nodes: reach?.two ?? all,
+    },
   ];
   return h(
     'section',
     { class: 'control-block' },
     h('h3', {}, 'Reach'),
-    ...phases.map(({ phase, label, hint }) => {
-      let chosen = state.reach.get(phase);
-      if (!chosen) {
-        chosen = new Set(acceptors.map((node) => node.id));
-        state.reach.set(phase, chosen);
-      }
-      const set = chosen;
+    ...phases.map(({ phase, label, hint, nodes }) => {
+      const set = new Set(nodes);
       return h(
         'div',
         { class: 'control-row reach-row' },
@@ -129,9 +204,10 @@ function reachPicker(view: GameView, state: ControlState, dispatch: Dispatch): H
             checked: set.has(acceptor.id),
           });
           box.addEventListener('change', () => {
-            if (box.checked) set.add(acceptor.id);
-            else set.delete(acceptor.id);
-            dispatch({ kind: 'set_reach', phase, nodes: [...set].sort((a, b) => a - b) });
+            const next = new Set(set);
+            if (box.checked) next.add(acceptor.id);
+            else next.delete(acceptor.id);
+            dispatch({ kind: 'set_reach', phase, nodes: [...next].sort((a, b) => a - b) });
           });
           return h(
             'label',
@@ -147,27 +223,17 @@ function reachPicker(view: GameView, state: ControlState, dispatch: Dispatch): H
 
 // ---- the replicated-log world -----------------------------------------------
 
-function proposeForm(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
+function proposeRow(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
   if (!allowed(view, 'propose')) return null;
   const clients = view.world.clients;
-  const client = clients[0]?.id ?? 0;
-  const leader = view.world.nodes.find((node) => node.role === 'leader');
-  const target =
-    state.proposeNode ?? leader?.id ?? view.world.nodes.find((node) => node.alive)?.id ?? 0;
-
-  const select = h('select', { class: 'node-select', 'data-focus-key': 'propose-node' });
-  for (const node of view.world.nodes) {
-    const option = h(
-      'option',
-      { value: node.id, selected: node.id === target },
-      `node ${node.id}${node.role === 'leader' ? ' (leader)' : ''}`,
-    );
-    select.append(option);
-  }
-  select.addEventListener('change', () => {
-    state.proposeNode = Number(select.value);
+  const client = state.proposeClient ?? clients[0]?.id ?? 0;
+  const target = defaultTarget(view, state.proposeNode);
+  const select = nodeSelect('propose-node', view.world.nodes, target, (id) => {
+    state.proposeNode = id;
   });
-
+  const who = clientSelect('propose-client', clients, client, (id) => {
+    state.proposeClient = id;
+  });
   const input = textInput('propose-value', state.proposeValue, 'the command', (next) => {
     state.proposeValue = next;
   });
@@ -175,27 +241,153 @@ function proposeForm(view: GameView, state: ControlState, dispatch: Dispatch): H
     dispatch({
       kind: 'propose',
       node: Number(select.value),
-      client,
+      client: who ? Number(who.value) : client,
       value: input.value.trim() || 'x=1',
+      // The engine derives the column of a grid deployment; a level that
+      // makes the player pick one has its own control.
+      column: null,
     });
   };
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') submit();
   });
-
   return h(
-    'section',
-    { class: 'control-block' },
-    h('h3', {}, 'The client'),
-    h(
-      'div',
-      { class: 'control-row' },
-      h('span', { class: 'control-label' }, `client ${client} asks`),
-      select,
-      input,
-      action('Propose', 'Ask this node to get the command chosen', submit),
+    'div',
+    { class: 'control-row' },
+    h('span', { class: 'control-label' }, who ? 'a write from' : `client ${client} writes`),
+    who,
+    who ? h('span', { class: 'control-hint' }, 'to') : null,
+    select,
+    input,
+    action('Write', 'The client asks this node to get the command chosen.', submit),
+  );
+}
+
+function readRow(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
+  if (!allowed(view, 'read_index')) return null;
+  const clients = view.world.clients;
+  const client = state.readClient ?? clients[0]?.id ?? 0;
+  const target = defaultTarget(view, state.readNode);
+  const select = nodeSelect('read-node', view.world.nodes, target, (id) => {
+    state.readNode = id;
+  });
+  const who = clientSelect('read-client', clients, client, (id) => {
+    state.readClient = id;
+  });
+  return h(
+    'div',
+    { class: 'control-row' },
+    h('span', { class: 'control-label' }, who ? 'a read from' : `client ${client} reads`),
+    who,
+    who ? h('span', { class: 'control-hint' }, 'to') : null,
+    select,
+    action(
+      'Read',
+      'The client asks this node for a read. The node must prove that it is the leader now.',
+      () => {
+        dispatch({
+          kind: 'read_index',
+          node: Number(select.value),
+          client: who ? Number(who.value) : (clients[0]?.id ?? null),
+        });
+      },
     ),
   );
+}
+
+function compactRow(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
+  if (!allowed(view, 'compact')) return null;
+  const target = defaultTarget(view, state.compactNode);
+  const select = nodeSelect('compact-node', view.world.nodes, target, (id) => {
+    state.compactNode = id;
+  });
+  const highest = view.world.nodes.find((node) => node.id === target)?.chosen_index ?? 0;
+  const input = textInput(
+    'compact-up-to',
+    state.compactUpTo ?? String(highest),
+    'the last slot',
+    (next) => {
+      state.compactUpTo = next;
+    },
+  );
+  input.classList.add('tiny');
+  const submit = (): void => {
+    const upTo = Number.parseInt(input.value, 10);
+    if (!Number.isFinite(upTo) || upTo < 0) return;
+    dispatch({ kind: 'compact', node: Number(select.value), up_to: upTo });
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+  return h(
+    'div',
+    { class: 'control-row' },
+    h('span', { class: 'control-label' }, 'the client compacts'),
+    select,
+    h('span', { class: 'control-hint' }, 'up to slot'),
+    input,
+    action(
+      'Compact',
+      'The client asks the leader to drop the log prefix. The leader must hold a snapshot point first.',
+      submit,
+    ),
+  );
+}
+
+function retryRows(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement[] {
+  if (!allowed(view, 'retry')) return [];
+  const target = defaultTarget(view, state.retryNode);
+  const rows: HTMLElement[] = [];
+  for (const client of view.world.clients) {
+    for (const proposal of client.proposals) {
+      const where =
+        proposal.acked === true
+          ? `acknowledged at slot ${proposal.slot ?? '?'}`
+          : proposal.slot !== null
+            ? `at slot ${proposal.slot}`
+            : 'not at a slot yet';
+      const select = nodeSelect(`retry-node-${client.id}-${proposal.seq}`, view.world.nodes, target, (id) => {
+        state.retryNode = id;
+      });
+      rows.push(
+        h(
+          'div',
+          { class: 'control-row retry-row' },
+          h(
+            'span',
+            { class: 'control-label' },
+            `client ${client.id} · write ${proposal.seq} ${proposal.value}`,
+          ),
+          h('span', { class: 'control-hint' }, where),
+          select,
+          action(
+            'Retry',
+            'The client asks again for the same write. The node must answer from its two dedup tables.',
+            () => {
+              dispatch({
+                kind: 'retry',
+                node: Number(select.value),
+                client: client.id,
+                seq: proposal.seq,
+              });
+            },
+          ),
+        ),
+      );
+    }
+  }
+  return rows;
+}
+
+function clientControls(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
+  const rows = [
+    proposeRow(view, state, dispatch),
+    readRow(view, state, dispatch),
+    compactRow(view, state, dispatch),
+    ...retryRows(view, state, dispatch),
+  ].filter((row): row is HTMLElement => row !== null);
+  if (rows.length === 0) return null;
+  return h('section', { class: 'control-block' }, h('h3', {}, 'The clients'), ...rows);
 }
 
 function seamButtons(node: NodeView, dispatch: Dispatch): HTMLElement[] {
@@ -203,12 +395,13 @@ function seamButtons(node: NodeView, dispatch: Dispatch): HTMLElement[] {
     {
       seam: 'before_sync',
       label: 'Crash before sync',
-      title: 'Cut the next batch before its writes are durable: nothing persists, nothing is sent',
+      title:
+        'Cut the next batch before its writes are durable. Nothing persists, and nothing goes out.',
     },
     {
       seam: 'after_sync_before_send',
       label: 'Crash after sync',
-      title: 'Cut the next batch after its writes are durable but before its messages go out',
+      title: 'Cut the next batch after its writes are durable, but before its messages go out.',
     },
   ];
   return seams.map(({ seam, label, title }) =>
@@ -225,7 +418,6 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
     'restart',
     'resend_pending',
     'step_down',
-    'read_index',
     'set_election_timeout',
   ];
   if (!kinds.some((kind) => allowed(view, kind)) && !allowed(view, 'tick_all')) return null;
@@ -239,7 +431,7 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
       ? h(
           'div',
           { class: 'control-row' },
-          action('Tick every node', 'Advance every node’s clock by one tick', () =>
+          action('Tick every node', 'Move the clock of every node forward one tick.', () =>
             dispatch({ kind: 'tick_all' }),
           ),
         )
@@ -247,40 +439,35 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
     ...nodes.map((node) => {
       const buttons: (HTMLElement | null)[] = [
         allowed(view, 'tick') && node.alive
-          ? action('Tick', 'Advance this node’s clock by one tick', () =>
+          ? action('Tick', 'Move the clock of this node forward one tick.', () =>
               dispatch({ kind: 'tick', node: node.id }),
             )
           : null,
         allowed(view, 'start_election') && node.alive
-          ? action('Elect', 'Campaign at a fresh, higher ballot', () =>
+          ? action('Elect', 'Campaign at a new, higher ballot.', () =>
               dispatch({ kind: 'start_election', node: node.id }),
             )
           : null,
-        allowed(view, 'read_index') && node.alive
-          ? action('Read', 'A client read: prove leadership now, then serve', () =>
-              dispatch({ kind: 'read_index', node: node.id }),
-            )
-          : null,
         allowed(view, 'resend_pending') && node.alive
-          ? action('Resend', 'Re-send every Accept still waiting for its quorum', () =>
+          ? action('Resend', 'Send every Accept that still waits for its quorum again.', () =>
               dispatch({ kind: 'resend_pending', node: node.id }),
             )
           : null,
         allowed(view, 'step_down') && node.alive
-          ? action('Step down', 'Resign leadership', () =>
+          ? action('Step down', 'The node gives up the leadership.', () =>
               dispatch({ kind: 'step_down', node: node.id }),
             )
           : null,
         allowed(view, 'crash') && node.alive
           ? action(
               'Crash',
-              'Lose the running node; its disk survives',
+              'Stop the node. Its disk stays.',
               () => dispatch({ kind: 'crash', node: node.id }),
               'control-button danger',
             )
           : null,
         allowed(view, 'restart') && !node.alive
-          ? action('Restart', 'Boot it again from its disk', () =>
+          ? action('Restart', 'Start the node again from its disk.', () =>
               dispatch({ kind: 'restart', node: node.id }),
             )
           : null,
@@ -297,7 +484,7 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
               'span',
               { class: 'timeout-box' },
               input,
-              action('Set timeout', 'How many ticks before this node campaigns', () => {
+              action('Set timeout', 'The number of ticks before this node campaigns.', () => {
                 const ticks = Number.parseInt(input.value, 10);
                 if (Number.isFinite(ticks) && ticks >= 0) {
                   dispatch({ kind: 'set_election_timeout', node: node.id, ticks });
@@ -325,8 +512,8 @@ export function renderControls(
 ): HTMLElement {
   const blocks = [
     ballotForms(view, state, dispatch),
-    reachPicker(view, state, dispatch),
-    proposeForm(view, state, dispatch),
+    reachPicker(view, dispatch),
+    clientControls(view, state, dispatch),
     nodeControls(view, state, dispatch),
   ].filter((block): block is HTMLElement => block !== null);
   return h('section', { class: 'controls' }, ...blocks);

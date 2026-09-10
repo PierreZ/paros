@@ -79,6 +79,11 @@ pub enum Action {
     Duplicate {
         /// The in-flight message's id.
         id: u64,
+        /// Address the copy to a **different** node: a misrouted message,
+        /// which is a thing networks do and which every rule in the protocol
+        /// is written to survive. Omitted (or `null`) keeps the addressee.
+        #[serde(default)]
+        to: Option<u64>,
     },
     /// Advance one node's logical clock by one tick.
     Tick {
@@ -113,6 +118,11 @@ pub enum Action {
         client: u64,
         /// The command text; the engine turns it into opaque bytes.
         value: String,
+        /// Which column of an acceptor grid this proposal's Accept goes to.
+        /// Omitted (or `null`) lets the configuration derive it, which is
+        /// what every deployment that is not a grid does.
+        #[serde(default)]
+        column: Option<u64>,
     },
     /// Force `node`'s election timeout to fire on the spot.
     StartElection {
@@ -135,6 +145,39 @@ pub enum Action {
         /// what the field meant before there were two of them.
         #[serde(default)]
         client: Option<u64>,
+    },
+    /// A client asks `node` for a **leaderless** read: `node` asks a Phase-1
+    /// quorum for their vote watermarks and serves the read once its own
+    /// applied prefix covers the highest of them. Any node may answer one.
+    QuorumRead {
+        /// The node the client asks. It need not be the leader.
+        node: u64,
+        /// Which client is reading. Omitted (or `null`) means the level's
+        /// first client.
+        #[serde(default)]
+        client: Option<u64>,
+    },
+    /// A leader hands its Phase-2 authority to a peer, under the same ballot
+    /// and with no Phase 1 of its own.
+    Relinquish {
+        /// The leader that gives the authority up.
+        node: u64,
+        /// The peer that is offered it.
+        to: u64,
+    },
+    /// Rot one accepted record on `node`'s disk: its value is lost and its
+    /// identity survives. The node reads it back at its next boot.
+    Corrupt {
+        /// The node whose disk is damaged.
+        node: u64,
+        /// The slot whose record loses its value.
+        slot: u64,
+    },
+    /// Erase `node`'s disk. What survives is the operator's memory of having
+    /// provisioned that identity, which is what makes the refusal possible.
+    Wipe {
+        /// The node whose disk is erased.
+        node: u64,
     },
     /// A client asks `node` again for a write it already sent — same client,
     /// same sequence number, same bytes.
@@ -222,6 +265,14 @@ pub enum ActionKind {
     SetElectionTimeout,
     /// [`Action::ReadIndex`].
     ReadIndex,
+    /// [`Action::QuorumRead`].
+    QuorumRead,
+    /// [`Action::Relinquish`].
+    Relinquish,
+    /// [`Action::Corrupt`].
+    Corrupt,
+    /// [`Action::Wipe`].
+    Wipe,
     /// [`Action::Retry`].
     Retry,
     /// [`Action::Compact`].
@@ -257,6 +308,10 @@ impl Action {
             Action::StartElection { .. } => ActionKind::StartElection,
             Action::SetElectionTimeout { .. } => ActionKind::SetElectionTimeout,
             Action::ReadIndex { .. } => ActionKind::ReadIndex,
+            Action::QuorumRead { .. } => ActionKind::QuorumRead,
+            Action::Relinquish { .. } => ActionKind::Relinquish,
+            Action::Corrupt { .. } => ActionKind::Corrupt,
+            Action::Wipe { .. } => ActionKind::Wipe,
             Action::Retry { .. } => ActionKind::Retry,
             Action::Compact { .. } => ActionKind::Compact,
             Action::ResendPending { .. } => ActionKind::ResendPending,
@@ -274,7 +329,10 @@ impl Action {
         match self {
             Action::Deliver { id } => format!("deliver #{id}"),
             Action::Drop { id } => format!("drop #{id}"),
-            Action::Duplicate { id } => format!("duplicate #{id}"),
+            Action::Duplicate { id, to } => match to {
+                Some(to) => format!("duplicate #{id} to node {to}"),
+                None => format!("duplicate #{id}"),
+            },
             Action::Tick { node } => format!("tick node {node}"),
             Action::TickAll => "tick every node".to_string(),
             Action::Crash { node } => format!("crash node {node}"),
@@ -286,7 +344,13 @@ impl Action {
                 node,
                 client,
                 value,
-            } => format!("client {client} proposes {value:?} at node {node}"),
+                column,
+            } => match column {
+                Some(column) => {
+                    format!("client {client} proposes {value:?} at node {node}, to column {column}")
+                }
+                None => format!("client {client} proposes {value:?} at node {node}"),
+            },
             Action::StartElection { node } => format!("node {node} campaigns"),
             Action::SetElectionTimeout { node, ticks } => {
                 format!("node {node} election timeout = {ticks}")
@@ -295,6 +359,17 @@ impl Action {
                 Some(client) => format!("client {client} reads at node {node}"),
                 None => format!("read at node {node}"),
             },
+            Action::QuorumRead { node, client } => match client {
+                Some(client) => format!("client {client} asks node {node} for a quorum read"),
+                None => format!("quorum read at node {node}"),
+            },
+            Action::Relinquish { node, to } => {
+                format!("node {node} hands its leadership to node {to}")
+            }
+            Action::Corrupt { node, slot } => {
+                format!("rot node {node}'s record for slot {slot}")
+            }
+            Action::Wipe { node } => format!("wipe node {node}'s disk"),
             Action::Retry { node, client, seq } => {
                 format!("client {client} retries write #{seq} at node {node}")
             }
@@ -352,6 +427,14 @@ pub enum ActionErrorCode {
     UnknownChoice,
     /// The node is not the leader.
     NotLeader,
+    /// The action names a column the configuration in force does not have.
+    BadColumn,
+    /// The node is not in a state a cooperative handoff may leave from, or
+    /// the peer named cannot take one.
+    HandoffRefused,
+    /// The store was provisioned once and no longer carries its format
+    /// marker: the node's promise is gone, and it may never rejoin.
+    Amnesia,
     /// The level pins this automation flag off.
     PinnedOff,
     /// The automation flag is not unlocked in this level.

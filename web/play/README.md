@@ -38,7 +38,7 @@ is `nix develop --command scripts/build-play.sh`, after `mdbook build`.
 | `src/narration.ts` | narration: the last move's lines (the caption) and the log's whole stream |
 | `src/types.ts` | re-exports of the generated contract |
 | `src/render/` | the SVG stage: `layout.ts` is the geometry, `stage.ts` draws |
-| `src/ui/` | the panel, the prompt card, the wire list, the controls, the level map |
+| `src/ui/` | the panel, the prompt card, the wire list, the controls, the client history, the level map |
 | `src/generated/` | **the contract — never hand-edited** (see below) |
 | `src/wasm/` | wasm-bindgen output, gitignored, produced by the build script |
 | `src/fixtures/` | one captured `GameView`, for the tests |
@@ -50,10 +50,26 @@ derives in the Rust crate, is committed, and CI fails on a diff. **Never edit a
 file in it.** A field the UI wants is a change to `crates/paros-play/src/view.rs`
 followed by re-running that test.
 
-Two conventions the generated types do not spell out: every number is a
-`number` (never a `bigint`), and a ballot is always the string `"round.node"`.
-A command's text arrives rendered with Rust's `Debug`, quotes included —
-`render/stage.ts` exports `displayValue` to strip them for display.
+Three conventions the generated types do not spell out: every number is a
+`number` (never a `bigint`), a ballot is always the string `"round.node"`, and
+a command's text is plain — the engine strips Rust's quoting before it sends
+it. A slot that holds one of paros's own control commands says so in
+`SlotView.control` (`noop`, `truncate`, `snap`), and the stage prints that name
+in the box in place of the text.
+
+## What the engine says, and the UI must not work out
+
+Four facts arrive as fields, and the frontend must read them there:
+
+- **A request or a reply** is `MessageView.reply`. Do not read the variant's
+  name.
+- **A control command** is `SlotView.control` / `ChosenView.control`. A slot
+  with `null` there holds opaque client bytes.
+- **The reach sets** of the single-decree world are `WorldView.reach`, so the
+  checkboxes stay correct through an undo and a reset. The frontend keeps no
+  copy of them.
+- **A node's role** is `NodeView.role`, and a single-decree proposer holds
+  `NodeView.attempt` instead.
 
 ## What the UI must not decide
 
@@ -66,3 +82,10 @@ A command's text arrives rendered with Rust's `Debug`, quotes included —
 - **The teaching order** is the plan's education rule: the briefing, the
   narration and the prompt are the page; `paros-core` symbol names live in the
   "In the code" footnote at the bottom, beside the field-guide link.
+- **The reward** is `LevelView.unlocks`, which the panel prints as the
+  automation the player gets when the level is passed.
+
+All the text in this directory follows ASD-STE100: short active sentences,
+present tense, one instruction per sentence, no idioms, and `must` for an
+obligation. The `field_guide` field is a bare book filename, and the app is
+served beside the book, so a link to it is `../` plus that name.

@@ -35,8 +35,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Control, Message, NodeId,
-    ProposeResult, ReadIndexResult, ReadState, Slot, Value,
+    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Control, HANDOFF_BATCH,
+    LeadershipOrigin, Message, NodeId, ProposeResult, QuorumSystem, ReadIndexResult, ReadState,
+    Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Seam};
@@ -75,10 +76,19 @@ pub struct InFlight {
 }
 
 impl InFlight {
-    /// Render it for the wire list and the stage.
+    /// Render it for the wire list and the stage, under the quorum system the
+    /// **sender** runs: that is what decides which column an `Accept` was
+    /// addressed to, and a message carries no column of its own.
     #[must_use]
-    pub fn view(&self) -> MessageView {
-        message_view(self.id, self.from.0, self.to.0, self.sent_at, &self.message)
+    pub fn view(&self, system: QuorumSystem) -> MessageView {
+        message_view(
+            self.id,
+            self.from.0,
+            self.to.0,
+            self.sent_at,
+            &self.message,
+            system,
+        )
     }
 }
 
@@ -125,6 +135,10 @@ struct PendingRead {
     /// tally, for the prompt's summary. The *judgement* always comes from a
     /// clone of the real `Proposer`.
     acks: BTreeSet<NodeId>,
+    /// Whether this is a **leaderless** read: a Phase-1 quorum's vote
+    /// watermarks rather than a leader's beat acks. The two are served through
+    /// the same `ReadState`, and only the client knows which it asked for.
+    leaderless: bool,
     served: bool,
     /// When the client asked, on the history's own monotone counter.
     issued: u64,
@@ -202,6 +216,30 @@ pub struct RetryOutcome {
     pub answer: RetryAnswer,
 }
 
+/// One cooperative handoff that went through: what the successor was handed.
+///
+/// A **refused** handoff is not here. It is an [`ActionError`] with the reason
+/// in it, because the refusal is about the state the leader is in, and the
+/// state is what a goal reads back (see [`World::handoff_refusal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandoffOutcome {
+    /// The leader that gave the authority up.
+    pub from: NodeId,
+    /// The peer that was offered it.
+    pub to: NodeId,
+    /// The ballot that travelled — the successor runs Phase 2 under this very
+    /// ballot, with no Phase 1 of its own.
+    pub ballot: Ballot,
+    /// The allocator frontier that travelled with it: the first slot the
+    /// successor hands out, and the fence its reads sit behind until its own
+    /// prefix reaches it.
+    pub next_slot: Slot,
+    /// Tail slots handed over as already chosen.
+    pub decided: usize,
+    /// Tail slots handed over as still-open Phase-2 rounds.
+    pub pending: usize,
+}
+
 /// One client-visible operation, as the linearizability judge reads it.
 ///
 /// The client is the only party that knows its own program order, so this is
@@ -273,6 +311,15 @@ pub struct World {
     compacts: Vec<CompactOutcome>,
     /// Every client retry and what the leader answered it with.
     retries: Vec<RetryOutcome>,
+    /// Every cooperative handoff that went through, in order.
+    handoffs: Vec<HandoffOutcome>,
+    /// How many `Heartbeat`s any leader has broadcast. A leaderless read is
+    /// judged partly by this staying at zero, so it is counted where the beat
+    /// is queued rather than looked for on a wire it has already left.
+    beats_broadcast: u64,
+    /// Every boot the engine refused because the node's disk was erased:
+    /// `(node, the promise it last made)`.
+    refused_boots: Vec<(NodeId, Ballot)>,
     /// The history's own clock: a monotone counter stamped on every client
     /// operation as it is issued and again as it completes. It is **not** the
     /// tick clock — a level may never tick at all — and it never goes
@@ -346,6 +393,9 @@ impl World {
             recovery_plan: BTreeMap::new(),
             compacts: Vec::new(),
             retries: Vec::new(),
+            handoffs: Vec::new(),
+            beats_broadcast: 0,
+            refused_boots: Vec::new(),
             next_event: 1,
             narration: Vec::new(),
         };
@@ -441,6 +491,7 @@ impl World {
         let members = self
             .node(id)
             .map_or_else(|| self.pool.len(), |node| node.acceptors().members().len());
+        let system = self.system(id);
         let out = f(self);
         if self.prompt.is_some() {
             self.deferred = Some(Deferred {
@@ -456,7 +507,7 @@ impl World {
             .filter(|entry| entry.from == id)
             .map(|entry| (entry.to, entry.message.clone()))
             .collect();
-        let events = narration::describe(id, &before, &after, &sent, members);
+        let events = narration::describe(id, &before, &after, &sent, system, members);
         self.narration.extend(events);
         out
     }
@@ -485,6 +536,27 @@ impl World {
     #[must_use]
     pub fn pool(&self) -> &[NodeId] {
         &self.pool
+    }
+
+    /// The quorum system in force at `id`: what the node's own configuration
+    /// says, or — for a node that is not running — what its disk says. Every
+    /// quorum question in the world goes through a configuration, never
+    /// through a count.
+    #[must_use]
+    pub fn system(&self, id: NodeId) -> QuorumSystem {
+        let Some(index) = self.index_of(id) else {
+            return QuorumSystem::Majority;
+        };
+        self.nodes[index].as_ref().map_or_else(
+            || self.disks[index].config().quorum_system,
+            |node| node.acceptors().quorum_system(),
+        )
+    }
+
+    /// Render one in-flight message under its sender's quorum system.
+    #[must_use]
+    pub fn render(&self, entry: &InFlight) -> MessageView {
+        entry.view(self.system(entry.from))
     }
 
     /// The live node with `id`, if it is running.
@@ -536,6 +608,12 @@ impl World {
     /// `None` is the invariant holding. This is the game's own bookkeeping, not
     /// the core's: the core cannot regress a promise, and the point of the
     /// restart levels is to watch that hold across a crash the player chose.
+    ///
+    /// An **erased** disk is not counted, and that is the whole point of the
+    /// wipe: its promise really is below the one it made, which is exactly why
+    /// the node may never come back. The invariant this reports on is about
+    /// nodes that *do* come back, and the engine's boot refusal is what keeps
+    /// a wiped one out of that set.
     #[must_use]
     pub fn promise_regressed(&self) -> Option<NodeId> {
         self.pool
@@ -543,7 +621,11 @@ impl World {
             .copied()
             .enumerate()
             .find_map(|(index, id)| {
-                let durable = self.disks[index].hard_state().max_promised_ballot;
+                let disk = &self.disks[index];
+                if disk.provisioned() && !disk.is_formatted() {
+                    return None;
+                }
+                let durable = disk.hard_state().max_promised_ballot;
                 (durable < self.promise_watermarks[index]).then_some(id)
             })
     }
@@ -737,6 +819,123 @@ impl World {
         &self.retries
     }
 
+    /// Every cooperative handoff that went through, in order.
+    #[must_use]
+    pub fn handoffs(&self) -> &[HandoffOutcome] {
+        &self.handoffs
+    }
+
+    /// How many beats any leader has broadcast since the level began.
+    #[must_use]
+    pub fn beats_broadcast(&self) -> u64 {
+        self.beats_broadcast
+    }
+
+    /// Every boot the engine refused because the node's disk was erased.
+    #[must_use]
+    pub fn refused_boots(&self) -> &[(NodeId, Ballot)] {
+        &self.refused_boots
+    }
+
+    /// The records `id` holds whose value it has lost, with the ballot each
+    /// was accepted at — what its next `Promise` reports as *faulty*, and
+    /// never as "nothing accepted here".
+    #[must_use]
+    pub fn faulty_records(&self, id: NodeId) -> Vec<(Slot, Ballot)> {
+        let Some(index) = self.index_of(id) else {
+            return Vec::new();
+        };
+        self.nodes[index].as_ref().map_or_else(
+            || {
+                self.disks[index]
+                    .faulty()
+                    .iter()
+                    .map(|(slot, ballot)| (*slot, *ballot))
+                    .collect()
+            },
+            |node| {
+                node.acceptor()
+                    .faulty()
+                    .iter()
+                    .map(|(slot, ballot)| (*slot, *ballot))
+                    .collect()
+            },
+        )
+    }
+
+    /// How many slots `id`'s repair probe is still blocked on.
+    #[must_use]
+    pub fn blocked_repairs(&self, id: NodeId) -> usize {
+        self.node(id).map_or(0, ColocatedNode::blocked_repairs)
+    }
+
+    /// Why `id` may not hand its leadership on, or `None` when it may.
+    ///
+    /// Every reason is read off the node itself — the role, where the
+    /// leadership came from, what Phase-1-shaped work is open, how long the
+    /// tail is — and the last word is the core's own
+    /// [`ColocatedNode::can_relinquish`]. Both the refusal a player sees and
+    /// the goal that watches for one read this.
+    #[must_use]
+    pub fn handoff_refusal(&self, id: NodeId) -> Option<String> {
+        let Some(node) = self.node(id) else {
+            return Some(format!("node {} is not running", id.0));
+        };
+        if node.can_relinquish() {
+            return None;
+        }
+        if !node.is_leader() {
+            return Some(format!("node {} is not the leader", id.0));
+        }
+        if let LeadershipOrigin::Handoff { from } = node.leadership_origin() {
+            return Some(format!(
+                "node {} did not win ballot {} — node {} handed it over. An authority moves \
+                 once: only the node that minted a ballot may pass it on, because a replayed \
+                 hand-off would otherwise install it at a node that had already given it up, \
+                 beside the node exercising it now. Hold an election instead.",
+                id.0,
+                show_ballot(node.ballot()),
+                from.0
+            ));
+        }
+        if node.proposer().recovery().is_some()
+            || node.proposer().probe().is_some()
+            || node.proposer().election().is_some()
+            || node.replica().app_repair().is_some()
+            || !node.acceptor().faulty().is_empty()
+        {
+            return Some(format!(
+                "node {} still has work that only a promise quorum can finish: an inherited slot \
+                 to settle, a damaged record to repair, or an application prefix to pull. A \
+                 successor runs no Phase 1, so it could not finish any of it. An election can.",
+                id.0
+            ));
+        }
+        let tail = node
+            .proposer()
+            .next_slot()
+            .0
+            .saturating_sub(node.replica().first_unchosen().0);
+        if tail > u64::try_from(HANDOFF_BATCH).unwrap_or(u64::MAX) {
+            return Some(format!(
+                "node {}'s tail is {tail} slots long, and a hand-off carries at most {}. The \
+                 successor must be told about every slot below the frontier, or it would never \
+                 propose the ones it was not told about.",
+                id.0, HANDOFF_BATCH
+            ));
+        }
+        if node.acceptors().members().len() <= 1 {
+            return Some(format!(
+                "node {} has nobody to hand its leadership to",
+                id.0
+            ));
+        }
+        Some(format!(
+            "node {} is not in a state a hand-off may leave from",
+            id.0
+        ))
+    }
+
     /// Whether some live node's chosen prefix sits **below** another node's
     /// compaction floor — a node truncation has stranded, which only a
     /// snapshot can rescue.
@@ -785,7 +984,7 @@ impl World {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
-        let summary = entry.view().summary;
+        let summary = self.render(&entry).summary;
         let Some(index) = self.index_of(entry.to) else {
             return Ok(());
         };
@@ -832,7 +1031,7 @@ impl World {
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
-        let summary = self.wire[position].view().summary;
+        let summary = self.render(&self.wire[position].clone()).summary;
         self.wire.remove(position);
         self.narrate(
             NarrationKind::Info,
@@ -850,21 +1049,39 @@ impl World {
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
-    pub fn duplicate(&mut self, id: u64) -> Result<(), ActionError> {
+    pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
-        let summary = copy.view().summary;
+        if let Some(to) = to {
+            let to = NodeId(to);
+            if self.index_of(to).is_none() {
+                return Err(unknown_node(to));
+            }
+            copy.to = to;
+        }
+        let summary = self.render(&copy).summary;
         self.next_message_id += 1;
         copy.sent_at = self.clock;
+        let misrouted = copy.to;
         self.wire.push(copy);
         self.narrate(
             NarrationKind::Info,
-            format!(
-                "A second copy of {summary} is on the wire. Every rule in the protocol is stated \
-                 so that a message arriving twice changes nothing the first arrival did not."
-            ),
+            match to {
+                None => format!(
+                    "A second copy of {summary} is on the wire. Every rule in the protocol is \
+                     stated so that a message arriving twice changes nothing the first arrival \
+                     did not."
+                ),
+                Some(_) => format!(
+                    "A copy of {summary} is on the wire, addressed to {} instead. Networks \
+                     misroute messages, and the protocol answers for it: every guard asks who a \
+                     message is *from* and what the configuration says about them. No guard \
+                     asks what the transport did with it.",
+                    who(misrouted)
+                ),
+            },
         );
         Ok(())
     }
@@ -1091,6 +1308,27 @@ impl World {
                 format!("node {} is already running", id.0),
             ));
         }
+        // A store that was provisioned once and no longer carries its own
+        // format marker is a node whose promise is gone. An empty disk and a
+        // brand-new disk look exactly alike from inside, so the operator's
+        // record of having provisioned this identity is the only thing that
+        // tells them apart — and it is what makes the refusal possible.
+        if self.disks[index].provisioned() && !self.disks[index].is_formatted() {
+            if let Some(prompt) = self.wiped_rejoin_prompt(id, index) {
+                self.narrate(
+                    NarrationKind::Restart,
+                    format!(
+                        "{} asks to come back. {} You answer for the operator.",
+                        who(id),
+                        prompt.question
+                    ),
+                );
+                self.prompt = Some(prompt);
+                self.paused = Some(Paused::Boot { node: id });
+                return Ok(());
+            }
+            return Err(self.amnesia(id, index));
+        }
         let mut node = ColocatedNode::new(&self.disks[index]);
         node.set_election_timeout(self.election_timeouts[index]);
         self.nodes[index] = Some(node);
@@ -1162,15 +1400,62 @@ impl World {
 
     // ---- the client --------------------------------------------------------
 
-    /// A client asks `id` to get `value` chosen.
+    /// A client asks `id` to get `value` chosen, optionally naming the grid
+    /// **column** its Phase 2 goes to.
+    ///
+    /// A column is validated against the configuration in force before the
+    /// core is called: the core asserts on a column its configuration does not
+    /// have, and an assert in wasm is an abort with no stack. A grid leader
+    /// asked for no column, on a level that teaches the choice, is asked which
+    /// column instead — and the world holds the proposal until it is answered.
     ///
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
-    pub fn propose(&mut self, id: NodeId, client: u64, value: &str) -> Result<(), ActionError> {
+    pub fn propose(
+        &mut self,
+        id: NodeId,
+        client: u64,
+        value: &str,
+        column: Option<u64>,
+    ) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
+        let column = self.validate_column(id, column)?;
+        // A player who named a column has answered the question already.
+        if column.is_none()
+            && let Some(prompt) = self.grid_column_prompt(id, index)
+        {
+            self.narrate(
+                NarrationKind::Client,
+                format!(
+                    "Client {client} asks {} to get {value:?} chosen. {} You answer for it, and \
+                     the configuration marks the answer.",
+                    who(id),
+                    prompt.question
+                ),
+            );
+            self.prompt = Some(prompt);
+            self.paused = Some(Paused::Propose {
+                node: id,
+                client,
+                value: value.to_string(),
+            });
+            return Ok(());
+        }
+        self.propose_now(id, index, client, value, column)
+    }
+
+    /// Send the proposal for real, once nobody owes an answer for it.
+    fn propose_now(
+        &mut self,
+        id: NodeId,
+        index: usize,
+        client: u64,
+        value: &str,
+        column: Option<usize>,
+    ) -> Result<(), ActionError> {
         let slot = self
             .clients
             .iter()
@@ -1188,7 +1473,7 @@ impl World {
         let result = self.observe(id, move |world| {
             let out = world.nodes[index]
                 .as_mut()
-                .map(|node| node.propose(ClientId(client), seq, bytes));
+                .map(|node| node.propose_in(ClientId(client), seq, bytes, column));
             world.pump(id);
             out
         });
@@ -1600,6 +1885,7 @@ impl World {
             index: captured,
             required_seq,
             acks: BTreeSet::new(),
+            leaderless: false,
             served: false,
             issued,
             served_at: None,
@@ -1619,6 +1905,221 @@ impl World {
             ),
         );
         self.narration.insert(mark, opening);
+        Ok(())
+    }
+
+    /// A client asks `id` for a **leaderless** read (Compartmentalized Paxos
+    /// §3.4).
+    ///
+    /// `id` asks a Phase-1 quorum — one row of a grid, the whole membership
+    /// under a majority — for the highest slot each of them has voted in,
+    /// takes the maximum, and answers the read once its own applied prefix
+    /// covers it. No leader is asked, no beat is sent, and no clock is read.
+    /// Any node may serve one: a leader, a follower, a node that is not even
+    /// an acceptor.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn quorum_read(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.require_live(id)?;
+        let position = self
+            .clients
+            .iter()
+            .position(|c| c.id == ClientId(client))
+            .ok_or_else(|| {
+                ActionError::new(
+                    ActionErrorCode::UnknownParty,
+                    format!("there is no client {client} in this level"),
+                )
+            })?;
+        let ctx = self.next_read_ctx;
+        self.next_read_ctx += 1;
+        let issued = self.take_event();
+        let row = self
+            .node(id)
+            .and_then(|node| node.acceptors().row_of(ctx))
+            .map_or_else(|| "every acceptor".to_string(), |row| format!("row {row}"));
+        self.clients[position].reads.push(PendingRead {
+            ctx,
+            node: id,
+            // A quorum read captures nothing when it opens: the index is the
+            // maximum watermark the row reports, and the row has not answered
+            // yet. `serve_read` fills it in.
+            index: None,
+            required_seq: 0,
+            acks: BTreeSet::new(),
+            leaderless: true,
+            served: false,
+            issued,
+            served_at: None,
+        });
+        let mark = self.narration.len();
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.quorum_read(ctx);
+            }
+            world.pump(id);
+        });
+        let opening = say(
+            NarrationKind::Read,
+            format!(
+                "Client {client} asks {} for a read, and {} does not ask the leader. It asks \
+                 {row} one question: what is the highest slot you have voted in? The largest of \
+                 those answers is the index this read must reach before it may be answered.",
+                who(id),
+                who(id)
+            ),
+        );
+        self.narration.insert(mark, opening);
+        Ok(())
+    }
+
+    // ---- the operator's Act IV verbs ---------------------------------------
+
+    /// A leader hands its Phase-2 authority to `to`, under the **same ballot**
+    /// and with no Phase 1.
+    ///
+    /// The abdication happens inside the core's own call, before the message
+    /// exists, so this world never holds a state where two nodes own one
+    /// ballot. Every refusal is checked first ([`World::handoff_refusal`]) so
+    /// the player reads a reason rather than watching nothing happen.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn relinquish(&mut self, id: NodeId, to: NodeId) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.require_live(id)?;
+        if self.index_of(to).is_none() {
+            return Err(unknown_node(to));
+        }
+        if let Some(reason) = self.handoff_refusal(id) {
+            return Err(ActionError::new(ActionErrorCode::HandoffRefused, reason));
+        }
+        let candidates = self
+            .node(id)
+            .map(ColocatedNode::handoff_candidates)
+            .unwrap_or_default();
+        if !candidates.contains(&to) {
+            return Err(ActionError::new(
+                ActionErrorCode::HandoffRefused,
+                format!(
+                    "node {} cannot take the authority: a hand-off goes to another member of the \
+                     configuration in force.",
+                    to.0
+                ),
+            ));
+        }
+        let mark = self.narration.len();
+        let receipt = self.observe(id, move |world| {
+            let out = world.nodes[index]
+                .as_mut()
+                .and_then(|node| node.relinquish_to(to));
+            world.pump(id);
+            out
+        });
+        let Some(receipt) = receipt else {
+            self.narration.truncate(mark);
+            return Err(ActionError::new(
+                ActionErrorCode::HandoffRefused,
+                format!("node {} did not hand its leadership over", id.0),
+            ));
+        };
+        self.handoffs.push(HandoffOutcome {
+            from: id,
+            to,
+            ballot: receipt.ballot,
+            next_slot: receipt.next_slot,
+            decided: receipt.decided,
+            pending: receipt.pending,
+        });
+        let opening = say(
+            NarrationKind::Election,
+            format!(
+                "{} hands ballot {} to {} and stops leading inside the same call, before the \
+                 message exists. It sends the frontier — slot {} is the next free slot — and the \
+                 tail below it: {} already chosen, {} still in flight. The two exactly cover the \
+                 range. That is what lets the successor skip Phase 1 and still know it has been \
+                 told about every slot.",
+                who(id),
+                show_ballot(receipt.ballot),
+                who(to),
+                receipt.next_slot.0,
+                many(receipt.decided, "slot"),
+                many(receipt.pending, "slot")
+            ),
+        );
+        self.narration.insert(mark, opening);
+        Ok(())
+    }
+
+    /// Rot one accepted record on `id`'s disk: the value is lost, the identity
+    /// is not.
+    ///
+    /// A running node keeps its record in memory, so the damage shows up at
+    /// the **next boot** — which is exactly how a real disk fault behaves, and
+    /// why this level crashes and restarts the node it damages.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn corrupt(&mut self, id: NodeId, slot: Slot) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.index_of(id).ok_or_else(|| unknown_node(id))?;
+        let ballot = self.disks[index].records().get(&slot).map(|(at, _)| *at);
+        let Some(ballot) = ballot else {
+            return Err(ActionError::new(
+                ActionErrorCode::UnknownMessage,
+                format!("node {} holds no record for slot {}", id.0, slot.0),
+            ));
+        };
+        self.disks[index].corrupt(slot);
+        self.narrate(
+            NarrationKind::Crash,
+            format!(
+                "{}'s record for slot {} rots. The value is gone and the identity survives: the \
+                 disk still knows it voted there, at ballot {}. At its next boot it reports that \
+                 slot as damaged. It does not report \"nothing accepted here\", because that \
+                 answer tells a candidate it may decide something else at a slot a quorum may \
+                 already have decided.",
+                who(id),
+                slot.0,
+                show_ballot(ballot)
+            ),
+        );
+        Ok(())
+    }
+
+    /// Erase `id`'s disk, keeping only the memory that the identity was
+    /// provisioned once.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn wipe(&mut self, id: NodeId) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.index_of(id).ok_or_else(|| unknown_node(id))?;
+        let promised = self.disks[index].hard_state().max_promised_ballot;
+        self.nodes[index] = None;
+        self.armed_seams[index] = None;
+        self.disks[index].wipe();
+        self.narrate(
+            NarrationKind::Crash,
+            format!(
+                "{}'s disk is erased. It had promised {}, and that promise is gone from the one \
+                 place it was written down. Nothing in the cluster returns it: no peer knows what \
+                 this node has promised, and a snapshot restores the log and not a promise.",
+                who(id),
+                show_ballot(promised)
+            ),
+        );
+        self.settle();
         Ok(())
     }
 
@@ -1693,6 +2194,7 @@ impl World {
 
     fn serve_read(&mut self, state: ReadState) {
         let mut served = false;
+        let mut leaderless = false;
         let stamp = self.next_event;
         for client in &mut self.clients {
             for read in &mut client.reads {
@@ -1701,27 +2203,36 @@ impl World {
                     read.index = state.index;
                     read.served_at = Some(stamp);
                     served = true;
+                    leaderless = read.leaderless;
                 }
             }
         }
-        if served {
-            self.next_event += 1;
+        if !served {
+            return;
         }
-        if served {
-            self.narrate(
-                NarrationKind::Read,
-                format!(
-                    "The read at ctx {} is served at {}. A quorum acked a beat sent after the \
-                     read began, so no other node could have been committing behind this one's \
-                     back, and the applied prefix covers the watermark the read captured.",
-                    state.ctx,
-                    state.index.map_or_else(
-                        || "the empty prefix".to_string(),
-                        |s| format!("slot {}", s.0)
-                    )
-                ),
-            );
-        }
+        self.next_event += 1;
+        let at = state.index.map_or_else(
+            || "the empty prefix".to_string(),
+            |s| format!("slot {}", s.0),
+        );
+        let text = if leaderless {
+            format!(
+                "The read at ctx {} is served at {at}, and no leader was asked. A Phase-1 quorum \
+                 reported the highest slot each of them had voted in, every write acknowledged \
+                 before this read began was chosen by a Phase-2 quorum, and the two always share \
+                 an acceptor — so the maximum they reported is at or above that write. This \
+                 node has now applied that far.",
+                state.ctx
+            )
+        } else {
+            format!(
+                "The read at ctx {} is served at {at}. A quorum acked a beat sent after the read \
+                 began, so no other node could have been committing behind this one's back, and \
+                 the applied prefix covers the watermark the read captured.",
+                state.ctx
+            )
+        };
+        self.narrate(NarrationKind::Read, text);
     }
 
     /// The line a tick gets, before anything is stepped.
@@ -1793,6 +2304,84 @@ impl World {
                 node.set_election_timeout(restore);
             }
         }
+    }
+
+    /// Resume a proposal whose column the player has just named. The column
+    /// they were checked against is the one the configuration derives, so this
+    /// hands the core no override at all: it derives the same column itself.
+    pub(super) fn propose_answered(&mut self, id: NodeId, client: u64, value: &str) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        let _ = self.propose_now(id, index, client, value, None);
+    }
+
+    /// Resume a wiped node's boot, once the player has refused it.
+    pub(super) fn boot_refused(&mut self, id: NodeId) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        let _ = self.amnesia(id, index);
+    }
+
+    /// The refusal an erased disk earns, and the sentence that goes with it.
+    fn amnesia(&mut self, id: NodeId, index: usize) -> ActionError {
+        let promised = self.promise_watermarks[index];
+        self.refused_boots.push((id, promised));
+        self.narrate(
+            NarrationKind::Restart,
+            format!(
+                "{} is refused. Its disk is empty and this identity was provisioned once, so \
+                 what is missing is a promise it already made — it last promised {}. A node that \
+                 booted here with an empty promise would answer a ballot below {} that it had \
+                 already sworn to refuse, and a quorum built behind that older ballot could \
+                 choose a second value for a slot. What heals the cluster is a change of the \
+                 acceptor set, decided by the cluster: the survivors go on without this \
+                 identity.",
+                who(id),
+                show_ballot(promised),
+                show_ballot(promised)
+            ),
+        );
+        ActionError::new(
+            ActionErrorCode::Amnesia,
+            format!(
+                "node {} lost its disk: it may never rejoin, because a promise cannot be \
+                 restored from anywhere.",
+                id.0
+            ),
+        )
+    }
+
+    /// Turn a player's column into one the configuration in force actually
+    /// has, or refuse it. The core asserts on a column its configuration does
+    /// not have, so nothing unvalidated ever reaches it.
+    fn validate_column(
+        &self,
+        id: NodeId,
+        column: Option<u64>,
+    ) -> Result<Option<usize>, ActionError> {
+        let Some(column) = column else {
+            return Ok(None);
+        };
+        let QuorumSystem::Grid { cols, .. } = self.system(id) else {
+            return Err(ActionError::new(
+                ActionErrorCode::BadColumn,
+                format!(
+                    "node {} runs no grid, so it names no columns: an Accept goes to the whole \
+                     configuration.",
+                    id.0
+                ),
+            ));
+        };
+        let index = usize::try_from(column).unwrap_or(usize::MAX);
+        if index >= cols {
+            return Err(ActionError::new(
+                ActionErrorCode::BadColumn,
+                format!("this grid has {cols} column(s), numbered 0 to {}", cols - 1),
+            ));
+        }
+        Ok(Some(index))
     }
 
     /// The next reading of the history's monotone counter.

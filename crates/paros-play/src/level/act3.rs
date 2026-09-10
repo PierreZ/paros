@@ -179,6 +179,7 @@ fn propose(client: u64, node: u64, value: &str) -> Action {
         node,
         client,
         value: value.to_string(),
+        column: None,
     }
 }
 

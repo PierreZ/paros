@@ -57,6 +57,14 @@ pub enum PromptKind {
     SnapshotPromise,
     /// A client retried a write. Acked as applied, held in flight, or fresh?
     AckWrite,
+    /// A grid leader is about to propose. Which column takes this slot?
+    GridColumn,
+    /// A quorum read's row has answered. Serve it, or wait?
+    QuorumReadServe,
+    /// A repair probe holds a faulty slot. Which CTRL case is it?
+    RepairVerdict,
+    /// A wiped node asks to rejoin. Boot it fresh, or refuse?
+    WipedRejoin,
 }
 
 impl PromptKind {
@@ -75,6 +83,10 @@ impl PromptKind {
             PromptKind::ReadServe => AutomationFlag::ReadServe,
             PromptKind::SnapshotPromise => AutomationFlag::SnapshotPromise,
             PromptKind::AckWrite => AutomationFlag::AckWrite,
+            PromptKind::GridColumn => AutomationFlag::GridColumn,
+            PromptKind::QuorumReadServe => AutomationFlag::QuorumReadServe,
+            PromptKind::RepairVerdict => AutomationFlag::RepairVerdict,
+            PromptKind::WipedRejoin => AutomationFlag::WipedRejoin,
         }
     }
 }
@@ -93,6 +105,10 @@ pub const ALL_PROMPTS: &[PromptKind] = &[
     PromptKind::ReadServe,
     PromptKind::SnapshotPromise,
     PromptKind::AckWrite,
+    PromptKind::GridColumn,
+    PromptKind::QuorumReadServe,
+    PromptKind::RepairVerdict,
+    PromptKind::WipedRejoin,
 ];
 
 /// What a **right** answer confirms, in one clause. The narration says it back
@@ -127,6 +143,21 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
         }
         PromptKind::AckWrite => {
             "an ack names a slot this node has really executed, and nothing else does."
+        }
+        PromptKind::GridColumn => {
+            "the slot goes to the column the configuration derives for it, so every node \
+             derives the same one."
+        }
+        PromptKind::QuorumReadServe => {
+            "a read is answered only once this node has applied the highest slot the row \
+             reported."
+        }
+        PromptKind::RepairVerdict => {
+            "the slot is settled exactly as far as the quorum's reports license, and no further."
+        }
+        PromptKind::WipedRejoin => {
+            "a node that lost its promise does not rejoin, and the acceptor set changes \
+             instead."
         }
     }
 }
@@ -958,4 +989,316 @@ impl Prompt {
             feedback: None,
         }
     }
+}
+
+impl Prompt {
+    // ---- the four Act IV kinds ---------------------------------------------
+
+    /// A grid leader is about to propose into `slot`. Which column takes it?
+    ///
+    /// Judged by [`paros_core::AcceptorConfig::column_of`] on the
+    /// configuration in force: the column is `slot % cols`, a pure function of
+    /// the slot. `expected` is that answer, and `columns` is how many the grid
+    /// has.
+    ///
+    /// Every wrong choice here is **safe** — every full column of a grid is a
+    /// Phase-2 quorum, and every row meets every column — so the explanation
+    /// is about who else has to reach the same answer, not about a value being
+    /// lost.
+    #[must_use]
+    pub fn grid_column(id: u64, node: NodeId, slot: Slot, columns: usize, expected: usize) -> Self {
+        let mut choices = Vec::new();
+        let mut explanations = BTreeMap::new();
+        for column in 0..columns {
+            choices.push(Choice::new(
+                &format!("column_{column}"),
+                format!("Column {column}"),
+            ));
+            if column == expected {
+                continue;
+            }
+            explanations.insert(
+                format!("column_{column}"),
+                format!(
+                    "Column {column} is a perfectly good Phase-2 quorum: every full column of \
+                     this grid is one, and every row meets every column, so a value chosen \
+                     through any column binds every later ballot. The problem is agreement about \
+                     *which* column. Nothing on the wire carries it. If this leader dies and \
+                     another node re-proposes slot {}, or if this leader restarts and re-sends \
+                     its own Accept, each of them works the column out again from the slot alone \
+                     — and each of them gets column {expected}, because the rule is slot \
+                     {} modulo {columns} columns. Pick the column the rule gives, and every \
+                     incarnation of this leadership addresses the same acceptors.",
+                    slot.0, slot.0
+                ),
+            );
+        }
+        Self {
+            id,
+            kind: PromptKind::GridColumn,
+            node: node.0,
+            question: format!("Slot {} goes to which column?", slot.0),
+            state_summary: vec![
+                format!("the slot being proposed: {}", slot.0),
+                format!("columns in this grid: {columns}"),
+                "a Phase-2 quorum here is one full column".to_string(),
+            ],
+            choices,
+            expected: format!("column_{expected}"),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A quorum read's row has answered: the highest slot any of them has
+    /// voted in is `watermark`, and this node has applied up to `applied`.
+    ///
+    /// Judged on a clone of the node's own
+    /// [`QuorumReads`](paros_core::quorum_read::QuorumReads), through
+    /// [`serve`](paros_core::quorum_read::QuorumReads::serve) with the
+    /// replica's own `covers`: `served` is what the clone did.
+    #[must_use]
+    pub fn quorum_read_serve(
+        id: u64,
+        node: NodeId,
+        ctx: u64,
+        watermark: Option<Slot>,
+        applied: Option<Slot>,
+        answered: usize,
+        served: bool,
+    ) -> Self {
+        let high =
+            watermark.map_or_else(|| "nothing at all".to_string(), |s| format!("slot {}", s.0));
+        let here = applied.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let expected = if served { "serve" } else { "wait" };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "serve".to_string(),
+            format!(
+                "The row's highest vote is {high}, and this node has applied {here}. Serving now \
+                 answers from a prefix that does not reach the watermark. Some acceptor in that \
+                 row voted for a slot this node has not executed, and a write acknowledged before \
+                 the read began may be exactly that slot — the client would be shown a state \
+                 older than a write it was already promised. Wait: the slot arrives here by \
+                 ordinary replication, and the read is answered the moment the prefix covers it."
+            ),
+        );
+        explanations.insert(
+            "wait".to_string(),
+            format!(
+                "This node has applied {here}, which already covers the row's highest vote \
+                 ({high}). Every write acknowledged before this read began was chosen by a \
+                 Phase-2 quorum, that quorum meets the row this read asked, so the row's maximum \
+                 is at or above it — and this prefix is at or above the maximum. Waiting buys \
+                 nothing and no leader has to be involved at all."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::QuorumReadServe,
+            node: node.0,
+            question: format!("The row has answered read #{ctx}. Serve it, or wait?"),
+            state_summary: vec![
+                format!("acceptors that answered: {answered}"),
+                format!("the highest slot any of them voted in: {high}"),
+                format!("this node has applied: {here}"),
+            ],
+            choices: vec![
+                Choice::new("serve", format!("Serve the read at {high}")),
+                Choice::new("wait", "Wait: the prefix does not reach it"),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A leader's repair probe holds `slot`, whose value one acceptor lost.
+    /// Which of the three CTRL cases is this, and what may be re-proposed?
+    ///
+    /// Judged on a **clone of the proposer**: the arriving `Promise` is folded
+    /// through
+    /// [`fold_probe_promise`](paros_core::proposer::Proposer::fold_probe_promise)
+    /// and the probe is resolved through
+    /// [`resolve_probe`](paros_core::proposer::Proposer::resolve_probe). A
+    /// decision carrying a value is Case 1, a decision carrying none is Case
+    /// 2, and no decision at all is Case 3.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn repair_verdict(
+        id: u64,
+        node: NodeId,
+        slot: Slot,
+        reported: Option<&Command>,
+        faulty_at: Option<Ballot>,
+        expected: RepairCase,
+    ) -> Self {
+        let value = reported.map(show_command);
+        let rotted = faulty_at.map_or_else(
+            || "a peer reports no damage".to_string(),
+            |ballot| {
+                format!(
+                    "a peer lost its value for slot {}, accepted at ballot {}",
+                    slot.0,
+                    show_ballot(ballot)
+                )
+            },
+        );
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "case1".to_string(),
+            match &value {
+                Some(value) => format!(
+                    "There is a value to re-propose — {value} — so this is the case where the \
+                     probe re-proposes it. (You are reading this because you picked something \
+                     else.)"
+                ),
+                None => format!(
+                    "Nobody has reported a value for slot {}. Re-proposing needs a value to \
+                     re-propose, and the reports hold none: the acceptor that voted there lost \
+                     it, and every acceptor that answered reports no vote there.",
+                    slot.0
+                ),
+            },
+        );
+        explanations.insert(
+            "case2".to_string(),
+            match &value {
+                Some(value) => format!(
+                    "A promise reported {value} for slot {}, at a ballot at or above the rotted \
+                     record. Deciding a Noop there decides a *different* value at a slot some \
+                     earlier ballot may already have chosen. The reported value is the only \
+                     thing this ballot may put in slot {}.",
+                    slot.0, slot.0
+                ),
+                None => format!(
+                    "A Noop is safe here only when a full Phase-1 quorum has answered and none \
+                     of those answers can hide a chosen value. One acceptor's answer is \"I voted \
+                     at that slot and I no longer know what for\", and that answer hides exactly \
+                     what a Noop would overwrite. Until enough of the others answer, slot {} \
+                     stays undecided.",
+                    slot.0
+                ),
+            },
+        );
+        explanations.insert(
+            "case3".to_string(),
+            match &value {
+                Some(value) => format!(
+                    "The reports now hold {value} for slot {}, accepted at a ballot at or above \
+                     the rotted record. That is enough: a value chosen at or below that ballot is \
+                     the same value, and a value chosen above it would have left a record on some \
+                     member of the quorum that answered. Re-propose it and the damaged acceptor \
+                     writes the value back as it votes.",
+                    slot.0
+                ),
+                None => format!(
+                    "Enough acceptors have now answered that no chosen value can be hiding \
+                     behind the damage: a full Phase-1 quorum reported either nothing or a record \
+                     no higher than what the probe holds. Waiting longer settles nothing, and \
+                     slot {} stays a hole in every node's prefix while you do.",
+                    slot.0
+                ),
+            },
+        );
+        let expected_id = match expected {
+            RepairCase::ReproposeReported => "case1",
+            RepairCase::FillNoop => "case2",
+            RepairCase::Wait => "case3",
+        };
+        Self {
+            id,
+            kind: PromptKind::RepairVerdict,
+            node: node.0,
+            question: format!("What may this ballot put in slot {}?", slot.0),
+            state_summary: vec![
+                rotted,
+                format!(
+                    "the highest value any answer reports for slot {}: {}",
+                    slot.0,
+                    value.clone().unwrap_or_else(|| "none".to_string())
+                ),
+            ],
+            choices: vec![
+                Choice::new(
+                    "case1",
+                    match &value {
+                        Some(value) => format!("Re-propose {value}"),
+                        None => "Re-propose the reported value".to_string(),
+                    },
+                ),
+                Choice::new("case2", "Decide a Noop"),
+                Choice::new("case3", "Wait for more answers"),
+            ],
+            expected: expected_id.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A node whose disk was erased asks to come back. Boot it fresh, or
+    /// refuse?
+    ///
+    /// **The answer is a constant, and deliberately so.** There is no role to
+    /// clone: the store carries no promise to read back, which is the whole
+    /// problem. What decides it is the operator's own record that this
+    /// identity was provisioned once, and the library refuses such a boot
+    /// outright rather than taking a branch in a state machine. The `refuse`
+    /// side therefore carries no explanation and the `boot_fresh` side carries
+    /// the whole story.
+    #[must_use]
+    pub fn wiped_rejoin(id: u64, node: NodeId, promised: Ballot) -> Self {
+        let held = show_ballot(promised);
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "boot_fresh".to_string(),
+            format!(
+                "A fresh boot puts this node back in the pool with an empty promise. It had \
+                 promised {held}. It now answers a ballot below {held}, because it has no memory \
+                 of refusing one, and it votes for whatever that ballot proposes. Some proposer \
+                 already ran Phase 1 at {held}. That proposer was told this acceptor held \
+                 nothing newer, and it may have chosen a value on the strength of that answer. A \
+                 quorum of this node and the acceptors behind the older ballot then chooses a \
+                 second value for one slot. A snapshot does not repair it: a snapshot restores \
+                 the log and not a promise, and no peer knows what this node has promised. \
+                 Refuse the boot. The cluster changes its acceptor set instead, and that \
+                 decision leaves this identity out of every quorum."
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::WipedRejoin,
+            node: node.0,
+            question: format!(
+                "Node {}'s disk is empty, and it was a member. Boot it fresh, or refuse?",
+                node.0
+            ),
+            state_summary: vec![
+                format!("the promise this node last made: {held}"),
+                "what its disk holds now: nothing at all".to_string(),
+                "an operator provisioned this identity once".to_string(),
+            ],
+            choices: vec![
+                Choice::new("refuse", "Refuse the boot"),
+                Choice::new("boot_fresh", "Boot it fresh, as a new node"),
+            ],
+            expected: "refuse".to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+}
+
+/// Which CTRL case a repair probe's answers put a faulty slot in — the shape
+/// of [`paros_core::proposer::Proposer::resolve_probe`]'s answer, named for
+/// the player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairCase {
+    /// Case 1: a value was reported, and this ballot re-proposes it.
+    ReproposeReported,
+    /// Case 2: a full Phase-1 quorum of qualifying answers reported no value
+    /// at all, so the slot may be decided as a `Noop`.
+    FillNoop,
+    /// Case 3: not enough answers yet. The slot stays undecided.
+    Wait,
 }

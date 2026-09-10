@@ -24,7 +24,13 @@ id: number, } | { "kind": "duplicate",
 /**
  * The in-flight message's id.
  */
-id: number, } | { "kind": "tick", 
+id: number, 
+/**
+ * Address the copy to a **different** node: a misrouted message,
+ * which is a thing networks do and which every rule in the protocol
+ * is written to survive. Omitted (or `null`) keeps the addressee.
+ */
+to: number | null, } | { "kind": "tick", 
 /**
  * The node's id.
  */
@@ -56,7 +62,13 @@ client: number,
 /**
  * The command text; the engine turns it into opaque bytes.
  */
-value: string, } | { "kind": "start_election", 
+value: string, 
+/**
+ * Which column of an acceptor grid this proposal's Accept goes to.
+ * Omitted (or `null`) lets the configuration derive it, which is
+ * what every deployment that is not a grid does.
+ */
+column: number | null, } | { "kind": "start_election", 
 /**
  * The node's id.
  */
@@ -78,7 +90,36 @@ node: number,
  * first client, which is what every single-client level wants and
  * what the field meant before there were two of them.
  */
-client: number | null, } | { "kind": "retry", 
+client: number | null, } | { "kind": "quorum_read", 
+/**
+ * The node the client asks. It need not be the leader.
+ */
+node: number, 
+/**
+ * Which client is reading. Omitted (or `null`) means the level's
+ * first client.
+ */
+client: number | null, } | { "kind": "relinquish", 
+/**
+ * The leader that gives the authority up.
+ */
+node: number, 
+/**
+ * The peer that is offered it.
+ */
+to: number, } | { "kind": "corrupt", 
+/**
+ * The node whose disk is damaged.
+ */
+node: number, 
+/**
+ * The slot whose record loses its value.
+ */
+slot: number, } | { "kind": "wipe", 
+/**
+ * The node whose disk is erased.
+ */
+node: number, } | { "kind": "retry", 
 /**
  * The node the client asks (must be the leader).
  */

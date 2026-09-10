@@ -16,9 +16,15 @@ const SLOT_WIDTH = 92;
 const SLOT_HEIGHT = 19;
 const MAX_SLOTS = 6;
 
-/** Replies are drawn hollow; requests solid. */
-export function isReply(kind: string): boolean {
-  return /(Ack|Promise|Accepted|Nack|Reply|Response|Learned)$/.test(kind);
+/**
+ * Whether a message answers one.
+ *
+ * The engine reports this fact (`MessageView.reply`); the frontend must not
+ * read it out of the variant's name. An engine that does not send the field
+ * yet gives every message the request shape.
+ */
+export function isReply(message: Pick<MessageView, 'reply'>): boolean {
+  return message.reply === true;
 }
 
 /** The CSS class carrying a message's phase colour. */
@@ -43,66 +49,127 @@ export function phaseClass(phase: string): string {
 }
 
 /**
- * A command's text, as the player should read it.
+ * The name of a control command, as a slot box prints it.
  *
- * The engine renders a user command with Rust's `Debug`, so `alpha` arrives as
- * `"alpha"`. Strip the quoting for display only — the raw string stays in the
- * view, and in the `title` a hover shows.
+ * The engine sends the discriminant in lower case (`noop`, `truncate`,
+ * `snap`); the label is the command's own name. A slot with no control command
+ * holds an opaque client value and has no name to print.
  */
-export function displayValue(value: string): string {
-  return value.length >= 2 && value.startsWith('"') && value.endsWith('"')
-    ? value.slice(1, -1)
-    : value;
+export function controlLabel(control: string | null | undefined): string | null {
+  if (typeof control !== 'string' || control === '') return null;
+  const known: Record<string, string> = {
+    noop: 'Noop',
+    truncate: 'Truncate',
+    snap: 'Snap',
+  };
+  return known[control.toLowerCase()] ?? control;
 }
 
 /** A short label for one slot box. */
-function slotLabel(slot: SlotView): string {
-  const value = displayValue(slot.value) || '·';
+export function slotLabel(slot: SlotView): string {
+  const control = controlLabel(slot.control);
+  const value = control ?? slot.value;
+  if (value === '') return `${slot.slot}: ·`;
   return `${slot.slot}: ${value.length > 10 ? `${value.slice(0, 9)}…` : value}`;
 }
 
-function slotClass(slot: SlotView): string {
-  if (slot.applied) return 'slot applied';
-  if (slot.chosen) return 'slot chosen';
-  return 'slot open';
+/** The CSS classes one slot box carries. */
+export function slotClass(slot: SlotView): string {
+  const parts = ['slot'];
+  if (slot.applied) parts.push('applied');
+  else if (slot.chosen) parts.push('chosen');
+  else parts.push('open');
+  if (controlLabel(slot.control)) parts.push('control');
+  return parts.join(' ');
+}
+
+/**
+ * What the stage prints under a node.
+ *
+ * A log node has a role in the current ballot. A single-decree proposer has no
+ * role, but it has an attempt, and that is what the player watches. A node
+ * with neither prints what it is.
+ */
+export function roleLabel(node: NodeView): string {
+  if (!node.alive) return 'crashed';
+  if (node.role) return node.role;
+  const attempts: Record<string, string> = {
+    idle: 'idle',
+    phase1: 'phase 1',
+    phase2: 'phase 2',
+    preempted: 'preempted',
+    won: 'won',
+  };
+  if (node.attempt) return attempts[node.attempt] ?? node.attempt;
+  return node.flavour;
 }
 
 function nodeStateClass(node: NodeView): string {
   const parts = ['node'];
   if (!node.alive) parts.push('crashed');
-  if (node.role === 'leader' || node.role === 'won') parts.push('leader');
-  if (node.role === 'candidate' || node.role === 'phase 1') parts.push('candidate');
+  if (node.role === 'leader' || node.attempt === 'won') parts.push('leader');
+  if (node.role === 'candidate' || node.attempt === 'phase1' || node.attempt === 'phase2') {
+    parts.push('candidate');
+  }
   return parts.join(' ');
+}
+
+function slotTitle(slot: SlotView): string {
+  const control = controlLabel(slot.control);
+  const what = control ? `the control command ${slot.value}` : `the value ${slot.value || '(empty)'}`;
+  return `slot ${slot.slot} holds ${what}, at ballot ${slot.ballot ?? 'none'}${
+    slot.chosen ? ', chosen' : ''
+  }${slot.applied ? ', applied' : ''}`;
+}
+
+/**
+ * The compaction floor: the first slot this node still keeps.
+ *
+ * A floor of zero drops nothing, so the stage draws no line for it.
+ */
+function floorOf(node: NodeView): number | null {
+  const floor = node.floor;
+  return typeof floor === 'number' && floor > 0 ? floor : null;
 }
 
 function logColumn(node: NodeView, at: Point, centre: Point): SVGGElement {
   const toTheRight = at.x >= centre.x;
   const x = toTheRight ? at.x + NODE_RADIUS + 10 : at.x - NODE_RADIUS - 10 - SLOT_WIDTH;
   const shown = node.accepted.slice(0, MAX_SLOTS);
-  const rows: (SVGGElement | SVGTextElement)[] = [];
-  const total = shown.length + (node.chosen_gap ? 1 : 0);
+  const rows: (SVGGElement | SVGTextElement | SVGLineElement)[] = [];
+  const floor = floorOf(node);
+  const total = shown.length + (node.chosen_gap ? 1 : 0) + (floor === null ? 0 : 1);
   const top = at.y - ((total * (SLOT_HEIGHT + 3)) / 2 - 2);
+  let row = 0;
 
-  shown.forEach((slot, index) => {
-    const y = top + index * (SLOT_HEIGHT + 3);
-    const box = svg(
-      'g',
-      { class: slotClass(slot) },
-      svg('rect', { x, y, width: SLOT_WIDTH, height: SLOT_HEIGHT, rx: 3 }),
-      svg('text', { x: x + 5, y: y + 13, class: 'slot-label' }, slotLabel(slot)),
+  // The floor sits above the slots the node still keeps: everything before it
+  // is deleted here, and only a snapshot can put it back.
+  if (floor !== null) {
+    const y = top + SLOT_HEIGHT - 4;
+    rows.push(
+      svg('line', { class: 'floor-line', x1: x, y1: y, x2: x + SLOT_WIDTH, y2: y }),
+      svg('text', { class: 'floor-label', x: x + 2, y: y - 4 }, `floor ${floor}`),
+    );
+    row += 1;
+  }
+
+  shown.forEach((slot) => {
+    const y = top + row * (SLOT_HEIGHT + 3);
+    row += 1;
+    rows.push(
       svg(
-        'title',
-        {},
-        `slot ${slot.slot} — value ${displayValue(slot.value) || '(empty)'}, ballot ${slot.ballot ?? 'none'}${
-          slot.chosen ? ', chosen' : ''
-        }${slot.applied ? ', applied' : ''}`,
+        'g',
+        { class: slotClass(slot) },
+        svg('rect', { x, y, width: SLOT_WIDTH, height: SLOT_HEIGHT, rx: 3 }),
+        svg('text', { x: x + 5, y: y + 13, class: 'slot-label' }, slotLabel(slot)),
+        svg('title', {}, slotTitle(slot)),
       ),
     );
-    rows.push(box);
   });
 
   if (node.chosen_gap) {
-    const y = top + shown.length * (SLOT_HEIGHT + 3);
+    const y = top + row * (SLOT_HEIGHT + 3);
+    row += 1;
     rows.push(
       svg(
         'g',
@@ -116,14 +183,14 @@ function logColumn(node: NodeView, at: Point, centre: Point): SVGGElement {
         svg(
           'title',
           {},
-          `slot ${node.chosen_gap.hole} is undecided while ${node.chosen_gap.highest} is already chosen`,
+          `slot ${node.chosen_gap.hole} is undecided, and slot ${node.chosen_gap.highest} is already chosen`,
         ),
       ),
     );
   }
 
   if (node.accepted.length > MAX_SLOTS) {
-    const y = top + total * (SLOT_HEIGHT + 3) + 11;
+    const y = top + row * (SLOT_HEIGHT + 3) + 11;
     rows.push(
       svg(
         'text',
@@ -184,33 +251,30 @@ function nodeGroup(node: NodeView, at: Point): SVGGElement {
     ring,
     svg('circle', { class: 'node-disc', r: NODE_RADIUS, cx: 0, cy: 0 }),
     svg('text', { class: 'node-id', x: 0, y: -2 }, String(node.id)),
-    svg('text', { class: 'node-role', x: 0, y: 14 }, node.role ?? node.flavour),
+    svg('text', { class: 'node-role', x: 0, y: 14 }, roleLabel(node)),
     ...labels,
     svg(
       'title',
       {},
-      `node ${node.id} — ${node.alive ? node.role ?? node.flavour : 'crashed'}${
-        node.promised ? `, promised ${node.promised}` : ''
-      }`,
+      `node ${node.id} is ${roleLabel(node)}${node.promised ? `, and it promised ${node.promised}` : ''}`,
     ),
   );
 }
 
 function messageDot(message: MessageView, at: Point): SVGGElement {
-  const reply = isReply(message.kind);
   return svg(
     'g',
     {
-      class: `wire-dot ${phaseClass(message.phase)} ${reply ? 'reply' : 'request'}`,
+      class: `wire-dot ${phaseClass(message.phase)} ${isReply(message) ? 'reply' : 'request'}`,
       'data-msg': message.id,
       transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
       tabindex: 0,
       role: 'button',
-      'aria-label': `${message.summary} — from ${message.from} to ${message.to}. Click to deliver.`,
+      'aria-label': `${message.summary}, from node ${message.from} to node ${message.to}. Click to deliver it.`,
     },
     svg('circle', { class: 'dot-hit', r: 13, cx: 0, cy: 0 }),
     svg('circle', { class: 'dot', r: 7, cx: 0, cy: 0 }),
-    svg('title', {}, `${message.summary} (${message.from} → ${message.to}) — click to deliver`),
+    svg('title', {}, `${message.summary} (${message.from} → ${message.to}). Click to deliver it.`),
   );
 }
 
@@ -223,12 +287,12 @@ function clientColumn(world: WorldView): SVGGElement | null {
     y += 16;
     for (const proposal of client.proposals.slice(-4)) {
       const state = proposal.acked
-        ? 'applied'
+        ? `acked at slot ${proposal.slot ?? '?'}`
         : proposal.slot !== null
           ? `slot ${proposal.slot}`
           : 'in flight';
       rows.push(
-        svg('text', { class: 'client-line', x: 20, y }, `#${proposal.seq} ${displayValue(proposal.value)} — ${state}`),
+        svg('text', { class: 'client-line', x: 20, y }, `#${proposal.seq} ${proposal.value} — ${state}`),
       );
       y += 14;
     }
@@ -237,7 +301,7 @@ function clientColumn(world: WorldView): SVGGElement | null {
         svg(
           'text',
           { class: 'client-line', x: 20, y },
-          `read ${read.ctx} — ${read.served ? `served at ${read.index ?? '?'}` : 'waiting'}`,
+          `read ${read.ctx} — ${read.served ? `slot ${read.index ?? '?'}` : 'waiting'}`,
         ),
       );
       y += 14;
@@ -249,6 +313,7 @@ function clientColumn(world: WorldView): SVGGElement | null {
 
 function chosenBanner(world: WorldView): SVGGElement | null {
   if (!world.chosen) return null;
+  const control = controlLabel(world.chosen.control);
   return svg(
     'g',
     { class: 'chosen-banner' },
@@ -256,7 +321,7 @@ function chosenBanner(world: WorldView): SVGGElement | null {
     svg(
       'text',
       { x: WIDTH / 2, y: 34 },
-      `chosen: ${displayValue(world.chosen.value)} at ballot ${world.chosen.ballot}`,
+      `chosen: ${control ?? world.chosen.value} at ballot ${world.chosen.ballot}`,
     ),
   );
 }
@@ -309,7 +374,7 @@ export function renderStage(view: GameView): SVGSVGElement {
       viewBox: `0 0 ${WIDTH} ${HEIGHT}`,
       preserveAspectRatio: 'xMidYMid meet',
       role: 'img',
-      'aria-label': 'the cluster, its logs and the messages in flight',
+      'aria-label': 'the cluster, the logs and the messages in flight',
     },
     chosenBanner(world),
     clientColumn(world),

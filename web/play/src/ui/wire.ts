@@ -6,7 +6,7 @@
 
 import type { Action, ActionKind, GameView, MessageView } from '../types';
 import { h } from '../render/dom';
-import { phaseClass } from '../render/stage';
+import { isReply, phaseClass } from '../render/stage';
 
 type Dispatch = (action: Action) => void;
 
@@ -33,21 +33,24 @@ function row(
     h(
       'td',
       { class: 'wire-route' },
-      h('span', { class: `wire-swatch ${phaseClass(message.phase)}` }),
+      h('span', {
+        class: `wire-swatch ${phaseClass(message.phase)}${isReply(message) ? ' reply' : ''}`,
+        title: isReply(message) ? 'This message answers a message.' : 'This message asks for something.',
+      }),
       `${message.from} → ${message.to}`,
     ),
     h('td', { class: 'wire-summary', title: message.summary }, message.summary),
     h(
       'td',
       { class: 'wire-actions' },
-      button('Deliver', 'Hand this message to its addressee', allowed.includes('deliver'), () =>
+      button('Deliver', 'Give this message to the node that it is addressed to.', allowed.includes('deliver'), () =>
         dispatch({ kind: 'deliver', id: message.id }),
       ),
-      button('Drop', 'Lose it on the wire', allowed.includes('drop'), () =>
+      button('Drop', 'Lose this message on the wire.', allowed.includes('drop'), () =>
         dispatch({ kind: 'drop', id: message.id }),
       ),
-      button('Dup', 'Deliver it twice', allowed.includes('duplicate'), () =>
-        dispatch({ kind: 'duplicate', id: message.id }),
+      button('Dup', 'Deliver this message two times.', allowed.includes('duplicate'), () =>
+        dispatch({ kind: 'duplicate', id: message.id, to: null }),
       ),
     ),
   );
@@ -62,7 +65,7 @@ export function renderWire(view: GameView, dispatch: Dispatch): HTMLElement {
       'section',
       { class: 'wire-list' },
       h('h2', {}, 'On the wire'),
-      h('p', { class: 'empty' }, 'Nothing is in flight. Make a move to put a message on the wire.'),
+      h('p', { class: 'empty' }, 'No message is in flight. Play a move to put a message on the wire.'),
     );
   }
   return h(

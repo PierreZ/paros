@@ -766,3 +766,153 @@ code,
   font-size: 0.83rem;
   color: var(--ink-soft);
 }
+
+/* ---- the compaction floor and the control commands ---- */
+
+.floor-line {
+  stroke: var(--shared-dark);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+
+.floor-label {
+  fill: var(--shared-dark);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+/* A control command is paros's own: a Noop, a Truncate, a Snap. The dashed
+ * edge and the orange say that the slot holds a decision about the log, and
+ * not a value that a client wrote. */
+.slot.control rect {
+  stroke: var(--shared-dark);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+}
+
+.slot.control.open rect {
+  fill: color-mix(in srgb, var(--shared) 22%, var(--page));
+}
+
+.slot.control.chosen rect {
+  fill: color-mix(in srgb, var(--shared) 45%, var(--page));
+}
+
+.slot.control .slot-label {
+  font-style: italic;
+}
+
+/* A snapshot is the only message that carries application state, so its dot
+ * gets a heavier edge as well as its own colour. */
+.wire-dot.phase-snapshot .dot {
+  stroke-width: 3;
+}
+
+/* ---- the client history ---- */
+
+.history {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+}
+
+.history h2 {
+  margin: 0 0 0.2rem;
+  font-size: 1rem;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.history-op {
+  display: grid;
+  grid-template-columns: 5.5rem 11rem 7rem 1fr;
+  gap: 0.4rem;
+  align-items: baseline;
+  font-size: 0.84rem;
+  border-left: 3px solid var(--open);
+  padding-left: 0.5rem;
+}
+
+.history-op.status-acked {
+  border-left-color: var(--done);
+}
+
+.history-op.status-read {
+  border-left-color: var(--phase-read);
+}
+
+.history-op.status-ambiguous {
+  border-left-color: var(--shared);
+}
+
+.history-op.status-pending {
+  border-left-color: var(--open);
+}
+
+.history-client {
+  color: var(--ink-soft);
+}
+
+.history-name {
+  font-weight: 700;
+}
+
+.history-status {
+  color: var(--accent);
+}
+
+.history-detail {
+  color: var(--ink-soft);
+}
+
+@media (max-width: 900px) {
+  .history-op {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+}
+
+/* ---- the client controls ---- */
+
+.control-hint {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.client-select {
+  font: inherit;
+}
+
+.retry-row .control-label {
+  min-width: 12rem;
+}
+
+/* A reply is drawn hollow, on the stage and in the wire list. The engine says
+ * which messages are replies; the list never reads the variant's name. */
+.wire-swatch.reply {
+  background: var(--page);
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
+.wire-swatch.reply.phase-prepare { color: var(--phase-prepare); }
+.wire-swatch.reply.phase-promise { color: var(--phase-promise); }
+.wire-swatch.reply.phase-accept { color: var(--phase-accept); }
+.wire-swatch.reply.phase-accepted { color: var(--phase-accepted); }
+.wire-swatch.reply.phase-nack { color: var(--phase-nack); }
+.wire-swatch.reply.phase-commit { color: var(--phase-commit); }
+.wire-swatch.reply.phase-heartbeat { color: var(--phase-heartbeat); }
+.wire-swatch.reply.phase-catchup { color: var(--phase-catchup); }
+.wire-swatch.reply.phase-snapshot { color: var(--phase-snapshot); }
+.wire-swatch.reply.phase-read { color: var(--phase-read); }
+.wire-swatch.reply.phase-handoff { color: var(--phase-handoff); }
+.wire-swatch.reply.phase-match { color: var(--phase-match); }
+.wire-swatch.reply.phase-gc { color: var(--phase-gc); }
+.wire-swatch.reply.phase-reconfigure { color: var(--phase-reconfigure); }
+.wire-swatch.reply.phase-other { color: var(--phase-other); }

@@ -29,6 +29,12 @@ ballot: string | null,
  */
 slot: number | null, 
 /**
+ * The column an `Accept` (or the `Accepted` that answers it) was
+ * addressed to, when the sender runs a grid. Every full column is a
+ * Phase-2 quorum, and a slot's column is `slot % cols`.
+ */
+column: number | null, 
+/**
  * A one-line description for the wire list.
  */
 summary: string, 

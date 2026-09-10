@@ -5,14 +5,14 @@
 //! survives a crash — so the stage never blanks a node out and the player can
 //! see what a restart is about to read back.
 
-use paros_core::NodeId;
+use paros_core::{NodeId, QuorumSystem};
 
 use crate::view::{
-    AttemptView, ChosenView, ClientView, ElectionView, GapView, MatchmakerView, NodeFlavour,
-    NodeView, ProposalView, ReachView, ReadRoundView, ReadView, SlotView, WorldFlavour, WorldView,
-    show_ballot, show_role,
+    AttemptView, ChosenView, ClientView, ElectionView, GapView, GridCellView, MatchmakerView,
+    NodeFlavour, NodeView, ProposalView, ReachView, ReadRoundView, ReadView, SlotView,
+    WorldFlavour, WorldView, quorum_view, show_ballot, show_role,
 };
-use crate::world::{Client, InFlight, NO_CHECK_QUORUM, World, quorum_name};
+use crate::world::{Client, NO_CHECK_QUORUM, World, quorum_name};
 
 impl World {
     /// Render the whole world.
@@ -22,7 +22,7 @@ impl World {
             flavour: WorldFlavour::Log,
             clock: self.clock,
             nodes: (0..self.pool.len()).map(|i| self.node_view(i)).collect(),
-            wire: self.wire.iter().map(InFlight::view).collect(),
+            wire: self.wire.iter().map(|entry| self.render(entry)).collect(),
             clients: self.clients.iter().map(client_view).collect(),
             matchmakers: Vec::<MatchmakerView>::new(),
             chosen: None::<ChosenView>,
@@ -67,6 +67,8 @@ impl World {
                 recovery_remaining: 0,
                 acceptors: disk.config().peers.iter().map(|n| n.0).collect(),
                 quorum_system: quorum_name(disk.config().quorum_system),
+                quorum: quorum_view(disk.config().quorum_system),
+                grid_cell: grid_cell(&disk.config().peers, disk.config().quorum_system, id),
                 applied: disk
                     .applied()
                     .iter()
@@ -118,6 +120,12 @@ impl World {
             recovery_remaining: node.proposer().recovery_remaining(),
             acceptors: node.acceptors().members().iter().map(|n| n.0).collect(),
             quorum_system: quorum_name(node.acceptors().quorum_system()),
+            quorum: quorum_view(node.acceptors().quorum_system()),
+            grid_cell: grid_cell(
+                node.acceptors().members(),
+                node.acceptors().quorum_system(),
+                id,
+            ),
             applied: disk
                 .applied()
                 .iter()
@@ -139,6 +147,21 @@ impl World {
             })
             .collect()
     }
+}
+
+/// Where `id` sits in the grid `system` lays over the sorted `members`:
+/// member `i` at `(i / cols, i % cols)`, exactly as the configuration does it.
+/// `None` for every system that lays out no grid.
+fn grid_cell(members: &[NodeId], system: QuorumSystem, id: NodeId) -> Option<GridCellView> {
+    let QuorumSystem::Grid { cols, .. } = system else {
+        return None;
+    };
+    let index = members.iter().position(|member| *member == id)?;
+    let cols = cols.max(1);
+    Some(GridCellView {
+        row: u64::try_from(index / cols).unwrap_or(0),
+        column: u64::try_from(index % cols).unwrap_or(0),
+    })
 }
 
 fn client_view(client: &Client) -> ClientView {

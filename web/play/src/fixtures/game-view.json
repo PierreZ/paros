@@ -19,6 +19,7 @@
       "duplicate",
       "set_automation"
     ],
+    "unlocks": [],
     "hint": null
   },
   "world": {
@@ -29,7 +30,8 @@
         "id": 1,
         "flavour": "acceptor",
         "alive": true,
-        "role": "acceptor",
+        "role": null,
+        "attempt": null,
         "ballot": null,
         "leader": null,
         "promised": "1.5",
@@ -50,6 +52,14 @@
           3
         ],
         "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
         "applied": [],
         "armed_seam": null
       },
@@ -57,7 +67,8 @@
         "id": 2,
         "flavour": "acceptor",
         "alive": true,
-        "role": "acceptor",
+        "role": null,
+        "attempt": null,
         "ballot": null,
         "leader": null,
         "promised": "0.0",
@@ -78,6 +89,14 @@
           3
         ],
         "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
         "applied": [],
         "armed_seam": null
       },
@@ -85,7 +104,8 @@
         "id": 3,
         "flavour": "acceptor",
         "alive": true,
-        "role": "acceptor",
+        "role": null,
+        "attempt": null,
         "ballot": null,
         "leader": null,
         "promised": "0.0",
@@ -106,6 +126,14 @@
           3
         ],
         "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
         "applied": [],
         "armed_seam": null
       },
@@ -113,7 +141,8 @@
         "id": 5,
         "flavour": "proposer",
         "alive": true,
-        "role": "phase 1",
+        "role": null,
+        "attempt": "phase1",
         "ballot": "1.5",
         "leader": null,
         "promised": null,
@@ -121,7 +150,8 @@
           {
             "slot": 0,
             "ballot": "1.5",
-            "value": "\"alpha\"",
+            "value": "alpha",
+            "control": null,
             "chosen": false,
             "applied": false
           }
@@ -142,6 +172,14 @@
           3
         ],
         "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
         "applied": [],
         "armed_seam": null
       }
@@ -154,8 +192,10 @@
         "to": 2,
         "ballot": "1.5",
         "slot": 0,
+        "column": null,
         "summary": "Prepare at 1.5 for slots from 0",
         "phase": "prepare",
+        "reply": false,
         "sent_at": 0
       },
       {
@@ -165,8 +205,10 @@
         "to": 3,
         "ballot": "1.5",
         "slot": 0,
+        "column": null,
         "summary": "Prepare at 1.5 for slots from 0",
         "phase": "prepare",
+        "reply": false,
         "sent_at": 0
       },
       {
@@ -176,14 +218,28 @@
         "to": 5,
         "ballot": "1.5",
         "slot": 0,
+        "column": null,
         "summary": "Promise 1.5 from slot 0: 0 accepted, 0 faulty",
         "phase": "promise",
+        "reply": true,
         "sent_at": 0
       }
     ],
     "clients": [],
     "matchmakers": [],
-    "chosen": null
+    "chosen": null,
+    "reach": {
+      "one": [
+        1,
+        2,
+        3
+      ],
+      "two": [
+        1,
+        2,
+        3
+      ]
+    }
   },
   "prompt": null,
   "goal": {
@@ -262,6 +318,48 @@
         "flag": "read_serve",
         "label": "serve reads",
         "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "snapshot_promise",
+        "label": "promise across a snapshot",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "ack_write",
+        "label": "answer a client retry",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "grid_column",
+        "label": "address a slot to its column",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "quorum_read_serve",
+        "label": "serve a quorum read",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "repair_verdict",
+        "label": "settle a damaged slot",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "wiped_rejoin",
+        "label": "refuse a wiped node",
+        "on": false,
         "unlocked": false,
         "pinned_off": false
       },

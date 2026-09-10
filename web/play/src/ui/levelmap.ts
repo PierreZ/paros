@@ -7,7 +7,7 @@ import { h } from '../render/dom';
 const ACT_TITLES: Record<number, string> = {
   1: 'Act I — a single decree',
   2: 'Act II — a replicated log',
-  3: 'Act III — truncation, snapshots, reads',
+  3: 'Act III — truncation, snapshots and reads',
   4: 'Act IV — everything the book never wrote',
 };
 
@@ -33,7 +33,7 @@ export function renderLevelMap(levels: readonly LevelSummary[], progress: Progre
           ...entries.map((level) => {
             const record = progress.levels[level.id];
             const status = record?.passed
-              ? `passed${record.mistakes > 0 ? ` — ${record.mistakes} mistake${record.mistakes === 1 ? '' : 's'}` : ' — clean'}`
+              ? `passed${record.mistakes > 0 ? ` — ${record.mistakes} mistake${record.mistakes === 1 ? '' : 's'}` : ' — no mistake'}`
               : record
                 ? 'attempted'
                 : 'not played';
@@ -60,17 +60,17 @@ export function renderLevelMap(levels: readonly LevelSummary[], progress: Progre
     h(
       'p',
       { class: 'lede' },
-      'Run Paxos by hand. You are the network and the clock: nothing moves unless you deliver ' +
-        'it, and when a node has to decide something, you decide it — and the real state machine ' +
-        'marks your answer.',
+      'You operate Paxos by hand. You are the network and the clock. A message moves only when ' +
+        'you deliver it. When a node must make a decision, you make it, and the real state ' +
+        'machine marks your answer.',
     ),
     ...sections,
     h(
       'p',
       { class: 'footnote' },
-      'Progress is kept in this browser only. ',
+      'This browser keeps your progress. ',
       h('a', { href: '../index.html' }, 'The field guide'),
-      ' explains the mechanisms the levels teach.',
+      ' gives the reference pages for the mechanisms in the levels.',
     ),
   );
 }

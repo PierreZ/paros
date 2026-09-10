@@ -28,6 +28,24 @@
 //! is exactly the split the doctrine asks for — the engine's driver half ships
 //! and stores the blob without looking inside, and only the apply side, which
 //! owns the state machine, decodes it.
+//!
+//! # Damage: a rotted record, and an erased disk
+//!
+//! Act IV adds the two ways a disk can lose something. [`Disk::corrupt`] rots
+//! **one accepted record**: its value is gone and its identity — the slot and
+//! the ballot it was accepted at — survives, which is exactly the tri-state a
+//! boot scan classifies and reports through [`Storage::faulty_entries`]. The
+//! record is never reported as "nothing accepted here": that misreport is what
+//! lets a later ballot decide a second value for a slot that already has one.
+//! A peer's `Accept` at a high enough ballot writes the value back and the
+//! entry stops being faulty, which is the whole repair.
+//!
+//! [`Disk::wipe`] erases everything instead — the lost disk, not the clean
+//! crash. What survives it is one bit outside the erased area: this identity
+//! **was provisioned once**. A store that was provisioned and no longer
+//! carries its own format marker is a node whose promise is gone, and the
+//! engine refuses to boot it (see `World::restart`): a snapshot restores the
+//! log, never a promise.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +67,17 @@ pub struct Disk {
     /// a decided [`Control::Snap`](paros_core::Control::Snap) is applied
     /// ([`Disk::record_snapshot`]) and when a peer's snapshot is installed.
     snapshot: Option<(Slot, Value)>,
+    /// The **faulty** records: value lost, identity — the slot and the ballot
+    /// it was accepted at — intact. Reported through
+    /// [`Storage::faulty_entries`] at the next boot.
+    faulty: BTreeMap<Slot, Ballot>,
+    /// Whether this store carries its own format marker. A fresh disk in a
+    /// level's setup does; [`Disk::wipe`] clears it.
+    formatted: bool,
+    /// Whether an operator ever provisioned this identity. It lives outside
+    /// the area a wipe erases, because an operator remembers provisioning a
+    /// node even when the node's disk no longer does.
+    provisioned: bool,
 }
 
 impl Disk {
@@ -63,6 +92,9 @@ impl Disk {
             sealed: BTreeMap::new(),
             applied: Vec::new(),
             snapshot: None,
+            faulty: BTreeMap::new(),
+            formatted: true,
+            provisioned: true,
         }
     }
 
@@ -105,6 +137,54 @@ impl Disk {
     #[must_use]
     pub fn records(&self) -> &BTreeMap<Slot, (Ballot, Command)> {
         &self.records
+    }
+
+    /// The faulty records: the slots whose value is lost and whose identity
+    /// survived.
+    #[must_use]
+    pub fn faulty(&self) -> &BTreeMap<Slot, Ballot> {
+        &self.faulty
+    }
+
+    /// Whether this store carries its format marker.
+    #[must_use]
+    pub fn is_formatted(&self) -> bool {
+        self.formatted
+    }
+
+    /// Whether an operator ever provisioned this identity.
+    #[must_use]
+    pub fn provisioned(&self) -> bool {
+        self.provisioned
+    }
+
+    /// **Rot one accepted record**: drop its value and keep its identity.
+    ///
+    /// Returns `false` when the slot holds no readable record here. The next
+    /// boot reads the entry back through [`Storage::faulty_entries`], so the
+    /// node reports `faulty` for that slot rather than `have` — and never
+    /// `none`, which is the misreport that would let a later ballot decide a
+    /// second value for a slot a quorum may already have decided.
+    pub fn corrupt(&mut self, slot: Slot) -> bool {
+        let Some((ballot, _)) = self.records.remove(&slot) else {
+            return false;
+        };
+        self.faulty.insert(slot, ballot);
+        true
+    }
+
+    /// **Erase the disk**, keeping only the memory that this identity was
+    /// provisioned once. The promise, the records, the application and the
+    /// format marker all go.
+    pub fn wipe(&mut self) {
+        self.hard_state = HardState::default();
+        self.records.clear();
+        self.faulty.clear();
+        self.sealed.clear();
+        self.applied.clear();
+        self.snapshot = None;
+        self.first_slot = Slot(0);
+        self.formatted = false;
     }
 
     /// The compaction floor: the first slot still retained.
@@ -167,6 +247,10 @@ impl Disk {
                 ballot,
                 value,
             }) => {
+                // A record written over a faulty entry **is** the repair: the
+                // value is readable again, so the slot leaves the faulty set
+                // and the next boot reports `have` for it.
+                self.faulty.remove(slot);
                 self.records.insert(*slot, (*ballot, value.clone()));
             }
             WriteOp::SetChosenIndex(slot) => {
@@ -176,6 +260,7 @@ impl Disk {
                 self.seal(sealed);
                 self.first_slot = self.first_slot.max(*first);
                 self.records.retain(|slot, _| *slot >= self.first_slot);
+                self.faulty.retain(|slot, _| *slot >= self.first_slot);
             }
             WriteOp::InstallSnapshot {
                 chosen_index,
@@ -189,6 +274,7 @@ impl Disk {
                     self.hard_state.max_promised_ballot.max(*ballot);
                 self.first_slot = self.first_slot.max(Slot(chosen_index.0 + 1));
                 self.records.retain(|slot, _| *slot >= self.first_slot);
+                self.faulty.retain(|slot, _| *slot >= self.first_slot);
                 self.snapshot = Some((*chosen_index, snapshot.clone()));
                 // The application side of the seam, and the only place the
                 // bytes are read: the game's application state *is* the
@@ -242,13 +328,27 @@ impl Storage for Disk {
     }
 
     fn last_slot(&self) -> Slot {
-        self.records.keys().next_back().copied().unwrap_or(Slot(0))
+        // A faulty entry is a record this node accepted: it bounds the scan
+        // exactly like a readable one, it is simply unreadable.
+        self.records
+            .keys()
+            .chain(self.faulty.keys())
+            .max()
+            .copied()
+            .unwrap_or(Slot(0))
     }
 
     fn sealed_sessions(&self) -> Vec<SessionEntry> {
         self.sealed
             .iter()
             .map(|(&(client, seq), &slot)| (client, seq, slot))
+            .collect()
+    }
+
+    fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
+        self.faulty
+            .iter()
+            .map(|(slot, ballot)| (*slot, *ballot))
             .collect()
     }
 }

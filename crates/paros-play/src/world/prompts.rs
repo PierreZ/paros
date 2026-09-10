@@ -10,10 +10,11 @@
 //! wrong answer cost a mistake instead of a state.
 
 use paros_core::{
-    AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Message, NodeId, Slot, WriteOp,
+    AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Message, NodeId, QuorumSystem, Slot,
+    WriteOp,
 };
 
-use crate::prompt::{Prompt, PromptKind};
+use crate::prompt::{Prompt, PromptKind, RepairCase};
 use crate::world::World;
 
 impl World {
@@ -30,7 +31,191 @@ impl World {
         self.vote_prompt(to, index, message)
             .or_else(|| self.learn_prompt(to, index, message))
             .or_else(|| self.read_prompt(to, index, message))
+            .or_else(|| self.quorum_read_prompt(to, index, message))
+            .or_else(|| self.repair_prompt(to, index, message))
             .or_else(|| self.snapshot_prompt(to, index, message))
+    }
+
+    /// The question a grid leader is asked before it proposes: which column
+    /// takes the slot it is about to allocate?
+    ///
+    /// Judged by the configuration's own
+    /// [`column_of`](paros_core::AcceptorConfig::column_of), so the answer is
+    /// the rule itself and not a modulus restated here.
+    pub(super) fn grid_column_prompt(&mut self, to: NodeId, index: usize) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::GridColumn) {
+            return None;
+        }
+        let node = self.nodes[index].as_ref()?;
+        if !node.is_leader() {
+            return None;
+        }
+        let QuorumSystem::Grid { cols, .. } = node.acceptors().quorum_system() else {
+            return None;
+        };
+        let slot = node.proposer().next_slot();
+        let expected = node.acceptors().column_of(slot)?;
+        let id = self.take_prompt_id();
+        Some(Prompt::grid_column(id, to, slot, cols, expected))
+    }
+
+    /// The question an erased disk raises when its node asks to come back.
+    ///
+    /// There is no role to clone here — the store holds no promise, which is
+    /// the whole problem — so the prompt's answer is a constant and its doc
+    /// comment says why.
+    pub(super) fn wiped_rejoin_prompt(&mut self, to: NodeId, index: usize) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::WipedRejoin) {
+            return None;
+        }
+        let promised = self.promise_watermarks[index];
+        let id = self.take_prompt_id();
+        Some(Prompt::wiped_rejoin(id, to, promised))
+    }
+
+    /// The question a quorum read's last answer raises: the row has answered,
+    /// so serve the read, or wait for this node's own prefix to reach the
+    /// index the row settled on?
+    ///
+    /// Judged on a **clone of the node's own quorum reads**, folded with this
+    /// answer and served with the replica's own `covers`.
+    fn quorum_read_prompt(
+        &mut self,
+        to: NodeId,
+        index: usize,
+        message: &Message,
+    ) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::QuorumReadServe) {
+            return None;
+        }
+        let Message::PreReadAck {
+            from,
+            ctx,
+            watermark,
+            config_since,
+        } = message
+        else {
+            return None;
+        };
+        let node = self.nodes[index].as_ref()?;
+        let mut clone = node.quorum_reads().clone();
+        if clone.fold(*ctx, *from, *watermark, *config_since) != paros_core::PreReadFold::Counted {
+            return None;
+        }
+        // What the row settled on, and whether this node may answer with it:
+        // both come from the clone, driven exactly as the node drives the real
+        // one.
+        let replica = node.replica().clone();
+        let applied = replica.chosen_index();
+        let served = clone.serve(|at| replica.covers(at));
+        let confirmed = clone
+            .pending()
+            .iter()
+            .find(|read| read.ctx() == *ctx)
+            .and_then(paros_core::quorum_read::QuorumRead::confirmed_index);
+        let (settled, answered) = match confirmed {
+            Some(index) => (
+                index,
+                clone
+                    .pending()
+                    .iter()
+                    .find(|read| read.ctx() == *ctx)
+                    .map_or(0, |read| read.watermarks().len()),
+            ),
+            // The read left the tally, so it was served: the index it was
+            // served at is the one the row settled on.
+            None => (
+                served
+                    .iter()
+                    .find(|(served_ctx, _)| *served_ctx == *ctx)
+                    .and_then(|(_, at)| *at),
+                node.acceptors()
+                    .phase1_addressees(node.acceptors().row_of(*ctx))
+                    .len(),
+            ),
+        };
+        let serve = served.iter().any(|(served_ctx, _)| *served_ctx == *ctx);
+        // A row that has not answered whole yet asks nothing: there is no
+        // index to serve or wait for.
+        if !serve && confirmed.is_none() {
+            return None;
+        }
+        let id = self.take_prompt_id();
+        Some(Prompt::quorum_read_serve(
+            id, to, *ctx, settled, applied, answered, serve,
+        ))
+    }
+
+    /// The question a straggler's `Promise` raises at a leader whose repair
+    /// probe is still blocked: which CTRL case does this answer put the
+    /// damaged slot in?
+    ///
+    /// Judged on a **clone of the proposer**: the page is folded through
+    /// `fold_probe_promise` and the probe resolved through `resolve_probe`,
+    /// exactly as the node does it.
+    fn repair_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::RepairVerdict) {
+            return None;
+        }
+        let Message::Promise {
+            from,
+            ballot,
+            from_slot,
+            accepted,
+            faulty,
+            next_from_slot,
+        } = message
+        else {
+            return None;
+        };
+        let node = self.nodes[index].as_ref()?;
+        let probe = node.proposer().probe()?;
+        let slot = *probe.blocked().iter().next()?;
+        let mut clone = node.proposer().clone();
+        clone.fold_probe_promise(
+            *from,
+            *ballot,
+            *from_slot,
+            accepted,
+            faulty,
+            *next_from_slot,
+        );
+        let decisions = clone.resolve_probe();
+        let decision = decisions.iter().find(|decision| decision.slot == slot);
+        let expected = match decision {
+            Some(decision) if decision.command.is_some() => RepairCase::ReproposeReported,
+            Some(_) => RepairCase::FillNoop,
+            None => RepairCase::Wait,
+        };
+        // What the reports hold for the slot, taken from the same clone: the
+        // value it would re-propose, or — while it is still blocked — the
+        // highest report the page just added.
+        let reported = decision
+            .and_then(|decision| decision.command.clone())
+            .or_else(|| accepted.get(&slot).map(|(_, command)| command.clone()));
+        let faulty_at = faulty
+            .get(&slot)
+            .copied()
+            .or_else(|| node.acceptor().faulty().get(&slot).copied())
+            .or_else(|| self.reported_faulty(slot));
+        let id = self.take_prompt_id();
+        Some(Prompt::repair_verdict(
+            id,
+            to,
+            slot,
+            reported.as_ref(),
+            faulty_at,
+            expected,
+        ))
+    }
+
+    /// The ballot some acceptor's damaged record for `slot` was accepted at,
+    /// read off the disks the world owns — what the earlier `Promise` that
+    /// blocked the probe reported.
+    fn reported_faulty(&self, slot: Slot) -> Option<Ballot> {
+        self.disks
+            .iter()
+            .find_map(|disk| disk.faulty().get(&slot).copied())
     }
 
     /// The question a peer's snapshot raises at a node stranded below the

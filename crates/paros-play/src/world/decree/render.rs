@@ -8,10 +8,11 @@
 
 use super::{Attempt, DECREE, DecreeAcceptor, DecreeProposer, DecreeWorld};
 use crate::view::{
-    AttemptView, ChosenView, ClientView, MatchmakerView, NodeFlavour, NodeView, ReachView,
-    SlotView, WorldFlavour, WorldView, control_kind, show_ballot, value_text,
+    AttemptView, ChosenView, ClientView, GridCellView, MatchmakerView, NodeFlavour, NodeView,
+    ReachView, SlotView, WorldFlavour, WorldView, control_kind, quorum_view, show_ballot,
+    value_text,
 };
-use crate::world::{InFlight, quorum_name};
+use crate::world::quorum_name;
 use paros_core::Ballot;
 
 impl DecreeWorld {
@@ -28,7 +29,11 @@ impl DecreeWorld {
             flavour: WorldFlavour::Decree,
             clock: 0,
             nodes,
-            wire: self.wire.iter().map(InFlight::view).collect(),
+            wire: self
+                .wire
+                .iter()
+                .map(|entry| entry.view(self.config.quorum_system()))
+                .collect(),
             clients: Vec::<ClientView>::new(),
             matchmakers: Vec::<MatchmakerView>::new(),
             chosen: self.chosen.as_ref().map(|(ballot, command)| ChosenView {
@@ -84,6 +89,10 @@ impl DecreeWorld {
             recovery_remaining: 0,
             acceptors: self.config.members().iter().map(|n| n.0).collect(),
             quorum_system: quorum_name(self.config.quorum_system()),
+            quorum: quorum_view(self.config.quorum_system()),
+            // The single-decree world lays out no grid: its levels teach the
+            // counting systems, and a grid is a log-world deployment.
+            grid_cell: None::<GridCellView>,
             applied: Vec::new(),
             armed_seam: None,
         }
@@ -132,6 +141,10 @@ impl DecreeWorld {
             recovery_remaining: 0,
             acceptors: self.config.members().iter().map(|n| n.0).collect(),
             quorum_system: quorum_name(self.config.quorum_system()),
+            quorum: quorum_view(self.config.quorum_system()),
+            // The single-decree world lays out no grid: its levels teach the
+            // counting systems, and a grid is a log-world deployment.
+            grid_cell: None::<GridCellView>,
             applied: Vec::new(),
             armed_seam: None,
         }

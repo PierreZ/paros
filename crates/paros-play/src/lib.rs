@@ -284,7 +284,7 @@ impl Game {
         match action {
             Action::Deliver { id } => self.world.deliver(*id)?,
             Action::Drop { id } => self.world.drop_message(*id)?,
-            Action::Duplicate { id } => self.world.duplicate(*id)?,
+            Action::Duplicate { id, to } => self.world.duplicate(*id, *to)?,
             Action::Tick { node } => self.log_world()?.tick(NodeId(*node))?,
             Action::TickAll => self.log_world()?.tick_all()?,
             Action::Crash { node } => self.log_world()?.crash(NodeId(*node))?,
@@ -296,7 +296,10 @@ impl Game {
                 node,
                 client,
                 value,
-            } => self.log_world()?.propose(NodeId(*node), *client, value)?,
+                column,
+            } => self
+                .log_world()?
+                .propose(NodeId(*node), *client, value, *column)?,
             Action::StartElection { node } => self.log_world()?.start_election(NodeId(*node))?,
             Action::SetElectionTimeout { node, ticks } => {
                 self.log_world()?
@@ -315,6 +318,27 @@ impl Game {
                 };
                 world.read_index(NodeId(*node), client)?;
             }
+            Action::QuorumRead { node, client } => {
+                let world = self.log_world()?;
+                let client = match client {
+                    Some(client) => *client,
+                    None => world.clients().first().copied().ok_or_else(|| {
+                        ActionError::new(
+                            ActionErrorCode::UnknownParty,
+                            "this level has no client to read for",
+                        )
+                    })?,
+                };
+                world.quorum_read(NodeId(*node), client)?;
+            }
+            Action::Relinquish { node, to } => {
+                self.log_world()?.relinquish(NodeId(*node), NodeId(*to))?;
+            }
+            Action::Corrupt { node, slot } => {
+                self.log_world()?
+                    .corrupt(NodeId(*node), paros_core::Slot(*slot))?;
+            }
+            Action::Wipe { node } => self.log_world()?.wipe(NodeId(*node))?,
             Action::Retry { node, client, seq } => {
                 self.log_world()?.retry(NodeId(*node), *client, *seq)?;
             }

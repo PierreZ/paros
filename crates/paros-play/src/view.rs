@@ -14,7 +14,7 @@
 //! ([`control_kind`]), so the renderer styles a `Truncate` differently from a
 //! client's `"alpha"` without parsing either.
 
-use paros_core::{Ballot, Command, Control, NodeRole, Slot};
+use paros_core::{Ballot, Command, Control, NodeRole, QuorumSystem, Slot};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -270,10 +270,88 @@ pub struct NodeView {
     pub acceptors: Vec<u64>,
     /// Its quorum system, e.g. `majority`.
     pub quorum_system: String,
+    /// The same quorum system, as numbers the stage can draw.
+    pub quorum: QuorumSystemView,
+    /// Where this acceptor sits in the grid, when the configuration runs one.
+    pub grid_cell: Option<GridCellView>,
     /// A one-line summary of what this node's application has applied.
     pub applied: Vec<SlotView>,
     /// An armed durability seam, if the player set one.
     pub armed_seam: Option<Seam>,
+}
+
+/// Which family of quorums a configuration counts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum QuorumKindView {
+    /// Any group of more than half the acceptors, in both phases.
+    Majority,
+    /// A split: `q1` acceptors answer Phase 1 and `q2` vote in Phase 2.
+    Flexible,
+    /// A grid: a full row answers Phase 1 and a full column votes in Phase 2.
+    Grid,
+}
+
+/// The quorum system a configuration runs, as a structure rather than a
+/// sentence: the renderer draws a grid from `rows` and `cols` and prints a
+/// split from `q1` and `q2`, and never parses
+/// [`NodeView::quorum_system`](NodeView::quorum_system).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct QuorumSystemView {
+    /// Which family this is.
+    pub kind: QuorumKindView,
+    /// How many acceptors answer Phase 1 (a flexible split's `q1`).
+    pub q1: Option<u64>,
+    /// How many acceptors vote in Phase 2 (a flexible split's `q2`).
+    pub q2: Option<u64>,
+    /// The grid's rows: how many Phase-1 quorums there are.
+    pub rows: Option<u64>,
+    /// The grid's columns: how many Phase-2 quorums there are.
+    pub cols: Option<u64>,
+}
+
+/// Where one acceptor sits in a grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GridCellView {
+    /// The row this acceptor is in. Its row is a Phase-1 quorum.
+    pub row: u64,
+    /// The column this acceptor is in. Its column is a Phase-2 quorum.
+    pub column: u64,
+}
+
+/// A count for the view. Every count here is a configuration size, so the
+/// saturation is unreachable; it exists so no cast can truncate one.
+fn as_u64(count: usize) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
+/// The structured form of `system`. Every number is a fact the configuration
+/// itself carries; nothing here is a threshold the game computed.
+#[must_use]
+pub fn quorum_view(system: QuorumSystem) -> QuorumSystemView {
+    match system {
+        QuorumSystem::Majority => QuorumSystemView {
+            kind: QuorumKindView::Majority,
+            q1: None,
+            q2: None,
+            rows: None,
+            cols: None,
+        },
+        QuorumSystem::Flexible { q1, q2 } => QuorumSystemView {
+            kind: QuorumKindView::Flexible,
+            q1: Some(as_u64(q1)),
+            q2: Some(as_u64(q2)),
+            rows: None,
+            cols: None,
+        },
+        QuorumSystem::Grid { rows, cols } => QuorumSystemView {
+            kind: QuorumKindView::Grid,
+            q1: None,
+            q2: None,
+            rows: Some(as_u64(rows)),
+            cols: Some(as_u64(cols)),
+        },
+    }
 }
 
 /// A chosen slot stranded above a hole in the contiguous prefix.
@@ -339,6 +417,10 @@ pub struct MessageView {
     pub ballot: Option<String>,
     /// The slot it names.
     pub slot: Option<u64>,
+    /// The column an `Accept` (or the `Accepted` that answers it) was
+    /// addressed to, when the sender runs a grid. Every full column is a
+    /// Phase-2 quorum, and a slot's column is `slot % cols`.
+    pub column: Option<u64>,
     /// A one-line description for the wire list.
     pub summary: String,
     /// The render family: `prepare`, `promise`, `accept`, `accepted`, `nack`,
@@ -558,6 +640,7 @@ pub fn message_view(
     to: u64,
     sent_at: u64,
     message: &paros_core::Message,
+    system: QuorumSystem,
 ) -> MessageView {
     use paros_core::Message as M;
     let (kind, phase, ballot, slot, summary) = match message {
@@ -760,6 +843,13 @@ pub fn message_view(
         ),
         _ => ("Other", "other", None, None, "a message".to_string()),
     };
+    // The column is a Phase-2 fact, so only the two Phase-2 messages carry
+    // one, and only under a grid: `QuorumSystem::column_of` answers `None`
+    // for every other system, which is exactly "the whole membership".
+    let column = match message {
+        M::Accept { slot, .. } | M::Accepted { slot, .. } => system.column_of(*slot),
+        _ => None,
+    };
     MessageView {
         id,
         kind: kind.to_string(),
@@ -767,6 +857,7 @@ pub fn message_view(
         to,
         ballot: ballot.map(show_ballot),
         slot: slot.map(|s| s.0),
+        column: column.map(as_u64),
         summary,
         phase: phase.to_string(),
         reply: is_reply(message),

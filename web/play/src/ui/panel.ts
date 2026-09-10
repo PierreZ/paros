@@ -5,7 +5,7 @@
 // symbols the level names are a small footnote at the bottom, beside the link
 // into the field guide.
 
-import type { Action, AutomationFlagView, GameView, LevelSummary } from '../types';
+import type { Action, AutomationFlag, AutomationFlagView, GameView, LevelSummary } from '../types';
 import type { Progress } from '../progress';
 import { narrationStream } from '../narration';
 import { h } from '../render/dom';
@@ -41,9 +41,35 @@ function goalBlock(view: GameView): HTMLElement {
       ? h(
           'p',
           { class: 'mistakes' },
-          `${view.mistakes} wrong answer${view.mistakes === 1 ? '' : 's'} so far — the world never took one of them.`,
+          `You gave ${view.mistakes} wrong answer${view.mistakes === 1 ? '' : 's'}. The world did not move for them.`,
         )
       : null,
+  );
+}
+
+/**
+ * What passing this level gives the player.
+ *
+ * The engine names the flags (`LevelView.unlocks`); their labels come from the
+ * automation view, which is where a flag's name for the player lives. A level
+ * that unlocks nothing renders nothing.
+ */
+function unlocksBlock(view: GameView): HTMLElement | null {
+  const unlocks = Array.isArray(view.level.unlocks) ? view.level.unlocks : [];
+  if (unlocks.length === 0) return null;
+  const labels = new Map<AutomationFlag, string>();
+  for (const flag of view.automation.flags) labels.set(flag.flag, flag.label);
+  const names = unlocks.map((flag) => labels.get(flag) ?? String(flag).replace(/_/g, ' '));
+  return h(
+    'section',
+    { class: 'unlocks' },
+    h('h2', {}, 'The reward'),
+    h('p', {}, `Passing this level unlocks: ${names.join(', ')}.`),
+    h(
+      'p',
+      { class: 'small' },
+      'The engine then takes this decision for you in the levels that come after this one.',
+    ),
   );
 }
 
@@ -57,8 +83,8 @@ function automationBlock(view: GameView, dispatch: Dispatch): HTMLElement | null
     h(
       'p',
       { class: 'small' },
-      'A role you have already played can be played for you. A level that teaches a decision ' +
-        'pins it back to manual.',
+      'The engine can play a role that you know. A level that teaches a decision keeps that ' +
+        'decision manual.',
     ),
     ...flags.map((flag) => toggle(flag, dispatch)),
   );
@@ -82,10 +108,10 @@ function toggle(flag: AutomationFlagView, dispatch: Dispatch): HTMLElement {
       class: `auto-toggle${disabled ? ' disabled' : ''}`,
       for: `auto-${flag.flag}`,
       title: flag.pinned_off
-        ? 'This level keeps this decision manual: it is what the level teaches.'
+        ? 'This level teaches this decision. You must make it.'
         : flag.unlocked
-          ? 'Let the engine take this decision for you.'
-          : 'Pass the level that teaches this decision to unlock it.',
+          ? 'The engine makes this decision for you.'
+          : 'You must pass the level that teaches this decision first.',
     },
     box,
     h('span', {}, flag.label),
@@ -106,7 +132,7 @@ function logBlock(deps: PanelDeps): HTMLElement {
     h('h2', {}, 'What you have played'),
     h('div', { class: 'log-buttons' }, undo, reset),
     entries.length === 0
-      ? h('p', { class: 'empty' }, 'Nothing yet.')
+      ? h('p', { class: 'empty' }, 'You did not play a move yet.')
       : h(
           'ol',
           { class: 'log-list', start: view.log.length - entries.length + 1 },
@@ -162,7 +188,7 @@ function footnote(view: GameView): HTMLElement {
       h(
         'p',
         { class: 'small' },
-        'You do not need any of this to play. It is where the rules you just used live.',
+        'You do not need this to play. It shows where the rules that you used are in the code.',
       ),
       level.symbols.length > 0
         ? h(
@@ -201,6 +227,7 @@ export function renderPanel(deps: PanelDeps): HTMLElement {
       h('h2', {}, 'The briefing'),
       markdown(view.level.briefing),
     ),
+    unlocksBlock(view),
     view.level.hint ? h('section', { class: 'hint' }, h('h2', {}, 'A hint'), h('p', {}, view.level.hint)) : null,
     automationBlock(view, deps.dispatch),
     logBlock(deps),

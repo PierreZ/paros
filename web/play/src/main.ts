@@ -13,6 +13,7 @@ import { h, replace } from './render/dom';
 import { renderStage } from './render/stage';
 import { renderCaption } from './ui/caption';
 import { renderControls, newControlState, type ControlState } from './ui/controls';
+import { renderHistory } from './ui/history';
 import { renderLevelMap } from './ui/levelmap';
 import { renderPanel } from './ui/panel';
 import { renderWire } from './ui/wire';
@@ -101,6 +102,7 @@ function render(): void {
     h('div', { class: 'stage-host' }, renderStage(view)),
     renderCaption(view),
     renderControls(view, controls, dispatch),
+    renderHistory(view),
     renderWire(view, dispatch),
   );
   replace(
@@ -193,7 +195,9 @@ function openMenu(id: number, x: number, y: number): void {
     { class: 'wire-menu', style: `left:${x}px; top:${y}px` },
     item('Deliver', { kind: 'deliver', id }),
     item('Drop', { kind: 'drop', id }),
-    item('Duplicate', { kind: 'duplicate', id }),
+    // `to: null` keeps the copy's addressee. A level that teaches a
+    // misrouted message names the other node itself.
+    item('Duplicate', { kind: 'duplicate', id, to: null }),
   );
   document.body.append(element);
   menu = element;

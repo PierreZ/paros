@@ -108,6 +108,14 @@ pub(super) enum Paused {
     Message { node: NodeId, message: Box<Message> },
     /// A client retry the `AckWrite` answer has not been given for yet.
     Retry { node: NodeId, client: u64, seq: u64 },
+    /// A client's proposal waiting on the column its Phase 2 goes to.
+    Propose {
+        node: NodeId,
+        client: u64,
+        value: String,
+    },
+    /// A wiped node's boot, waiting on the operator's answer.
+    Boot { node: NodeId },
     /// A drained batch waiting on the persist-order answer.
     Batch { node: NodeId, batch: Box<Batch> },
     /// A drained recovery batch, and the slots still to be quizzed on.
@@ -128,6 +136,7 @@ impl World {
         let known = NodeSnapshot::capture(self.node(id));
         let receipt = narration::receipt(id, &message, &known);
         self.narration_push(receipt);
+        self.note_stray_vote(id, &message);
         // A won Phase 1 opens *and* pumps its first recovery page inside this
         // one `step`, so the oracle for that page has to be taken now.
         self.plan_recovery(id, Some(&message));
@@ -139,6 +148,44 @@ impl World {
             }
             world.pump(id);
         });
+    }
+
+    /// Say so when a vote arrives from an acceptor the slot's Phase-2 quorum
+    /// does not contain.
+    ///
+    /// Under a grid a slot is decided by **one column**, and an acceptor
+    /// outside it is a member of the configuration whose vote for that slot
+    /// counts toward nothing. The fact is read off the configuration itself
+    /// (`is_phase2_addressee` over the slot's own column), so the line is only
+    /// ever printed when the tally really is about to ignore the vote.
+    fn note_stray_vote(&mut self, id: NodeId, message: &Message) {
+        let Message::Accepted { from, slot, .. } = message else {
+            return;
+        };
+        let (from, slot) = (*from, *slot);
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        let config = node.acceptors();
+        let Some(column) = config.column_of(slot) else {
+            return;
+        };
+        if config.is_phase2_addressee(from, Some(column)) {
+            return;
+        }
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} does not count that vote. Slot {} belongs to column {column} and node {} is \
+                 not in it. A Phase-2 quorum of this grid is a whole column, so the tally does \
+                 not move. Node {} is a member of the configuration. It is not one of the \
+                 acceptors that decide this slot.",
+                who(id),
+                slot.0,
+                from.0,
+                from.0
+            ),
+        );
     }
 
     /// Read off the proposer, **before** the call that pumps it, what the core
@@ -385,6 +432,9 @@ impl World {
         }
         self.narrate_installs(id, &writes);
         for (to, message) in batch.messages {
+            if matches!(message, Message::Heartbeat { .. }) {
+                self.beats_broadcast = self.beats_broadcast.saturating_add(1);
+            }
             self.wire.push(InFlight {
                 id: self.next_message_id,
                 from: id,
@@ -556,6 +606,12 @@ impl World {
         match paused {
             Paused::Message { node, message } => self.step(node, *message),
             Paused::Retry { node, client, seq } => self.retry_now(node, client, seq),
+            Paused::Propose {
+                node,
+                client,
+                value,
+            } => self.propose_answered(node, client, &value),
+            Paused::Boot { node } => self.boot_refused(node),
             Paused::Batch { node, batch } => {
                 let Some(index) = self.index_of(node) else {
                     return;

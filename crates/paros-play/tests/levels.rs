@@ -275,8 +275,29 @@ fn every_act_is_registered_in_play_order() {
         acts.windows(2).all(|pair| pair[0] <= pair[1]),
         "the level map is in act order: {acts:?}"
     );
-    for act in 1..=3u8 {
+    for act in 1..=4u8 {
         assert!(acts.contains(&act), "act {act} has levels registered");
+    }
+}
+
+#[test]
+fn act_four_registers_the_six_levels_of_part_one() {
+    // Part two appends the four matchmaker levels to the same module. These
+    // six are the ones part one owns, and they stay in this order.
+    let act4: Vec<&str> = levels()
+        .into_iter()
+        .filter(|level| level.act == 4)
+        .map(|level| level.id)
+        .collect();
+    for id in [
+        "act4/flexible-quorums",
+        "act4/the-grid",
+        "act4/quorum-reads",
+        "act4/the-handoff",
+        "act4/faulty-records",
+        "act4/the-wiped-node",
+    ] {
+        assert!(act4.contains(&id), "{id} is registered; act 4 has {act4:?}");
     }
 }
 

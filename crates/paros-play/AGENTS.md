@@ -46,12 +46,26 @@ Two corollaries that bite in review:
   - `world/drain.rs` — **the drain contract**, and the only place a `Ready` is held.
   - `world/prompts.rs` — which delivery raises which question, and the clone it is
     judged on.
+  - Act IV's world support lives in the same files, not in new ones: the quorum
+    system is level data (`Config::quorum_system`, `DecreeWorld::with_system`), a
+    proposal may name a grid **column** (`World::propose(.., column)` →
+    `propose_in`, validated against `AcceptorConfig` before the core is called),
+    `World::quorum_read` opens a leaderless read that surfaces through the same
+    `ReadState` the read-index path uses, `World::relinquish` moves a leadership
+    (`World::handoff_refusal` gives the reason a refusal has, and the goals read
+    the same function), `Disk::corrupt` rots one record into the tri-state
+    `Storage::faulty_entries` reports at the next boot, and `Disk::wipe` erases a
+    disk while keeping the operator's record that the identity was provisioned —
+    which is what lets `World::restart` refuse the boot. `world/matchmakers.rs`
+    is part two's.
 - `src/prompt.rs` — the questions, the choices, the judge, and one authored explanation
   per **wrong** choice (nothing is explained when nothing broke).
 - `src/auto.rs` — automation as reward: one flag per decision, and the deterministic
   pump the delivery flags enable.
 - `src/narration.rs` — what the game says just happened, **derived from the transition**.
-- `src/level/` — the level DSL and one module per act.
+- `src/level/` — the level DSL and one module per act. `act4.rs` holds part one's
+  six levels and a marked place for part two's four matchmaker levels; the two
+  numbered 28 and 29 stay last in `levels()`.
 - `src/view.rs` — the one contract the browser reads.
 
 ## The drain contract
@@ -92,6 +106,14 @@ open, so raise time is answer time), give every wrong choice an authored explana
 naming the violation it would cause with this prompt's own numbers, and add the
 `PromptKind` to `prompt::ALL_PROMPTS` and its governing `AutomationFlag` to
 `auto::ALL_FLAGS`.
+
+The Act IV four: `GridColumn` (judged by `AcceptorConfig::column_of`),
+`QuorumReadServe` (a `QuorumReads` clone folded with the arriving `PreReadAck`
+and served with the replica's own `covers`), `RepairVerdict` (a `Proposer` clone
+through `fold_probe_promise` then `resolve_probe`; its three answers are the CTRL
+cases) and `WipedRejoin` — the third prompt whose answer is a **constant**,
+because a store with no promise on it has no role to clone, and the library
+refuses such a boot rather than branching on it.
 
 ## Narration is derived, never scripted
 

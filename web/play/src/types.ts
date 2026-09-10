@@ -7,6 +7,7 @@
 export type { Action } from './generated/Action';
 export type { ActionKind } from './generated/ActionKind';
 export type { ActionView } from './generated/ActionView';
+export type { AttemptView } from './generated/AttemptView';
 export type { AutomationFlag } from './generated/AutomationFlag';
 export type { AutomationFlagView } from './generated/AutomationFlagView';
 export type { AutomationView } from './generated/AutomationView';
@@ -29,8 +30,10 @@ export type { Phase } from './generated/Phase';
 export type { PromptKind } from './generated/PromptKind';
 export type { PromptView } from './generated/PromptView';
 export type { ProposalView } from './generated/ProposalView';
+export type { ReachView } from './generated/ReachView';
 export type { ReadRoundView } from './generated/ReadRoundView';
 export type { ReadView } from './generated/ReadView';
+export type { RoleView } from './generated/RoleView';
 export type { Seam } from './generated/Seam';
 export type { SlotView } from './generated/SlotView';
 export type { WorldFlavour } from './generated/WorldFlavour';

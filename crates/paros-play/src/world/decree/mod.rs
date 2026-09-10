@@ -24,7 +24,7 @@ use paros_core::{
 };
 
 use crate::action::{ActionError, ActionErrorCode, Phase};
-use crate::narration::{NarrationEvent, NarrationKind, list_nodes, say};
+use crate::narration::{NarrationEvent, NarrationKind, list_nodes, phase1_note, phase2_note, say};
 use crate::prompt::{Prompt, PromptKind, Verdict};
 use crate::view::{show_ballot, show_command};
 use crate::world::{InFlight, WorldPolicy};
@@ -163,9 +163,34 @@ impl DecreeWorld {
         seeds: &BTreeMap<u64, Seed>,
         chosen: Option<(Ballot, Command)>,
     ) -> Self {
+        Self::with_system(acceptors, proposers, seeds, chosen, QuorumSystem::Majority)
+    }
+
+    /// A seeded world under a **named quorum system** — the flexible split
+    /// Act IV runs, where a Phase-1 quorum and a Phase-2 quorum are different
+    /// sizes and only the intersection *between* them is required.
+    ///
+    /// # Panics
+    ///
+    /// If `acceptors` is empty, if a seed names an acceptor the world has not
+    /// got, or if `system` is not well formed over this many acceptors
+    /// ([`QuorumSystem::admits`]) — a level's own configuration, checked once
+    /// where it is written.
+    #[must_use]
+    pub fn with_system(
+        acceptors: &[u64],
+        proposers: &[u64],
+        seeds: &BTreeMap<u64, Seed>,
+        chosen: Option<(Ballot, Command)>,
+        system: QuorumSystem,
+    ) -> Self {
         assert!(!acceptors.is_empty(), "a decree world has acceptors");
+        assert!(
+            system.admits(acceptors.len()),
+            "a level's quorum system fits its acceptors"
+        );
         let members: Vec<NodeId> = acceptors.iter().copied().map(NodeId).collect();
-        let config = AcceptorConfig::new(members.clone(), QuorumSystem::Majority);
+        let config = AcceptorConfig::new(members.clone(), system);
         let roles = acceptors
             .iter()
             .map(|id| {
@@ -450,7 +475,7 @@ impl DecreeWorld {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
-        let summary = entry.view().summary;
+        let summary = entry.view(self.config.quorum_system()).summary;
         if let Some(prompt) = self.prompt_for(entry.to, &entry.message) {
             self.narrate(
                 NarrationKind::Info,
@@ -481,7 +506,9 @@ impl DecreeWorld {
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
-        let summary = self.wire[position].view().summary;
+        let summary = self.wire[position]
+            .view(self.config.quorum_system())
+            .summary;
         self.wire.remove(position);
         self.narrate(
             NarrationKind::Info,
@@ -499,12 +526,22 @@ impl DecreeWorld {
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
-    pub fn duplicate(&mut self, id: u64) -> Result<(), ActionError> {
+    pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
-        let summary = copy.view().summary;
+        if let Some(to) = to {
+            let to = NodeId(to);
+            if !self.config.contains(to) && self.proposer_index(to).is_none() {
+                return Err(ActionError::new(
+                    ActionErrorCode::UnknownNode,
+                    format!("there is no node {} in this world", to.0),
+                ));
+            }
+            copy.to = to;
+        }
+        let summary = copy.view(self.config.quorum_system()).summary;
         self.next_message_id += 1;
         self.wire.push(copy);
         self.narrate(
@@ -816,17 +853,18 @@ impl DecreeWorld {
         // A bare proposer holds no promise of its own, so the win gate's
         // promise argument is the zero ballot.
         let won = self.proposers[index].role.phase1_won(Ballot::zero());
+        let needed = phase1_note(self.config.quorum_system(), members);
         self.narrate(
             NarrationKind::Promise,
             format!(
-                "Proposer {} holds Promises from {} — {} of {members}{}",
+                "Proposer {} holds Promises from {} — {} of {members}. {needed} {}",
                 to.0,
                 list_nodes(promised.clone()),
                 promised.len(),
                 if won {
-                    ", a quorum. Phase 1 is complete."
+                    "Phase 1 is complete."
                 } else {
-                    ". That is not a quorum yet, so nothing may be proposed."
+                    "That is not enough yet, so nothing may be proposed."
                 }
             ),
         );
@@ -950,13 +988,14 @@ impl DecreeWorld {
         let config = self.config.clone();
         let voters = crate::narration::votes_of(self.proposers[index].role.rounds(), DECREE);
         let members = config.members().len();
+        let needed = phase2_note(config.quorum_system(), members);
         let Some((at, command)) = self.proposers[index].role.decided(DECREE, &config) else {
             let count = voters.len();
             self.narrate(
                 NarrationKind::Info,
                 format!(
-                    "Proposer {} has {count} of {members} votes at ballot {}. Not a quorum yet: \
-                     nothing is chosen.",
+                    "Proposer {} has {count} of {members} votes at ballot {}. {needed} Nothing is \
+                     chosen yet.",
                     to.0,
                     show_ballot(ballot)
                 ),
@@ -966,9 +1005,9 @@ impl DecreeWorld {
         self.narrate(
             NarrationKind::Chosen,
             format!(
-                "Slot {} is chosen: {} — {} of {members} — voted for {} at ballot {}. That is \
-                 final: every higher ballot's Phase 1 must intersect this quorum, so every \
-                 later proposer will be told about it and made to propose it back.",
+                "Slot {} is chosen: {} — {} of {members} — voted for {} at ballot {}. {needed} \
+                 That is final: every Phase-1 quorum of a higher ballot meets this set of \
+                 voters, so every later proposer is told about it and made to propose it back.",
                 DECREE.0,
                 list_nodes(voters.iter().copied()),
                 voters.len(),
