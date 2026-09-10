@@ -111,7 +111,7 @@ function render(): void {
     // controls that made it — and above them, because the controls of a
     // six-node level are longer than the screen.
     renderRefusal(game.lastError),
-    renderControls(view, controls, dispatch),
+    renderControls(view, controls, dispatch, render),
     renderHistory(view),
     renderWire(view, dispatch),
   );
@@ -164,8 +164,15 @@ function messageIdFrom(target: EventTarget | null, selector = '[data-msg]'): num
   return Number.isFinite(id) ? id : null;
 }
 
-function nodeCentre(id: number): { x: number; y: number } | null {
-  const group = document.querySelector(`[data-node="${id}"]`);
+/**
+ * Where a message's addressee is drawn.
+ *
+ * The tier is the engine's answer: a matchmaker and a node with the same
+ * number are two processes, and they are two different squares on the stage.
+ */
+function partyCentre(id: number, party: string | null | undefined): { x: number; y: number } | null {
+  const attribute = party === 'matchmaker' ? 'data-matchmaker' : 'data-node';
+  const group = document.querySelector(`[${attribute}="${id}"]`);
   const transform = group?.getAttribute('transform');
   const match = transform?.match(/translate\(([-\d.]+),\s*([-\d.]+)\)/);
   if (!match?.[1] || !match[2]) return null;
@@ -179,7 +186,7 @@ function deliver(id: number, dot: Element | null): void {
     return;
   }
   const message = game.view.world.wire.find((entry) => entry.id === id);
-  const target = message ? nodeCentre(message.to) : null;
+  const target = message ? partyCentre(message.to, message.to_party) : null;
   if (!target) {
     dispatch({ kind: 'deliver', id });
     return;

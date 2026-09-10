@@ -6,6 +6,7 @@
 
 import type { Action, ActionKind, GameView, MessageView } from '../types';
 import { h } from '../render/dom';
+import { endpointName } from '../render/matchmaker';
 import { isReply, phaseClass } from '../render/stage';
 
 type Dispatch = (action: Action) => void;
@@ -37,7 +38,7 @@ function row(
         class: `wire-swatch ${phaseClass(message.phase)}${isReply(message) ? ' reply' : ''}`,
         title: isReply(message) ? 'This message answers a message.' : 'This message asks for something.',
       }),
-      `${message.from} → ${message.to}`,
+      `${endpointName(message.from, message.from_party)} → ${endpointName(message.to, message.to_party)}`,
     ),
     h('td', { class: 'wire-summary', title: message.summary }, message.summary),
     h(

@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { controlLabel, isReply, phaseClass, roleLabel, slotClass, slotLabel } from './stage';
+import {
+  controlLabel,
+  isReply,
+  nodeMeta,
+  partyName,
+  phaseClass,
+  roleLabel,
+  slotClass,
+  slotLabel,
+} from './stage';
 import type { MessageView, NodeView, SlotView } from '../types';
 
 function slot(over: Partial<SlotView> = {}): SlotView {
@@ -42,6 +51,12 @@ function node(over: Partial<NodeView> = {}): NodeView {
     grid_cell: null,
     applied: [],
     armed_seam: null,
+    acceptors_since: null,
+    matchmakers: null,
+    matchmaking: null,
+    gc: null,
+    handover: null,
+    retired: false,
     ...over,
   };
 }
@@ -117,5 +132,95 @@ describe('what the stage prints under a node', () => {
 
   it('says a crashed node is crashed', () => {
     expect(roleLabel(node({ role: 'leader', alive: false }))).toBe('crashed');
+  });
+
+  it('says a retired node is retired, because it does not come back', () => {
+    expect(roleLabel(node({ role: 'follower', alive: false, retired: true }))).toBe('retired');
+  });
+});
+
+describe('the badges under a node', () => {
+  it('prints no acceptor set where the set is fixed for life', () => {
+    const lines = nodeMeta(node({ promised: '1.0' }), null, false, false);
+    expect(lines).toEqual(['promised 1.0']);
+  });
+
+  it('prints the set in force and the ballot it is bound to, where one can change', () => {
+    const lines = nodeMeta(
+      node({ acceptors: [0, 1, 2, 3], acceptors_since: '2.0' }),
+      null,
+      false,
+      true,
+    );
+    expect(lines[0]).toBe('acceptors 0,1,2,3 · since 2.0');
+  });
+
+  it('names the matchmaker set and its generation', () => {
+    const lines = nodeMeta(
+      node({ matchmakers: { generation: 1, members: [0, 1, 3] } }),
+      null,
+      false,
+      true,
+    );
+    expect(lines).toContain('matchmakers m0,m1,m3 · gen 1');
+  });
+
+  it('prints an open matchmaking phase, its kind and how many must still answer', () => {
+    const lines = nodeMeta(
+      node({
+        matchmaking: { ballot: '2.1', config: [0, 1, 2], kind: 'reconfiguration', remaining: 1 },
+      }),
+      null,
+      false,
+      true,
+    );
+    expect(lines).toContain('matchmaking 2.1 · change');
+    expect(lines).toContain('1 to answer');
+  });
+
+  it('prints the floor in force and the acceptors it released', () => {
+    const lines = nodeMeta(
+      node({ gc: { effective_watermark: '2.0', retirable: [3] } }),
+      null,
+      false,
+      true,
+    );
+    expect(lines).toContain('gc floor 2.0');
+    expect(lines).toContain('it frees 3');
+  });
+
+  it('prints no released list when the floor released nobody', () => {
+    const lines = nodeMeta(
+      node({ gc: { effective_watermark: '2.0', retirable: [] } }),
+      null,
+      false,
+      true,
+    );
+    expect(lines).toContain('gc floor 2.0');
+    expect(lines.some((line) => line.startsWith('it frees'))).toBe(false);
+  });
+
+  it('names the step of a matchmaker handover this node drives', () => {
+    expect(nodeMeta(node({ handover: 'stopping' }), null, false, true)).toContain(
+      'handover · stopping',
+    );
+  });
+
+  it('says nothing else about a retired node, whose old state proves nothing', () => {
+    expect(
+      nodeMeta(node({ retired: true, promised: '3.0', chosen_index: 4 }), null, false, true),
+    ).toEqual(['it does not come back']);
+  });
+
+  it('says nothing else about a wiped node either', () => {
+    expect(nodeMeta(node({ promised: '3.0' }), null, true, true)).toEqual(['the disk is empty']);
+  });
+});
+
+describe('naming a message endpoint', () => {
+  it('says which tier the number belongs to', () => {
+    expect(partyName(0, 'matchmaker')).toBe('matchmaker 0');
+    expect(partyName(0, 'node')).toBe('node 0');
+    expect(partyName(0, undefined)).toBe('node 0');
   });
 });

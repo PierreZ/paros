@@ -5,7 +5,7 @@
 // attributes (`data-msg`, `data-node`) and is handled by delegation in
 // `main.ts`, so a re-render never has to re-bind anything.
 
-import type { GameView, MessageView, NodeView, SlotView, WorldView } from '../types';
+import type { GameView, MatchmakerView, MessageView, NodeView, SlotView, WorldView } from '../types';
 import { svg } from './dom';
 import { wipedNodes } from './disk';
 import { cellBadge, columnClass, columnOf, gridCells, gridOf } from './grid';
@@ -19,9 +19,26 @@ import {
   type GridShape,
   type Point,
 } from './layout';
+import {
+  BAND_WIDTH,
+  MATCHMAKER_SIZE,
+  endpointOf,
+  matchmakerClass,
+  matchmakerLabel,
+  matchmakerPositions,
+  phaseWords,
+  registryLines,
+} from './matchmaker';
 
+/** The stage without a matchmaker band. */
 const WIDTH = 960;
+
+/** The stage without the taller node badges a matchmaker deployment prints. */
 const HEIGHT = 620;
+
+/** The stage with a matchmaker deployment's band and badges. */
+const TALL = 680;
+
 const NODE_RADIUS = 32;
 const SLOT_WIDTH = 92;
 const SLOT_HEIGHT = 19;
@@ -119,6 +136,9 @@ export function slotClass(slot: SlotView): string {
  * with neither prints what it is.
  */
 export function roleLabel(node: NodeView, wiped = false): string {
+  // A retired node answered the evidence and shut down for good. It is not a
+  // crashed node, because it does not come back.
+  if (node.retired === true) return 'retired';
   if (wiped) return 'wiped';
   if (!node.alive) return 'crashed';
   if (node.role) return node.role;
@@ -135,6 +155,7 @@ export function roleLabel(node: NodeView, wiped = false): string {
 
 function nodeStateClass(node: NodeView, wiped = false): string {
   const parts = ['node'];
+  if (node.retired === true) parts.push('retired');
   if (wiped) parts.push('wiped');
   if (!node.alive) parts.push('crashed');
   if (node.role === 'leader' || node.attempt === 'won') parts.push('leader');
@@ -259,20 +280,87 @@ function electionRing(node: NodeView): SVGElement | null {
   });
 }
 
-function nodeGroup(node: NodeView, at: Point, cell: Cell | null, wiped: boolean): SVGGElement {
-  const under: string[] = [];
+/**
+ * What the stage prints under a node, the top line first.
+ *
+ * `matchmade` says the deployment names matchmakers. On a plain deployment the
+ * acceptor set is fixed for life and its badge would be noise; where a
+ * reconfiguration is possible the set in force and the ballot it is bound to
+ * are the two facts the player works with, so they come first.
+ *
+ * Every line is a field the engine reports. The frontend derives no
+ * configuration, no floor and no generation of its own.
+ */
+export function nodeMeta(
+  node: NodeView,
+  cell: Cell | null,
+  wiped: boolean,
+  matchmade: boolean,
+): string[] {
+  const lines: string[] = [];
   const badge = cellBadge(cell);
-  if (badge) under.push(badge);
-  if (wiped) {
-    under.push('the disk is empty');
-  } else {
-    if (node.promised) under.push(`promised ${node.promised}`);
-    if (node.ballot) under.push(`ballot ${node.ballot}`);
-    if (node.chosen_index !== null) under.push(`chosen ≤ ${node.chosen_index}`);
-    if (node.leader !== null) under.push(`leader ${node.leader}`);
-  }
+  if (badge) lines.push(badge);
+  // A retired node answered the evidence and shut down. Its old state says
+  // nothing about the cluster now.
+  if (node.retired === true) return [...lines, 'it does not come back'];
+  if (wiped) return [...lines, 'the disk is empty'];
 
-  const ring = wiped ? null : electionRing(node);
+  if (matchmade) {
+    const set = Array.isArray(node.acceptors) ? node.acceptors : [];
+    const since = typeof node.acceptors_since === 'string' ? node.acceptors_since : null;
+    lines.push(`acceptors ${set.join(',') || '—'}${since === null ? '' : ` · since ${since}`}`);
+    const registry = node.matchmakers;
+    if (registry) {
+      const members = Array.isArray(registry.members) ? registry.members : [];
+      lines.push(`matchmakers ${members.map((id) => `m${id}`).join(',')} · gen ${registry.generation}`);
+    }
+  }
+  if (node.promised) lines.push(`promised ${node.promised}`);
+  if (node.ballot) lines.push(`ballot ${node.ballot}`);
+  if (node.chosen_index !== null) lines.push(`chosen ≤ ${node.chosen_index}`);
+  if (node.leader !== null) lines.push(`leader ${node.leader}`);
+
+  const matchmaking = node.matchmaking;
+  if (matchmaking) {
+    const kind = matchmaking.kind === 'reconfiguration' ? 'change' : 'belief';
+    lines.push(`matchmaking ${matchmaking.ballot} · ${kind}`);
+    lines.push(`${matchmaking.remaining} to answer`);
+  }
+  const gc = node.gc;
+  if (gc) {
+    lines.push(`gc floor ${gc.effective_watermark}`);
+    const retirable = Array.isArray(gc.retirable) ? gc.retirable : [];
+    if (retirable.length > 0) lines.push(`it frees ${retirable.join(',')}`);
+  }
+  if (node.handover) lines.push(`handover · ${node.handover}`);
+  return lines;
+}
+
+/** The sentence a node's tooltip carries. */
+function nodeTitle(node: NodeView, wiped: boolean): string {
+  if (node.retired === true) {
+    return `node ${node.id} is retired. It showed the garbage-collection floor, it shut down, and it does not come back.`;
+  }
+  if (wiped) {
+    return `node ${node.id} lost its disk. It must not start again: a promise cannot come back.`;
+  }
+  const promise = node.promised ? `, and it promised ${node.promised}` : '';
+  const matchmaking = node.matchmaking
+    ? ` It registers ballot ${node.matchmaking.ballot} with the matchmakers, and ${node.matchmaking.remaining} of them must still answer.`
+    : '';
+  return `node ${node.id} is ${roleLabel(node)}${promise}.${matchmaking}`;
+}
+
+function nodeGroup(
+  node: NodeView,
+  at: Point,
+  cell: Cell | null,
+  wiped: boolean,
+  matchmade: boolean,
+): SVGGElement {
+  const under = nodeMeta(node, cell, wiped, matchmade);
+  const badge = cellBadge(cell);
+  const ring = wiped || node.retired === true ? null : electionRing(node);
   const labels = under.map((line, index) =>
     svg(
       'text',
@@ -284,9 +372,7 @@ function nodeGroup(node: NodeView, at: Point, cell: Cell | null, wiped: boolean)
       line,
     ),
   );
-  const title = wiped
-    ? `node ${node.id} lost its disk. It must not start again: a promise cannot come back.`
-    : `node ${node.id} is ${roleLabel(node)}${node.promised ? `, and it promised ${node.promised}` : ''}`;
+  const title = nodeTitle(node, wiped);
 
   return svg(
     'g',
@@ -304,6 +390,16 @@ function nodeGroup(node: NodeView, at: Point, cell: Cell | null, wiped: boolean)
   );
 }
 
+/**
+ * How a message's endpoint is named in a sentence.
+ *
+ * The engine says which tier the number belongs to. Node 0 and matchmaker 0
+ * are two different processes, and a reader must be told which one moved.
+ */
+export function partyName(id: number, party: string | null | undefined): string {
+  return party === 'matchmaker' ? `matchmaker ${id}` : `node ${id}`;
+}
+
 function messageDot(message: MessageView, at: Point): SVGGElement {
   // The column an Accept was addressed to colours the dot's edge: a grid
   // decides a slot by one whole column, so the player must see which one a
@@ -312,6 +408,8 @@ function messageDot(message: MessageView, at: Point): SVGGElement {
   const column = columnOf(message);
   const columnClasses = column === null ? '' : ` column ${columnClass(column)}`;
   const where = column === null ? '' : `, column ${column}`;
+  const from = partyName(message.from, message.from_party);
+  const to = partyName(message.to, message.to_party);
   return svg(
     'g',
     {
@@ -320,15 +418,11 @@ function messageDot(message: MessageView, at: Point): SVGGElement {
       transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
       tabindex: 0,
       role: 'button',
-      'aria-label': `${message.summary}, from node ${message.from} to node ${message.to}${where}. Click to deliver it.`,
+      'aria-label': `${message.summary}, from ${from} to ${to}${where}. Click to deliver it.`,
     },
     svg('circle', { class: 'dot-hit', r: 13, cx: 0, cy: 0 }),
     svg('circle', { class: 'dot', r: 7, cx: 0, cy: 0 }),
-    svg(
-      'title',
-      {},
-      `${message.summary} (${message.from} → ${message.to})${where}. Click to deliver it.`,
-    ),
+    svg('title', {}, `${message.summary} (${from} → ${to})${where}. Click to deliver it.`),
   );
 }
 
@@ -361,6 +455,79 @@ function gridLabels(shape: GridShape, centre: Point): SVGGElement {
     );
   }
   return svg('g', { class: 'grid-axes' }, ...marks);
+}
+
+/**
+ * One matchmaker: a rounded square, its generation and phase, its registry and
+ * its floor.
+ *
+ * The square is a different shape from a node's disc on purpose. A matchmaker
+ * keeps a map from a ballot to an acceptor set; it holds no log and it votes
+ * on no slot, so it must not read as one more acceptor.
+ */
+function matchmakerGroup(matchmaker: MatchmakerView, at: Point): SVGGElement {
+  const half = MATCHMAKER_SIZE / 2;
+  const phase = phaseWords(matchmaker.phase);
+  const successor = matchmaker.successor;
+  const under: string[] = [`gen ${matchmaker.generation} · ${matchmaker.alive === false ? 'down' : phase}`];
+  under.push(`floor ${matchmaker.gc_watermark}`);
+  if (successor) {
+    under.push(`next gen ${successor.generation}: ${successor.members.map((id) => `m${id}`).join(',')}`);
+  }
+
+  const rows = registryLines(matchmaker).map((line, index) =>
+    svg('text', { class: 'registry-line', x: half + 10, y: -8 + index * 12 }, line),
+  );
+  const title =
+    matchmaker.alive === false
+      ? `matchmaker ${matchmaker.id} is down. Its registry stays on its disk.`
+      : matchmaker.phase === 'stopped'
+        ? `matchmaker ${matchmaker.id} is frozen for generation ${matchmaker.generation}. It registers nothing more, and it points late candidates at the successor.`
+        : `matchmaker ${matchmaker.id} serves generation ${matchmaker.generation}. It holds ${matchmaker.registrations.length} registration(s), and it forgets every ballot below ${matchmaker.gc_watermark}.`;
+
+  return svg(
+    'g',
+    {
+      class: matchmakerClass(matchmaker),
+      transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
+      'data-matchmaker': matchmaker.id,
+    },
+    svg('rect', {
+      class: 'matchmaker-box',
+      x: -half,
+      y: -half,
+      width: MATCHMAKER_SIZE,
+      height: MATCHMAKER_SIZE,
+      rx: 9,
+    }),
+    svg('text', { class: 'matchmaker-id', x: 0, y: 5 }, matchmakerLabel(matchmaker)),
+    ...under.map((line, index) =>
+      svg('text', { class: 'matchmaker-meta', x: 0, y: half + 14 + index * 12 }, line),
+    ),
+    ...rows,
+    svg('title', {}, title),
+  );
+}
+
+/** The whole matchmaker band, and the rule that separates it from the cluster. */
+function matchmakerBand(matchmakers: readonly MatchmakerView[], centre: Point): SVGGElement | null {
+  if (matchmakers.length === 0) return null;
+  const positions = matchmakerPositions(matchmakers.length, centre);
+  return svg(
+    'g',
+    { class: 'matchmaker-band' },
+    svg('line', {
+      class: 'band-rule',
+      x1: centre.x - MATCHMAKER_SIZE,
+      y1: 44,
+      x2: centre.x - MATCHMAKER_SIZE,
+      y2: centre.y * 2 - 30,
+    }),
+    svg('text', { class: 'gutter-title', x: centre.x - MATCHMAKER_SIZE + 12, y: 30 }, 'matchmakers'),
+    ...matchmakers.map((matchmaker, index) =>
+      matchmakerGroup(matchmaker, positions[index] ?? centre),
+    ),
+  );
 }
 
 function clientColumn(world: WorldView): SVGGElement | null {
@@ -396,16 +563,16 @@ function clientColumn(world: WorldView): SVGGElement | null {
   return svg('g', { class: 'client-gutter' }, ...rows);
 }
 
-function chosenBanner(world: WorldView): SVGGElement | null {
+function chosenBanner(world: WorldView, width: number): SVGGElement | null {
   if (!world.chosen) return null;
   const control = controlLabel(world.chosen.control);
   return svg(
     'g',
     { class: 'chosen-banner' },
-    svg('rect', { x: WIDTH / 2 - 200, y: 12, width: 400, height: 34, rx: 6 }),
+    svg('rect', { x: width / 2 - 200, y: 12, width: 400, height: 34, rx: 6 }),
     svg(
       'text',
-      { x: WIDTH / 2, y: 34 },
+      { x: width / 2, y: 34 },
       `chosen: ${control ?? world.chosen.value} at ballot ${world.chosen.ballot}`,
     ),
   );
@@ -415,6 +582,12 @@ function chosenBanner(world: WorldView): SVGGElement | null {
 export function renderStage(view: GameView): SVGSVGElement {
   const world = view.world;
   const hasClients = world.clients.length > 0;
+  // A deployment that names matchmakers gets a band of its own on the right
+  // and a taller stage for the badges the tier adds. Every other position is
+  // exactly where it was, so the acceptor ring never moves under the player.
+  const matchmakers = Array.isArray(world.matchmakers) ? world.matchmakers : [];
+  const width = WIDTH + (matchmakers.length > 0 ? BAND_WIDTH : 0);
+  const height = matchmakers.length > 0 ? TALL : HEIGHT;
   // A grid deployment is laid out as a grid: a row is a Phase-1 quorum and a
   // column is a Phase-2 quorum, and neither is legible on a ring. Every other
   // quorum system keeps the circle. A grid sits further right than a ring: it
@@ -437,14 +610,23 @@ export function renderStage(view: GameView): SVGSVGElement {
     });
   }
   const wiped = wipedNodes(view);
+  const bandCentre: Point = { x: WIDTH + MATCHMAKER_SIZE + 20, y: height / 2 };
+  const bandAt = new Map<number, Point>();
+  matchmakerPositions(matchmakers.length, bandCentre).forEach((point, index) => {
+    const matchmaker = matchmakers[index];
+    if (matchmaker) bandAt.set(matchmaker.id, point);
+  });
 
   const links: SVGElement[] = [];
   const dots: SVGElement[] = [];
   for (const [, messages] of groupByLink(world.wire)) {
     const first = messages[0];
     if (!first) continue;
-    const from = at.get(first.from);
-    const to = at.get(first.to);
+    // The tier an endpoint belongs to is the engine's answer: matchmaker 0 and
+    // node 0 are two processes, and only `from_party`/`to_party` tell them
+    // apart.
+    const from = endpointOf(first.from, first.from_party, at, bandAt);
+    const to = endpointOf(first.to, first.to_party, at, bandAt);
     if (!from || !to) continue;
     const ends = trim(from, to, NODE_RADIUS + 4);
     links.push(
@@ -462,13 +644,16 @@ export function renderStage(view: GameView): SVGSVGElement {
     });
   }
 
+  const matchmade = matchmakers.length > 0;
   const nodes = world.nodes.map((node) => {
     const point = at.get(node.id) ?? centre;
     return svg(
       'g',
       {},
-      logColumn(node, point, centre),
-      nodeGroup(node, point, cells?.get(node.id) ?? null, wiped.has(node.id)),
+      // A retired node draws no log: it shut down for good, and its log says
+      // nothing about the cluster now.
+      node.retired === true ? null : logColumn(node, point, centre),
+      nodeGroup(node, point, cells?.get(node.id) ?? null, wiped.has(node.id), matchmade),
     );
   });
 
@@ -476,14 +661,17 @@ export function renderStage(view: GameView): SVGSVGElement {
     'svg',
     {
       class: 'stage',
-      viewBox: `0 0 ${WIDTH} ${HEIGHT}`,
+      viewBox: `0 0 ${width} ${height}`,
       preserveAspectRatio: 'xMidYMid meet',
       role: 'img',
-      'aria-label': 'the cluster, the logs and the messages in flight',
+      'aria-label': matchmade
+        ? 'the cluster, the matchmakers, the logs and the messages in flight'
+        : 'the cluster, the logs and the messages in flight',
     },
-    chosenBanner(world),
+    chosenBanner(world, width),
     clientColumn(world),
     shape ? gridLabels(shape, centre) : null,
+    matchmakerBand(matchmakers, bandCentre),
     svg('g', { class: 'links' }, ...links),
     svg('g', { class: 'nodes' }, ...nodes),
     svg('g', { class: 'wire' }, ...dots),

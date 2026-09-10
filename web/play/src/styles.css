@@ -1053,3 +1053,85 @@ code,
   align-items: center;
   flex-wrap: wrap;
 }
+
+/* ---- the matchmaker tier -------------------------------------------------- */
+
+/* A matchmaker keeps one map from a ballot to an acceptor set. It holds no
+   log and it votes on no slot, so it is a square and not a disc, and it sits
+   in a band of its own beside the cluster. */
+.band-rule {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.matchmaker-box {
+  fill: var(--panel);
+  stroke: var(--phase-match);
+  stroke-width: 2;
+}
+
+/* A frozen matchmaker registers nothing more for its generation. */
+.matchmaker.frozen .matchmaker-box {
+  fill: none;
+  stroke-dasharray: 6 4;
+}
+
+/* A crashed matchmaker keeps its registry, exactly as a crashed node keeps
+   its disk. */
+.matchmaker.crashed .matchmaker-box {
+  fill: color-mix(in srgb, var(--open) 30%, var(--page));
+  stroke: var(--open);
+  stroke-dasharray: 3 4;
+}
+
+.matchmaker.crashed .matchmaker-id,
+.matchmaker.crashed .matchmaker-meta,
+.matchmaker.crashed .registry-line {
+  fill: var(--ink-soft);
+  opacity: 0.7;
+}
+
+.matchmaker-id {
+  fill: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.matchmaker-meta {
+  fill: var(--ink-soft);
+  font-size: 10px;
+  text-anchor: middle;
+}
+
+.registry-line {
+  fill: var(--ink-soft);
+  font-size: 10px;
+}
+
+/* ---- a node that retired -------------------------------------------------- */
+
+/* The floor released it, it showed the evidence, and it shut down. It does
+   not come back, so it is drawn hollow and it draws no log. */
+.node.retired .node-disc {
+  fill: none;
+  stroke: var(--ink-soft);
+  stroke-width: 2;
+  stroke-dasharray: 2 6;
+  opacity: 0.6;
+}
+
+.node.retired .node-id,
+.node.retired .node-role,
+.node.retired .node-meta {
+  fill: var(--ink-soft);
+  opacity: 0.65;
+}
+
+/* ---- the matchmaker plane's controls -------------------------------------- */
+
+.quorum-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}

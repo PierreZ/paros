@@ -18,6 +18,12 @@ const ADVICE: Partial<Record<ActionErrorCode, string>> = {
   bad_column:
     'Give a column of this grid. The column of a slot is the slot number modulo the number of columns.',
   not_leader: 'Ask the leader. Only the leader puts a command in a slot.',
+  no_matchmakers:
+    'This cluster names no matchmakers. There is no place to record a second acceptor set, so the set it started with is the set it keeps.',
+  handover_busy:
+    'A matchmaker handover is already open at this node. Wait for it, or send its open step again.',
+  no_handover: 'No matchmaker handover is open at this node. Ask for one first.',
+  unknown_party: 'This process is not in this world.',
   node_crashed: 'Start the node again first.',
   node_alive: 'Stop the node first.',
   prompt_open: 'Answer the open question first.',

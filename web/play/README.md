@@ -37,8 +37,9 @@ is `nix develop --command scripts/build-play.sh`, after `mdbook build`.
 | `src/progress.ts` | `localStorage`: levels passed, mistakes, automation unlocked |
 | `src/narration.ts` | narration: the last move's lines (the caption) and the log's whole stream |
 | `src/types.ts` | re-exports of the generated contract |
-| `src/render/` | the SVG stage: `layout.ts` is the geometry, `grid.ts` reads the acceptor grid, `disk.ts` says which disks are gone, `stage.ts` draws |
-| `src/ui/` | the panel, the prompt card, the wire list, the controls, the quorum sentences, the refusal, the client history, the level map |
+| `src/ballot.ts` | reads the printed `round.node` ballot back, for the one ballot a player passes on |
+| `src/render/` | the SVG stage: `layout.ts` is the geometry, `grid.ts` reads the acceptor grid, `matchmaker.ts` is the matchmaker band's geometry and labels, `disk.ts` says which disks are gone, `stage.ts` draws |
+| `src/ui/` | the panel, the prompt card, the wire list, the controls, `matchmakers.ts` for the matchmaker plane's own controls, the quorum sentences, the refusal, the client history, the level map |
 | `src/generated/` | **the contract — never hand-edited** (see below) |
 | `src/wasm/` | wasm-bindgen output, gitignored, produced by the build script |
 | `src/fixtures/` | one captured `GameView`, for the tests |
@@ -50,16 +51,18 @@ derives in the Rust crate, is committed, and CI fails on a diff. **Never edit a
 file in it.** A field the UI wants is a change to `crates/paros-play/src/view.rs`
 followed by re-running that test.
 
-Three conventions the generated types do not spell out: every number is a
+Four conventions the generated types do not spell out: every number is a
 `number` (never a `bigint`), a ballot is always the string `"round.node"`, and
 a command's text is plain — the engine strips Rust's quoting before it sends
 it. A slot that holds one of paros's own control commands says so in
 `SlotView.control` (`noop`, `truncate`, `snap`), and the stage prints that name
-in the box in place of the text.
+in the box in place of the text. Node ids and matchmaker ids are **two identity
+spaces**: matchmaker 0 and node 0 are two processes, and a matchmaker is written
+`m0` everywhere the player reads one.
 
 ## What the engine says, and the UI must not work out
 
-Four facts arrive as fields, and the frontend must read them there:
+These facts arrive as fields, and the frontend must read them there:
 
 - **A request or a reply** is `MessageView.reply`. Do not read the variant's
   name.
@@ -77,6 +80,25 @@ Four facts arrive as fields, and the frontend must read them there:
 - **Where an acceptor sits in a grid** is `NodeView.grid_cell`, and **which
   column an Accept was addressed to** is `MessageView.column`. The frontend
   works neither out from the slot, even though the rule is public.
+- **Which tier a message's endpoint belongs to** is `MessageView.from_party` /
+  `to_party`. The two id spaces are separate, so the stage resolves an endpoint
+  through that field and never through the message's name. `groupByLink` keys a
+  link by the tier and the id at each end, so a node and a matchmaker with the
+  same number never share a link.
+- **The acceptor set in force** is `NodeView.acceptors`, and **the ballot it is
+  bound to** is `NodeView.acceptors_since`. A configuration is never edited: it
+  belongs to one ballot. The badge is drawn only where a deployment names
+  matchmakers, because a plain deployment keeps one set for life.
+- **The matchmaker tier's own state** is `WorldView.matchmakers`: the generation
+  and phase (`MatchmakerPhaseView`), the registry (`RegistrationView`, a ballot,
+  its members and whether it is a belief or a change), the floor
+  (`gc_watermark`) and the successor a frozen matchmaker points at. The band
+  draws those and nothing else.
+- **An open matchmaking phase** is `NodeView.matchmaking`, **the floor a
+  matchmaker quorum made effective** is `NodeView.gc` (with the acceptors it
+  released), **the step of a handover** is `NodeView.handover`, and **a node
+  that retired** is `NodeView.retired`. A retired node is drawn hollow, labelled
+  `retired`, and draws no log: it does not come back.
 
 One fact has no field yet. A node whose disk the player **erased** is drawn
 hollow, and `src/render/disk.ts` reads `NodeView.wiped` first — the field the

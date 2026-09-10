@@ -115,13 +115,29 @@ export function dotPositions(from: Point, to: Point, count: number, lateral = 8)
   }));
 }
 
-/** Group messages by the ordered pair they travel between. */
-export function groupByLink<T extends { from: number; to: number }>(
-  messages: readonly T[],
-): Map<string, T[]> {
+/**
+ * The prefix that names a message endpoint's tier.
+ *
+ * Node ids and matchmaker ids are different identity spaces, so matchmaker 0
+ * and node 0 are two endpoints and must never share a link. A message with no
+ * party at all is a node message, which is what every message was before the
+ * matchmakers arrived.
+ */
+function tier(party: unknown): string {
+  return party === 'matchmaker' ? 'm' : '';
+}
+
+/**
+ * Group messages by the ordered pair they travel between.
+ *
+ * The pair is a tier and an id at each end, never an id alone.
+ */
+export function groupByLink<
+  T extends { from: number; to: number; from_party?: unknown; to_party?: unknown },
+>(messages: readonly T[]): Map<string, T[]> {
   const links = new Map<string, T[]>();
   for (const message of messages) {
-    const key = `${message.from}->${message.to}`;
+    const key = `${tier(message.from_party)}${message.from}->${tier(message.to_party)}${message.to}`;
     const bucket = links.get(key);
     if (bucket) bucket.push(message);
     else links.set(key, [message]);

@@ -1,11 +1,25 @@
 import { describe, expect, it } from 'vitest';
 
 import { handoffTargets, misrouteTargets, nodeControlsFor, proposeColumns } from './controls';
+import {
+  acceptorPool,
+  acceptorsInForce,
+  handoverMembers,
+  matchmakerControlsFor,
+  matchmakerPool,
+  matchmakersInForce,
+  newMatchmakerState,
+  quorumSpecOf,
+  reconfigureMembers,
+  retireEvidence,
+  retireTargets,
+} from './matchmakers';
 import { memberCount, phaseSize, quorumOf, quorumPanel } from './quorum';
 import { refusalAdvice } from './refusal';
 import type {
   ActionKind,
   GameView,
+  MatchmakerView,
   MessageView,
   NodeView,
   QuorumSystemView,
@@ -49,10 +63,27 @@ function node(id: number, over: Partial<NodeView> = {}): NodeView {
   } as unknown as NodeView;
 }
 
-function view(allowed: ActionKind[], nodes: NodeView[]): GameView {
+function matchmaker(id: number, over: Partial<MatchmakerView> = {}): MatchmakerView {
+  return {
+    id,
+    alive: true,
+    generation: 0,
+    phase: 'active',
+    gc_watermark: '0.0',
+    registrations: [],
+    successor: null,
+    ...over,
+  };
+}
+
+function view(
+  allowed: ActionKind[],
+  nodes: NodeView[],
+  matchmakers: MatchmakerView[] = [],
+): GameView {
   return {
     level: { allowed_actions: allowed },
-    world: { nodes, clients: [], wire: [] },
+    world: { nodes, clients: [], wire: [], matchmakers },
   } as unknown as GameView;
 }
 
@@ -186,5 +217,144 @@ describe('what a refusal tells the player to do', () => {
 
   it('adds nothing to a code it does not know', () => {
     expect(refusalAdvice('a_code_from_tomorrow')).toBeNull();
+  });
+});
+
+describe("Act IV's matchmaker plane", () => {
+  const MATCHMADE: ActionKind[] = [
+    'reconfigure',
+    'retire',
+    'reconfigure_matchmakers',
+    'crash_matchmaker',
+    'restart_matchmaker',
+  ];
+
+  describe('which resend a node row offers', () => {
+    it('offers each of the three only where the level lists it', () => {
+      const level = view(['resend_matchmaking', 'resend_gc', 'resend_reconfigurer'], [node(0)]);
+      expect(nodeControlsFor(level, node(0))).toEqual([
+        'resend_matchmaking',
+        'resend_gc',
+        'resend_reconfigurer',
+      ]);
+      expect(nodeControlsFor(view(['resend_gc'], [node(0)]), node(0))).toEqual(['resend_gc']);
+    });
+
+    it('does not ask a node that is down to send anything again', () => {
+      const level = view(['resend_matchmaking', 'resend_gc', 'resend_reconfigurer'], [node(0)]);
+      expect(nodeControlsFor(level, node(0, { alive: false }))).toEqual([]);
+    });
+  });
+
+  describe('which controls a matchmaker row offers', () => {
+    it('crashes one that runs and restarts one that does not', () => {
+      const level = view(MATCHMADE, [node(0)], [matchmaker(0)]);
+      expect(matchmakerControlsFor(level, matchmaker(0))).toEqual(['crash_matchmaker']);
+      expect(matchmakerControlsFor(level, matchmaker(0, { alive: false }))).toEqual([
+        'restart_matchmaker',
+      ]);
+    });
+
+    it('offers nothing where the level lists neither', () => {
+      expect(matchmakerControlsFor(view([], [node(0)], [matchmaker(0)]), matchmaker(0))).toEqual([]);
+    });
+  });
+
+  describe('the set the reconfigure picker starts from', () => {
+    it('reads the set in force off the leader, and never counts one', () => {
+      const nodes = [
+        node(0, { acceptors: [0, 1, 2, 3] }),
+        node(1, { role: 'leader', acceptors: [0, 1, 2] }),
+      ];
+      const level = view(MATCHMADE, nodes);
+      expect(acceptorsInForce(level)).toEqual([0, 1, 2]);
+      expect(reconfigureMembers(level, newMatchmakerState())).toEqual([0, 1, 2]);
+    });
+
+    it('keeps what the player ticked once the player ticks something', () => {
+      const level = view(MATCHMADE, [node(0, { role: 'leader' })]);
+      const state = { ...newMatchmakerState(), reconfigureMembers: [0, 3] };
+      expect(reconfigureMembers(level, state)).toEqual([0, 3]);
+    });
+
+    it('offers every node that has not retired', () => {
+      const nodes = [node(0), node(1), node(2, { retired: true })];
+      expect(acceptorPool(view(MATCHMADE, nodes))).toEqual([0, 1]);
+      expect(retireTargets(view(MATCHMADE, nodes))).toEqual([0, 1]);
+    });
+  });
+
+  describe('the quorum system a new set runs', () => {
+    it('sends no numbers for a majority', () => {
+      expect(quorumSpecOf(newMatchmakerState())).toBeNull();
+    });
+
+    it('sends the two sizes of a split, and the two of a grid', () => {
+      const split = {
+        ...newMatchmakerState(),
+        reconfigureQuorum: 'flexible' as const,
+        quorumSizes: { q1: '3', q2: '2', rows: '', cols: '' },
+      };
+      expect(quorumSpecOf(split)).toEqual({ kind: 'flexible', q1: 3, q2: 2 });
+      const grid = {
+        ...newMatchmakerState(),
+        reconfigureQuorum: 'grid' as const,
+        quorumSizes: { q1: '', q2: '', rows: '2', cols: '3' },
+      };
+      expect(quorumSpecOf(grid)).toEqual({ kind: 'grid', rows: 2, cols: 3 });
+    });
+
+    it('sends nothing for a shape the player did not finish', () => {
+      const half = {
+        ...newMatchmakerState(),
+        reconfigureQuorum: 'grid' as const,
+        quorumSizes: { q1: '', q2: '', rows: '2', cols: '' },
+      };
+      expect(quorumSpecOf(half)).toBeNull();
+    });
+  });
+
+  describe('the evidence a Retire carries', () => {
+    it("reads the floor off the leader's own report", () => {
+      const nodes = [node(0, { gc: { effective_watermark: '2.0', retirable: [3] } }), node(1)];
+      expect(retireEvidence(view(MATCHMADE, nodes), 0)).toEqual({ round: 2, node: 0 });
+    });
+
+    it('carries none where the node reports no floor, so the refusal can be played', () => {
+      const nodes = [node(0), node(1)];
+      expect(retireEvidence(view(MATCHMADE, nodes), 0)).toBeNull();
+      expect(retireEvidence(view(MATCHMADE, nodes), 9)).toBeNull();
+    });
+  });
+
+  describe('the matchmaker picker', () => {
+    it('offers every matchmaker the deployment names, spares included', () => {
+      const level = view(MATCHMADE, [node(0)], [matchmaker(0), matchmaker(3, { phase: 'inactive' })]);
+      expect(matchmakerPool(level)).toEqual([0, 3]);
+    });
+
+    it('starts from the set a node believes authoritative', () => {
+      const nodes = [node(0, { matchmakers: { generation: 1, members: [0, 1, 3] } })];
+      const level = view(MATCHMADE, nodes, [matchmaker(0), matchmaker(1), matchmaker(3)]);
+      expect(matchmakersInForce(level)).toEqual([0, 1, 3]);
+      expect(handoverMembers(level, newMatchmakerState())).toEqual([0, 1, 3]);
+    });
+
+    it('falls back to the matchmakers that serve, where no node names a set', () => {
+      const level = view(
+        MATCHMADE,
+        [node(0)],
+        [matchmaker(0), matchmaker(1), matchmaker(3, { phase: 'inactive' })],
+      );
+      expect(matchmakersInForce(level)).toEqual([0, 1]);
+    });
+  });
+
+  describe('what the new refusals tell the player to do', () => {
+    it('names the next step for each', () => {
+      expect(refusalAdvice('no_matchmakers')).toContain('names no matchmakers');
+      expect(refusalAdvice('handover_busy')).toContain('already open');
+      expect(refusalAdvice('no_handover')).toContain('Ask for one first');
+    });
   });
 });

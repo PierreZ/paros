@@ -17,12 +17,22 @@ import type {
 } from '../types';
 import { h } from '../render/dom';
 import { gridOf } from '../render/grid';
+import {
+  newMatchmakerState,
+  renderMatchmakerControls,
+  type MatchmakerControlState,
+} from './matchmakers';
 import { memberCount, phaseSize, quorumOf } from './quorum';
 
 type Dispatch = (action: Action) => void;
 
-/** The bits of input the panel keeps between frames. */
-export interface ControlState {
+/**
+ * The bits of input the panel keeps between frames.
+ *
+ * The matchmaker plane keeps its own slice, defined beside the controls that
+ * read it, so this interface never grows a second concern.
+ */
+export interface ControlState extends MatchmakerControlState {
   /** The value each proposer's next ballot carries. */
   ballotValues: Map<number, string>;
   /** The command the client's next write carries. */
@@ -73,6 +83,7 @@ export function newControlState(): ControlState {
     quorumReadClient: null,
     handoffTargets: new Map(),
     corruptSlots: new Map(),
+    ...newMatchmakerState(),
   };
 }
 
@@ -86,6 +97,9 @@ export type NodeControl =
   | 'step_down'
   | 'quorum_read'
   | 'relinquish'
+  | 'resend_matchmaking'
+  | 'resend_gc'
+  | 'resend_reconfigurer'
   | 'corrupt'
   | 'wipe'
   | 'crash'
@@ -110,6 +124,9 @@ export function nodeControlsFor(view: GameView, node: NodeView): NodeControl[] {
     'step_down',
     'quorum_read',
     'relinquish',
+    'resend_matchmaking',
+    'resend_gc',
+    'resend_reconfigurer',
     'crash',
     'crash_at',
   ];
@@ -666,6 +683,9 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
     'set_election_timeout',
     'quorum_read',
     'relinquish',
+    'resend_matchmaking',
+    'resend_gc',
+    'resend_reconfigurer',
     'corrupt',
     'wipe',
   ];
@@ -718,6 +738,27 @@ function nodeControls(view: GameView, state: ControlState, dispatch: Dispatch): 
             )
           : null,
         offered.has('relinquish') ? handoffBox(view, node, state, dispatch) : null,
+        offered.has('resend_matchmaking')
+          ? action(
+              'Resend matchmaking',
+              'Ask the matchmakers again. A campaign whose matchmakers are slow waits; it is not abandoned by the clock.',
+              () => dispatch({ kind: 'resend_matchmaking', node: node.id }),
+            )
+          : null,
+        offered.has('resend_gc')
+          ? action(
+              'Resend GC',
+              'Ask the matchmakers again to raise their floor to this leader\u2019s ballot.',
+              () => dispatch({ kind: 'resend_gc', node: node.id }),
+            )
+          : null,
+        offered.has('resend_reconfigurer')
+          ? action(
+              'Resend handover',
+              'Send the open step of the matchmaker handover again.',
+              () => dispatch({ kind: 'resend_reconfigurer', node: node.id }),
+            )
+          : null,
         offered.has('crash')
           ? action(
               'Crash',
@@ -778,11 +819,13 @@ export function renderControls(
   view: GameView,
   state: ControlState,
   dispatch: Dispatch,
+  rerender: () => void = () => {},
 ): HTMLElement {
   const blocks = [
     ballotForms(view, state, dispatch),
     reachPicker(view, dispatch),
     clientControls(view, state, dispatch),
+    renderMatchmakerControls(view, state, dispatch, rerender),
     nodeControls(view, state, dispatch),
   ].filter((block): block is HTMLElement => block !== null);
   return h('section', { class: 'controls' }, ...blocks);
