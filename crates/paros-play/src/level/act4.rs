@@ -442,26 +442,26 @@ pub static FLEXIBLE_QUORUMS: Level = Level {
     act: 4,
     title: "Flexible quorums",
     briefing: "\
-Act I told you that any two majorities share an acceptor, and that this one \
-fact carries the whole safety argument. Read the argument again and you find \
-something smaller is enough. Phase 1 must learn about every value that Phase 2 \
-may have chosen. Nothing needs two Phase-1 quorums to share an acceptor. \
-Nothing needs two Phase-2 quorums to share one either. Only the two phases \
-must meet.
+Act I showed that any two majorities share an acceptor, and that this fact \
+gives the safety argument. Read the argument again, because a smaller \
+condition is sufficient. Phase 1 must learn every value that Phase 2 possibly \
+chose. Two Phase-1 quorums do not need to share an acceptor. Two Phase-2 \
+quorums do not need to share one either. Only the two phases must meet.
 
-Write that as arithmetic and you get `q1 + q2 > n`. Four acceptors give you a \
-choice the majority hides: this level runs `q1 = 3` and `q2 = 2`. A value is \
-now chosen by **two** acceptors, and every later election must collect **three** \
-promises. The trade is the point. The steady state gets cheaper and more \
-tolerant, because a write needs two answers instead of three. The next \
-election gets dearer, because it needs three answers instead of three of four \
-being enough at two.
+Write that condition as arithmetic and you get `q1 + q2 > n`. Four acceptors \
+then give you a choice that a majority does not offer: this level runs \
+`q1 = 3` and `q2 = 2`. **Two** acceptors now choose a value, and every later election must \
+collect **three** promises. That trade is the subject of this level. The \
+steady state costs less and tolerates more, because a write needs two answers, \
+not three. The next election costs more, because it needs three answers while \
+a write needs only two.
 
-You control the reach of each phase: which acceptors a `Prepare` gets to, and \
-which acceptors an `Accept` gets to. Get `alpha` chosen with two acceptors. \
-Then run a second ballot with three, and watch it come back with the same \
-value. Try to pick three acceptors that miss both voters. Three plus two is \
-five, and there are only four acceptors, so no such set exists.",
+You control the reach of each phase. The reach names the acceptors that a \
+`Prepare` reaches, and the acceptors that an `Accept` reaches. Get `alpha` \
+chosen with two acceptors. Then run a second ballot with three acceptors, and \
+look at the value that comes back. Try to select three acceptors that contain \
+neither voter. Three plus two is five, and there are only four acceptors, so \
+no such set exists.",
     field_guide: "play.html",
     symbols: &[
         "QuorumSystem::Flexible",
@@ -500,26 +500,27 @@ five, and there are only four acceptors, so no such set exists.",
             .find(|campaign| Some(campaign.ballot) > first);
         match later {
             Some(campaign) if text(&campaign.proposed) == chosen => GoalStatus::Reached(format!(
-                "Two acceptors chose {chosen}, and three had to be asked to find it again. \
-                 Ballot {}.{} reached {:?}, and every set of three acceptors here contains one \
-                 of the two that voted. That is the whole of `q1 + q2 > n`.",
+                "Two acceptors chose {chosen}, and three acceptors had to answer to find it \
+                 again. Ballot {}.{} reached {:?}. Every set of three acceptors here contains \
+                 one of the two that voted, and that is what `q1 + q2 > n` says.",
                 campaign.ballot.round,
                 campaign.ballot.node.0,
                 campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
             )),
             Some(campaign) => GoalStatus::Failed(format!(
-                "A campaign proposed {} over the chosen {chosen}.",
+                "A campaign proposed {}, but the cluster already chose {chosen}.",
                 text(&campaign.proposed)
             )),
             None => GoalStatus::Open(format!(
-                "{chosen} is chosen. Now run a second ballot and see what its promises report."
+                "{chosen} is chosen. Now run a second ballot, and read what its promises \
+                 report."
             )),
         }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
             "Set the Phase-1 reach to three acceptors before you open the second ballot. Two \
-             acceptors are not enough to complete Phase 1 here, whichever two you pick."
+             acceptors cannot complete Phase 1 here, whichever two you select."
                 .to_string()
         })
     },
@@ -556,25 +557,26 @@ pub static THE_GRID: Level = Level {
     act: 4,
     title: "The grid",
     briefing: "\
-A quorum does not have to be a count at all. Lay six acceptors out in two rows \
-of three. Call any whole **row** a Phase-1 quorum and any whole **column** a \
-Phase-2 quorum. A row and a column of one grid always cross in exactly one \
-cell, so the two phases meet by geometry. No arithmetic is involved, and \
-nothing about the safety argument changes.
+A quorum is not always a count. Put six acceptors in two rows of three. Call \
+any whole **row** a Phase-1 quorum, and call any whole **column** a Phase-2 \
+quorum. A row and a column of one grid always cross at exactly one cell, so \
+the two phases meet by geometry. The rule uses no arithmetic, and the safety \
+argument does not change.
 
-What this buys is throughput. Each slot goes to **one column**, so each \
-acceptor sees a third of the writes and the acceptor tier scales with the \
-number of columns. What it costs is that failure now depends on *which* \
-acceptor is down, not how many. One dead acceptor leaves its column short, and \
-that column's slots wait. The column a slot uses is `slot` modulo the number \
-of columns. That is a rule, not a message: nothing on the wire carries the \
-column, so a restarted leader and a successor both work out the same one.
+The grid gives more throughput. Each slot goes to **one column**, so each \
+acceptor gets a third of the writes, and more columns give more capacity. The \
+cost is that a failure now depends on *which* acceptor is down, not on how \
+many. One dead acceptor leaves its column incomplete, and the slots of that \
+column wait. The column of a slot is `slot` modulo the number of columns. That \
+column is a rule, not a message: no message carries the column, so a restarted \
+leader and a successor compute the same one.
 
-Get two commands chosen. You choose the column for each, and the grid marks \
-your answer. Then watch the rule do its own work: send a copy of slot 0's \
-`Accept` to a node outside slot 0's column. That node is a member of the \
-configuration and it votes, honestly and safely. Its vote counts for nothing, \
-because a Phase-2 quorum here is a whole column and it is in a different one.",
+Get two commands chosen. You select the column for each command, and the grid \
+marks your answer. Then look at the rule itself: send a copy of the `Accept` \
+for slot 0 to a node outside the column of slot 0. That node is a member of \
+the configuration, and it votes correctly and safely. Its vote counts for \
+nothing, because a Phase-2 quorum here is a whole column, and that node is in \
+another column.",
     field_guide: "play.html",
     symbols: &[
         "QuorumSystem::Grid",
@@ -614,13 +616,13 @@ because a Phase-2 quorum here is a whole column and it is in a different one.",
             });
         match (everywhere, columns.as_slice(), stray) {
             (true, [first, second], true) if first != second => GoalStatus::Reached(format!(
-                "Slot 0 was decided by column {first} and slot 1 by column {second}, and all six \
-                 nodes applied both. Node 4 holds slot 0's value too, and its vote for that slot \
-                 counted for nothing: it is not in column {first}."
+                "Column {first} decided slot 0, column {second} decided slot 1, and all six \
+                 nodes applied both slots. Node 4 also holds the value of slot 0. Its vote for \
+                 that slot counted for nothing, because it is not in column {first}."
             )),
             (true, [first, second], false) if first != second => GoalStatus::Open(format!(
-                "Both slots are chosen, on columns {first} and {second}. Now send a copy of slot \
-                 0's Accept to a node outside column {first}, and watch the tally."
+                "Both slots are chosen, on columns {first} and {second}. Now send a copy of \
+                 the Accept for slot 0 to a node outside column {first}, and look at the tally."
             )),
             _ => GoalStatus::Open(
                 "Get two commands chosen and applied on all six nodes.".to_string(),
@@ -635,8 +637,9 @@ because a Phase-2 quorum here is a whole column and it is in a different one.",
                 .to_string(),
         ),
         _ => Some(
-            "Slot 0 goes to column 0, slot 1 to column 1, slot 2 to column 2, slot 3 back to \
-             column 0. Any column is safe; only this one is the column everybody else derives."
+            "Slot 0 goes to column 0, slot 1 to column 1, slot 2 to column 2, and slot 3 goes \
+             to column 0 again. Every column is safe, but only this column is the one that every \
+             other node computes."
                 .to_string(),
         ),
     },
@@ -685,26 +688,27 @@ pub static QUORUM_READS: Level = Level {
     act: 4,
     title: "Quorum reads",
     briefing: "\
-The grid took the writes off the leader and left the reads on it. A read-index \
-read asks the leader to prove it still leads, and that proof costs a round of \
-beats and acks on the one node the grid was trying to relieve. There is a \
-better question to ask, and it does not involve the leader at all.
+The grid moved the writes away from the leader, but the reads stay on the \
+leader. A read-index read asks the leader to prove that it still leads. That \
+proof costs one round of beats and acks on the node that the grid must \
+protect. A better question exists, and it does not use the leader.
 
-Ask a **row** — a Phase-1 quorum — one thing each: what is the highest slot you \
-have voted in? Take the largest answer. Then have any replica serve the read as \
-soon as it has applied that slot. The argument is the same intersection you \
-already know. A write acknowledged before this read began was chosen by a whole \
-column. The row you asked crosses that column. So one of the acceptors that \
-answered has voted that slot, and the largest answer is at or above it. There \
-is no clock here, and no lease: this level refuses exactly the assumption that \
-clocks agree.
+Ask a **row**, which is a Phase-1 quorum, one question each: what is the \
+highest slot that you voted in? Take the largest answer, and let any replica \
+serve the read after it applies that slot. The argument is the intersection \
+that you already know. A whole column chose every write acknowledged before \
+this read started, and the row that you asked crosses that column. One of the \
+acceptors that answered voted in that slot, so the largest answer is at or \
+above it. This level uses no clock and no lease, and it refuses the assumption \
+that clocks agree.
 
-The waiting is the interesting half. An acceptor raises its watermark when it \
-**votes**, not when a slot is chosen, so a slot the leader started and did not \
-finish raises it too. A read that lands on such a watermark waits for the slot \
-to arrive. That costs the reader time. It does not cost the client a stale \
-answer. You get one of those here: read at a follower while a slot sits \
-half decided, and say whether the read may be served.",
+The wait is the second half of the rule. An acceptor raises its watermark when \
+it **votes**, not when a slot becomes chosen. A slot that the leader started \
+and did not finish therefore raises the watermark too. A read that meets such \
+a watermark waits for the slot. That wait costs the reader time, and it does \
+not give the client an old answer. This level gives you that case: read at a \
+follower while a slot is not yet decided, and say whether the cluster may \
+serve the read.",
     field_guide: "play.html",
     symbols: &[
         "ColocatedNode::quorum_read",
@@ -744,7 +748,7 @@ half decided, and say whether the read may be served.",
         let leader = log.leader();
         match served.first() {
             Some((node, index)) if Some(*node) != leader => GoalStatus::Reached(format!(
-                "Node {} answered the read at {}, and it does not lead. No beat was broadcast, \
+                "Node {} answered the read at {}, and it does not lead. No node sent a beat, \
                  the leader opened no read round, and the history is linearizable.",
                 node.0,
                 index.map_or_else(
@@ -753,25 +757,26 @@ half decided, and say whether the read may be served.",
                 )
             )),
             Some((node, _)) => GoalStatus::Open(format!(
-                "Node {} served the read, and it is the leader. Ask a follower instead: the \
-                 point is that any replica can answer.",
+                "Node {} served the read, and it is the leader. Ask a follower instead, \
+                 because any replica can answer.",
                 node.0
             )),
             None => GoalStatus::Open(
-                "Ask a follower for a read, and decide when it may be answered.".to_string(),
+                "Ask a follower for a read. Then decide when the follower may answer it."
+                    .to_string(),
             ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Compare two numbers on the card: the highest slot the row has voted in, and the \
-             slot this node has applied up to."
+            "Compare two numbers on the card: the highest slot that the row voted in, and the \
+             last slot that this node applied."
                 .to_string(),
         ),
         _ => Some(
-            "One acceptor in the row voted for a slot that is not chosen yet. This node has not \
-             applied it. Wait, and let the leader re-send its Accept."
+            "One acceptor in the row voted in a slot that is not chosen yet, and this node did \
+             not apply that slot. Wait, and let the leader send its Accept again."
                 .to_string(),
         ),
     },
@@ -813,29 +818,29 @@ pub static THE_HANDOFF: Level = Level {
     act: 4,
     title: "The handoff",
     briefing: "\
-An election destroys a leadership and builds a new one. The successor picks a \
-higher ballot, runs Phase 1, and rediscovers the log from a promise quorum. \
-That is the right tool when the old leader is gone. It is a waste when the old \
-leader is alive and simply wants to move — during a rolling restart, for \
-example, or when an operator moves the leadership closer to its clients.
+An election destroys a leadership and builds a new one. The successor selects \
+a higher ballot, runs Phase 1, and learns the log from a promise quorum. That \
+method is correct when the old leader is gone. It costs too much when the old \
+leader is alive and only wants to move. A rolling restart is one example, and \
+an operator that moves the leadership nearer to its clients is another.
 
-So hand the authority over instead. The outgoing leader sends the ballot, the \
-next free slot, and the tail below it, split into the slots it knows are \
-chosen and the slots whose Phase 2 is still open. The two exactly cover the \
-range, and that is what lets the successor skip Phase 1: it may re-propose \
-what it was told about, and there is nothing else in the range to be told \
-about. Gap filling stays **off** here. A `Noop` needs a promise quorum's \
-report to license it, and this successor collected none.
+Move the authority instead. The old leader sends the ballot, the next free \
+slot, and the tail below that slot. It splits the tail into the slots that it \
+knows are chosen and the slots whose Phase 2 is still open. The two parts \
+cover the range exactly, so the successor can omit Phase 1. It re-proposes the \
+slots that the message described, and the range holds nothing else. The gap \
+fill stays **off** here, because a `Noop` needs a report from a promise \
+quorum, and this successor collected none.
 
-The dangerous case is a replayed message, so read the rule that closes it. \
-Only the node that **won** a ballot may hand it on. Suppose a successor could \
-pass it further. A delayed copy of the first message then arrives at that \
-successor again. Every check passes — it is the named addressee and its \
-promise still matches — so it installs the same authority a second time, \
-beside the node that is already using it. Two nodes then hand out the same \
-slots under one ballot. One hop costs an election. The alternative costs \
-safety. Hand the leadership over, get a command chosen under it, and then try \
-to hand it on again.",
+A replayed message is the unsafe case, so read the rule that prevents it: only \
+the node that **won** a ballot may pass it on. Suppose that a successor could \
+pass the ballot further, and a delayed copy of the first message reaches that \
+successor again. Every check passes, because the message names that node and \
+its promise still matches. The node installs the same authority a second time, \
+beside the node that already uses it. Two nodes then give out the same slots \
+under one ballot, so one extra hop costs safety while one hop costs only an \
+election. Move the leadership, get a command chosen under it, and then try to \
+move it again.",
     field_guide: "play.html",
     symbols: &[
         "ColocatedNode::relinquish_to",
@@ -857,7 +862,7 @@ to hand it on again.",
         };
         let Some(handoff) = log.handoffs().first().copied() else {
             return GoalStatus::Open(
-                "Get a command chosen, then hand the leadership to a peer.".to_string(),
+                "Get a command chosen. Then move the leadership to a peer.".to_string(),
             );
         };
         let Some(node) = log.node(handoff.to) else {
@@ -865,14 +870,15 @@ to hand it on again.",
         };
         if !node.is_leader() {
             return GoalStatus::Open(format!(
-                "Node {} was offered the authority. Deliver the message that carries it.",
+                "The old leader offered the authority to node {}. Deliver the message that \
+                 carries it.",
                 handoff.to.0
             ));
         }
         if node.ballot() != handoff.ballot {
             return GoalStatus::Failed(format!(
-                "Node {} leads at a different ballot: the authority was not inherited, it was \
-                 won again.",
+                "Node {} leads at a different ballot. It did not inherit the authority. It \
+                 won a new one.",
                 handoff.to.0
             ));
         }
@@ -883,10 +889,10 @@ to hand it on again.",
         let refusal = log.handoff_refusal(handoff.to);
         match (under_successor, refusal) {
             (true, Some(_)) => GoalStatus::Reached(format!(
-                "Node {} leads at ballot {}.{}, which node {} won. No election ran, and slot {} \
-                 was chosen under the inherited authority. Node {} may not hand it on: an \
-                 authority moves once, and a second hop needs a durable record that paros does \
-                 not keep.",
+                "Node {} leads at ballot {}.{}, which node {} won. No election ran, and the \
+                 cluster chose slot {} under the inherited authority. Node {} must not pass the \
+                 authority on. An authority moves once, and a second hop needs a durable record \
+                 that paros does not keep.",
                 handoff.to.0,
                 handoff.ballot.round,
                 handoff.ballot.node.0,
@@ -899,7 +905,7 @@ to hand it on again.",
                 handoff.to.0
             )),
             (true, None) => GoalStatus::Failed(format!(
-                "Node {} is allowed to hand the authority on. One hop is the rule.",
+                "Node {} can pass the authority on. The rule allows one hop only.",
                 handoff.to.0
             )),
         }
@@ -907,8 +913,8 @@ to hand it on again.",
     hint: |world, mistakes| {
         let handed = log_world(world).is_some_and(|log| !log.handoffs().is_empty());
         (mistakes > 0 || handed).then(|| {
-            "Ask the successor to hand the leadership on. The refusal names the rule, and the \
-             briefing explains the replayed message it closes."
+            "Ask the successor to pass the leadership on. The refusal names the rule, and the \
+             briefing explains the replayed message that the rule prevents."
                 .to_string()
         })
     },
@@ -946,32 +952,32 @@ pub static MATCHMAKING: Level = Level {
     act: 4,
     title: "Matchmaking",
     briefing: "\
-Every level so far kept one thing fixed: the acceptors never changed. Let \
-them change and the safety argument breaks in a way that is easy to miss. \
-Say the acceptors are `{0, 1, 2}` and a leader gets a slot chosen with nodes \
-0 and 1, then dies before it tells anybody. An operator moves the cluster to \
-`{2, 3, 4}`. A new leader asks that set, hears from nodes 3 and 4, and both \
-report nothing — truthfully, because neither was there. It decides something \
-else, and one slot holds two values.
+Every level until now kept the acceptors fixed, and if the acceptors change, \
+the safety argument breaks in a way that is easy to miss. Take the acceptors \
+`{0, 1, 2}`. A leader gets a slot chosen with nodes 0 and 1, and then it stops \
+before it tells any other node. An operator moves the cluster to `{2, 3, 4}`. \
+A new leader asks that set and hears from nodes 3 and 4, and both report \
+nothing. Their reports are correct, because neither node was a member before, \
+so the new leader decides another value and the slot holds two values.
 
-So a new leader must ask a Phase-1 quorum of **every** acceptor set that may \
-still hold a value it has not seen. That raises a question: how does a \
-candidate learn which sets existed? A separate small service answers it. A \
-**matchmaker** keeps one durable map from a ballot to an acceptor set. It \
-holds no log, it votes on no slot, and nothing on the command path asks it \
-anything.
+A new leader must therefore ask a Phase-1 quorum of **every** acceptor set \
+that possibly holds a value that it has not seen. One question follows: how \
+does a candidate learn which sets existed? A small separate service answers \
+that question. A **matchmaker** keeps one durable map from a ballot to an \
+acceptor set. It holds no log, it votes on no slot, and no message on the \
+command path asks it anything.
 
-A candidate registers `(my ballot, my acceptor set)` with a quorum of \
-matchmakers before it sends one `Prepare`. Each of them answers with every \
-set it holds below that ballot. A quorum is enough, and the reason is the \
-intersection you already know. Every earlier ballot registered with a quorum \
-of the same matchmakers before it could accept anything, and two quorums \
-share a matchmaker. So the union of the answers names every set an earlier \
-ballot could have chosen under.
+A candidate registers its own ballot and its own acceptor set with a quorum \
+of matchmakers. It does that before it sends one `Prepare`. Each matchmaker \
+answers with every set that it holds below that ballot. A quorum is \
+sufficient, for the intersection reason that you know. Every earlier ballot \
+registered with a quorum of the same matchmakers before any acceptor voted, \
+and two quorums share a matchmaker. The union of the answers therefore names \
+every set that an earlier ballot could use.
 
-Elect node 0, get a command chosen, then take node 0 away and elect node 1. \
-Node 1's matchmakers will tell it about node 0's set, and you say whether \
-its Phase 1 is complete.",
+Elect node 0 and get a command chosen. Then remove node 0 and elect node 1. \
+The matchmakers tell node 1 about the set of node 0. You then say whether its \
+Phase 1 is complete.",
     field_guide: "play.html",
     symbols: &[
         "ColocatedNode::on_match_reply",
@@ -1005,24 +1011,24 @@ its Phase 1 is complete.",
         let prior = log.prior_configurations(leader);
         if prior.is_empty() {
             return GoalStatus::Open(format!(
-                "Node {} leads, and the matchmakers told it nothing came before. Get a command \
-                 chosen, then take node {} away and elect somebody else.",
+                "Node {} leads, and the matchmakers reported no earlier set. Get a command \
+                 chosen. Then remove node {} and elect another node.",
                 leader.0, leader.0
             ));
         }
         let executed = commands(world, leader.0);
         if executed.len() < 2 {
             return GoalStatus::Open(format!(
-                "Node {} was elected across a set the matchmakers named. Get one more command \
-                 chosen under it.",
+                "The cluster elected node {} across a set that the matchmakers named. Get one \
+                 more command chosen under it.",
                 leader.0
             ));
         }
         GoalStatus::Reached(format!(
-            "Node {} leads, and it was elected across the acceptor set the matchmakers reported \
-             for the earlier ballot. It has executed {} commands. No Prepare left before a \
-             matchmaker quorum answered, and Phase 1 closed only once that set held a quorum of \
-             its own.",
+            "Node {} leads, and the cluster elected it across the acceptor set that the \
+             matchmakers reported for the earlier ballot. It executed {} commands. No Prepare \
+             went out before a matchmaker quorum answered. Phase 1 closed only after that set \
+             held a quorum of its own.",
             leader.0,
             executed.len()
         ))
@@ -1030,13 +1036,13 @@ its Phase 1 is complete.",
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Read the card's first two lines: who has promised, and which sets the matchmakers \
-             named."
+            "Read the first two lines of the card: which nodes promised, and which sets the \
+             matchmakers named."
                 .to_string(),
         ),
         _ => Some(
-            "One set is named, and two of its three acceptors have promised. Two of three is a \
-             Phase-1 quorum of that set."
+            "The matchmakers named one set, and two of its three acceptors promised. Two of \
+             three acceptors are a Phase-1 quorum of that set."
                 .to_string(),
         ),
     },
@@ -1076,29 +1082,31 @@ pub static RECONFIGURE: Level = Level {
     act: 4,
     title: "Reconfigure",
     briefing: "\
-An acceptor set belongs to a ballot, and it is never edited. Edit it under a \
-live ballot and every quorum count in flight changes meaning. The \
-matchmakers' map from a ballot to a set becomes a lie as well. So there is \
-exactly one way to change the acceptors. The leader picks a **fresh ballot** \
-and registers the new set with it: a reconfiguration is a round change.
+An acceptor set belongs to one ballot, and no node edits that set. If you \
+edit it under a live ballot, every open quorum count changes its meaning. The \
+map that the matchmakers hold from a ballot to a set also becomes wrong. Only \
+one method changes the acceptors. The leader selects a **fresh ballot** and \
+registers the new set with that ballot, so a reconfiguration is a round \
+change.
 
-That has a price and a shape. The price is a stall. The leader abandons its \
-open rounds and admits no new command. It leads again after one matchmaking \
-round trip and one Phase 1. The shape is that the new ballot's Phase 1 must \
-cover the **old** set, which the matchmakers now report. Its Phase 2 \
-addresses the new set alone.
+That method has a cost and a shape. The cost is a stall: the leader abandons \
+its open rounds and admits no new command. It leads again after one \
+matchmaking round trip and one Phase 1. The shape is that the Phase 1 of the \
+new ballot must cover the **old** set, which the matchmakers now report. Its \
+Phase 2 addresses the new set alone.
 
-A joining node is sent the `Prepare` too, so it promises the ballot and \
-learns the set before any `Accept` reaches it. A removed node keeps \
-answering Phase 1 for the ballots it took part in: removed is not shut down. \
-(A cluster with no matchmakers refuses a reconfiguration outright — there is \
-nowhere to record a second set, so plain Multi-Paxos keeps one for life.)
+The leader sends the `Prepare` to a node that joins as well. That node \
+therefore promises the ballot and learns the set before any `Accept` reaches \
+it. A node that leaves the set still answers Phase 1 for the ballots that it \
+took part in. A removed node is not a node that is off. A cluster with no \
+matchmakers refuses a reconfiguration. It has no place to record a second \
+set, so plain Multi-Paxos keeps one set permanently.
 
-Grow the cluster onto the spare, node 3. Then take the leader away and elect \
-somebody else. That campaign is told about **two** sets, the one before the \
-change and the one after, and it must hold a Phase-1 quorum of each. A \
-quorum of everything the two sets name together is not the same claim, and \
-the card will ask you which one Phase 1 needs.",
+Grow the cluster onto the spare node, node 3. Then remove the leader and \
+elect another node. The matchmakers tell that campaign about **two** sets: \
+the set before the change and the set after it. The campaign must hold a \
+Phase-1 quorum of each set. A quorum of every node that the two sets name \
+together is a different claim. The card asks you which claim Phase 1 needs.",
     field_guide: "play.html",
     symbols: &[
         "ColocatedNode::reconfigure",
@@ -1130,15 +1138,16 @@ the card will ask you which one Phase 1 needs.",
         let members = node.acceptors().members().len();
         if members < 4 {
             return GoalStatus::Open(format!(
-                "Node {} leads a set of {members}. Ask it to run with the acceptors 0, 1, 2 and 3.",
+                "Node {} leads a set of {members}. Ask it to run with the acceptors 0, 1, 2 \
+                 and 3.",
                 leader.0
             ));
         }
         let prior = log.prior_configurations(leader);
         if prior.len() < 2 {
             return GoalStatus::Open(format!(
-                "The new set is in force. Now take node {} away and elect somebody else: that \
-                 campaign is told about both sets.",
+                "The new set is in force. Now remove node {} and elect another node. The \
+                 matchmakers tell that campaign about both sets.",
                 leader.0
             ));
         }
@@ -1149,10 +1158,11 @@ the card will ask you which one Phase 1 needs.",
             );
         }
         GoalStatus::Reached(format!(
-            "Node {} leads a set of four at ballot {}, which is above the ballot the set of three \
-             was bound to. Node 3 promised that ballot before any Accept reached it, and it has \
-             executed the command chosen under the new set. The campaign that elected node {} had \
-             to hold a Phase-1 quorum of both sets, not of the {} acceptors they name together.",
+            "Node {} leads a set of four at ballot {}, which is above the ballot that bound \
+             the set of three. Node 3 promised that ballot before any Accept reached it, and it \
+             executed the command chosen under the new set. The campaign that elected node {} \
+             had to hold a Phase-1 quorum of both sets. A quorum of the {} acceptors that they \
+             name together is not enough.",
             leader.0,
             crate::view::show_ballot(node.acceptors_since()),
             leader.0,
@@ -1171,7 +1181,7 @@ the card will ask you which one Phase 1 needs.",
                 .to_string(),
         ),
         _ => Some(
-            "The set of three needs two of its own members to have promised. Check that one \
+            "The set of three needs a promise from two of its own members. Check that set \
              first."
                 .to_string(),
         ),
@@ -1225,31 +1235,34 @@ pub static GARBAGE_COLLECTION: Level = Level {
     act: 4,
     title: "Garbage collection",
     briefing: "\
-Every reconfiguration adds a set the matchmakers must keep, and every later \
-Phase 1 must cover every set they report. Left alone, elections get slower \
-for ever and a removed machine can never be switched off. So a set has to \
-become forgettable — and the condition for that is exact. A set may be \
-forgotten only when **no future leader can need its Phase-1 quorum to learn \
-a value its Phase-2 quorum may have chosen**.
+Every reconfiguration adds a set that the matchmakers must keep, and every \
+later Phase 1 must cover every set that they report. Without a rule, the \
+elections get slower and slower, and an operator cannot stop a removed \
+machine. A set must therefore become forgettable, and the condition is exact. \
+A set may be forgotten only when **no future leader needs its Phase-1 quorum \
+to learn a value that its Phase-2 quorum possibly chose**.
 
-A leader can prove that about the log it holds. Above its election fence, \
-its own Phase 1 already reported that nothing was accepted, so no older set \
-is relevant there. Between the fence and its applied prefix, everything was \
-re-proposed or filled under its own ballot and set. Below that, a node that \
-learns a slot chosen writes the value down as its accepted record. A member \
-of the current set therefore answers a later Phase 1 with it.
+A leader can prove that condition about the log that it holds. Above its \
+election fence, its own Phase 1 reported that no acceptor accepted anything, \
+so no older set matters there. Between the fence and its applied prefix, the \
+leader re-proposed or filled every slot under its own ballot and set. Below \
+the prefix, a node that learns that a slot is chosen writes the value as its \
+accepted record. A member of the current set therefore answers a later Phase \
+1 with that value.
 
-So the condition is this. The leadership must be settled, and a **Phase-2 \
-quorum of the current set must report a chosen index at or past the fence**. The leader \
-then asks the matchmakers to raise their floor to its own ballot. The floor \
-is in force only once a matchmaker **quorum** has written it down.
+The condition is therefore this. The leadership must be settled. A **Phase-2 \
+quorum of the current set must report a chosen index at or above the \
+fence**. The leader then asks the matchmakers to raise their floor to its own \
+ballot. The floor is in force only after a matchmaker **quorum** writes it to \
+disk.
 
-Only then may a removed acceptor be switched off, and the request must carry \
-the floor as evidence. \"I am not in the set in force\" is a belief this node \
-forgets at every crash. A floor above every ballot a set naming it was bound \
-to is a fact. Take the cluster down to three acceptors, and beat until the \
-floor is in force. Then answer for node 3 twice: once with no evidence, once \
-with the watermark the leader reports.",
+Only then may an operator stop a removed acceptor, and the request must carry \
+the floor as evidence. The statement \"I am not in the set in force\" is a \
+belief, and the node loses that belief at every crash. A floor above every \
+ballot that named this node in a set is a fact. Take the cluster down to \
+three acceptors, and beat until the floor is in force. Then answer for node 3 \
+twice: once with no evidence, and once with the watermark that the leader \
+reports.",
     field_guide: "play.html",
     symbols: &[
         "ColocatedNode::gc_effective",
@@ -1274,13 +1287,13 @@ with the watermark the leader reports.",
             return match floor {
                 Some((watermark, retirable)) if retirable.contains(&NodeId(3)) => {
                     GoalStatus::Open(format!(
-                        "The floor {} is in force and it releases node 3. Ask node 3 to retire, \
-                         and show it that watermark.",
+                        "The floor {} is in force, and it releases node 3. Ask node 3 to \
+                         retire, and give it that watermark.",
                         crate::view::show_ballot(watermark)
                     ))
                 }
                 _ => GoalStatus::Open(
-                    "Take node 3 out of the acceptor set, then beat until a matchmaker quorum \
+                    "Take node 3 out of the acceptor set. Then beat until a matchmaker quorum \
                      holds the floor."
                         .to_string(),
                 ),
@@ -1288,16 +1301,16 @@ with the watermark the leader reports.",
         }
         if !refused {
             return GoalStatus::Failed(
-                "Node 3 retired, and no request was ever refused for want of evidence. The point \
-                 of this level is the refusal."
+                "Node 3 retired, and the leader refused no request for a lack of evidence. \
+                 This level is about that refusal."
                     .to_string(),
             );
         }
         GoalStatus::Reached(
-            "Node 3 is retired, and the first request — the one that carried no watermark — was \
-             refused with \"not collected\". An installed successor set is not a collected \
-             predecessor: what licenses the shutdown is a floor a matchmaker quorum wrote down, \
-             above every ballot a set naming node 3 was bound to."
+            "Node 3 is retired. The first request carried no watermark, and node 3 refused it \
+             with \"not collected\". An installed successor set does not mean a collected \
+             predecessor. Only a floor that a matchmaker quorum wrote to disk permits the \
+             shutdown. That floor must be above every ballot that bound a set naming node 3."
                 .to_string(),
         )
     },
@@ -1305,10 +1318,11 @@ with the watermark the leader reports.",
         let effective = log_world(world)
             .and_then(|log| log.leader().and_then(|leader| log.gc_effective(leader)));
         (mistakes > 0).then(|| match effective {
-            Some(_) => "The leader reports a floor now. Compare it with the ballots node 3's own \
-                        sets were bound to."
+            Some(_) => "The leader now reports a floor. Compare that floor with the ballots \
+                        that bound the sets which named node 3."
                 .to_string(),
-            None => "No floor is in force yet. A request with no evidence behind it is refused."
+            None => "No floor is in force yet. A node refuses a request that carries no \
+                     evidence."
                 .to_string(),
         })
     },
@@ -1383,27 +1397,28 @@ pub static MATCHMAKER_GENERATIONS: Level = Level {
     act: 4,
     title: "Matchmaker generations",
     briefing: "\
-The matchmakers are now the source of truth about membership. Their own \
-membership cannot be frozen for ever: one of them loses a disk and must be \
-replaced. Asking a higher tier of matchmakers for the matchmakers never \
-bottoms out. The answer is that the matchmaker set carries a **generation**. \
-Generation `g + 1` is chosen by single-decree Paxos whose acceptors are the \
-members of generation `g`. That decree is Act I again — the same proposer, \
-the same acceptor, one slot — with a list of matchmakers as its value.
+The matchmakers now hold the true membership. Their own membership cannot \
+stay fixed permanently, because one matchmaker loses a disk and needs a \
+replacement. A higher tier of matchmakers for the matchmakers has no end. The \
+answer is that the matchmaker set carries a **generation**. Single-decree \
+Paxos chooses generation `g + 1`, and its acceptors are the members of \
+generation `g`. That decree is Act I again: the same proposer, the same \
+acceptor and one slot, with a list of matchmakers as its value.
 
 The handover has five steps, and their order is the argument. **Stop**: a \
-quorum of the old generation freezes, durably. A frozen matchmaker registers \
-nothing more, so the copy taken next is a still picture.
+quorum of the old generation freezes its state on disk. A frozen matchmaker \
+registers nothing more, so the next copy does not change while the handover \
+reads it.
 
-**Reconstruct**: take the highest floor the frozen members report and the \
-union of their registries above it. **Bootstrap**: every proposed member \
-writes that reconstruction down, marked pending. **Decide**: the decree \
-chooses one successor, so two operators racing cannot install two. \
-**Publish**: the old members record the link and point stragglers at it; the \
-new members activate what they held pending.
+**Reconstruct**: take the highest floor that the frozen members report, and \
+the union of their registries above that floor. **Bootstrap**: every proposed \
+member writes that reconstruction to disk and marks it pending. **Decide**: \
+the decree chooses one successor, so two operators that compete cannot \
+install two sets. **Publish**: the old members record the link and send late \
+proposers to it, and the new members activate the pending set.
 
-Every message names the generation it is for, and a matchmaker answers only \
-its own. Replace matchmaker 2 by matchmaker 3. A campaign that started \
+Every message names its generation, and a matchmaker answers only its own \
+generation. Replace matchmaker 2 with matchmaker 3. A campaign that started \
 before the handover still has a registration in flight for the old \
 generation. When that registration reaches a frozen matchmaker, you say what \
 the matchmaker does with it.",
@@ -1440,7 +1455,7 @@ the matchmaker does with it.",
         if active.len() < 3 {
             return GoalStatus::Open(format!(
                 "Generation 1 is active at {} of its three members. Drive the handover: stop, \
-                 bootstrap, decide, publish.",
+                 bootstrap, decide and publish.",
                 active.len()
             ));
         }
@@ -1472,23 +1487,24 @@ the matchmaker does with it.",
             ));
         }
         GoalStatus::Reached(format!(
-            "Generation 1 = {active:?} serves matchmaking at every member, the matchmaker it \
-             replaced stays alive to point late candidates at it, node {} was elected through the \
-             new generation, and a command is chosen under that leadership. One successor was \
-             chosen, by a decree over the generation it replaced.",
+            "Generation 1 = {active:?} serves matchmaking at every member. The matchmaker that \
+             it replaced stays up, and it sends late candidates to the new generation. The \
+             cluster elected node {} through the new generation, and a command is chosen under \
+             that leadership. A decree over the generation that it replaced chose one successor.",
             leader.0
         ))
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Read the card's second line: it says which generation this matchmaker holds, and \
-             whether it is frozen."
+            "Read the second line of the card. It says which generation this matchmaker holds, \
+             and whether the matchmaker is frozen."
                 .to_string(),
         ),
         _ => Some(
-            "This matchmaker is frozen for the generation the request names. A frozen matchmaker \
-             registers nothing more; it answers with the successor it knows."
+            "This matchmaker is frozen for the generation that the request names. A frozen \
+             matchmaker registers nothing more, and it answers with the successor that it \
+             knows."
                 .to_string(),
         ),
     },
@@ -1540,26 +1556,28 @@ pub static FAULTY_RECORDS: Level = Level {
     act: 4,
     title: "Faulty records",
     briefing: "\
-Disks lose things one block at a time. A node comes back and one accepted \
-record no longer reads: the value is gone, and the slot number and the ballot \
-survive beside it. The node has three honest answers about that slot, not two. \
-It voted and holds the value. It did not vote. Or it voted and no longer knows \
-for what.
+A disk loses data one block at a time. A node comes back, and one accepted \
+record does not read: the value is gone, but the slot number and the ballot \
+are still there. The node has three correct answers about that slot, not two. \
+It voted and it holds the value. It did not vote. It voted, and it does not \
+know the value any more.
 
-The third answer must stay its own answer. A node that turns it into \"I did \
-not vote\" makes the mistake this level exists for. A candidate that hears silence from a \
-whole quorum concludes that nothing was chosen there and decides something \
-else. If the lost value was already chosen, that slot now holds two values. So \
-a damaged record is reported as damaged, and a candidate that receives one \
-cannot settle the slot from that report alone.
+The third answer must stay a separate answer. A node that changes it into \"I \
+did not vote\" makes the mistake that this level shows. A candidate that hears \
+nothing from a whole quorum decides that nothing was chosen there, and it \
+decides another value. If the cluster already chose the lost value, that slot \
+now holds two values. A node therefore reports a damaged record as damaged, \
+and a candidate that receives one cannot settle the slot from that report \
+alone.
 
-What settles it is more answers. The leader keeps asking the acceptors that \
-have not replied, and each reply moves the slot into one of three cases. Some \
-acceptor reports a value at a ballot at or above the damaged record: the \
-leader re-proposes that value, and the damaged acceptor writes it back as it \
-votes. A whole Phase-1 quorum reports nothing that could hide a chosen value: \
-the leader decides a `Noop`. Neither yet: the leader waits. Damage one record \
-here, bring the node back, and say which case each report puts the slot in.",
+More answers settle the slot: the leader keeps asking the acceptors that did \
+not reply, and each reply puts the slot into one of three cases. First: an \
+acceptor reports a value at a ballot at or above the damaged record, so the \
+leader re-proposes that value. The damaged acceptor then writes the value \
+back when it votes. Second: a whole Phase-1 quorum reports nothing that can \
+hide a chosen value, so the leader decides a `Noop`. Third: neither case \
+holds yet, so the leader waits. Damage one record here, start the node again, \
+and say which case each report gives the slot.",
     field_guide: "play.html",
     symbols: &[
         "Storage::faulty_entries",
@@ -1591,35 +1609,35 @@ here, bring the node back, and say which case each report puts the slot in.",
             .and_then(|node| node.replica().chosen_at(Slot(0)).map(show_command));
         match (damaged, blocked, repaired, value) {
             (None, 0, true, Some(value)) if value == "alpha" => GoalStatus::Reached(
-                "Slot 0 holds alpha, the value the damaged acceptor had voted for and could \
-                 no longer read. The record is readable again on every node, because the \
-                 acceptor wrote it back as it voted for the leader's proposal."
+                "Slot 0 holds alpha. The damaged acceptor voted for that value, and then it \
+                 could not read the value. Every node can read the record again, because the \
+                 acceptor wrote the value back when it voted for the proposal of the leader."
                     .to_string(),
             ),
             (None, 0, true, Some(value)) => GoalStatus::Failed(format!(
-                "Slot 0 holds {value}. The repair re-proposed a value nobody had reported for \
-                 that slot."
+                "Slot 0 holds {value}. The repair re-proposed a value that no acceptor \
+                 reported for that slot."
             )),
             (Some(id), _, _, _) => GoalStatus::Open(format!(
-                "Node {} still holds a record it cannot read. Elect a leader and let it collect \
-                 enough answers to settle that slot.",
+                "Node {} still holds a record that it cannot read. Elect a leader, and let it \
+                 collect enough answers to settle that slot.",
                 id.0
             )),
             _ => GoalStatus::Open(
-                "Damage one accepted record, bring the node back, and elect a leader.".to_string(),
+                "Damage one accepted record, start the node again, and elect a leader.".to_string(),
             ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Read the card's second line. It says what the answers hold for that slot, and it \
-             is the only thing this ballot may put there."
+            "Read the second line of the card. It says what the answers hold for that slot, \
+             and this ballot may put nothing else there."
                 .to_string(),
         ),
         _ => Some(
-            "One acceptor reports the value it accepted, at a ballot at or above the damaged \
-             record. Re-propose that value: a `Noop` would decide something else."
+            "One acceptor reports the value that it accepted, at a ballot at or above the \
+             damaged record. Re-propose that value, because a `Noop` decides another value."
                 .to_string(),
         ),
     },
@@ -1670,27 +1688,28 @@ pub static THE_WIPED_NODE: Level = Level {
     act: 4,
     title: "The wiped node",
     briefing: "\
-A crash costs a node everything it held in memory and nothing it wrote down. \
-That is why paros keeps leadership in memory and promises on disk: the crash \
-is an abdication, and the promise comes back. Losing the **disk** is a \
-different failure, and it has a different answer.
+A crash costs a node every item in memory, and no item on disk. paros \
+therefore keeps the leadership in memory and the promises on disk. The crash \
+is an abdication, and the promise comes back. A lost **disk** is a different \
+failure, and it has a different answer.
 
-A promise is the one thing a node may not take back. Having promised a ballot, \
-it told some proposer that every lower ballot was finished there, and that \
-proposer may have chosen a value on the strength of it. A node that boots with \
-an empty disk has no memory of that promise. It answers a lower ballot, votes \
-for whatever that ballot proposes, and a quorum built behind the older ballot \
-chooses a second value for a slot that already has one. A snapshot does not \
-help. A snapshot restores the log, and the peer that sends it does not know \
-what this node has sworn.
+A node must not take back a promise. When it promises a ballot, it tells a \
+proposer that every lower ballot is finished there, and that proposer \
+possibly chose a value from that answer. A node that boots with an empty disk \
+holds no record of that promise. It answers a lower ballot and votes for the \
+value of that ballot. A quorum at the older ballot then chooses a second \
+value for a slot that already holds one. A snapshot does not help, because a \
+snapshot restores the log and the peer that sends it does not know what this \
+node promised.
 
-So a node that lost its disk does not rejoin, and the library refuses the boot \
-rather than trusting an operator to remember. Every store carries a marker \
-that says it has been formatted. An operator's own record says the identity \
-was provisioned once. A store that was provisioned and no longer carries its \
-marker is a lost disk, and that is the refusal. Erase a disk here, try to \
-bring it back, and keep the survivors deciding without it. What heals the \
-cluster is a change of the acceptor set, which is the next act's business.",
+A node that lost its disk therefore does not rejoin: the library refuses the \
+boot, and it does not depend on the memory of an operator. Every store \
+carries a marker that says that an operator formatted it. The record of the \
+operator says that this identity was provisioned once. A store that was \
+provisioned and no longer carries its marker is a lost disk, and the library \
+refuses that boot. Erase a disk here, try to start the node again, and let \
+the other nodes keep deciding. A change of the acceptor set heals the \
+cluster, and the next levels cover that change.",
     field_guide: "play.html",
     symbols: &[
         "NodeStorage::is_formatted",
@@ -1711,7 +1730,8 @@ cluster is a change of the acceptor set, which is the next act's business.",
         };
         if let Some(node) = log.promise_regressed() {
             return GoalStatus::Failed(format!(
-                "node {}'s durable promise came back lower than a promise it had already made.",
+                "The durable promise of node {} came back lower than a promise that it \
+                 already made.",
                 node.0
             ));
         }
@@ -1722,10 +1742,10 @@ cluster is a change of the acceptor set, which is the next act's business.",
             });
             return match erased {
                 Some(id) => GoalStatus::Open(format!(
-                    "Node {}'s disk is empty. Try to bring it back.",
+                    "The disk of node {} is empty. Try to start the node again.",
                     id.0
                 )),
-                None => GoalStatus::Open("Erase one node's disk.".to_string()),
+                None => GoalStatus::Open("Erase the disk of one node.".to_string()),
             };
         };
         if log.node(wiped).is_some() {
@@ -1742,21 +1762,22 @@ cluster is a change of the acceptor set, which is the next act's business.",
             .unwrap_or(0);
         if survivors < 2 {
             return GoalStatus::Open(format!(
-                "Node {} stays out. Get one more command chosen without it.",
+                "Node {} stays out of the cluster. Get one more command chosen without it.",
                 wiped.0
             ));
         }
         GoalStatus::Reached(format!(
-            "Node {} is refused, and the two survivors chose another command without it. Its \
-             disk no longer holds the promise {}.{} it made, and nothing in the cluster can give \
-             that promise back. The acceptor set has to change instead.",
+            "The library refuses node {}, and the other two nodes chose another command \
+             without it. Its disk no longer holds the promise {}.{} that it made, and no node in \
+             the cluster can give that promise back. The acceptor set must change instead.",
             wiped.0, promised.round, promised.node.0
         ))
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "An empty disk and a new disk look the same from inside the node. What tells them \
-             apart is the operator's own record that this identity was provisioned once."
+            "An empty disk and a new disk look the same inside the node. Only the record of \
+             the operator separates them, because it says that this identity was provisioned \
+             once."
                 .to_string()
         })
     },

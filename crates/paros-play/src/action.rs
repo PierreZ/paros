@@ -36,8 +36,8 @@ impl Seam {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Seam::BeforeSync => "before sync",
-            Seam::AfterSyncBeforeSend => "after sync, before send",
+            Seam::BeforeSync => "before the sync",
+            Seam::AfterSyncBeforeSend => "after the sync and before the send",
         }
     }
 }
@@ -485,14 +485,14 @@ impl Action {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
-            Action::Deliver { id } => format!("deliver #{id}"),
-            Action::Drop { id } => format!("drop #{id}"),
+            Action::Deliver { id } => format!("deliver message {id}"),
+            Action::Drop { id } => format!("drop message {id}"),
             Action::Duplicate { id, to } => match to {
-                Some(to) => format!("duplicate #{id} to node {to}"),
-                None => format!("duplicate #{id}"),
+                Some(to) => format!("send a copy of message {id} to node {to}"),
+                None => format!("send a copy of message {id}"),
             },
-            Action::Tick { node } => format!("tick node {node}"),
-            Action::TickAll => "tick every node".to_string(),
+            Action::Tick { node } => format!("advance the clock of node {node}"),
+            Action::TickAll => "advance the clock of every node".to_string(),
             Action::Crash { node } => format!("crash node {node}"),
             Action::CrashAt { node, seam } => {
                 format!("crash node {node} {}", seam.label())
@@ -505,33 +505,35 @@ impl Action {
                 column,
             } => match column {
                 Some(column) => {
-                    format!("client {client} proposes {value} at node {node}, to column {column}")
+                    format!(
+                        "ask node {node} to choose {value} for client {client}, in column {column}"
+                    )
                 }
-                None => format!("client {client} proposes {value} at node {node}"),
+                None => format!("ask node {node} to choose {value} for client {client}"),
             },
-            Action::StartElection { node } => format!("node {node} campaigns"),
+            Action::StartElection { node } => format!("make node {node} campaign"),
             Action::SetElectionTimeout { node, ticks } => {
-                format!("node {node} election timeout = {ticks}")
+                format!("set the election timeout of node {node} to {ticks} ticks")
             }
             Action::ReadIndex { node, client } => match client {
-                Some(client) => format!("client {client} reads at node {node}"),
-                None => format!("read at node {node}"),
+                Some(client) => format!("ask node {node} to read for client {client}"),
+                None => format!("ask node {node} to read"),
             },
             Action::QuorumRead { node, client } => match client {
-                Some(client) => format!("client {client} asks node {node} for a quorum read"),
-                None => format!("quorum read at node {node}"),
+                Some(client) => format!("ask node {node} for a quorum read for client {client}"),
+                None => format!("ask node {node} for a quorum read"),
             },
             Action::Relinquish { node, to } => {
-                format!("node {node} hands its leadership to node {to}")
+                format!("tell node {node} to hand its leadership to node {to}")
             }
             Action::Corrupt { node, slot } => {
-                format!("rot node {node}'s record for slot {slot}")
+                format!("rot the record of node {node} for slot {slot}")
             }
-            Action::Wipe { node } => format!("wipe node {node}'s disk"),
+            Action::Wipe { node } => format!("erase the disk of node {node}"),
             Action::CrashMatchmaker { matchmaker } => format!("crash matchmaker {matchmaker}"),
             Action::RestartMatchmaker { matchmaker } => format!("restart matchmaker {matchmaker}"),
             Action::Reconfigure { node, members, .. } => {
-                format!("ask node {node} to run with the acceptors {members:?}")
+                format!("ask node {node} to make {members:?} the acceptors")
             }
             Action::Retire {
                 target,
@@ -539,43 +541,43 @@ impl Action {
                 ..
             } => match gc_watermark {
                 Some(watermark) => format!(
-                    "retire node {target}, showing the watermark {}.{}",
+                    "retire node {target} with the watermark {}.{}",
                     watermark.round, watermark.node
                 ),
-                None => format!("retire node {target}, showing no watermark"),
+                None => format!("retire node {target} with no watermark"),
             },
             Action::ReconfigureMatchmakers { node, members } => {
                 format!("ask node {node} to make the matchmakers {members:?}")
             }
             Action::ResendMatchmaking { node } => {
-                format!("node {node} asks the matchmakers again")
+                format!("tell node {node} to ask the matchmakers again")
             }
-            Action::ResendGc { node } => format!("node {node} asks for the floor again"),
+            Action::ResendGc { node } => format!("tell node {node} to ask for the floor again"),
             Action::ResendReconfigurer { node } => {
-                format!("node {node} beats its handover forward")
+                format!("tell node {node} to send its handover step again")
             }
             Action::Retry { node, client, seq } => {
-                format!("client {client} retries write #{seq} at node {node}")
+                format!("retry write {seq} of client {client} at node {node}")
             }
-            Action::Compact { node, up_to } => {
-                format!("compact node {node} up to slot {up_to}")
+            Action::Compact { node, up_to } => format!("compact node {node} up to slot {up_to}"),
+            Action::ResendPending { node } => {
+                format!("tell node {node} to re-send its pending Accepts")
             }
-            Action::ResendPending { node } => format!("node {node} re-sends its accepts"),
-            Action::StepDown { node } => format!("node {node} resigns"),
+            Action::StepDown { node } => format!("make node {node} resign"),
             Action::OpenBallot { proposer, value } => {
-                format!("proposer {proposer} opens a ballot for {value}")
+                format!("tell proposer {proposer} to open a ballot for {value}")
             }
             Action::SetReach { phase, nodes } => {
                 let phase = match phase {
-                    Phase::One => "phase 1",
-                    Phase::Two => "phase 2",
+                    Phase::One => "Phase 1",
+                    Phase::Two => "Phase 2",
                 };
-                format!("{phase} reaches {nodes:?}")
+                format!("let {phase} reach the acceptors {nodes:?}")
             }
             Action::Answer { choice, .. } => format!("answer {choice:?}"),
             Action::SetAutomation { flag, on } => {
                 format!(
-                    "{} automation {}",
+                    "turn the {:?} automation {}",
                     flag.label(),
                     if *on { "on" } else { "off" }
                 )

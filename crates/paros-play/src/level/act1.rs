@@ -116,21 +116,23 @@ pub static CHOOSE_A_VALUE: Level = Level {
     act: 1,
     title: "Choose a value",
     briefing: "\
-Three acceptors have to agree on one value, and never disagree afterwards — not \
-when a message is lost, not when one of them is unreachable, not when the machine \
-that started the whole thing dies half-way through. The protocol is two round \
-trips, and you are the network: nothing moves unless you deliver it.
+Three acceptors must agree on one value. They must keep that agreement after a \
+message is lost. They must keep it after one acceptor becomes unreachable. They \
+must also keep it if the proposer stops in the middle of the protocol. The \
+protocol uses two round trips. You are the network, and no message moves until \
+you deliver it.
 
-A proposer first claims a **ballot**, a number that gives it the right to \
-propose. It sends `Prepare(b)` and waits for a **majority** of acceptors to \
-promise not to accept anything below `b`. That is Phase 1. Only then does it \
-send `Accept(b, value)`, and once a majority have voted, the value is \
-**chosen** — permanently, whether or not anybody has heard about it yet.
+First, a proposer claims a **ballot**, a number that gives it the right to \
+propose. The proposer sends `Prepare(b)` and waits for a **majority** of the \
+acceptors to promise. Each promise says that the acceptor refuses every ballot \
+below `b`. That is Phase 1. The proposer then sends `Accept(b, value)`. When a \
+majority votes, the value is **chosen** permanently, even if no node knows \
+about it yet.
 
-Two of three is a majority, so run the whole protocol with the third acceptor \
-silent: drop its `Prepare` and drop its `Accept`. Watch the moment the second \
-`Accepted` lands. That is the decision, and it happened at the proposer, out of \
-sight of the acceptor you cut off.",
+Two of the three acceptors are a majority. Run the full protocol, but keep the \
+third acceptor silent. Drop its `Prepare` and drop its `Accept`. Look at the \
+moment when the second `Accepted` arrives. That moment is the decision. The \
+decision occurs at the proposer, and the third acceptor does not see it.",
     field_guide: "choose-one-value.html",
     symbols: &[
         "Proposer::open_phase1",
@@ -147,15 +149,18 @@ sight of the acceptor you cut off.",
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5]))),
     goal: |world| match chosen_text(world) {
         Some(value) => GoalStatus::Reached(format!(
-            "{value} is chosen: a majority of the three acceptors voted for it at one ballot, \
-             and no later ballot can change it."
+            "{value} is chosen. A majority of the three acceptors voted for it at one ballot. \
+             No later ballot can change it."
         )),
-        None => GoalStatus::Open("Get a value chosen with two of the three acceptors.".to_string()),
+        None => {
+            GoalStatus::Open("Get one value chosen with two of the three acceptors.".to_string())
+        }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Phase 1 first: deliver two Prepares, then the two Promises they produce. The \
-             proposer only sends its Accepts once a majority has promised."
+            "Do Phase 1 first. Deliver the two Prepare messages. Then deliver the two Promise \
+             messages that they cause. The proposer sends its Accept messages only after a \
+             majority promises."
                 .to_string()
         })
     },
@@ -184,32 +189,33 @@ pub static BE_THE_ACCEPTOR: Level = Level {
     act: 1,
     title: "Be the acceptor",
     briefing: "\
-Now you are the acceptor. Every `Prepare` and every `Accept` that arrives is \
-yours to answer, and the protocol marks your work.
+Now you are the acceptor. You must answer every `Prepare` and every `Accept` \
+that arrives. The protocol marks each answer.
 
-An acceptor keeps exactly two things: the highest ballot it has **promised**, \
-and the value it has **accepted**. One rule governs both questions, and it is \
-the whole of Paxos safety: **refuse anything below the promise you hold.** \
-Anything at or above it is admitted. An *equal* ballot is not a special case — \
-a ballot is minted by exactly one proposer, so \"equal\" always means \"that \
-same proposer, again\", and the honest answer is the answer you already gave.
+An acceptor keeps two things: the highest ballot it **promised**, and the value \
+it **accepted**. One rule answers both questions, and Paxos safety depends on \
+it. **Refuse every ballot below the promise that you hold.** Admit every ballot \
+at or above that promise. An *equal* ballot is not a special case. Only one \
+proposer mints a given ballot, so an equal ballot comes from that same \
+proposer, and your correct answer does not change.
 
-What differs between the two questions is what your answer is *for*:
+The two questions differ in what your answer does:
 
-- A **Promise reports and fences.** It tells the proposer everything you have \
-  accepted at or above the slot it asked about — the report its \
-  value-selection rule is built on — and it closes the door on every lower \
-  ballot for good. Once you promise `b`, that report is your last word about \
-  everything below `b`, and `b`'s proposer is entitled to act on it.
-- A **vote records.** It writes a durable `(ballot, value)` for one slot, and \
-  that record is what some *later* ballot's Phase 1 will find and be forced to \
-  re-propose. A vote does not promise anything new; it is the thing a promise \
-  is about.
+- A **Promise reports and fences.** It tells the proposer every value that you \
+  accepted at or above the slot that the proposer asked about. The \
+  value-selection rule of the proposer uses that report. The Promise also \
+  refuses every lower ballot permanently. After you promise `b`, you send no \
+  more reports about the ballots below `b`. The proposer of `b` may act on \
+  your report.
+- A **vote records.** It writes a durable `(ballot, value)` pair for one slot. \
+  The Phase 1 of a later ballot finds that record and must re-propose the \
+  value. A vote adds no new promise. The vote is the fact that a promise \
+  reports.
 
-Two proposers compete here, so both answers come up: the same acceptor \
-promises a higher ballot and then refuses a vote from the ballot it just \
-fenced out — refused because that ballot is *below* what it now holds, not \
-because votes are judged more harshly than promises.",
+Two proposers compete in this level, so you must give both answers. The same \
+acceptor promises a higher ballot. It then refuses a vote from the lower \
+ballot. It refuses that vote because the ballot is below the promise that it \
+now holds. The rule for votes is not stricter than the rule for promises.",
     field_guide: "choose-one-value.html",
     symbols: &[
         "Acceptor::prepare",
@@ -234,17 +240,18 @@ because votes are judged more harshly than promises.",
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5, 8]))),
     goal: |world| match chosen_text(world) {
         Some(value) => GoalStatus::Reached(format!(
-            "{value} is chosen, and every promise and vote behind it was yours."
+            "{value} is chosen, and you gave every promise and every vote for it."
         )),
         None => GoalStatus::Open(
-            "Answer every Prepare and Accept correctly until a value is chosen.".to_string(),
+            "Answer every Prepare and every Accept correctly until a value is chosen.".to_string(),
         ),
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Compare the message's ballot with the promise you already hold. One comparison \
-             answers both questions: below it, refuse; at or above it, answer. Nothing here \
-             turns on which kind of message arrived."
+            "Compare the ballot of the message with the promise that you hold. One comparison \
+             answers both questions. If the ballot is below the promise, refuse it. If the \
+             ballot is at or above the promise, admit it. The kind of the message does not \
+             change the answer."
                 .to_string()
         })
     },
@@ -284,21 +291,21 @@ pub static ADOPT_THE_VALUE: Level = Level {
     act: 1,
     title: "Adopt the value",
     briefing: "\
-Acceptor 1 already holds a vote: it accepted `\"old-value\"` at ballot `1.5`, and \
-then that proposer vanished. Nobody knows whether `\"old-value\"` was chosen — \
-maybe the crashed proposer got a second vote somewhere before it died, maybe it \
-did not. From here, the two look identical.
+Acceptor 1 already holds a vote. It accepted `\"old-value\"` at ballot `1.5`, \
+and then that proposer stopped. No node knows whether `\"old-value\"` is chosen. \
+The proposer possibly got a second vote before it stopped, and possibly it did \
+not. From your position, the two cases look the same.
 
-You are proposer 8, at the higher ballot `1.8`, and your client wants \
-`\"new-value\"`. Phase 1 will complete; then you choose what goes in the \
+You are proposer 8 at the higher ballot `1.8`. Your client wants \
+`\"new-value\"`. Phase 1 completes first. You then choose the value for the \
 `Accept`, and the protocol marks your answer.
 
-The rule — Lamport calls it **P2c** — is: if any promise reported a value, \
-propose the one reported at the **highest** ballot, not your own. It looks like \
-a rule about deference. It is a rule about ignorance: a value chosen at `1.5` \
-would have been reported by *some* member of your promise majority, because any \
-two majorities of three share an acceptor. One report is what \"already chosen\" \
-looks like from where you stand — so you must treat it as if it were.",
+Lamport calls the rule **P2c**. If any promise reports a value, you must \
+propose the value reported at the **highest** ballot. You must not propose your \
+own value. The rule is about your ignorance, not about politeness. Some member \
+of your promise majority reports a value chosen at `1.5`, because any two \
+majorities of three acceptors share an acceptor. You cannot tell a single \
+report from an agreed decision, so you must treat the report as a decision.",
     field_guide: "safety.html",
     symbols: &[
         "Proposer::close_phase1",
@@ -339,22 +346,23 @@ looks like from where you stand — so you must treat it as if it were.",
     },
     goal: |world| match chosen_text(world).as_deref() {
         Some("old-value") => GoalStatus::Reached(
-            "\"old-value\" is chosen. Your client's value never went out — and that is the \
-             protocol working, not failing: Paxos promises that a value once chosen stays \
-             chosen, never that a particular proposer wins."
+            "\"old-value\" is chosen. The value of your client did not go out. That result is \
+             correct behaviour. Paxos guarantees that a chosen value stays chosen. It does not \
+             guarantee that one given proposer succeeds."
                 .to_string(),
         ),
         Some(other) => GoalStatus::Failed(format!(
-            "{other:?} was chosen over a value a promise had already reported."
+            "{other:?} was chosen. A promise already reported a different value."
         )),
-        None => {
-            GoalStatus::Open("Complete Phase 1 and get the value P2c selects chosen.".to_string())
-        }
+        None => GoalStatus::Open(
+            "Complete Phase 1. Then make the cluster choose the value that P2c selects."
+                .to_string(),
+        ),
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Look at what the promise from acceptor 1 reported. If any promise names a value, \
-             that value is the only one you may propose at this ballot."
+            "Look at the report in the promise from acceptor 1. If a promise names a value, you \
+             must propose that value at this ballot."
                 .to_string()
         })
     },
@@ -382,21 +390,25 @@ pub static THE_DUEL: Level = Level {
     act: 1,
     title: "The duel",
     briefing: "\
-Two proposers, one slot, and no referee. Proposer 5 wins Phase 1 at `1.5` and \
-starts sending its `Accept`s; before they land, proposer 8 runs Phase 1 at \
-`1.8` and every acceptor it reaches raises its promise. Proposer 5's votes now \
-bounce: `Nack`, `Nack` — the ballot it holds has been fenced out from under it.
+Two proposers compete for one slot, and no node controls the order. Proposer 5 \
+completes Phase 1 at `1.5` and sends its `Accept` messages. Before they arrive, \
+proposer 8 runs Phase 1 at `1.8`. Every acceptor that proposer 8 reaches raises \
+its promise. The acceptors then refuse the `Accept` messages of proposer 5 with \
+a `Nack`. The ballot of proposer 5 is now below the promises that those \
+acceptors hold.
 
-Nothing here is unsafe. Exactly one value will be chosen, and every acceptor \
-will agree on which. What the duel costs is *progress*: each proposer, refused, \
-may climb to a higher ballot and refuse the other in turn, forever. Paxos is \
-safe without any timing assumption at all, and live only when the proposers \
-stop competing — which is what the stable leader of Act II is for.
+This sequence is safe. The cluster chooses exactly one value, and every \
+acceptor agrees on that value. The duel costs *progress*. Each refused proposer \
+opens a higher ballot and refuses the other proposer, and the two can repeat \
+this exchange without end. Paxos is safe with no timing assumption, but it \
+makes progress only when one proposer stops. Act II adds a stable leader for \
+that reason.
 
-Notice what a `Nack` does **not** carry: the promise that refused it. A proposer \
-learns only that its own ballot was refused, and climbs one round at a time. \
-That is deliberate — a ballot chosen from an untrusted wire value is a ballot an \
-attacker picks.",
+Look at what a `Nack` does **not** contain: the promise that refused the \
+ballot. A proposer learns only that an acceptor refused its own ballot. The \
+proposer then increases its ballot by one round. This design is deliberate. If \
+a proposer took its next ballot from a message, an attacker could set that \
+ballot.",
     field_guide: "safety.html",
     symbols: &["Message::Nack", "Ballot", "Proposer::phase1_won"],
     automation_on: ALL_ROLES_AUTOMATIC,
@@ -412,22 +424,22 @@ attacker picks.",
         let campaigns = decree.completed_phase1().len();
         match (chosen_text(world), campaigns) {
             (Some(value), n) if n >= 2 => GoalStatus::Reached(format!(
-                "{n} ballots completed Phase 1 and exactly one value — {value} — was chosen. \
-                 The duel cost rounds, never safety."
+                "{n} ballots completed Phase 1, and the cluster chose exactly one value: \
+                 {value}. The duel cost extra rounds. It did not cost safety."
             )),
             (Some(value), _) => GoalStatus::Open(format!(
-                "{value} is chosen, but only one proposer ever got that far. Let the other \
-                 one run a ballot too."
+                "{value} is chosen, but only one proposer completed Phase 1. Let the other \
+                 proposer run a ballot too."
             )),
             (None, _) => GoalStatus::Open(
-                "Let both proposers run a ballot, and get one value chosen.".to_string(),
+                "Let both proposers run a ballot. Then get one value chosen.".to_string(),
             ),
         }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Deliver proposer 5's Accept to an acceptor that has already promised proposer 8's \
-             higher ballot, and watch the Nack come back."
+            "Find an acceptor that already promised the higher ballot of proposer 8. Deliver \
+             the Accept of proposer 5 to that acceptor. Look at the Nack that it returns."
                 .to_string()
         })
     },
@@ -461,22 +473,22 @@ pub static QUORUM_INTERSECTION: Level = Level {
     act: 1,
     title: "Quorum intersection",
     briefing: "\
-`alpha` is chosen. Acceptors 1 and 2 voted for it at ballot `1.5`, which is a \
-majority, so the decision is final — whether or not acceptor 3 has ever heard of \
-it.
+`alpha` is chosen. Acceptors 1 and 2 voted for it at ballot `1.5`. Two of the \
+three acceptors are a majority, so the decision is final. Acceptor 3 possibly \
+knows nothing about it.
 
-Your job is to try to undo it. You control the **reach** of each phase: which \
-acceptors a `Prepare` gets to, and which acceptors an `Accept` gets to. Pick a \
-Phase-1 quorum that avoids the acceptors holding the vote, and propose \
-`\"new-value\"` instead.
+Your task is to try to change that decision. You control the **reach** of each \
+phase. The reach names the acceptors that a `Prepare` reaches. It also names \
+the acceptors that an `Accept` reaches. Select a Phase-1 quorum that avoids the \
+acceptors that hold the vote. Then propose `\"new-value\"`.
 
-You cannot. A Phase-1 quorum is two of three, and `{1, 2}` is two of three, so \
-every quorum you can pick shares at least one acceptor with the one that voted \
-— the **pivot**. That acceptor's promise reports `alpha`, and P2c makes you \
-propose it back. This is the entire safety argument of Paxos, and it is a \
-counting fact about sets, not about code: any two majorities of `n` intersect. \
-Act IV takes the same fact apart and shows that only *cross-phase* intersection \
-is needed — `q1 + q2 > n` — which buys cheaper steady-state writes.",
+You cannot do it. A Phase-1 quorum contains two of the three acceptors, and so \
+does the set `{1, 2}`. Every quorum that you select therefore contains at least \
+one acceptor that voted for `alpha`. That acceptor is the **pivot**, and its \
+promise reports `alpha`, so P2c makes you propose `alpha` again. This result is \
+the safety argument of Paxos, and it is a counting fact about sets: any two \
+majorities of `n` members intersect. Act IV shows that only *cross-phase* \
+intersection is necessary, and that `q1 + q2 > n` gives cheaper writes.",
     field_guide: "safety.html",
     symbols: &[
         "QuorumSystem::Majority",
@@ -509,7 +521,10 @@ is needed — `q1 + q2 > n` — which buys cheaper steady-state writes.",
             return GoalStatus::Open("This level runs in the single-decree world.".to_string());
         };
         let Some((_, chosen)) = decree.chosen() else {
-            return GoalStatus::Open("Nothing is chosen here — that cannot happen.".to_string());
+            return GoalStatus::Open(
+                "Nothing is chosen here, but this level always starts with a chosen value."
+                    .to_string(),
+            );
         };
         let chosen_text = text(chosen);
         let later = decree.completed_phase1().iter().find(|campaign| {
@@ -522,27 +537,27 @@ is needed — `q1 + q2 > n` — which buys cheaper steady-state writes.",
         match later {
             Some(campaign) if text(&campaign.proposed) == chosen_text => {
                 GoalStatus::Reached(format!(
-                    "Ballot {}.{} reached the quorum {:?} — and every one of those quorums \
-                     contains an acceptor that voted for {chosen_text:?}, so P2c made you \
-                     propose it straight back. There is no reach set that works.",
+                    "Ballot {}.{} reached the quorum {:?}. Every quorum of that size contains \
+                     an acceptor that voted for {chosen_text:?}. P2c therefore made you propose \
+                     that value again. No reach set can change the decision.",
                     campaign.ballot.round,
                     campaign.ballot.node.0,
                     campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
                 ))
             }
             Some(campaign) => GoalStatus::Failed(format!(
-                "A campaign proposed {:?} over the chosen {chosen_text:?}.",
+                "A campaign proposed {:?}, but the cluster already chose {chosen_text:?}.",
                 text(&campaign.proposed)
             )),
             None => GoalStatus::Open(
-                "Pick a Phase-1 reach set and run a ballot above 1.5 with it.".to_string(),
+                "Select a Phase-1 reach set. Then run a ballot above 1.5 with it.".to_string(),
             ),
         }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Try every two-acceptor reach set you like: {1,2}, {1,3}, {2,3}. Count how many of \
-             them miss both acceptor 1 and acceptor 2."
+            "Try each reach set of two acceptors: {1,2}, {1,3}, {2,3}. Count the sets that \
+             contain neither acceptor 1 nor acceptor 2."
                 .to_string()
         })
     },
@@ -569,21 +584,21 @@ pub static RECOVERY_IS_NOT_CATCH_UP: Level = Level {
     act: 1,
     title: "Recovery is not catch-up",
     briefing: "\
-One acceptor holds `\"old-value\"` at ballot `1.5`. One. Nothing is chosen; a \
-single vote is not a decision, and it never will be — the proposer that cast it \
-is gone.
+One acceptor holds `\"old-value\"` at ballot `1.5`. No other acceptor holds it. \
+Nothing is chosen, because a single vote is not a decision. The proposer that \
+cast that vote is gone, so it sends no second copy.
 
-Run ballot `1.8` with a Phase-1 quorum that includes that acceptor, and finish \
-the protocol. The value that ends up chosen is `\"old-value\"`, voted for by two \
-acceptors that had never heard of it until you delivered your `Accept`.
+Run ballot `1.8` with a Phase-1 quorum that includes that acceptor. Then \
+complete the protocol. The chosen value is `\"old-value\"`. Two acceptors vote \
+for it, and they learn about it only from your `Accept`.
 
-That is the difference between **recovery** and catch-up. Catch-up copies a \
-decision that has already been made. Recovery re-proposes a value that may or \
-may not have been decided, because from a promise report the two are \
-indistinguishable — and re-proposing it makes the question moot. A single \
-surviving copy is enough to bind every higher ballot, which is why an acceptor \
-must persist its vote *before* it acknowledges one, and why Act II's leader \
-starts every term by recovering the suffix before it streams anything new.",
+That result shows the difference between **recovery** and catch-up. Catch-up \
+copies a decision that the cluster already made. Recovery re-proposes a value \
+that the cluster possibly decided and possibly did not. A promise report does \
+not separate the two cases, so recovery re-proposes the value and removes the \
+question. One surviving copy binds every higher ballot, so an acceptor must \
+write its vote to disk before it acknowledges the vote. For the same reason, a \
+new leader in Act II recovers the suffix before it proposes new values.",
     field_guide: "safety.html",
     symbols: &[
         "Proposer::close_phase1",
@@ -606,22 +621,23 @@ starts every term by recovering the suffix before it streams anything new.",
     },
     goal: |world| match chosen_text(world).as_deref() {
         Some("old-value") => GoalStatus::Reached(
-            "\"old-value\" is chosen — by acceptors that had never seen it. One surviving copy \
-             bound every higher ballot."
+            "\"old-value\" is chosen. Acceptors that had not seen it before voted for it. One \
+             surviving copy bound every higher ballot."
                 .to_string(),
         ),
         Some(other) => GoalStatus::Failed(format!(
-            "{other:?} was chosen. That is safe here (nothing was chosen before), but it is not \
-             what this level is about: run Phase 1 through the acceptor that holds the vote."
+            "{other:?} was chosen. That result is safe, because nothing was chosen before. It \
+             is not the lesson of this level. Run Phase 1 through the acceptor that holds the \
+             vote."
         )),
-        None => GoalStatus::Open(
-            "Get \"old-value\" chosen, without ever proposing it yourself.".to_string(),
-        ),
+        None => {
+            GoalStatus::Open("Get \"old-value\" chosen. Do not propose it yourself.".to_string())
+        }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Your promise quorum has to include acceptor 1 — it is the only one that knows \
-             anything. Deliver its Prepare and its Promise."
+            "Your promise quorum must include acceptor 1, because it is the only acceptor with \
+             a vote. Deliver its Prepare and its Promise."
                 .to_string()
         })
     },

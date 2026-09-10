@@ -77,7 +77,7 @@ impl Game {
         let level = level::level(level_id).ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::UnknownLevel,
-                format!("there is no level {level_id:?}"),
+                format!("the game does not start: there is no level {level_id:?}"),
             )
         })?;
         let mut game = Self {
@@ -163,7 +163,10 @@ impl Game {
         if !self.level.allows(action.kind()) {
             return Err(ActionError::new(
                 ActionErrorCode::NotAllowed,
-                format!("this level does not offer {}", action.label()),
+                format!(
+                    "the move is refused: this level does not offer {}",
+                    action.label()
+                ),
             ));
         }
         let events = self.apply(&action)?;
@@ -313,7 +316,7 @@ impl Game {
                     None => world.clients().first().copied().ok_or_else(|| {
                         ActionError::new(
                             ActionErrorCode::UnknownParty,
-                            "this level has no client to read for",
+                            "the read is refused: this level has no client",
                         )
                     })?,
                 };
@@ -326,7 +329,7 @@ impl Game {
                     None => world.clients().first().copied().ok_or_else(|| {
                         ActionError::new(
                             ActionErrorCode::UnknownParty,
-                            "this level has no client to read for",
+                            "the read is refused: this level has no client",
                         )
                     })?,
                 };
@@ -423,14 +426,18 @@ impl Game {
         if !self.automation.unlocked.contains(&flag) {
             return Err(ActionError::new(
                 ActionErrorCode::NotUnlocked,
-                format!("{} is not available in this level", flag.label()),
+                format!(
+                    "the toggle is refused: this level does not offer the {:?} automation",
+                    flag.label()
+                ),
             ));
         }
         if on && self.automation.is_pinned_off(flag) {
             return Err(ActionError::new(
                 ActionErrorCode::PinnedOff,
                 format!(
-                    "{} stays manual here: it is what this level teaches",
+                    "the toggle is refused: the {:?} decision stays manual, \
+                     because this level teaches it",
                     flag.label()
                 ),
             ));
@@ -460,7 +467,7 @@ impl Game {
         self.world.log_mut().ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::WrongWorld,
-                "that move belongs to the replicated-log world",
+                "the move is refused: it belongs to the replicated-log world",
             )
         })
     }
@@ -469,7 +476,7 @@ impl Game {
         self.world.decree_mut().ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::WrongWorld,
-                "that move belongs to the single-decree world",
+                "the move is refused: it belongs to the single-decree world",
             )
         })
     }
@@ -515,13 +522,16 @@ mod wasm {
             error: message.to_string(),
         })
         .unwrap_or_else(|_| {
-            r#"{"code":"internal","error":"could not encode the error"}"#.to_string()
+            r#"{"code":"internal","error":"the engine cannot encode the error"}"#.to_string()
         })
     }
 
     fn json<T: serde::Serialize>(value: &T) -> String {
         serde_json::to_string(value).unwrap_or_else(|err| {
-            error_json("internal", &format!("could not encode the view: {err}"))
+            error_json(
+                "internal",
+                &format!("the engine cannot encode the view: {err}"),
+            )
         })
     }
 
@@ -552,7 +562,10 @@ mod wasm {
             let action: Action = match serde_json::from_str(action_json) {
                 Ok(action) => action,
                 Err(err) => {
-                    return error_json("bad_action", &format!("could not read the action: {err}"));
+                    return error_json(
+                        "bad_action",
+                        &format!("the engine cannot read the action: {err}"),
+                    );
                 }
             };
             match self.inner.act(action) {

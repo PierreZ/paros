@@ -200,10 +200,10 @@ impl World {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "{} does not count that vote. Slot {} belongs to column {column} and node {} is \
-                 not in it. A Phase-2 quorum of this grid is a whole column, so the tally does \
-                 not move. Node {} is a member of the configuration. It is not one of the \
-                 acceptors that decide this slot.",
+                "{} does not count that vote. Slot {} belongs to column {column}, and node {} is \
+                 not in that column. A Phase-2 quorum of this grid is one whole column, so the \
+                 tally does not move. Node {} is a member of the configuration. It is not one of \
+                 the acceptors that decide this slot.",
                 who(id),
                 slot.0,
                 from.0,
@@ -489,7 +489,7 @@ impl World {
                     format!(
                         "{} retains a snapshot of its application at slot {}. A snapshot point \
                          is a *decided* slot, so every node takes it at the same place in the \
-                         same order — which is what lets one node's copy stand in for another's \
+                         same order. That is why one node's copy can replace another node's \
                          log.",
                         who(id),
                         at.0
@@ -507,9 +507,10 @@ impl World {
                 self.narrate(
                     NarrationKind::Truncate,
                     format!(
-                        "{} truncates: {} dropped, and its floor is now slot {}. It happens here, \
-                         when the node *applies* the decided Truncate — not when the leader asked \
-                         — so every node lands on the same floor without anybody broadcasting it.",
+                        "{} truncates. It dropped {}, and its floor is now slot {}. The \
+                         truncation happens when this node *applies* the decided Truncate, and \
+                         not when the leader asked for it. Every node therefore reaches the same \
+                         floor, and nobody broadcasts that floor.",
                         who(id),
                         many(dropped, "accepted record"),
                         first.0
@@ -541,10 +542,10 @@ impl World {
             self.narrate(
                 NarrationKind::Snapshot,
                 format!(
-                    "{} installs the snapshot: its chosen prefix jumps to slot {}, its log below \
-                     that is gone (the state is in the bytes now), and its durable promise is {} \
-                     — the snapshot's ballot was {}, and a promise is only ever raised. A \
-                     snapshot restores the log, never a promise.",
+                    "{} installs the snapshot. Its chosen prefix moves to slot {}, and its log \
+                     below that slot is gone, because the state is in the bytes now. Its durable \
+                     promise is {}. The snapshot's ballot was {}, and a promise only ever rises. \
+                     A snapshot restores the log, and it does not restore a promise.",
                     who(id),
                     chosen_index.0,
                     promised.map_or_else(|| "unchanged".to_string(), crate::view::show_ballot),
@@ -571,7 +572,7 @@ impl World {
                 self.narrate(
                     NarrationKind::Snapshot,
                     format!(
-                        "{} does not serve a snapshot at slot {}: its own application has not \
+                        "{} does not serve a snapshot at slot {}. Its own application has not \
                          executed that far, so the bytes would not describe the boundary the \
                          message claims. The peer asks again.",
                         who(id),
@@ -588,9 +589,10 @@ impl World {
             self.narrate(
                 NarrationKind::Snapshot,
                 format!(
-                    "{} offers {} a snapshot instead of a replay: the slots it asked for are \
-                     below this node's floor and no longer exist anywhere. The bytes are the \
-                     application's own state at slot {}, which paros ships without ever reading.",
+                    "{} offers {} a snapshot instead of a replay. The slots it asked for are \
+                     below this node's floor, and they no longer exist anywhere. The bytes are \
+                     the application's own state at slot {}. paros ships those bytes and never \
+                     reads them.",
                     who(id),
                     who(to),
                     at.0

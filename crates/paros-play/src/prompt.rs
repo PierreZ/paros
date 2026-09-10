@@ -136,62 +136,67 @@ pub const ALL_PROMPTS: &[PromptKind] = &[
 pub fn confirmation(kind: PromptKind) -> &'static str {
     match kind {
         PromptKind::AcceptorPrepare => {
-            "the promise is raised durably first, and the Promise reports whatever it accepted."
+            "the acceptor raises its promise on disk first, and the Promise then reports \
+             every value that it accepted."
         }
         PromptKind::AcceptorAccept => {
-            "the vote is written down before the Accepted that reports it leaves."
+            "the acceptor writes the vote to disk before it sends the Accepted that reports \
+             the vote."
         }
         PromptKind::ProposerValue => {
-            "a value the promise quorum reported is the only value this ballot may carry."
+            "this ballot may carry only a value that the promise quorum reported."
         }
         PromptKind::LeaderRecovery => {
-            "the slot is settled exactly as far as the promise quorum's report licenses."
+            "the report of the promise quorum settles the slot, and it settles the slot no \
+             further."
         }
         PromptKind::ReplicaApply => {
-            "the application executes the log in order, and stops at the first hole."
+            "the application executes the log in order, and it stops at the first hole."
         }
-        PromptKind::PersistOrder => "the batch is durable before any claim about it is sent.",
+        PromptKind::PersistOrder => {
+            "the batch is on disk before the node sends any claim about it."
+        }
         PromptKind::CommitOverwrite => {
-            "the record the choosing ballot decided is what a restart will read back."
+            "a restart reads back the record that the choosing ballot decided."
         }
         PromptKind::ReadServe => {
-            "a read is answered only on a proof of leadership newer than the read itself."
+            "a node answers a read only with a proof of leadership newer than the read."
         }
         PromptKind::SnapshotPromise => {
-            "a snapshot restores the log and never a promise, so the promise is only ever raised."
+            "a snapshot restores the log and not a promise, so the promise only goes up."
         }
         PromptKind::AckWrite => {
-            "an ack names a slot this node has really executed, and nothing else does."
+            "an ack names a slot that this node executed, and it names nothing else."
         }
         PromptKind::GridColumn => {
-            "the slot goes to the column the configuration derives for it, so every node \
-             derives the same one."
+            "the slot goes to the column that the configuration computes for it, so every \
+             node computes the same column."
         }
         PromptKind::QuorumReadServe => {
-            "a read is answered only once this node has applied the highest slot the row \
+            "this node answers a read only after it applies the highest slot that the row \
              reported."
         }
         PromptKind::RepairVerdict => {
-            "the slot is settled exactly as far as the quorum's reports license, and no further."
+            "the reports of the quorum settle the slot, and they settle the slot no further."
         }
         PromptKind::WipedRejoin => {
             "a node that lost its promise does not rejoin, and the acceptor set changes \
              instead."
         }
         PromptKind::Phase1Complete => {
-            "Phase 1 is complete only with a quorum of every configuration the matchmakers \
-             named, and never with a quorum of their union."
+            "Phase 1 is complete only with a quorum of every configuration that the \
+             matchmakers named, and not with a quorum of their union."
         }
         PromptKind::StaleConfiguration => {
-            "a campaign that registered a superseded acceptor set adopts the one in force and \
+            "a campaign that registered a superseded acceptor set adopts the set in force and \
              starts again."
         }
         PromptKind::GenerationFence => {
-            "a matchmaker answers its own generation, and refuses every other one with what it \
-             knows."
+            "a matchmaker answers its own generation, and it refuses every other generation \
+             with what it knows."
         }
         PromptKind::MayRetire => {
-            "a node retires on evidence that no future leader can need it, never on a belief \
+            "a node retires on evidence that no future leader needs it, and not on a belief \
              about the set in force."
         }
     }
@@ -266,7 +271,7 @@ impl Prompt {
         // prompt kind cannot ship a silent refusal.
         self.feedback = Some(self.explanations.get(choice).cloned().unwrap_or_else(|| {
             format!(
-                "That is not what the protocol does here: its own answer is {:?}.",
+                "The protocol does not do that here. Its own answer is {:?}.",
                 self.expected
             )
         }));
@@ -309,35 +314,36 @@ impl Prompt {
             "promise".to_string(),
             match outcome {
                 PrepareOutcome::BelowFloor => format!(
-                    "You would promise ballot {b} for slots from {}, but this acceptor \
-                     truncated everything below slot {}. A Promise reports the values it \
-                     accepted in the range it covers; these are gone, so the candidate would \
-                     read silence as \"nothing was ever accepted here\" and be free to propose \
-                     a fresh value into slots that are already chosen. Refuse instead: a \
-                     candidate this far behind must recover the compacted prefix out of band.",
+                    "A promise here lets the candidate propose a new value into slots that \
+                     are already chosen. You would promise ballot {b} for the slots from {}, \
+                     but this acceptor truncated everything below slot {}. A Promise reports \
+                     the values that it accepted in the range that it covers, and those values \
+                     are gone. The candidate would read the silence as \"nothing was ever \
+                     accepted here\". Refuse the Prepare: a candidate this far behind must \
+                     recover the compacted prefix another way.",
                     from_slot.0, floor.0
                 ),
                 _ => format!(
-                    "Ballot {b} is *below* the promise {p} already held here. A promise is the \
-                     only fence Paxos has: having promised {p}, this acceptor's report to \
-                     ballot {p}'s proposer was that proposer's *last word* about every lower \
-                     ballot. Answering {b} now un-says it — ballot {b} could gather a majority \
-                     behind {p}'s back and choose a second value for the same slot. One rule, \
-                     both questions: refuse anything below the promise you hold."
+                    "A promise here lets one slot get two values. Ballot {b} is *below* the \
+                     promise {p} that this acceptor holds. A promise is the only fence in \
+                     Paxos. After this acceptor promised {p}, its report to the proposer of \
+                     {p} covered every lower ballot for the last time. An answer to {b} now \
+                     cancels that report, and ballot {b} can collect a majority and choose a \
+                     second value for the same slot. One rule answers both questions: refuse \
+                     every ballot below the promise that you hold."
                 ),
             },
         );
         explanations.insert(
             "nack".to_string(),
             format!(
-                "Ballot {b} is not below the promise {p} held here, so refusing it is not \
-                 unsafe — it is a liveness bug. Nothing has been promised that {b} would \
-                 violate, and refusing it costs the cluster an election it could have won. \
-                 (An *equal* ballot is not a puzzle: a ballot is minted by exactly one \
-                 proposer, so ballot {b} arriving twice is that one proposer asking again, and \
-                 the honest answer is the same answer.) The acceptor promises, raises its \
-                 durable promise to {b} *before* the reply leaves, and reports whatever it has \
-                 accepted from slot {} on.",
+                "A refusal here costs the cluster an election that it could win. Ballot {b} \
+                 is not below the promise {p} that this acceptor holds, so the refusal is not \
+                 unsafe. It is a liveness fault. An *equal* ballot is not a special case. Only \
+                 one proposer mints a ballot, so ballot {b} twice is that one proposer that \
+                 asks again, and the answer does not change. The acceptor must promise, raise \
+                 its durable promise to {b} *before* the reply goes out, and report every \
+                 value that it accepted from slot {} up.",
                 from_slot.0
             ),
         );
@@ -349,12 +355,12 @@ impl Prompt {
             state_summary: vec![
                 format!("promised ballot: {p}"),
                 format!("the Prepare's ballot: {b}"),
-                format!("it covers slots from {}", from_slot.0),
+                format!("it covers the slots from {}", from_slot.0),
                 format!("compaction floor: slot {}", floor.0),
             ],
             choices: vec![
                 Choice::new("promise", format!("Promise {b}")),
-                Choice::new("nack", format!("Nack (I promised {p})")),
+                Choice::new("nack", format!("Nack, because I promised {p}")),
             ],
             expected: expected.to_string(),
             explanations,
@@ -391,25 +397,25 @@ impl Prompt {
         explanations.insert(
             "accept".to_string(),
             format!(
-                "You would vote for {v} at ballot {b} while holding a promise at {p}. That \
-                 promise was the fence ballot {p}'s proposer relied on when it ran its own \
-                 value-selection rule: it was told this acceptor had nothing newer, and it may \
-                 already have chosen a value on the strength of that. A vote at {b} behind {p} \
-                 puts a second value one accept closer to a majority for slot {}. Refuse, and \
-                 tell {b} which ballot fenced it out.",
+                "A vote here moves a second value one step nearer to a majority at slot {}. \
+                 You would vote for {v} at ballot {b} while this acceptor holds a promise at \
+                 {p}. The proposer of {p} used that promise as its fence when it ran its \
+                 value-selection rule. It learned that this acceptor held nothing newer, and it \
+                 possibly chose a value from that report. Refuse the Accept, and tell {b} which \
+                 ballot refused it.",
                 slot.0
             ),
         );
         explanations.insert(
             "nack".to_string(),
             format!(
-                "Ballot {b} is not below the promise {p}, so this vote is safe to cast. Refusing \
-                 it is a liveness bug: a proposer that ran Phase 1 at {b} and got this \
-                 acceptor's promise is entitled to its vote in Phase 2 at the same ballot — a \
-                 ballot is minted by one proposer, so \"equal\" always means \"the same \
-                 proposer, again\". Accept, and note the two writes and their order: the \
-                 promise is re-affirmed at {b} first, then the record for slot {} — the record \
-                 must never be durable above the promise that covers it.",
+                "A refusal here is a liveness fault. Ballot {b} is not below the promise {p}, \
+                 so this vote is safe. A proposer that ran Phase 1 at {b} and got the promise \
+                 of this acceptor may have its vote in Phase 2 at the same ballot. Only one \
+                 proposer mints a ballot, so an equal ballot is that same proposer again. \
+                 Accept the value, and look at the two writes and their order. The acceptor \
+                 writes the promise at {b} first, and the record for slot {} second. The record \
+                 must not reach the disk above the promise that covers it.",
                 slot.0
             ),
         );
@@ -418,7 +424,8 @@ impl Prompt {
             kind: PromptKind::AcceptorAccept,
             node: node.0,
             question: format!(
-                "An Accept at ballot {b} for slot {} carrying {v} arrived. Accept, or Nack?",
+                "An Accept at ballot {b} for slot {} arrived, and it carries {v}. Accept, or \
+                 Nack?",
                 slot.0
             ),
             state_summary: vec![
@@ -429,7 +436,7 @@ impl Prompt {
             ],
             choices: vec![
                 Choice::new("accept", format!("Accept {v} at {b}")),
-                Choice::new("nack", format!("Nack (I promised {p})")),
+                Choice::new("nack", format!("Nack, because I promised {p}")),
             ],
             expected: expected.to_string(),
             explanations,
@@ -464,14 +471,13 @@ impl Prompt {
             explanations.insert(
                 "own".to_string(),
                 format!(
-                    "A promise reported {rv} accepted at ballot {ra}. You cannot tell that \
-                     apart from \"{rv} is already chosen\": a majority of accepts at {ra} \
-                     shares an acceptor with your promise majority, so the one report you got \
-                     is exactly what a chosen value looks like from here. Propose {mine} \
-                     instead and, if {rv} really was chosen, slot 0 now holds two different \
-                     chosen values — the one thing Paxos promises can never happen. Adopt the \
-                     highest-ballot value you were told about; your own value waits for a \
-                     later slot, or a later ballot.",
+                    "This answer can put two chosen values in slot 0. A promise reported {rv} \
+                     accepted at ballot {ra}. You cannot separate that report from \"{rv} is \
+                     already chosen\", because a majority of accepts at {ra} shares an acceptor \
+                     with your promise majority. If you propose {mine} and the cluster already \
+                     chose {rv}, slot 0 holds two different chosen values, and Paxos guarantees \
+                     that this cannot occur. Adopt the value reported at the highest ballot. \
+                     Your own value waits for a later slot or a later ballot.",
                 ),
             );
             explanations.insert("reported".to_string(), String::new());
@@ -482,15 +488,15 @@ impl Prompt {
         };
         let mut state_summary = vec![
             format!("won ballot: {b}"),
-            format!("my client's value: {mine}"),
+            format!("the value of my client: {mine}"),
         ];
         state_summary.push(match reported {
             Some((at, value)) => format!(
-                "highest report from the promise quorum: {} at ballot {}",
+                "the highest report from the promise quorum: {} at ballot {}",
                 show_command(value),
                 show_ballot(*at)
             ),
-            None => "the promise quorum reported nothing accepted".to_string(),
+            None => "the promise quorum reported no accepted value".to_string(),
         });
         Self {
             id,
@@ -535,7 +541,7 @@ impl Prompt {
                 format!("the promise quorum reported nothing for slot {}", slot.0)
             }
             RecoveryStep::Undescribed => format!(
-                "the predecessor's handoff did not describe slot {} at all",
+                "the handoff from the last leader did not describe slot {}",
                 slot.0
             ),
         };
@@ -543,10 +549,10 @@ impl Prompt {
         explanations.insert(
             "repropose".to_string(),
             format!(
-                "Nothing was reported for slot {}, so there is no value to re-propose. \
-                 Inventing your client's next command here would be a *new* proposal at a slot \
-                 below the frontier you hand fresh commands out from — and that frontier is \
-                 derived from the accepted log, so a restart would step over the slot again.",
+                "There is no value to re-propose here. No acceptor reported anything for slot \
+                 {}. The next command of your client would be a *new* proposal at a slot below \
+                 the frontier that you give fresh commands. That frontier comes from the \
+                 accepted log, so a restart passes over the slot again.",
                 slot.0
             ),
         );
@@ -554,19 +560,19 @@ impl Prompt {
             "fill_noop".to_string(),
             match step {
                 RecoveryStep::Recovered(command) => format!(
-                    "A promise reported {} for slot {}. Filling a Noop over it decides a \
-                     *different* value at a slot some earlier ballot may already have chosen \
-                     — the double-choose. The value-selection rule applies per slot, and this \
-                     slot has a value.",
+                    "A Noop here decides a *different* value at a slot that an earlier ballot \
+                     possibly chose, and that is the double-choose. A promise reported {} for \
+                     slot {}. The value-selection rule applies to each slot, and this slot has \
+                     a value.",
                     show_command(command),
                     slot.0
                 ),
                 _ => format!(
-                    "Slot {} came out of a cooperative handoff, not a Phase 1. A handoff runs \
-                     no Prepare, so no quorum report licenses the claim \"nobody chose \
-                     anything here\" — the licence a Noop fill needs. Skip it: the successor \
-                     re-proposes only what the predecessor explicitly described, and an \
-                     ordinary election is the fallback for the rest.",
+                    "A Noop here has no permission behind it. Slot {} came from a cooperative \
+                     handoff, not from a Phase 1. A handoff runs no Prepare, so no quorum \
+                     report supports the claim \"no node chose anything here\", and a Noop fill \
+                     needs that report. Skip the slot: the successor re-proposes only the slots \
+                     that the last leader described, and an ordinary election covers the rest.",
                     slot.0
                 ),
             },
@@ -575,21 +581,21 @@ impl Prompt {
             "skip".to_string(),
             match step {
                 RecoveryStep::Recovered(command) => format!(
-                    "Skipping loses {}: nothing would ever propose slot {} again, and every \
-                     node's contiguous chosen prefix would freeze one below it — forever. \
+                    "A skip loses {}. No node proposes slot {} again, and the contiguous \
+                     chosen prefix of every node stops one slot below it, permanently. \
                      Re-propose the reported value under your own ballot.",
                     show_command(command),
                     slot.0
                 ),
                 _ => format!(
-                    "Skipping slot {} is exactly the permanent gap. A new proposal only ever \
-                     takes the frontier, and a restart recomputes the frontier from the \
-                     accepted log, so nothing proposes this slot again: the chosen prefix \
-                     freezes one below it cluster-wide, reads are fenced above it, and \
-                     commit-replay catch-up cannot help because every node is stuck in the \
-                     same place. Your promise quorum reported nothing here, and quorum \
-                     intersection turns that into a licence: a value already chosen would have \
-                     been reported by some member of *every* majority. Fill a Noop.",
+                    "A skip of slot {} makes the permanent gap. A new proposal always takes the \
+                     frontier, and a restart computes the frontier from the accepted log, so no \
+                     node proposes this slot again. The chosen prefix then stops one slot below \
+                     it on every node, and the reads stop above it. Catch-up cannot help, \
+                     because every node holds the same prefix. Your promise quorum reported \
+                     nothing here, and quorum intersection makes that silence a permission. \
+                     Some member of *every* majority reports a value that is already chosen. \
+                     Fill the slot with a Noop.",
                     slot.0
                 ),
             },
@@ -598,12 +604,12 @@ impl Prompt {
             id,
             kind: PromptKind::LeaderRecovery,
             node: node.0,
-            question: format!("You just won ballot {b}. What happens to slot {}?", slot.0),
+            question: format!("You won ballot {b}. What happens to slot {}?", slot.0),
             state_summary: vec![format!("won ballot: {b}"), reported],
             choices: vec![
                 Choice::new("repropose", "Re-propose the reported value"),
                 Choice::new("fill_noop", "Fill the slot with a Noop"),
-                Choice::new("skip", "Leave the slot alone"),
+                Choice::new("skip", "Do not touch the slot"),
             ],
             expected: expected.to_string(),
             explanations,
@@ -635,21 +641,22 @@ impl Prompt {
         explanations.insert(
             "apply".to_string(),
             format!(
-                "Slot {} is chosen, but slot {} is not, and the state machine has to execute \
-                 commands in log order or two nodes end up in different states. Applying {} \
-                 now would skip {}, and there is no way back: the application has already \
-                 taken the later command's effect. Hold it — it stays recorded as chosen, and \
-                 the walk applies it the moment the hole in front of it is filled.",
+                "This answer puts two nodes in different states. Slot {} is chosen, but slot \
+                 {} is not, and the state machine must execute the commands in log order. If \
+                 you apply {} now, you pass over {}, and you cannot undo that, because the \
+                 application already took the effect of the later command. Hold the slot: it \
+                 stays recorded as chosen, and the walk applies it when the hole below it \
+                 closes.",
                 slot.0, first_unchosen.0, slot.0, first_unchosen.0
             ),
         );
         explanations.insert(
             "hold".to_string(),
             format!(
-                "Slot {} is exactly the first slot the prefix is missing (applied: {at}), so \
-                 applying it extends the contiguous prefix by one — and possibly by more, \
-                 because slots above it that were already chosen out of order become \
-                 contiguous too. Holding it would stall the log for no reason.",
+                "A hold stops the log for no reason. Slot {} is the first slot that the \
+                 prefix misses, and the prefix ends at {at}. An apply extends the contiguous \
+                 prefix by one slot, and possibly by more. The slots above it that were \
+                 already chosen become contiguous as well.",
                 slot.0
             ),
         );
@@ -665,7 +672,7 @@ impl Prompt {
             ],
             choices: vec![
                 Choice::new("apply", format!("Apply slot {}", slot.0)),
-                Choice::new("hold", "Hold it: the prefix has a hole"),
+                Choice::new("hold", "Hold the slot, because the prefix has a hole"),
             ],
             expected: expected.to_string(),
             explanations,
@@ -684,14 +691,16 @@ impl Prompt {
         explanations.insert(
             "send_first".to_string(),
             format!(
-                "Sending first is the classic Paxos data loss. This batch has {writes} durable \
-                 write(s) and {messages} message(s), and every one of those messages is a \
-                 *claim about the writes*: a Promise says \"my promise is now durably this \
-                 high\", an Accepted says \"this value is durably recorded here\". Send them, \
-                 crash before the flush, and the node reboots having forgotten a promise it \
-                 published — free to accept a lower ballot it had sworn to refuse — or having \
-                 forgotten a vote a proposer already counted toward a majority. Either one \
-                 chooses two values for one slot. Flush, then send."
+                "A send first is the classic loss of data in Paxos. This batch holds {writes} \
+                 durable write(s) and {messages} message(s), and every message is a *claim \
+                 about the writes*. A Promise says that the promise of the node is now durable \
+                 at that ballot. An Accepted says that the node holds the value on disk. If you \
+                 send the messages and the node crashes before the disk write, the node \
+                 reboots without a promise that it published. It can also reboot without a vote \
+                 that a proposer counted toward a majority. It can then accept a lower ballot \
+                 that it refused, \
+                 and either fault gives one slot two values. Write the batch to disk, then \
+                 send it."
             ),
         );
         Self {
@@ -704,8 +713,8 @@ impl Prompt {
                 format!("messages in the batch: {messages}"),
             ],
             choices: vec![
-                Choice::new("sync_first", "Flush the writes, then send"),
-                Choice::new("send_first", "Send, then flush the writes"),
+                Choice::new("sync_first", "Write the batch to disk, then send"),
+                Choice::new("send_first", "Send, then write the batch to disk"),
             ],
             expected: "sync_first".to_string(),
             explanations,
@@ -744,13 +753,13 @@ impl Prompt {
         explanations.insert(
             "keep".to_string(),
             format!(
-                "Keeping {hv} at ballot {hb} keeps a record that is known wrong: {cv} is \
-                 *chosen* for slot {}, decided by a quorum at ballot {b}, and {hb} is below \
-                 it. Leave the stale record on disk and a restart reads it back as this \
-                 acceptor's accepted value; the next election's promise quorum could then \
-                 report {hv} as the highest thing anyone accepted, and a fresh leader would \
-                 re-propose it over the chosen {cv}. That is the stale-accept resurrection: \
-                 the overwrite is not an optimisation, it is what makes restart safe.",
+                "This answer keeps a record that the cluster already contradicted. {cv} is \
+                 *chosen* for slot {}, a quorum decided it at ballot {b}, and {hb} is below \
+                 that ballot. If the stale record stays on disk, a restart reads it back as the \
+                 accepted value of this acceptor. The next promise quorum can then report {hv} \
+                 as the highest accepted value, and a new leader re-proposes it over the chosen \
+                 {cv}. That fault is the stale-accept resurrection, and the overwrite makes a \
+                 restart safe.",
                 slot.0
             ),
         );
@@ -759,14 +768,14 @@ impl Prompt {
             kind: PromptKind::CommitOverwrite,
             node: node.0,
             question: format!(
-                "The cluster says slot {} is {cv}, decided at {b}. Your record says {hv} at \
-                 {hb}. Which stays on disk?",
+                "The cluster says that slot {} holds {cv}, decided at {b}. Your record says \
+                 {hv} at {hb}. Which record stays on disk?",
                 slot.0
             ),
             state_summary: vec![
                 format!("slot: {}", slot.0),
-                format!("my record: {hv} at ballot {hb}"),
-                format!("what arrived: {cv} chosen at ballot {b}"),
+                format!("my own record: {hv} at ballot {hb}"),
+                format!("the message that arrived: {cv} chosen at ballot {b}"),
             ],
             choices: vec![
                 Choice::new("take", format!("Overwrite with {cv} at {b}")),
@@ -815,26 +824,29 @@ impl Prompt {
         explanations.insert(
             "serve".to_string(),
             format!(
-                "The acks in hand ({acks} of {members}, this node's own vote included) are not a \
-                 Phase-2 quorum of this ballot's configuration for a beat broadcast at or after \
-                 the read began, or the applied \
-                 prefix ({applied}) does not yet cover {at}. Serving now serves whatever this \
-                 node happens to hold — and a leader cannot tell \"my followers are slow\" \
-                 from \"I was deposed and a newer leader has been committing without me\". A \
-                 read served on that state is a read that lies: the client sees a value \
-                 older than a write already acknowledged to somebody else. Wait: the quorum's \
-                 acks are the proof, and no log write is needed to collect them."
+                "This answer gives the client whatever this node holds now. The acks in hand \
+                 are {acks} of {members}, and that count includes the vote of this node. They \
+                 must make a Phase-2 quorum of the configuration of this ballot, for a beat \
+                 sent at or after the read started. The applied prefix ({applied}) must also \
+                 cover {at}. One of those two conditions does not hold. A leader cannot separate \"my followers are slow\" from \"another \
+                 node replaced me and commits without me\". A read on that state gives the \
+                 client a value older than a write that the cluster acknowledged to another \
+                 client. Wait for the acks of the quorum, because they are the proof and they \
+                 need no log write."
             ),
         );
         Self {
             id,
             kind: PromptKind::ReadServe,
             node: node.0,
-            question: format!("The client's read (#{ctx}) captured {at}. Serve it, or wait?"),
+            question: format!(
+                "The read of the client (#{ctx}) captured {at}. Serve it, or \
+                 wait?"
+            ),
             state_summary: vec![
                 format!("read index captured: {at}"),
-                format!("acks with this node's own vote: {acks} of {members}"),
-                format!("applied prefix ends at: {applied}"),
+                format!("the acks, with the vote of this node: {acks} of {members}"),
+                format!("the applied prefix ends at: {applied}"),
             ],
             choices: vec![
                 Choice::new("serve", format!("Serve the read at {at}")),
@@ -883,14 +895,14 @@ impl Prompt {
         explanations.insert(
             "lower".to_string(),
             format!(
-                "That lowers this node\'s durable promise to {}. A promise is the one thing a \
-                 node may never take back: having promised {hb}, it told some proposer that \
-                 every lower ballot was finished here, and that proposer may already have chosen \
-                 a value on the strength of it. A snapshot restores the *log* — the values, the \
-                 prefix, the application state — and says nothing about promises; the peer that \
-                 sent it does not know what this node has sworn. Take the higher of the two, \
-                 always. (This is also why a node whose disk was *wiped* can never rejoin: a \
-                 snapshot cannot give it back a promise it no longer remembers making.)",
+                "This answer lowers the durable promise of this node to {}. A node must not \
+                 take back a promise. When it promised {hb}, it told a proposer that every \
+                 lower ballot was finished here, and that proposer possibly chose a value from \
+                 that answer. A snapshot restores the *log*: the values, the prefix and the \
+                 state of the application. It says nothing about promises, and the peer that \
+                 sent it does not know what this node promised. Always take the higher of the \
+                 two ballots. For the same reason, a node whose disk was *erased* cannot \
+                 rejoin: a snapshot cannot give back a promise that the node no longer holds.",
                 show_ballot(lower)
             ),
         );
@@ -899,14 +911,14 @@ impl Prompt {
             kind: PromptKind::SnapshotPromise,
             node: node.0,
             question: format!(
-                "A snapshot covering everything up to slot {} arrived, taken under ballot {sb}. \
-                 You promised {hb}. What is your promise now?",
+                "A snapshot arrived. It covers every slot up to slot {}, and a node took it \
+                 under ballot {sb}. You promised {hb}. What is your promise now?",
                 at.0
             ),
             state_summary: vec![
-                format!("my durable promise: {hb}"),
-                format!("the snapshot\'s ballot: {sb}"),
-                format!("the snapshot covers everything up to slot {}", at.0),
+                format!("my own durable promise: {hb}"),
+                format!("the ballot of the snapshot: {sb}"),
+                format!("the snapshot covers every slot up to slot {}", at.0),
             ],
             choices: vec![
                 Choice::new("higher", format!("Promise {}", show_ballot(higher))),
@@ -954,27 +966,27 @@ impl Prompt {
         explanations.insert(
             "acked".to_string(),
             format!(
-                "Nothing in this node's applied prefix (which ends at {applied}) carries write \
-                 #{seq} for client {client}. Acking it anyway is the classic early ack: the \
-                 client is told its write is durable and readable, then reads at this very node \
-                 a moment later and does not find it — because \"chosen\" is not \"applied\", and \
-                 a slot decided above a hole is executed by nobody until the hole closes."
+                "This answer is the classic early ack. The applied prefix of this node ends \
+                 at {applied}, and no slot in it carries write #{seq} for client {client}. The \
+                 ack tells the client that its write is durable and readable. The client then \
+                 reads at this same node and does not find the write, because \"chosen\" is not \
+                 \"applied\". No node executes a slot decided above a hole until the hole \
+                 closes."
             ),
         );
         explanations.insert(
             "inflight".to_string(),
             match applied_at {
                 Some(slot) => format!(
-                    "Write #{seq} is already applied here, at slot {}. Parking the reply on an \
-                     in-flight slot would make the client wait for something that has already \
-                     happened — and if a later duplicate of it is sitting chosen-but-unapplied \
-                     somewhere above, that duplicate executes as a no-op and the reply never \
-                     fires at all.",
+                    "This answer makes the client wait for a result that it already has. Write \
+                     #{seq} is applied here, at slot {}. If a later duplicate of it sits chosen \
+                     and unapplied above, that duplicate executes as a no-op, and the reply \
+                     never goes out.",
                     slot.0
                 ),
                 None => format!(
-                    "This node has no record of write #{seq} in either table — not applied, not \
-                     in flight. There is no slot to park the reply on."
+                    "There is no slot to hold the reply on. This node has no record of write \
+                     #{seq} in either table: it is not applied, and it is not in flight."
                 ),
             },
         );
@@ -982,27 +994,29 @@ impl Prompt {
             "fresh".to_string(),
             match (applied_at, inflight_at) {
                 (Some(slot), _) => format!(
-                    "Write #{seq} already applied here, at slot {}. Giving it a fresh slot \
-                     executes the client\'s command a *second* time — the exact thing \
-                     at-most-once execution exists to prevent, and strictly worse than an early \
-                     ack.",
+                    "This answer executes the command of the client a *second* time. Write \
+                     #{seq} is applied here, at slot {}. At-most-once execution exists to stop \
+                     that result, and a second execution is worse than an early ack.",
                     slot.0
                 ),
                 (None, Some(slot)) => format!(
-                    "Write #{seq} is chosen (or still in flight) at slot {}, it just has not \
-                     been executed here yet. Give it a fresh slot and the same command lands \
-                     twice in the log. This is exactly why the two dedup tables have to move \
-                     together: if \"chosen\" left the in-flight table before \"applied\" \
-                     received it, a retry arriving in that window would miss both.",
+                    "This answer puts the same command in the log twice. Write #{seq} is chosen \
+                     at slot {}, or it is still in flight there, and this node has not executed \
+                     it yet. The two dedup tables must move together for that reason. If the \
+                     command left the in-flight table before the applied table received it, a \
+                     retry in that window would miss both tables.",
                     slot.0
                 ),
                 (None, None) => String::new(),
             },
         );
         let mut choices = vec![
-            Choice::new("acked", "Ack it: already applied here"),
-            Choice::new("inflight", "Hold the reply on the slot it is in flight at"),
-            Choice::new("fresh", "Give it the next free slot"),
+            Choice::new("acked", "Ack the write, because this node applied it"),
+            Choice::new(
+                "inflight",
+                "Hold the reply on the slot that it is in flight at",
+            ),
+            Choice::new("fresh", "Give the write the next free slot"),
         ];
         choices.retain(|choice| !choice.id.is_empty());
         Self {
@@ -1013,9 +1027,9 @@ impl Prompt {
                 "Client {client} asks again for its write #{seq}. What do you answer?"
             ),
             state_summary: vec![
-                format!("applied prefix ends at: {applied}"),
+                format!("the applied prefix ends at: {applied}"),
                 format!(
-                    "the applied ledger says: {}",
+                    "the applied table says: {}",
                     applied_at.map_or_else(
                         || "nothing for this write".to_string(),
                         |s| format!("applied at slot {}", s.0)
@@ -1066,15 +1080,14 @@ impl Prompt {
             explanations.insert(
                 format!("column_{column}"),
                 format!(
-                    "Column {column} is a perfectly good Phase-2 quorum: every full column of \
-                     this grid is one, and every row meets every column, so a value chosen \
-                     through any column binds every later ballot. The problem is agreement about \
-                     *which* column. Nothing on the wire carries it. If this leader dies and \
-                     another node re-proposes slot {}, or if this leader restarts and re-sends \
-                     its own Accept, each of them works the column out again from the slot alone \
-                     — and each of them gets column {expected}, because the rule is slot \
-                     {} modulo {columns} columns. Pick the column the rule gives, and every \
-                     incarnation of this leadership addresses the same acceptors.",
+                    "This answer breaks the agreement about *which* column takes the slot. \
+                     Column {column} is a correct Phase-2 quorum, because every full column of \
+                     this grid is one and every row meets every column. No message carries the \
+                     column. This leader can stop, and another node then re-proposes slot {}. \
+                     This leader can also restart and send its own Accept again. Each of them \
+                     computes the column from the slot alone, and each gets column {expected}, \
+                     because the rule is the slot {} modulo {columns} columns. Select the column \
+                     that the rule gives, and every leader addresses the same acceptors.",
                     slot.0, slot.0
                 ),
             );
@@ -1085,8 +1098,8 @@ impl Prompt {
             node: node.0,
             question: format!("Slot {} goes to which column?", slot.0),
             state_summary: vec![
-                format!("the slot being proposed: {}", slot.0),
-                format!("columns in this grid: {columns}"),
+                format!("the slot in the proposal: {}", slot.0),
+                format!("the columns in this grid: {columns}"),
                 "a Phase-2 quorum here is one full column".to_string(),
             ],
             choices,
@@ -1121,22 +1134,22 @@ impl Prompt {
         explanations.insert(
             "serve".to_string(),
             format!(
-                "The row's highest vote is {high}, and this node has applied {here}. Serving now \
-                 answers from a prefix that does not reach the watermark. Some acceptor in that \
-                 row voted for a slot this node has not executed, and a write acknowledged before \
-                 the read began may be exactly that slot — the client would be shown a state \
-                 older than a write it was already promised. Wait: the slot arrives here by \
-                 ordinary replication, and the read is answered the moment the prefix covers it."
+                "This answer gives the client a state older than a write that it already has. \
+                 The highest vote of the row is {high}, and this node applied {here}, so the \
+                 prefix does not reach the watermark. One acceptor in that row voted in a slot \
+                 that this node did not execute. A write acknowledged before the read started \
+                 is possibly that slot. Wait: ordinary replication brings the slot here, \
+                 and this node answers the read when the prefix covers it."
             ),
         );
         explanations.insert(
             "wait".to_string(),
             format!(
-                "This node has applied {here}, which already covers the row's highest vote \
-                 ({high}). Every write acknowledged before this read began was chosen by a \
-                 Phase-2 quorum, that quorum meets the row this read asked, so the row's maximum \
-                 is at or above it — and this prefix is at or above the maximum. Waiting buys \
-                 nothing and no leader has to be involved at all."
+                "A wait gains nothing here, and no leader takes part. This node applied \
+                 {here}, and that prefix already covers the highest vote of the row ({high}). A \
+                 Phase-2 quorum chose every write acknowledged before this read started, and \
+                 that quorum meets the row that this read asked. The maximum of the row is \
+                 therefore at or above that write, and this prefix is at or above the maximum."
             ),
         );
         Self {
@@ -1145,13 +1158,13 @@ impl Prompt {
             node: node.0,
             question: format!("The row has answered read #{ctx}. Serve it, or wait?"),
             state_summary: vec![
-                format!("acceptors that answered: {answered}"),
-                format!("the highest slot any of them voted in: {high}"),
-                format!("this node has applied: {here}"),
+                format!("the acceptors that answered: {answered}"),
+                format!("the highest slot that any of them voted in: {high}"),
+                format!("this node applied: {here}"),
             ],
             choices: vec![
                 Choice::new("serve", format!("Serve the read at {high}")),
-                Choice::new("wait", "Wait: the prefix does not reach it"),
+                Choice::new("wait", "Wait, because the prefix does not reach it"),
             ],
             expected: expected.to_string(),
             explanations,
@@ -1184,7 +1197,7 @@ impl Prompt {
             || "a peer reports no damage".to_string(),
             |ballot| {
                 format!(
-                    "a peer lost its value for slot {}, accepted at ballot {}",
+                    "a peer lost its value for slot {}, which it accepted at ballot {}",
                     slot.0,
                     show_ballot(ballot)
                 )
@@ -1195,14 +1208,13 @@ impl Prompt {
             "case1".to_string(),
             match &value {
                 Some(value) => format!(
-                    "There is a value to re-propose — {value} — so this is the case where the \
-                     probe re-proposes it. (You are reading this because you picked something \
-                     else.)"
+                    "This is the case where the probe re-proposes {value}. You read this text \
+                     because you selected another answer."
                 ),
                 None => format!(
-                    "Nobody has reported a value for slot {}. Re-proposing needs a value to \
-                     re-propose, and the reports hold none: the acceptor that voted there lost \
-                     it, and every acceptor that answered reports no vote there.",
+                    "There is no value to re-propose. No acceptor reported a value for slot {}. \
+                     The acceptor that voted there lost the value, and every acceptor that \
+                     answered reports no vote there.",
                     slot.0
                 ),
             },
@@ -1211,18 +1223,18 @@ impl Prompt {
             "case2".to_string(),
             match &value {
                 Some(value) => format!(
-                    "A promise reported {value} for slot {}, at a ballot at or above the rotted \
-                     record. Deciding a Noop there decides a *different* value at a slot some \
-                     earlier ballot may already have chosen. The reported value is the only \
-                     thing this ballot may put in slot {}.",
+                    "A Noop here decides a *different* value at a slot that an earlier ballot \
+                     possibly chose. A promise reported {value} for slot {}, at a ballot at or \
+                     above the damaged record. This ballot may put only that reported value in \
+                     slot {}.",
                     slot.0, slot.0
                 ),
                 None => format!(
-                    "A Noop is safe here only when a full Phase-1 quorum has answered and none \
-                     of those answers can hide a chosen value. One acceptor's answer is \"I voted \
-                     at that slot and I no longer know what for\", and that answer hides exactly \
-                     what a Noop would overwrite. Until enough of the others answer, slot {} \
-                     stays undecided.",
+                    "A Noop here can overwrite a chosen value. A Noop is safe only after a full \
+                     Phase-1 quorum answers and no answer can hide a chosen value. One acceptor \
+                     answers \"I voted in that slot and I do not know the value any more\", and \
+                     that answer hides what a Noop overwrites. Slot {} stays undecided until \
+                     enough of the other acceptors answer.",
                     slot.0
                 ),
             },
@@ -1231,18 +1243,18 @@ impl Prompt {
             "case3".to_string(),
             match &value {
                 Some(value) => format!(
-                    "The reports now hold {value} for slot {}, accepted at a ballot at or above \
-                     the rotted record. That is enough: a value chosen at or below that ballot is \
-                     the same value, and a value chosen above it would have left a record on some \
-                     member of the quorum that answered. Re-propose it and the damaged acceptor \
-                     writes the value back as it votes.",
+                    "A wait gains nothing now. The reports hold {value} for slot {}, accepted \
+                     at a ballot at or above the damaged record. A value chosen at or below \
+                     that ballot is the same value. A value chosen above it left a record on \
+                     a member of the quorum that answered. Re-propose the value, and the \
+                     damaged acceptor writes it back when it votes.",
                     slot.0
                 ),
                 None => format!(
-                    "Enough acceptors have now answered that no chosen value can be hiding \
-                     behind the damage: a full Phase-1 quorum reported either nothing or a record \
-                     no higher than what the probe holds. Waiting longer settles nothing, and \
-                     slot {} stays a hole in every node's prefix while you do.",
+                    "A wait gains nothing now. Enough acceptors answered, so no chosen value \
+                     can hide behind the damage. A full Phase-1 quorum reported nothing, or a \
+                     record no higher than the record that the probe holds. While you wait, \
+                     slot {} stays a hole in the prefix of every node.",
                     slot.0
                 ),
             },
@@ -1260,7 +1272,7 @@ impl Prompt {
             state_summary: vec![
                 rotted,
                 format!(
-                    "the highest value any answer reports for slot {}: {}",
+                    "the highest value that any answer reports for slot {}: {}",
                     slot.0,
                     value.clone().unwrap_or_else(|| "none".to_string())
                 ),
@@ -1299,16 +1311,17 @@ impl Prompt {
         explanations.insert(
             "boot_fresh".to_string(),
             format!(
-                "A fresh boot puts this node back in the pool with an empty promise. It had \
-                 promised {held}. It now answers a ballot below {held}, because it has no memory \
-                 of refusing one, and it votes for whatever that ballot proposes. Some proposer \
-                 already ran Phase 1 at {held}. That proposer was told this acceptor held \
-                 nothing newer, and it may have chosen a value on the strength of that answer. A \
-                 quorum of this node and the acceptors behind the older ballot then chooses a \
-                 second value for one slot. A snapshot does not repair it: a snapshot restores \
-                 the log and not a promise, and no peer knows what this node has promised. \
-                 Refuse the boot. The cluster changes its acceptor set instead, and that \
-                 decision leaves this identity out of every quorum."
+                "This answer lets one slot get two values. A fresh boot puts this node back \
+                 in the pool with an empty promise, and the node promised {held} before. It now \
+                 answers a ballot below {held}, because it holds no record of that promise, and \
+                 it votes for the value of that ballot. A proposer already ran Phase 1 at \
+                 {held}. That proposer learned that this acceptor held nothing newer, and it \
+                 possibly chose a value from that answer. A quorum of this node and the \
+                 acceptors at the older ballot then chooses a second value for one slot. A \
+                 snapshot does not repair that, because a snapshot restores the log and not a \
+                 promise, and no peer knows what this node promised. Refuse the boot: the \
+                 cluster changes its acceptor set instead, and that change leaves this identity \
+                 out of every quorum."
             ),
         );
         Self {
@@ -1316,17 +1329,18 @@ impl Prompt {
             kind: PromptKind::WipedRejoin,
             node: node.0,
             question: format!(
-                "Node {}'s disk is empty, and it was a member. Boot it fresh, or refuse?",
+                "The disk of node {} is empty, and the node was a member. Boot it fresh, or \
+                 refuse the boot?",
                 node.0
             ),
             state_summary: vec![
-                format!("the promise this node last made: {held}"),
-                "what its disk holds now: nothing at all".to_string(),
+                format!("the last promise that this node made: {held}"),
+                "the disk now holds nothing".to_string(),
                 "an operator provisioned this identity once".to_string(),
             ],
             choices: vec![
                 Choice::new("refuse", "Refuse the boot"),
-                Choice::new("boot_fresh", "Boot it fresh, as a new node"),
+                Choice::new("boot_fresh", "Boot the node fresh, as a new node"),
             ],
             expected: "refuse".to_string(),
             explanations,
@@ -1378,25 +1392,25 @@ impl Prompt {
         explanations.insert(
             "complete".to_string(),
             format!(
-                "The promises in hand are {held}, and the matchmakers named {listed}. At least \
-                 one of those configurations does not hold a Phase-1 quorum of its own. It is not \
-                 enough that the promises are a quorum of the union {}: a large set drawn mostly \
-                 from one configuration is a quorum of the union and still misses a Phase-2 \
-                 quorum of another. A value that other configuration already chose then stays \
-                 invisible, this ballot proposes a different one, and one slot holds two chosen \
-                 values. Ask the configuration that is short. Phase 1 needs a quorum of every \
-                 configuration, one at a time.",
+                "This answer lets one slot hold two chosen values. The promises in hand are \
+                 {held}, and the matchmakers named {listed}. At least one of those \
+                 configurations does not hold a Phase-1 quorum of its own. A quorum of the union \
+                 {} is not enough. A large set taken mostly from one configuration is a quorum \
+                 of the union, and it still misses a Phase-2 quorum of another configuration. A \
+                 value that the other configuration chose then stays hidden, and this ballot \
+                 proposes a different value. Ask the configuration that is short: Phase 1 needs \
+                 a quorum of every configuration, one configuration at a time.",
                 show_ids(&union)
             ),
         );
         explanations.insert(
             "open".to_string(),
             format!(
-                "Every configuration the matchmakers named — {listed} — already holds a Phase-1 \
-                 quorum of its own, and the promises are {held}. Waiting longer buys nothing. \
-                 Anything an earlier ballot chose was chosen by a Phase-2 quorum of one of those \
-                 configurations, and a Phase-1 quorum of that same configuration shares an \
-                 acceptor with it, so this candidate has been told about it."
+                "A wait gains nothing here. Every configuration that the matchmakers named \
+                 ({listed}) already holds a Phase-1 quorum of its own, and the promises are \
+                 {held}. A Phase-2 quorum of one of those configurations chose every value that \
+                 an earlier ballot chose. A Phase-1 quorum of that same configuration shares an \
+                 acceptor with it, so this candidate learned about the value."
             ),
         );
         Self {
@@ -1405,9 +1419,9 @@ impl Prompt {
             node: node.0,
             question: format!("Is Phase 1 at ballot {b} complete?"),
             state_summary: vec![
-                format!("promises held: {held}"),
-                format!("configurations the matchmakers named: {listed}"),
-                "a quorum of every one of them, never a quorum of their union".to_string(),
+                format!("the promises held: {held}"),
+                format!("the configurations that the matchmakers named: {listed}"),
+                "a quorum of every configuration, not a quorum of their union".to_string(),
             ],
             choices: vec![
                 Choice::new("complete", "Phase 1 is complete"),
@@ -1455,12 +1469,12 @@ impl Prompt {
             "carry_on".to_string(),
             match effective {
                 Some((at, members)) => format!(
-                    "This campaign registered {mine}, and the matchmakers report that an operator \
-                     put {} in force at ballot {}. Carrying on elects a leader under a set the \
-                     cluster has already replaced, and that rolls the operator's change back \
-                     without anybody asking. Abandon the campaign, adopt {}, and register it at \
-                     the next round. The registration this campaign made stays in the registry \
-                     and costs a later Phase 1 a few extra promises; it costs nothing else.",
+                    "This answer elects a leader under a set that the cluster already replaced, \
+                     and it cancels the change of the operator. This campaign registered {mine}, \
+                     and the matchmakers report that an operator put {} in force at ballot {}. \
+                     Abandon the campaign, adopt {}, and register it at the next round. The \
+                     registration of this campaign stays in the registry, and it costs a later \
+                     Phase 1 a few extra promises and nothing else.",
                     show_ids(members),
                     show_ballot(at),
                     show_ids(members)
@@ -1471,25 +1485,25 @@ impl Prompt {
         explanations.insert(
             "abandon".to_string(),
             format!(
-                "The matchmakers report no operator change below ballot {b}, so {mine} is the set \
-                 in force and this campaign registered the right one. Abandoning it costs an \
-                 election for nothing. Only a **reconfiguration** record decides here. The \
-                 registry also holds what every earlier candidate merely believed, and a campaign \
-                 that adopted the newest belief would swap beliefs with the next candidate, one \
-                 round per election timeout, for ever."
+                "This answer costs an election for nothing. The matchmakers report no \
+                 operator change below ballot {b}, so {mine} is the set in force, and this \
+                 campaign registered the correct set. Only a **reconfiguration** record decides \
+                 here. The registry also holds the set that every earlier candidate believed. A \
+                 campaign that adopted the newest belief would exchange beliefs with the next \
+                 candidate, one round for each election timeout, without end."
             ),
         );
         Self {
             id,
             kind: PromptKind::StaleConfiguration,
             node: node.0,
-            question: format!("A matchmaker quorum has answered ballot {b}. What now?"),
+            question: format!("A matchmaker quorum answered ballot {b}. What do you do now?"),
             state_summary: vec![
-                format!("the set this campaign registered: {mine}"),
-                format!("what the histories say: {told}"),
+                format!("the set that this campaign registered: {mine}"),
+                format!("the histories say: {told}"),
             ],
             choices: vec![
-                Choice::new("carry_on", "Open Phase 1 with the set I registered"),
+                Choice::new("carry_on", "Open Phase 1 with the set that I registered"),
                 Choice::new("abandon", "Abandon the campaign and adopt the set in force"),
             ],
             expected: expected.to_string(),
@@ -1520,45 +1534,48 @@ impl Prompt {
                 format!("it is frozen for generation {held}")
             }
             paros_core::MatchmakerPhase::Inactive => {
-                "it serves no generation: it is a spare".to_string()
+                "it serves no generation, because it is a spare".to_string()
             }
-            paros_core::MatchmakerPhase::Fresh => "nothing has ever been written here".to_string(),
+            paros_core::MatchmakerPhase::Fresh => "no node ever wrote anything here".to_string(),
         };
         let expected = if refusal.is_some() { "refuse" } else { "serve" };
         let mut explanations = BTreeMap::new();
         explanations.insert(
             "serve".to_string(),
             format!(
-                "This request addresses generation {asked}, and {standing}. Serving it writes a \
-                 registration into a registry the cluster has stopped reading. A candidate would \
-                 then be told its ballot is safe, while the generation that answers every later \
-                 campaign has never heard of it — and a configuration missing from a later \
-                 history is a configuration whose chosen values nobody asks about. Refuse, and \
-                 say what you know: the candidate adopts the set you name and asks again."
+                "This answer writes a registration into a registry that the cluster no longer \
+                 reads. The request addresses generation {asked}, and {standing}. The candidate \
+                 then learns that its ballot is safe, but the generation that answers every \
+                 later campaign holds no record of it. A configuration that a later history \
+                 misses is a configuration whose chosen values no campaign asks about. Refuse \
+                 the request and report what you hold: the candidate adopts the set that you \
+                 name and asks again."
             ),
         );
         explanations.insert(
             "refuse".to_string(),
             format!(
-                "This request addresses generation {asked}, which is exactly the generation this \
-                 matchmaker serves. Refusing it costs the candidate an election for nothing. \
-                 Register ballot {b}, write it down, and report the configurations you hold below \
-                 it."
+                "This answer costs the candidate an election for nothing. The request \
+                 addresses generation {asked}, and this matchmaker serves that generation. \
+                 Register ballot {b}, write the registration to disk, and report the \
+                 configurations that you hold below it."
             ),
         );
         Self {
             id,
             kind: PromptKind::GenerationFence,
             node: matchmaker.0,
-            question: format!("A registration for generation {asked} arrives. Serve, or refuse?"),
+            question: format!(
+                "A registration for generation {asked} arrives. Serve it, or refuse it?"
+            ),
             state_summary: vec![
-                format!("the generation the request addresses: {asked}"),
-                format!("where this matchmaker stands: {standing}"),
-                format!("the ballot it asks to register: {b}"),
+                format!("the generation that the request addresses: {asked}"),
+                format!("the state of this matchmaker: {standing}"),
+                format!("the ballot that it asks to register: {b}"),
             ],
             choices: vec![
                 Choice::new("serve", format!("Register {b}")),
-                Choice::new("refuse", "Refuse, and say what I hold"),
+                Choice::new("refuse", "Refuse, and report what I hold"),
             ],
             expected: expected.to_string(),
             explanations,
@@ -1599,25 +1616,26 @@ impl Prompt {
         explanations.insert(
             "retire".to_string(),
             format!(
-                "The watermark shown is {shown}, and {held}. Retiring on that is retiring on a \
-                 belief. \"I am not in the set in force\" is volatile: this node loses it at every \
-                 crash and comes back believing the set it was deployed with. An operator that \
-                 installed a successor configuration has not collected the old one — the old \
-                 configuration's Phase-1 quorum can still be asked, and a leader that asks it \
-                 must find this node's promise. What licenses a retirement is a watermark \
-                 strictly above every ballot a configuration naming this node was bound to: only \
-                 then does a matchmaker quorum durably refuse every campaign that could ask. \
-                 Refuse, and answer \"not collected\"."
+                "This answer retires the node on a belief. The operator shows the watermark \
+                 {shown}, and {held}. The statement \"I am not in the set in force\" is \
+                 volatile. This node loses it at every crash, and it comes back with the set \
+                 that it was deployed with. An operator that installed a successor \
+                 configuration has not collected the old one. A leader can still ask the Phase-1 \
+                 quorum of the old configuration, and it must find the promise of this node. \
+                 A retirement needs a watermark strictly above every ballot that bound a \
+                 configuration naming this node. Only then does a matchmaker quorum durably \
+                 refuse every campaign that could ask. Refuse the request, and answer \
+                 \"not collected\"."
             ),
         );
         explanations.insert(
             "refuse".to_string(),
             format!(
-                "The watermark {shown} is above every ballot a configuration naming this node was \
-                 bound to, {standing}, and it does not lead. A matchmaker quorum wrote that floor \
-                 down, so no future campaign can register below it and no future leader can ask \
-                 this node for a promise. Refusing costs the operator a machine that will never \
-                 be used again."
+                "This answer costs the operator a machine that no node uses again. The \
+                 watermark {shown} is above every ballot that bound a configuration naming this \
+                 node, {standing}, and this node does not lead. A matchmaker quorum wrote that \
+                 floor to disk. No future campaign can register below it, and no future leader \
+                 can ask this node for a promise."
             ),
         );
         Self {
@@ -1626,13 +1644,13 @@ impl Prompt {
             node: node.0,
             question: format!("May node {} retire?", node.0),
             state_summary: vec![
-                format!("where this node stands: {standing}"),
-                format!("the watermark the operator shows: {shown}"),
-                format!("what the leader reports: {held}"),
+                format!("the state of this node: {standing}"),
+                format!("the watermark that the operator shows: {shown}"),
+                format!("the leader reports: {held}"),
             ],
             choices: vec![
-                Choice::new("retire", "Shut down for good"),
-                Choice::new("refuse", "Refuse: not collected"),
+                Choice::new("retire", "Shut down permanently"),
+                Choice::new("refuse", "Refuse, because it is not collected"),
             ],
             expected: expected.to_string(),
             explanations,

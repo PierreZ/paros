@@ -413,7 +413,8 @@ impl DecreeWorld {
             NarrationKind::Election,
             format!(
                 "Proposer {proposer} opens ballot {} for {text:?} and sends Prepare to {}. Phase \
-                 1 names no value: it claims the ballot and asks what has already been accepted.",
+                 1 names no value. It claims the ballot, and it asks what the acceptors have \
+                 already accepted.",
                 show_ballot(ballot),
                 list_nodes(asked)
             ),
@@ -522,8 +523,8 @@ impl DecreeWorld {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "{summary} is lost. There is no partition object in this game: a partition is \
-                 you not delivering."
+                "{summary} is lost. This game has no partition object. A partition is you not \
+                 delivering a message."
             ),
         );
         Ok(())
@@ -683,9 +684,9 @@ impl DecreeWorld {
             Message::Nack { .. } => (
                 NarrationKind::Nack,
                 format!(
-                    "{} receives Prepare {}. It has already promised {}, so it refuses: a \
-                     promise is the only fence Paxos has, and un-saying one is how two values \
-                     get chosen for one slot.",
+                    "{} receives Prepare {}. It has already promised {}, so it refuses. A \
+                     promise is the only fence Paxos has. An acceptor that withdraws a promise \
+                     lets two values be chosen for one slot.",
                     actor(to),
                     show_ballot(ballot),
                     show_ballot(held)
@@ -752,8 +753,8 @@ impl DecreeWorld {
                 NarrationKind::Nack,
                 format!(
                     "{} receives Accept {} for {}. It promised {}, which is higher, so it \
-                     refuses the vote — the ballot it is holding the fence for may already have \
-                     chosen something.",
+                     refuses the vote. The ballot it holds the fence for may already have chosen \
+                     a value.",
                     actor(to),
                     show_ballot(ballot),
                     show_command(command),
@@ -763,9 +764,9 @@ impl DecreeWorld {
             _ => (
                 NarrationKind::Accept,
                 format!(
-                    "{} votes for {} at ballot {} — its promise was {}, and nothing at or above \
-                     the promise is refused. It re-affirms its promise and writes the record \
-                     down before the Accepted reports it.",
+                    "{} votes for {} at ballot {}. Its promise was {}, and it refuses nothing at \
+                     or above that promise. It re-affirms the promise and writes the record down \
+                     before the Accepted reports it.",
                     actor(to),
                     show_command(command),
                     show_ballot(ballot),
@@ -795,10 +796,10 @@ impl DecreeWorld {
             .map(|(held_at, held)| (*held_at, held.clone()));
         if let Some((held_at, held)) = contradiction {
             let detail = format!(
-                "{} was told slot {} holds {} at ballot {}, while it already holds {} at ballot \
-                 {}. That is two values for one slot — the one thing Paxos promises can never \
-                 happen. Nothing in this game can produce it through the protocol, so if you are \
-                 reading this, the game is wrong, not Paxos.",
+                "{} was told slot {} holds {} at ballot {}, and it already holds {} at ballot \
+                 {}. That is two values for one slot. Paxos states that this result is \
+                 impossible. Nothing in this game can produce it through the protocol. If you \
+                 read this line, the game is wrong, and Paxos is not.",
                 actor(to),
                 DECREE.0,
                 show_command(command),
@@ -866,14 +867,14 @@ impl DecreeWorld {
         self.narrate(
             NarrationKind::Promise,
             format!(
-                "Proposer {} holds Promises from {} — {} of {members}. {needed} {}",
+                "Proposer {} holds Promises from {}. That is {} of {members}. {needed} {}",
                 to.0,
                 list_nodes(promised.clone()),
                 promised.len(),
                 if won {
                     "Phase 1 is complete."
                 } else {
-                    "That is not enough yet, so nothing may be proposed."
+                    "That is not enough yet, so it may propose nothing."
                 }
             ),
         );
@@ -929,16 +930,16 @@ impl DecreeWorld {
             match &adopted {
                 Some((at, command)) => format!(
                     "A promise reported {} accepted at ballot {}. The value-selection rule (P2c) \
-                     makes proposer {} propose that value back instead of its own: one report is \
-                     exactly what an already-chosen value looks like from here.",
+                     makes proposer {} propose that value again, instead of its own. One report \
+                     is exactly what an already-chosen value looks like from here.",
                     show_command(command),
                     show_ballot(*at),
                     proposer.0
                 ),
                 None => format!(
-                    "No acceptor reported a value, so proposer {} is free to propose its own: \
-                     quorum intersection says a value already chosen would have been reported by \
-                     someone in this quorum.",
+                    "No acceptor reported a value, so proposer {} may propose its own. Quorum \
+                     intersection says that a member of this quorum would have reported a value \
+                     already chosen.",
                     proposer.0
                 ),
             },
@@ -1014,14 +1015,15 @@ impl DecreeWorld {
         self.narrate(
             NarrationKind::Chosen,
             format!(
-                "Slot {} is chosen: {} — {} of {members} — voted for {} at ballot {}. {needed} \
-                 That is final: every Phase-1 quorum of a higher ballot meets this set of \
-                 voters, so every later proposer is told about it and made to propose it back.",
+                "Slot {} is chosen: {} voted for {} at ballot {}. That is {} of {members} \
+                 acceptors. {needed} This decision is final. Every Phase-1 quorum of a higher \
+                 ballot meets this set of voters, so every later proposer learns the value and \
+                 must propose it again.",
                 DECREE.0,
                 list_nodes(voters.iter().copied()),
-                voters.len(),
                 show_command(&command),
-                show_ballot(at)
+                show_ballot(at),
+                voters.len()
             ),
         );
         self.proposers[index].role.close_round(DECREE);
@@ -1054,9 +1056,9 @@ impl DecreeWorld {
             self.narrate(
                 NarrationKind::Nack,
                 format!(
-                    "Proposer {}'s ballot {} is preempted: somewhere an acceptor has promised \
-                     something higher. Notice what the Nack does *not* carry — the promise that \
-                     refused it. A proposer climbs one round at a time, from what it knows.",
+                    "Proposer {}'s ballot {} is preempted. Some acceptor has promised a higher \
+                     ballot. Notice what the Nack does *not* carry: the promise that refused it. \
+                     A proposer raises its ballot one round at a time, from what it knows.",
                     to.0,
                     show_ballot(ballot)
                 ),

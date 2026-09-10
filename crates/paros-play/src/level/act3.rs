@@ -244,29 +244,29 @@ pub static TRUNCATE_BY_CONSENSUS: Level = Level {
     act: 3,
     title: "Truncate by consensus",
     briefing: "\
-A log that only grows is a disk that eventually fills, so a real system throws \
-the old prefix away. The obvious way to do that is the wrong one: let each node \
-prune whenever it likes. Two nodes then disagree about how far they have pruned, \
-and a `Prepare` from a lagging proposer lands on a peer that deleted exactly the \
-slot it is asking about — a peer that answers \"nothing accepted there\" when the \
-truth is \"I no longer know\". That is how two values get chosen for one slot.
+A log that only grows fills the disk, so a real system removes the old prefix. \
+One method is wrong: each node prunes its own log when it wants to. Two nodes \
+then disagree about how far they pruned. A `Prepare` from a slow proposer then \
+reaches a peer that deleted the slot in the question. That peer answers \
+\"nothing accepted there\" when the true answer is \"I do not know any more\". Two \
+values can then get chosen for one slot.
 
-So paros makes the floor a **decided value**. A log slot holds a `Command`, and a \
-command is either the client's opaque bytes or one of paros's own control \
-commands — and `Truncate{up_to}` is one of those. It is proposed by the leader, \
-voted on by acceptors that cannot tell it apart from a client value, and every \
-node drops its prefix **when it applies that slot**. One cluster-wide floor, \
-forwarded by ordinary replication, with no separate broadcast and no agreement \
-protocol of its own.
+paros therefore makes the floor a **decided value**. A log slot holds a \
+`Command`, and a command is either the opaque bytes of the client or one control \
+command of paros. `Truncate{up_to}` is one of those control commands. The leader \
+proposes it, and the acceptors vote for it as they vote for a client value. \
+Every node drops its prefix when it applies that slot. The result is one \
+cluster-wide floor, carried by ordinary replication, with no separate broadcast \
+and no separate agreement protocol.
 
-There is a coupling rule the leader will enforce on you here, and it is the \
-reason this level has two steps. Past the floor the entries are gone \
-*everywhere*, so the only thing left to rescue a node that was away is a \
-**snapshot** — and a snapshot nobody holds rescues nobody. So the leader \
-proposes a `Truncate` only once a quorum holds a decided snapshot point covering \
-it. Ask to compact before there is one and you will be refused: the leader seeds \
-a snapshot point instead, and your retry goes through. Watch the floors move on \
-every node, one at a time, as each one applies the decision.",
+The leader enforces a coupling rule here, and that rule is the reason for the \
+two steps of this level. Below the floor the entries are gone on every disk, so \
+only a **snapshot** can recover a node that was away. A snapshot that no node \
+holds recovers no node. The leader therefore proposes a `Truncate` only after a \
+quorum holds a decided snapshot point that covers it. If you ask for a \
+compaction before that point exists, the leader refuses you and seeds a snapshot \
+point, and your second request succeeds. Look at the floor on every node: each \
+floor moves when that node applies the decision.",
     field_guide: "truncation-and-snapshots.html",
     symbols: &[
         "Control::Truncate",
@@ -291,27 +291,28 @@ every node, one at a time, as each one applies the decision.",
         let stranded = log.stranded();
         if !stranded.is_empty() {
             return GoalStatus::Failed(format!(
-                "node {} sits below the cluster's floor: the slots it still needs have been \
-                 deleted everywhere.",
+                "node {} is below the floor of the cluster, and every disk deleted the slots \
+                 that it still needs.",
                 stranded[0].0
             ));
         }
         match (refused, accepted, floors.as_slice()) {
             (_, true, [first]) if *first > 0 => GoalStatus::Reached(format!(
-                "Every node's floor is slot {first}, and nobody is stranded. Nothing broadcast \
-                 that number: each node computed it by applying the same decided command, in the \
-                 same place in the same log."
+                "The floor of every node is slot {first}, and no node is stranded. No message \
+                 sent that number. Each node computed it when it applied the same decided \
+                 command, at the same place in the same log."
             )),
             (false, _, _) => GoalStatus::Open(
-                "Ask the leader to compact. The first answer is the interesting one.".to_string(),
+                "Ask the leader to compact the log. Look closely at the first answer.".to_string(),
             ),
             (_, false, _) => GoalStatus::Open(
-                "The leader refused and seeded a snapshot point. Get that decided, then ask again."
+                "The leader refused you and seeded a snapshot point. Get that point decided, \
+                 then ask again."
                     .to_string(),
             ),
             (_, _, floors) => GoalStatus::Open(format!(
-                "The floors are still {floors:?}. Deliver the decision to every node — each one \
-                 truncates when it *applies* that slot, not when the leader proposed it."
+                "The floors are still {floors:?}. Deliver the decision to every node. Each \
+                 node truncates when it *applies* that slot, not when the leader proposes it."
             )),
         }
     },
@@ -319,8 +320,8 @@ every node, one at a time, as each one applies the decision.",
         let refused = log_world(world)
             .is_some_and(|log| log.compacts().iter().any(|outcome| !outcome.accepted));
         (mistakes > 0 || refused).then(|| {
-            "A refusal is not a failure here. The leader will not drop a prefix no quorum can \
-             replace with a snapshot, so it seeds a snapshot point instead — deliver that \
+            "A refusal is not a failure here. The leader does not drop a prefix that no \
+             quorum can replace with a snapshot, so it seeds a snapshot point. Deliver that \
              decision, then ask to compact again."
                 .to_string()
         })
@@ -361,30 +362,29 @@ pub static THE_STRANDED_NODE: Level = Level {
     act: 3,
     title: "The stranded node",
     briefing: "\
-Truncation creates a node nothing can help. Crash node 2, let the cluster keep \
-deciding *and* keep truncating past its position, and bring it back: it needs \
-slots that no longer exist on any disk anywhere. Catch-up replays what a peer \
-still holds; it cannot replay what everybody deleted. And the acceptors are \
-right to refuse — a peer that answered a `Prepare` about a range it has \
-truncated would be reporting \"nothing accepted\" when the truth is \"I no longer \
-know\", which is exactly the lie the floor guard exists to prevent.
+Truncation creates a node that no ordinary message can help. Crash node 2, and \
+let the cluster decide more slots and truncate past its position. Then start \
+node 2 again: it needs slots that no disk holds. Catch-up replays what a peer \
+still holds, and it cannot replay what every node deleted. The acceptors are \
+also right to refuse a `Prepare` about a truncated range. Such a peer would \
+report \"nothing accepted\" when the true answer is \"I do not know any more\", and \
+the floor guard prevents that report.
 
-The one piece of state transfer paros performs is the answer. When a peer sees a \
-catch-up request that falls below its floor it offers a **snapshot** instead: the \
-opaque application state at its own chosen prefix, which the application \
-produced and which paros ships without ever reading a byte of. The receiver \
-jumps its chosen prefix to the snapshot's boundary, compacts everything below \
-it, and installs the state.
+paros performs one kind of state transfer, and it is the answer here. When a \
+peer sees a catch-up request below its floor, it offers a **snapshot**. The \
+snapshot is the opaque application state at the chosen prefix of that peer. The \
+application produced those bytes, and paros sends them without a read of any \
+byte. The receiver moves its chosen prefix to the boundary of the snapshot, \
+compacts everything below it, and installs the state.
 
-And then there is the line the whole level is about. A snapshot restores the \
-**log** — the values, the prefix, the application's state. It says nothing about \
-**promises**, and the peer that sent it has no idea what this node has sworn. So \
-the installing node keeps the *higher* of its own promise and the snapshot's \
-ballot, never the snapshot's alone. Node 2 comes back, hears from no leader, and \
-campaigns — which is what pulls the snapshot, and which is also why its promise \
-is now above the ballot the snapshot's prefix was decided under. You will be \
-asked what its promise is afterwards. Get it wrong and the node is free to vote \
-for a ballot it had already sworn to refuse.",
+One rule is the subject of this level: a snapshot restores the **log** — the \
+values, the prefix and the state of the application. It says nothing about \
+**promises**, and the peer that sent it does not know what this node promised. \
+The node that installs the snapshot therefore keeps the *higher* of its own \
+promise and the ballot of the snapshot. Node 2 comes back, hears no leader, and \
+campaigns. That campaign pulls the snapshot, and it raises the promise above the \
+ballot of the prefix. The game then asks you for its promise, and a wrong answer \
+lets the node vote for a ballot that it refused.",
     field_guide: "truncation-and-snapshots.html",
     symbols: &[
         "Message::InstallSnapshot",
@@ -404,8 +404,8 @@ for a ballot it had already sworn to refuse.",
         };
         if let Some(node) = log.promise_regressed() {
             return GoalStatus::Failed(format!(
-                "node {}'s durable promise came back lower than a promise it had already made. A \
-                 snapshot restores the log, never a promise.",
+                "The durable promise of node {} came back lower than a promise that it \
+                 already made. A snapshot restores the log, not a promise.",
                 node.0
             ));
         }
@@ -419,35 +419,35 @@ for a ballot it had already sworn to refuse.",
         }
         if floor == 0 {
             return GoalStatus::Open(
-                "Bring node 2 back and let it discover it is below the floor. It campaigns when \
-                 it hears from no leader, and that campaign is what asks its peers for the range \
-                 it is missing."
+                "Start node 2 again, and let it find that it is below the floor. It campaigns \
+                 when it hears no leader, and that campaign asks its peers for the range that \
+                 it misses."
                     .to_string(),
             );
         }
         if healed == leader_log {
             GoalStatus::Reached(format!(
-                "Node 2 is back with the whole prefix restored ({}) and its promise intact. \
-                 Nothing replayed those slots to it — they do not exist any more. It was handed \
-                 the application's state and told where the boundary was.",
+                "Node 2 is back with the whole prefix ({}), and it kept its promise. No peer \
+                 replayed those slots, because they do not exist any more. A peer gave node 2 \
+                 the state of the application and the boundary slot.",
                 healed.join(", ")
             ))
         } else {
             GoalStatus::Open(format!(
-                "Node 2 has executed {healed:?} and the cluster has executed {leader_log:?}."
+                "Node 2 executed {healed:?}, and the cluster executed {leader_log:?}."
             ))
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Compare the two ballots on the card. One of them is a promise this node made and \
-             nobody else knows about."
+            "Compare the two ballots on the card. One of them is a promise that this node \
+             made, and no other node knows about it."
                 .to_string(),
         ),
         _ => Some(
-            "Keep the higher of the two. A promise is the only thing a node may never take back, \
-             and the peer that sent the snapshot has no idea what this node has sworn."
+            "Keep the higher of the two ballots. A node must not take back a promise, and the \
+             peer that sent the snapshot does not know what this node promised."
                 .to_string(),
         ),
     },
@@ -498,28 +498,27 @@ pub static READ_INDEX: Level = Level {
     act: 3,
     title: "Read-index",
     briefing: "\
-There is a correct read that needs no new protocol at all: propose a no-op \
-through ordinary consensus and answer at its slot. The commit proves the \
-proposer was leader *now*, at a quorum. It also costs a log slot, an fsync on \
-every acceptor and a full round trip — per read. A read-heavy system would spend \
-its disks writing nothing.
+One correct read needs no new protocol: propose a no-op through ordinary \
+consensus, and answer at its slot. The commit proves that the proposer was the \
+leader at that moment, at a quorum. That read also costs a log slot, one flush \
+on every acceptor and a full round trip, for each read. A system with many reads \
+would write nothing useful to its disks.
 
-Read-index keeps the proof and drops the write, because the no-op's slot never \
-mattered — only the evidence of current leadership did, and a heartbeat can \
-carry that for free. Three moves: **capture** the applied watermark as the read \
-index; **confirm** by broadcasting a beat and collecting acks from a quorum; \
-**serve** once the applied prefix covers the captured index. Quorum \
-intersection does the rest — if a higher ballot had committed anything before \
-this read began, a quorum had promised that ballot, and at least one member of \
-any quorum answering us would have refused ours.
+Read-index keeps the proof and removes the write. The slot of the no-op was \
+never important; only the evidence of current leadership was, and a heartbeat \
+carries that evidence. **Capture** the applied watermark as the read index. \
+**Confirm** the leadership: send a beat, and collect the acks of a quorum. \
+**Serve** the read after the applied prefix covers the captured index. Quorum \
+intersection does the rest: a higher ballot that committed anything holds a \
+promise quorum, and one member of our ack quorum refuses our ballot.
 
-The detail that carries the safety, and the one this level puts in your hands: \
-an ack only counts if it echoes the leader's current ballot **and a beat \
-sequence at or after the one broadcast when the read began**. An ack to an older \
-beat proves nothing at all — the follower may have sent it and *then* promised a \
-higher ballot somewhere else, and you would be reading the past. There is one \
-such stale ack in flight here, from a beat sent before the client ever asked. \
-Deliver it and decide whether it is proof.",
+One detail carries the safety, and this level puts it in your hands. An ack \
+counts only if it names the current ballot of the leader. It must also name a \
+beat sequence at or after the beat that was sent when the read started. An ack \
+to an older beat proves nothing: the follower possibly sent it and then promised \
+a higher ballot elsewhere, so you would read the past. One such stale ack is in \
+flight here, from a beat sent before the client asked. Deliver it, and decide \
+whether it is proof.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "ColocatedNode::read_index",
@@ -550,31 +549,33 @@ Deliver it and decide whether it is proof.",
             .collect();
         match served.first() {
             Some(index) if *index >= acked && acked.is_some() => GoalStatus::Reached(format!(
-                "The read is served at {}, at or above the last acknowledged write ({}). It cost \
-                 one round of beats and not one byte of log.",
+                "The cluster served the read at {}, at or above the last acknowledged write \
+                 ({}). The read cost one round of beats and no byte of log.",
                 at(*index),
                 at(acked)
             )),
             Some(index) => GoalStatus::Open(format!(
-                "A read was served at {}, but the level wants a write acknowledged under it \
-                 first.",
+                "The cluster served a read at {}, but the level asks for an acknowledged \
+                 write below it first.",
                 at(*index)
             )),
             None => GoalStatus::Open(
-                "Get a command chosen, then ask for a read and decide when the proof is complete."
+                "Get a command chosen. Then ask for a read, and decide when the proof is \
+                 complete."
                     .to_string(),
             ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
-        1..=2 => {
-            Some("Look at which beat the ack echoes, not at how many acks there are.".to_string())
-        }
+        1..=2 => Some(
+            "Look at the beat that the ack names. The number of acks is not the question."
+                .to_string(),
+        ),
         _ => Some(
-            "An ack to a beat sent *before* the read began proves nothing: the follower could \
-             have promised a higher ballot in between. Wait for an ack to the beat the read \
-             itself triggered."
+            "An ack to a beat sent *before* the read started proves nothing, because the \
+             follower can promise a higher ballot after it sends the ack. Wait for an ack to \
+             the beat that the read itself caused."
                 .to_string(),
         ),
     },
@@ -617,29 +618,28 @@ pub static THE_FRESH_LEADER_TRAP: Level = Level {
     act: 3,
     title: "The fresh-leader trap",
     briefing: "\
-The confirmation round is not enough, and this is the sneaky half of the read \
-path. A leader that *just* won an election holds a perfectly valid quorum — \
-every ack it collects is real, at its own current ballot, right now. And its \
-applied prefix can still be missing writes the previous leader acknowledged to a \
-client. Election recovery re-proposes those slots, and until they re-decide, the \
-new leader's local state is behind the truth it is about to be asked for.
+The confirmation round is not enough, and that is the difficult half of the \
+read path. A leader that just won an election holds a valid quorum. Every ack \
+that it collects is real, at its own current ballot, at this moment. Its applied \
+prefix can still miss writes that the last leader acknowledged to a client. \
+Election recovery re-proposes those slots, and until they decide again, the \
+local state of the new leader does not hold those writes.
 
-Capture-and-confirm alone would serve that stale watermark with a fresh quorum, \
-and the client would see a write it had already been told was durable simply \
-vanish. Raft's answer is to commit a no-op in the new term before serving any \
-read. paros waits instead: at the moment it wins, a leader records a **read \
-floor** — the highest slot its promise quorum reported, which by quorum \
-intersection is at or above every write any earlier leader acknowledged. A read \
-captures the *maximum* of the applied watermark and that floor, and confirms \
-only when **both** things are true: the ack quorum is in, and the applied prefix \
-covers the captured index.
+Capture and confirm alone would serve that old watermark with a fresh quorum, \
+and the client would lose a write that the cluster called durable. Raft commits \
+a no-op in the new term before it serves a read, but paros waits instead. At the \
+moment that it wins, a leader records a **read floor**: the highest slot that \
+its promise quorum reported. By quorum intersection that floor is at or above \
+every write that an earlier leader acknowledged. A read captures the *maximum* \
+of the applied watermark and that floor. It confirms only when the ack quorum is \
+complete and the applied prefix covers the captured index.
 
-Here the old leader got one command accepted by one other node and then died \
-before the decision came back, so nothing is chosen and nobody has applied \
-anything. The new leader's Phase 1 finds that value and must re-propose it. Ask \
-for a read while its recovery is still in flight: the acks will be there, the \
-answer is still no. Then let the slot re-decide and watch the read fire on its \
-own, out of the very batch that applied it.",
+In this level one other node accepted one command from the old leader. The old \
+leader then stopped before the decision came back, so nothing is chosen and no \
+node applied anything. The Phase 1 of the new leader finds that value and must \
+re-propose it. Ask for a read while the recovery is still in flight: the acks \
+arrive, but the answer is still no. Then let the slot decide again, and the read \
+completes on its own, in the batch that applied the slot.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "Proposer::read_floor",
@@ -669,32 +669,33 @@ own, out of the very batch that applied it.",
         let recovered = applied(world, 1).iter().any(|command| command == "alpha");
         match (served.first(), recovered) {
             (Some(index), true) => GoalStatus::Reached(format!(
-                "The read was refused while the recovered slot was still in flight, and served \
-                 at {} once it re-decided. The quorum was never the missing piece — the applied \
-                 prefix was.",
+                "The leader refused the read while the recovered slot was still in flight. It \
+                 served the read at {} after the slot decided again. The quorum was not the \
+                 missing part. The applied prefix was.",
                 at(*index)
             )),
             (None, _) => GoalStatus::Open(
-                "Ask the fresh leader for a read, answer for it, and then let its recovered slot \
+                "Ask the new leader for a read, and answer for it. Then let its recovered slot \
                  finish."
                     .to_string(),
             ),
             (Some(_), false) => GoalStatus::Open(
-                "The read was served, but the inherited value has not been executed.".to_string(),
+                "The cluster served the read, but no node executed the inherited value."
+                    .to_string(),
             ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "The acks are not the question. Compare the index the read captured with the applied \
-             prefix underneath it."
+            "The acks are not the question. Compare the index that the read captured with the \
+             applied prefix below it."
                 .to_string(),
         ),
         _ => Some(
-            "A fresh leader's read floor sits at the highest slot its promise quorum reported, \
-             which is above anything it has applied yet. Wait: the read fires by itself when the \
-             recovered slot decides."
+            "The read floor of a new leader is the highest slot that its promise quorum \
+             reported. That slot is above every slot that the leader applied. Wait, because \
+             the read completes by itself when the recovered slot decides."
                 .to_string(),
         ),
     },
@@ -742,30 +743,28 @@ pub static LINEARIZABLE_OR_NOT: Level = Level {
     act: 3,
     title: "Linearizable or not",
     briefing: "\
-Every mechanism in this act exists for one client-visible property, and this \
-level is where you produce it and have it judged. **Linearizable** means every \
-operation appears to take effect atomically at some instant between when it was \
-asked and when it was answered. The register under observation here is the \
-applied log prefix: a write appends to it at its committed slot, and a read \
-observes its watermark.
+Every mechanism in this act serves one client-visible property, and this level \
+produces it and judges it. **Linearizable** means that every operation takes \
+effect at one instant between the request and the answer. The register under \
+observation here is the applied log prefix. A write adds to that prefix at its \
+committed slot, and a read observes its watermark.
 
-Because the log totally orders the writes, checking a recorded history needs no \
-search at all — three conditions over the clients' own program order are the \
-whole test. One: a committed read observes every write acknowledged before it \
-began. Two: watermarks never move backwards across reads that do not overlap. \
-Three: a write issued after a committed read lands *above* that read's \
-watermark. Operations that never completed constrain nothing; a timed-out write \
-may still commit later, and that is not a violation of anything.
+The log gives a total order to the writes, so a check of a recorded history \
+needs no search. Three conditions over the program order of the clients are the \
+whole test. One: a committed read observes every write acknowledged before the \
+read started. Two: a watermark does not go down across two reads that do not \
+overlap. Three: a write issued after a committed read takes a slot *above* the \
+watermark of that read. Operations that never completed constrain nothing, so a \
+write that timed out may still commit later, and that result is not a violation.
 
-Two clients here, and one leader change in the middle. Get a write acknowledged \
-under the old leadership, elect a new leader behind the old one's back, and read \
-across the change: the second client's read must see the first client's write, \
-even though the node answering it was not the node that took it. **Then try to \
-break it.** Ask the deposed leader — which still believes it leads — for a read \
-of its own. It will collect nothing, because every follower that promised the \
-new ballot refuses to ack the old one, and its read will sit unanswered for the \
-rest of the level. That is the protocol declining to certify a read it cannot \
-prove, and it is the correct thing for it to do forever.",
+This level has two clients and one leader change. Get a write acknowledged under \
+the old leadership, and elect a new leader without the knowledge of the old one. \
+Then read across the change: the read of the second client must observe the \
+write of the first client, even though a different node answers it. **Then try \
+to break the property:** ask the replaced leader, which still believes that it \
+leads, for a read. It collects nothing, because every follower that promised the \
+new ballot refuses to ack the old ballot. That read stays open for the rest of \
+the level, and the protocol is correct to refuse a read that it cannot prove.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "ReadState",
@@ -809,10 +808,10 @@ prove, and it is the correct thing for it to do forever.",
             .count();
         match (across, refused) {
             (true, 1..) => GoalStatus::Reached(format!(
-                "The history checks out. A read at one node observed a write acknowledged at \
-                 another before it began, across a leader change — and {} read the protocol \
-                 could not prove is still sitting unanswered, which is the only honest thing to \
-                 do with it.",
+                "The history is linearizable. A read at one node observed a write that \
+                 another node acknowledged before the read started, across a leader change. {} \
+                 read that the protocol cannot prove is still open, and the protocol must keep \
+                 it open.",
                 if refused == 1 {
                     "one".to_string()
                 } else {
@@ -820,20 +819,21 @@ prove, and it is the correct thing for it to do forever.",
                 }
             )),
             (false, _) => GoalStatus::Open(
-                "Get a write acknowledged, change the leadership behind the old leader's back, \
-                 and read at the new leader."
+                "Get a write acknowledged. Change the leadership without the knowledge of the \
+                 old leader. Then read at the new leader."
                     .to_string(),
             ),
             (true, 0) => GoalStatus::Open(
-                "Now ask the deposed leader for a read too, and watch what it cannot do."
-                    .to_string(),
+                "Now ask the replaced leader for a read as well, and look at what it cannot \
+                 do."
+                .to_string(),
             ),
         }
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "The deposed leader's read is supposed to hang. Deliver its beats and see who acks \
-             them: a follower that has promised the newer ballot will not."
+            "The read of the replaced leader must stay open. Deliver its beats, and look at \
+             which nodes ack them. A follower that promised the newer ballot does not ack."
                 .to_string()
         })
     },
@@ -883,29 +883,30 @@ pub static CHOSEN_IS_NOT_APPLIED: Level = Level {
     act: 3,
     title: "Chosen is not applied",
     briefing: "\
-The read half of linearizability leans on the write half: \"a read observes \
-every write **acknowledged** before it began\" is only worth something if the \
-ack means what it says. And there is one word in the middle of the log that \
-means two different things.
+The read half of linearizability depends on the write half. The rule \"a read \
+observes every write **acknowledged** before it started\" is worth something only \
+if the ack means what it says. One word in the middle of the log has two \
+meanings.
 
-A slot is **chosen** when a quorum has voted for it. That is a fact about the \
-cluster, it is permanent, and — because the leader pipelines — it can become \
-true at slot 6 while slot 5 is still open. A slot is **applied** when this node \
-has handed it to its state machine, which happens strictly in order, so slot 6 \
-waits for slot 5. Between those two moments the command is decided and \
-unexecuted, and a node that acked it as done would be promising a client \
-something no node can read back yet.
+A slot is **chosen** when a quorum votes for it. That fact belongs to the \
+cluster and it is permanent. The leader pipelines, so slot 6 can become chosen \
+while slot 5 is still open. A slot is **applied** when this node gives it to its \
+state machine, and that step is strictly in order. Slot 6 therefore waits for \
+slot 5. Between those two moments the command is decided and not executed, and a \
+node that acked it would promise the client an unreadable result.
 
-That window is exactly where a client retry lands. A retry is deduplicated by \
-`(client, seq)`, and the leader keeps **two** tables: what it has applied, and \
-what it has in flight. Answer from the applied table when the command is only \
-chosen and you have acked a write nobody executed. Answer \"never seen it\" and \
-you give an already-decided command a second slot — duplicate execution, which \
-is strictly worse. So the two tables move together: when a slot is learned \
-chosen, the identity moves *within* the in-flight table onto that slot, and only \
-the contiguous apply walk ever writes the applied one. Here the client's second \
-write is chosen above a hole. It will ask twice — once while the hole is open, \
-once after it closes — and you answer for the leader both times.",
+A client retry arrives in that window, and the leader removes duplicates by \
+`(client, seq)`. The leader keeps **two** tables: the applied commands, and the \
+commands in flight. If you answer from the applied table while the command is \
+only chosen, you ack a write that no node executed. If you answer that you did \
+not see the command, the cluster gives a decided command a second slot and \
+executes it twice. The two tables move together: the identity moves inside the \
+in-flight table onto the chosen slot, and only the apply walk writes the applied \
+one.
+
+In this level the second write of the client is chosen above a hole. The client \
+asks twice: once while the hole is open, and once after it closes. Answer for \
+the leader both times.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "Replica::applied_at",
@@ -931,8 +932,8 @@ once after it closes — and you answer for the leader both times.",
             .count();
         if bravo > 1 {
             return GoalStatus::Failed(
-                "The command bravo was executed twice. A retry that misses both dedup tables gets a \
-                 fresh slot, and the command runs again."
+                "The cluster executed the command bravo twice. A retry that misses both dedup \
+                 tables gets a fresh slot, and the command runs a second time."
                     .to_string(),
             );
         }
@@ -950,30 +951,31 @@ once after it closes — and you answer for the leader both times.",
             .any(|outcome| matches!(outcome.answer, RetryAnswer::Fresh(_)))
         {
             return GoalStatus::Failed(
-                "A retry was given a fresh slot: the leader had never heard of a command it was \
-                 already holding, and the client's write is now in the log twice."
+                "A retry got a fresh slot. The leader did not recognise a command that it \
+                 already held, so the write of the client is now in the log twice."
                     .to_string(),
             );
         }
         match (bravo, held, acked) {
             (1, true, true) => GoalStatus::Reached(format!(
-                "The command was executed exactly once ({}), and both retries were answered from \
-                 the table that actually knew where it was — held while the hole was open, \
-                 acknowledged once it closed. \"Chosen\" and \"applied\" are two different facts, \
-                 and only one of them may be acknowledged.",
+                "The cluster executed the command exactly once ({}). The leader answered both \
+                 retries from the table that knew where the command was. It held the retry \
+                 while the hole was open. It acknowledged the retry after the hole closed. \
+                 \"Chosen\" and \"applied\" are two different facts, and a leader may acknowledge \
+                 only one of them.",
                 executed.join(", ")
             )),
             (1, false, _) => GoalStatus::Open(
-                "Have the client ask again *while* its command is chosen above the hole — that \
-                 is the window the level is about."
+                "Let the client ask again *while* its command is chosen above the hole. That \
+                 window is the subject of this level."
                     .to_string(),
             ),
             (1, true, false) => {
-                GoalStatus::Open("Now close the hole and let the client ask once more.".to_string())
+                GoalStatus::Open("Now close the hole, and let the client ask again.".to_string())
             }
             _ => GoalStatus::Open(
-                "Get both commands chosen — out of order, so the second one waits above a hole \
-                 — and answer the client's retries."
+                "Get both commands chosen, but not in order, so the second command waits above \
+                 a hole. Then answer the retries of the client."
                     .to_string(),
             ),
         }
@@ -981,14 +983,15 @@ once after it closes — and you answer for the leader both times.",
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Read the two lines on the card. One table knows where the command *is*; the other \
-             knows it has been *run*."
+            "Read the two lines on the card. One table knows where the command *is*. The \
+             other table knows that the cluster *ran* it."
                 .to_string(),
         ),
         _ => Some(
-            "While the hole is open the command is chosen and unexecuted: it is in the in-flight \
-             table, not the applied one, so the client waits on that slot. Once the hole closes \
-             it is in the applied table and may be acknowledged."
+            "While the hole is open, the command is chosen and not executed. It is in the \
+             in-flight table, not in the applied table, so the client waits on that slot. After \
+             the hole closes, the command is in the applied table, and the leader may \
+             acknowledge it."
                 .to_string(),
         ),
     },

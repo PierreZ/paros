@@ -654,8 +654,8 @@ impl World {
                 "A client asks {} to run with the acceptors {members}. The leader does not edit \
                  the set it has. It opens a fresh ballot, {}, and registers the new set with the \
                  matchmakers under that ballot. A configuration belongs to one ballot, so the \
-                 only way to change it is a new ballot. Nothing new is proposed until the ballot \
-                 is won.",
+                 only way to change it is a new ballot. The leader proposes nothing new until it \
+                 holds that new ballot.",
                 who(id),
                 show_ballot(ballot)
             ),
@@ -700,9 +700,9 @@ impl World {
         let text = match refusal {
             ReconfigureRefusal::NoMatchmakers => format!(
                 "{} names no matchmakers. Plain Multi-Paxos has one fixed acceptor set for the \
-                 life of the cluster, and there is nowhere to record a second one: a later leader \
-                 would have no way to learn that {members} ever existed. The request is refused, \
-                 and it is not queued.",
+                 life of the cluster. There is nowhere to record a second set, so a later leader \
+                 could not learn that {members} ever existed. The request is refused, and it is \
+                 not queued.",
                 who(id)
             ),
             ReconfigureRefusal::Unchanged => {
@@ -718,8 +718,8 @@ impl World {
             ),
             ReconfigureRefusal::Unsettled => format!(
                 "{} still has Phase-1 work open: a slot to settle, a damaged record to repair, or \
-                 an application prefix to pull. A reconfiguration moves a settled leadership. Ask \
-                 again once the recovery closes.",
+                 an application prefix to complete. A reconfiguration moves a settled leadership. \
+                 Ask again once the recovery closes.",
                 who(id)
             ),
             ReconfigureRefusal::RoundExhausted => {
@@ -758,7 +758,7 @@ impl World {
             self.narrate(
                 NarrationKind::Gc,
                 format!(
-                    "An operator asks {} to shut down for good. {} You answer for it.",
+                    "An operator asks {} to shut down permanently. {} You answer for it.",
                     who(target),
                     prompt.question
                 ),
@@ -784,11 +784,11 @@ impl World {
             self.narrate(
                 NarrationKind::Gc,
                 format!(
-                    "{} refuses to retire, and the leg is \"not collected\". The watermark it was \
-                     shown, {}, is not above every ballot a configuration naming this node was \
-                     bound to. An installed successor is not a collected predecessor: until a \
-                     matchmaker quorum durably refuses those ballots, some future leader may \
-                     still need this node's Phase-1 promise.",
+                    "{} refuses to retire, and the reason is \"not collected\". The watermark it \
+                     was shown, {}, is not above every ballot a configuration naming this node \
+                     was bound to. An installed successor is not a collected predecessor. Some \
+                     future leader may still need this node's Phase-1 promise, until a \
+                     matchmaker quorum durably refuses those ballots.",
                     who(target),
                     show_ballot(watermark)
                 ),
@@ -801,9 +801,9 @@ impl World {
         self.narrate(
             NarrationKind::Gc,
             format!(
-                "{} retires. It is not in the acceptor set in force, it does not lead, and the \
+                "{} retires. It is not in the acceptor set in force, and it does not lead. The \
                  watermark {} sits above every ballot a configuration naming it was bound to. No \
-                 future leader can ask it for a promise, so it may stop for good.",
+                 future leader can ask it for a promise, so it may stop permanently.",
                 who(target),
                 show_ballot(watermark)
             ),
@@ -864,9 +864,9 @@ impl World {
         self.narrate(
             NarrationKind::Generation,
             format!(
-                "{} starts a handover of the matchmaker set: generation {} = {} gives way to \
+                "{} starts a handover of the matchmaker set: generation {} = {} is replaced by \
                  {}. The first step freezes the old generation. A frozen matchmaker registers \
-                 nothing more, so the copy taken next is a still picture and not a moving one.",
+                 nothing more, so the copy taken next cannot change while it is read.",
                 who(id),
                 current.generation.0,
                 show_set(current.members()),
@@ -1004,11 +1004,11 @@ impl World {
         self.narrate(
             NarrationKind::Generation,
             format!(
-                "{} closes the freeze. A quorum of the old generation answered, so it takes the \
-                 highest watermark they reported and the union of their registries above it: {}. \
-                 Every registration that ever completed reached a quorum of the old generation, \
-                 and any two quorums share a matchmaker, so nothing can be missing from that \
-                 union.",
+                "{} closes the freeze. A quorum of the old generation answered. It takes the \
+                 highest watermark they reported, and the union of their registries above it: \
+                 {}. Every registration that ever completed reached a quorum of the old \
+                 generation. Any two quorums share a matchmaker, so nothing can be missing from \
+                 that union.",
                 who(id),
                 many(reconstruction.bootstrap.history.len(), "registration")
             ),
@@ -1153,13 +1153,14 @@ impl World {
         };
         let text = match &reply.outcome {
             MatchOutcome::Registered { history, .. } => format!(
-                "{} writes down that ballot {} runs with the acceptors {members}{}, and only then \
-                 answers. It reports the {} it holds below that ballot. The write comes first: a \
-                 registration it forgot would leave a later leader asking the wrong acceptors.",
+                "{} writes down that ballot {} runs with the acceptors {members}{}. It answers \
+                 only after that write. It reports the {} it holds below that ballot. The write \
+                 comes first: a registration it forgot would leave a later leader asking the \
+                 wrong acceptors.",
                 which(to),
                 show_ballot(ballot),
                 if reconfiguration {
-                    " — an operator's change, not a belief"
+                    " (an operator's change, and not a belief)"
                 } else {
                     ""
                 },
@@ -1299,16 +1300,16 @@ impl World {
                 };
                 format!(
                     "A matchmaker quorum has answered {}. The union of their histories, above the \
-                     watermark {}, names {named}. Phase 1 may open now, and not one moment \
-                     earlier: the matchmakers are what prove no earlier ballot chose something \
-                     this candidate cannot see.",
+                     watermark {}, names {named}. Phase 1 may open now, and not before. The \
+                     matchmakers prove that no earlier ballot chose a value this candidate \
+                     cannot see.",
                     who(id),
                     show_ballot(*watermark)
                 )
             }
             MatchStep::Refused(refusal) => format!(
                 "{} abandons its campaign: a matchmaker refused it, because {}. A refused \
-                 registration never becomes a leadership. The next campaign opens at a higher \
+                 registration does not become a leadership. The next campaign opens at a higher \
                  round.",
                 who(id),
                 why(refusal)
@@ -1323,9 +1324,9 @@ impl World {
             ),
             MatchStep::StaleConfiguration { newest } => format!(
                 "{} abandons its campaign and adopts the configuration registered at {}. Its own \
-                 belief was out of date: an operator changed the acceptor set while this node was \
-                 not listening. A candidate that was elected under a superseded set would roll \
-                 the change back without anybody asking.",
+                 belief was out of date, because an operator changed the acceptor set while this \
+                 node was not listening. A candidate elected under a superseded set would undo \
+                 that change, and nobody asked for that.",
                 who(id),
                 show_ballot(*newest)
             ),
@@ -1472,7 +1473,8 @@ impl World {
             ),
             ReconfigurerStep::Chosen { successor } => format!(
                 "Generation {} = {} is chosen: a quorum of the old generation voted for it at one \
-                 ballot. From here there is exactly one successor, whoever finishes the job.",
+                 ballot. From here there is exactly one successor, whichever node finishes the \
+                 handover.",
                 successor.generation.0,
                 show_set(successor.members())
             ),

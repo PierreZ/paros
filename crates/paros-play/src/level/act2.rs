@@ -191,7 +191,7 @@ fn everyone_applied(world: &WorldKind, expected: &[&str]) -> Result<(), String> 
         let got = applied(world, node);
         if got != want {
             return Err(format!(
-                "node {node} has executed {got:?}, and the level wants {want:?}"
+                "node {node} executed {got:?}, but the level asks for {want:?}"
             ));
         }
     }
@@ -293,26 +293,26 @@ pub static PERSIST_BEFORE_SEND: Level = Level {
     act: 2,
     title: "Persist before send",
     briefing: "\
-Everything a node says about itself is a claim about its disk. A `Promise` says \
-\"my promise is now durably at least this high\"; an `Accepted` says \"this value \
-is durably recorded here\". A proposer counts those claims toward a quorum and \
-then treats the slot as decided — so a claim that turns out not to be durable is \
-not a lost message, it is a decision unmade.
+Every message that a node sends about itself is a claim about its disk. A \
+`Promise` says that the promise of the node is now durable at that ballot or \
+higher. An `Accepted` says that the node holds that value on disk. A proposer \
+counts those claims toward a quorum and then treats the slot as decided. If a \
+claim is not durable, the cluster loses a decision, not a message.
 
-That is why a node's output arrives in **batches**: a set of durable writes and a \
-set of messages, produced together, with a fixed order between them. Flush first, \
-send second. Get it backwards and a node that crashes in the window reboots \
-having forgotten a promise it published — free to vote for a ballot it had sworn \
-to refuse — or having forgotten a vote a proposer already counted. Either one \
-chooses two values for one slot.
+For that reason a node produces its output in **batches**. One batch holds a \
+set of durable writes and a set of messages, in a fixed order. Write the batch \
+to disk first, and send the messages second. If you send first, a node that \
+crashes in that window forgets a promise that it published, or a vote that a \
+proposer counted. A node that forgot a promise can then vote for a ballot that \
+it refused. Either fault lets one slot get two values.
 
-You will be asked the order on every batch, and then you will cut a batch in half \
-on purpose. `crash before sync` throws the whole batch away: nothing written, \
-nothing sent, and the disk is exactly what it was — always safe, because nobody \
-was ever told anything. `crash after sync, before send` keeps the writes and \
-loses the messages: the node now holds a promise **nobody in the cluster has ever \
-heard about**, and when it reboots it still holds it. That asymmetry is the \
-whole rule. Restart both nodes and check: no promise ever goes backwards.",
+The game asks you for the order on every batch. You then cut one batch in two, \
+and the two seams give different results. `crash before sync` discards the \
+whole batch: it writes nothing and it sends nothing. That case is always safe, \
+because the disk does not change and the node told no other node anything. \
+`crash after sync, before send` keeps the writes and loses the messages, so the \
+node holds a promise that no other node knows about. The restart keeps that \
+promise, so restart both nodes and make sure that no promise goes down.",
     field_guide: "restart-safety.html",
     symbols: &["Ready", "Ready::advance", "HardState", "WriteOp"],
     automation_on: &[
@@ -334,8 +334,8 @@ whole rule. Restart both nodes and check: no promise ever goes backwards.",
         };
         if let Some(node) = log.promise_regressed() {
             return GoalStatus::Failed(format!(
-                "node {}'s durable promise is below a promise it had already made. Nothing in \
-                 the protocol survives that.",
+                "The durable promise of node {} is below a promise that it already made. No \
+                 part of the protocol is safe after that.",
                 node.0
             ));
         }
@@ -347,40 +347,40 @@ whole rule. Restart both nodes and check: no promise ever goes backwards.",
         let down = crashed(world);
         match (before, after, chosen, down.is_empty()) {
             (true, true, true, true) => GoalStatus::Reached(
-                "A value is chosen, both seams were cut, and every node came back holding every \
-                 promise it had made. The batch that was flushed and never sent is the safe \
-                 half: a node may know more than the cluster, never less."
+                "A value is chosen, you cut both seams, and every node came back with every \
+                 promise that it made. The batch that reached the disk but not the wire is the \
+                 safe one. A node may know more than the cluster, but it must not know less."
                     .to_string(),
             ),
             (_, _, _, false) => GoalStatus::Open(format!(
-                "Restart node {} and see what it reads back.",
+                "Restart node {} and look at what it reads back.",
                 down[0]
             )),
             (false, _, _, _) => GoalStatus::Open(
-                "Cut a batch before its flush: arm `crash before sync` and deliver something that \
-                 makes the node write."
+                "Cut a batch before it reaches the disk. Arm `crash before sync`. Then deliver a \
+                 message that makes the node write."
                     .to_string(),
             ),
             (_, false, _, _) => GoalStatus::Open(
-                "Cut a batch after its flush and before its send: that is the one that leaves a \
-                 promise nobody heard about."
+                "Cut a batch after it reaches the disk and before it goes out. That seam leaves \
+                 a promise that no other node knows about."
                     .to_string(),
             ),
-            (_, _, false, _) => {
-                GoalStatus::Open("Now get a value chosen through the survivors.".to_string())
-            }
+            (_, _, false, _) => GoalStatus::Open(
+                "Now get a value chosen through the nodes that are up.".to_string(),
+            ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "The question is never which is faster. Ask what the message would be claiming if \
-             the node died a moment after sending it."
+            "The question is not which order is faster. Ask what the message claims if the node \
+             stops one moment after it sends the message."
                 .to_string(),
         ),
         _ => Some(
-            "Flush the writes, then send. A `Promise` is a statement about the disk, so the disk \
-             has to be true first."
+            "Write the batch to disk, then send it. A `Promise` is a statement about the disk, \
+             so the disk must be correct first."
                 .to_string(),
         ),
     },
@@ -430,24 +430,24 @@ pub static A_LOG_OF_DECISIONS: Level = Level {
     title: "A log of decisions",
     briefing: "\
 One decision is not a database. A replicated state machine needs a **sequence** \
-of them, so Multi-Paxos runs the same protocol independently at every **slot** of \
-a log, and the application executes the chosen commands in slot order. \
-Independently is the important word: slot 2 does not wait for slot 1. A leader \
-streams `Accept`s for several slots at once — that is pipelining, and it is what \
-makes the log fast — so the slots come back in whatever order the network feels \
-like.
+of decisions. Multi-Paxos therefore runs the same protocol at every **slot** of \
+a log, and the application executes the chosen commands in slot order. Each \
+slot runs on its own, so slot 2 does not wait for slot 1. A leader sends the \
+`Accept` messages for several slots at the same time. That method is \
+pipelining, and it makes the log fast, but the slots then complete in any order.
 
-Which splits one word into two. A slot is **chosen** when a quorum has voted for \
-it: that is a fact about the cluster, it is permanent, and it can happen at any \
-slot at any time. A slot is **applied** when this node has handed it to its state \
-machine: that is local, and it is strictly in order, because two nodes that \
-executed the same commands in different orders are two different databases. So a \
-node keeps a contiguous *applied prefix*, and a slot chosen above a hole simply \
-waits.
+That behaviour separates two words. A slot is **chosen** when a quorum votes \
+for it. That fact belongs to the cluster, it is permanent, and it can occur at \
+any slot at any time. A slot is **applied** when this node gives it to its \
+state machine. That step is local and strictly in order, because two nodes that \
+execute the same commands in a different order hold two different databases. A \
+node therefore keeps a contiguous *applied prefix*, and a slot chosen above a \
+hole waits.
 
-Propose three commands, then deliver slot 2's votes before slot 1's, and answer \
-for the replica each time a slot becomes chosen. Applying the later slot early is \
-not a mistake you can take back: the application has already run the command.",
+Propose three commands. Then deliver the votes for slot 2 before the votes for \
+slot 1. Answer for the replica each time that a slot becomes chosen. Do not \
+apply the later slot early. You cannot undo that mistake, because the \
+application already ran the command.",
     field_guide: "replicated-log.html",
     symbols: &[
         "Replica::chosen_index",
@@ -470,24 +470,25 @@ not a mistake you can take back: the application has already run the command.",
     setup: || fresh(3),
     goal: |world| match everyone_applied(world, &["alpha", "bravo", "charlie"]) {
         Ok(()) => GoalStatus::Reached(
-            "Every node executed the same three commands in the same order — including the one \
-             that was chosen before the slot in front of it, and executed after it."
+            "Every node executed the same three commands in the same order. One command was \
+             chosen before the slot below it, and every node executed it after that slot."
                 .to_string(),
         ),
         Err(detail) => GoalStatus::Open(format!(
-            "Get all three commands chosen and applied everywhere, in slot order. {detail}"
+            "Get all three commands chosen and applied on every node, in slot order. {detail}"
         )),
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Compare the slot that just became chosen with the first slot the node is still \
-             missing. They are only sometimes the same."
+            "Compare the slot that became chosen with the first slot that the node still \
+             misses. The two are sometimes different."
                 .to_string(),
         ),
         _ => Some(
-            "A slot is applied exactly when it is the first unchosen one. Anything above a hole \
-             is held — recorded as chosen, executed later, the moment the hole closes."
+            "A node applies a slot only when that slot is its first unchosen slot. A node holds \
+             every slot above a hole. It records the slot as chosen, and it executes the slot \
+             when the hole closes."
                 .to_string(),
         ),
     },
@@ -527,27 +528,25 @@ pub static ELECT_A_LEADER: Level = Level {
     act: 2,
     title: "Elect a leader",
     briefing: "\
-Running Phase 1 for every slot would cost two round trips per command and let two \
-proposers collide on each one. Multi-Paxos gets rid of both by electing one \
-**leader** that runs Phase 1 exactly once — and not for a slot, for *every slot \
-from here on*. That is what the `from_slot` in a `Prepare` means, and it is why \
-one short message can claim an unbounded suffix of the log: Phase 1 never \
-mentions a value, so there is nothing slot-specific in it to repeat.
+Phase 1 at every slot costs two round trips for each command. It also lets two \
+proposers compete at each slot. Multi-Paxos removes both costs. It elects one \
+**leader**, and that leader runs Phase 1 once for every slot above a start \
+slot. The `from_slot` field in a `Prepare` names that start slot. Phase 1 names \
+no value, so one short message can claim a log suffix of any length.
 
-The reply is what makes it work. A `Promise` reports **everything** the acceptor \
-has accepted at or above that slot, so a single exchange tells the new leader the \
-whole state of the log the previous one left behind. Some of those slots may \
-already be chosen and some may not, and — this is the part that catches people — \
-the new leader cannot tell which. A value reported by one acceptor is exactly \
-what an already-chosen value looks like from here, so the value-selection rule \
-from Act I applies per slot: re-propose what you were told, under your own \
-ballot, before you propose anything of your own.
+The reply carries the work. A `Promise` reports **every** value that the \
+acceptor accepted at or above that slot. One exchange therefore tells the new \
+leader the state of the log that the last leader left. Some of those slots are \
+already chosen and some are not, and the new leader cannot separate the two. A \
+report from one acceptor looks the same as an already chosen value. The \
+value-selection rule of Act I therefore applies to each slot: re-propose the \
+reported value under your own ballot before you propose your own command.
 
-One node here still holds a value from a leadership that ended: it accepted it, \
-and then that leader vanished. Tick a follower until its election timer fires, \
-run its Phase 1 through the node that holds the value, and settle the inherited \
-slot before you stream anything new. Then give the cluster a fresh command and \
-watch it cost one round trip instead of two.",
+One node in this level still holds a value from a leadership that ended. It \
+accepted the value, and then that leader stopped. Tick a follower until its \
+election timer fires. Run its Phase 1 through the node that holds the value. \
+Settle the inherited slot before you propose anything new. Then give the \
+cluster a fresh command, and look at the cost: one round trip, not two.",
     field_guide: "stable-leader.html",
     symbols: &[
         "Message::Prepare",
@@ -574,26 +573,27 @@ watch it cost one round trip instead of two.",
     },
     goal: |world| match everyone_applied(world, &["carried-over", "fresh"]) {
         Ok(()) => GoalStatus::Reached(
-            "The inherited value was decided under the new ballot before anything new was \
-             streamed, and the fresh command landed above it. Phase 1 ran once, for the whole \
-             suffix."
+            "The cluster decided the inherited value under the new ballot before it proposed \
+             anything new. The fresh command took a slot above it. Phase 1 ran once, for the \
+             whole suffix."
                 .to_string(),
         ),
         Err(detail) => GoalStatus::Open(format!(
-            "Settle the slot the promise quorum reported, then get a fresh command chosen. \
+            "Settle the slot that the promise quorum reported. Then get a fresh command chosen. \
              {detail}"
         )),
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Read what the Promise reported for that slot before you answer. The new leader's \
-             own client has nothing to do with it."
+            "Read the report that the Promise gave for that slot before you answer. The client \
+             of the new leader does not change that answer."
                 .to_string(),
         ),
         _ => Some(
-            "A slot a Promise described may already be chosen — you cannot tell. Re-propose the \
-             reported value under your ballot; your own command waits for a slot above it."
+            "A slot that a Promise describes is possibly already chosen, and you cannot tell. \
+             Re-propose the reported value under your ballot. Your own command waits for a slot \
+             above it."
                 .to_string(),
         ),
     },
@@ -635,26 +635,26 @@ pub static STEADY_STATE: Level = Level {
     act: 2,
     title: "Steady state",
     briefing: "\
-With a leader in place the protocol collapses to its cheapest possible shape: one \
-round trip per command. The leader hands the command the next free slot, sends \
-`Accept`, counts votes, and the slot is chosen — no `Prepare`, because the ballot \
-it won already covers every slot it will ever use. Lamport's note on this is not \
-that it is fast but that it is *optimal*: Phase 2 alone is the minimum cost any \
-fault-tolerant agreement algorithm can have.
+With a leader in place the protocol reaches its lowest cost: one round trip for \
+each command. The leader gives the command the next free slot. It sends \
+`Accept` and counts the votes, and the slot is chosen. It sends no `Prepare`, \
+because the ballot that it won already covers every slot that it uses. Lamport \
+says that this cost is not only low, it is *optimal*. Phase 2 alone is the \
+smallest cost that any fault-tolerant agreement algorithm can reach.
 
-It does not wait, either. Propose three commands and the leader opens three \
-rounds at once; each decides when its own quorum answers. What the followers do \
-**not** get from that is the news that a slot was decided — the votes go to the \
-leader, and the decision happens there. So the leader piggybacks its commit \
-watermark on the `Heartbeat` it was already sending to hold its position: no \
-extra message, no extra round trip, and a follower learns how far the log is \
-settled as a side effect of being told the leader is alive.
+The leader also does not wait. Propose three commands, and the leader opens \
+three rounds at the same time. Each round decides when its own quorum answers. \
+The followers do **not** learn that a slot is decided, because the votes go to \
+the leader and the decision occurs there. The leader therefore adds its commit \
+watermark to the `Heartbeat` that it already sends to hold its position. That \
+costs no extra message and no extra round trip, and a follower learns how far \
+the log is settled.
 
-Drop the commit messages and watch the followers stay stuck with three accepted \
-values and an empty applied prefix. Then tick the leader once, deliver the beat, \
-and watch all three execute at once. When the whole cluster has caught up, \
-heartbeat delivery stops being your job: it is the first thing the game automates \
-for you, and every later level assumes it.",
+Drop the commit messages. The followers then hold three accepted values and an \
+empty applied prefix. Tick the leader once and deliver the beat. All three \
+commands then execute together. After the whole cluster catches up, the game \
+delivers the heartbeats for you. That automation is the first one, and every \
+later level uses it.",
     field_guide: "stable-leader.html",
     symbols: &[
         "Message::Heartbeat",
@@ -670,13 +670,13 @@ for you, and every later level assumes it.",
     setup: || fresh(3),
     goal: |world| match everyone_applied(world, &["alpha", "bravo", "charlie"]) {
         Ok(()) => GoalStatus::Reached(
-            "Three commands, three round trips, and the followers learned the whole thing from \
-             a watermark riding a beat the leader was sending anyway. Heartbeat delivery is \
-             yours to automate from here on."
+            "Three commands took three round trips. The followers learned the result from a \
+             watermark on a beat that the leader sent anyway. The game now delivers the \
+             heartbeats for you."
                 .to_string(),
         ),
         Err(detail) => GoalStatus::Open(format!(
-            "Stream all three commands and get them executed on every node. {detail}"
+            "Propose all three commands and get them executed on every node. {detail}"
         )),
     },
     // This level asks no question, so there are no mistakes to count: the hint
@@ -684,9 +684,9 @@ for you, and every later level assumes it.",
     // votes it has not been told the fate of.
     hint: |world, mistakes| {
         (mistakes > 1 || holding_undecided(world)).then(|| {
-            "The votes go to the leader, so the decision happens there and the followers are \
-             told nothing. A follower finds out from the commit index on the next beat — tick \
-             the leader, then deliver the beat."
+            "The votes go to the leader, so the decision occurs there and no message tells the \
+             followers. A follower learns the result from the commit index on the next beat. \
+             Tick the leader, then deliver the beat."
                 .to_string()
         })
     },
@@ -725,29 +725,28 @@ pub static THE_PERMANENT_GAP: Level = Level {
     act: 2,
     title: "The permanent gap",
     briefing: "\
-Pipelining has a failure mode that nothing else in the protocol repairs. The \
-leader streams the `Accept`s for slot 0 and slot 1 together; slot 0's reach \
-nobody but the leader itself, slot 1's reach a quorum, and slot 1 is chosen. Then \
-the leader crashes. Its round map was volatile — it dies with the leadership, \
-which is exactly why this level makes you *crash* the leader rather than cut it \
-off — so nobody re-sends slot 0's `Accept`s, ever.
+Pipelining has one failure that no other part of the protocol repairs. The \
+leader sends the `Accept` messages for slot 0 and slot 1 together. The messages \
+for slot 0 reach only the leader itself. The messages for slot 1 reach a \
+quorum, so slot 1 is chosen. The leader then crashes, and its round map is \
+volatile, so the leadership takes the map with it. For that reason this level \
+makes you crash the leader, and no node sends the `Accept` for slot 0 again.
 
 Now count what the next leader can see. Its promise quorum excludes the dead \
-leader, so **no** `Promise` mentions slot 0; and `next_slot`, the first slot it \
-will hand out, is derived from the accepted log, so it steps straight over the \
-hole. Nothing will ever propose slot 0 again — not after a restart either, \
-because a reboot recomputes `next_slot` the same way. And a hole is not a local \
-blemish: every node's contiguous applied prefix stops one below it, cluster-wide \
-and forever. Higher slots keep being chosen and never execute, reads are fenced \
-below the hole, and catch-up cannot help, because every node is stuck at the same \
-place and no peer has anything to replay.
+leader, so **no** `Promise` names slot 0. The first free slot comes from the \
+accepted log, so the next leader passes over the hole. A restart computes the \
+same first free slot, so no node proposes slot 0 again. A hole is not a local \
+fault: the applied prefix of every node stops one slot below it, permanently. \
+Higher slots become chosen but do not execute, the reads stop below the hole, \
+and no peer can replay the missing slot.
 
-So the new leader has a second duty beside re-proposing what it was told: it must \
-fill every slot below its frontier that **no** `Promise` described, with a `Noop` \
-of its own. That is safe for precisely the reason Phase 1 exists. A value already \
-chosen there was accepted by a Phase-2 quorum; that quorum shares a member with \
-this promise quorum; so it would have been reported. Silence from a full quorum \
-is not ignorance — it is a licence.",
+The new leader must re-propose every value that a `Promise` reported. It has a \
+second duty as well: it must fill every slot below its frontier that **no** \
+`Promise` described, with its own `Noop`. That fill is safe for the reason that \
+Phase 1 exists. A Phase-2 quorum accepted any value already chosen at that \
+slot. That quorum shares a member with this promise quorum, so a `Promise` \
+reports the value. Silence from a full quorum is not ignorance; it is \
+permission to fill the slot.",
     field_guide: "stable-leader.html",
     symbols: &[
         "Control::Noop",
@@ -779,8 +778,8 @@ is not ignorance — it is a licence.",
             .find_map(|node| node.replica().chosen_gap())
         {
             return GoalStatus::Open(format!(
-                "Slot {} is chosen and slot {} is not, so the applied prefix is frozen below it. \
-                 Nothing will propose slot {} unless a new leadership does.",
+                "Slot {} is chosen and slot {} is not, so the applied prefix stops below the \
+                 hole. Only a new leadership can propose slot {} again.",
                 highest.0, hole.0, hole.0
             ));
         }
@@ -790,31 +789,32 @@ is not ignorance — it is a licence.",
         let bravo = executed.iter().any(|command| command == "bravo");
         match (filled, alpha && bravo) {
             (true, true) => GoalStatus::Reached(format!(
-                "No hole anywhere, and the client's commands are executed: {}. The Noop is not a \
-                 value anybody wanted — it is the proof that the slot was free, bought by quorum \
-                 intersection.",
+                "No node holds a hole, and the cluster executed the commands of the client: {}. \
+                 No client asked for the Noop. Quorum intersection makes the Noop the proof \
+                 that the slot was free.",
                 executed.join(", ")
             )),
             (true, false) => GoalStatus::Open(
-                "The hole is filled. The command that was lost with the old leader was never \
-                 chosen, though: the client has to ask again."
+                "The Noop filled the hole. The cluster did not choose the command that was lost \
+                 with the old leader, so the client must ask again."
                     .to_string(),
             ),
             (false, _) => GoalStatus::Open(
-                "Get a new leadership to account for every slot below its frontier.".to_string(),
+                "Let a new leadership account for every slot below its frontier.".to_string(),
             ),
         }
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Ask what licenses each answer. Re-proposing needs a value somebody reported; \
-             leaving the slot alone needs somebody who will propose it later."
+            "Ask what permits each answer. A re-proposal needs a value that an acceptor \
+             reported. A skip needs another node that proposes the slot later."
                 .to_string(),
         ),
         _ => Some(
-            "Nobody reported that slot, and a full promise quorum's silence means nothing was \
-             ever chosen there. Fill it with a Noop so the prefix can move past it."
+            "No acceptor reported that slot, and the silence of a full promise quorum shows \
+             that nothing was chosen there. Fill the slot with a Noop, so the prefix can move \
+             past it."
                 .to_string(),
         ),
     },
@@ -854,27 +854,26 @@ pub static WHAT_SURVIVES_A_CRASH: Level = Level {
     act: 2,
     title: "What survives a crash",
     briefing: "\
-A node is two things: a disk and a mind. The mind — the role, the ballot it \
-operates under, the rounds it has in flight, the reads it owes an answer to — is \
-volatile and dies with the process, and that is deliberate: it means a crash is \
-an abdication, and no fence has to be written to make one. The disk is the \
-promise and the accepted records, and it is the only thing the protocol's safety \
-argument ever depended on. Crash a node at any step of a decision and restart it: \
-it comes back a follower who remembers exactly what it swore.
+A node holds two kinds of state: the disk and the volatile state. The volatile \
+state is the role, the ballot, the open rounds and the reads that the node \
+owes. The process loses that state at a crash, so a crash is an abdication and \
+the node writes no fence to make one. The disk holds the promise and the \
+accepted records, and the safety argument of the protocol uses only the disk. \
+Crash a node at any step of a decision, and then restart it. It comes back as a \
+follower, and it holds every promise that it made.
 
-There is one way to break that, and it is not losing a write. It is keeping the \
-wrong one. Here a node has been holding an accepted value from an old ballot and \
-was left out of the new leader's promise quorum, so the cluster went on and chose \
-something else at that slot. When the decision finally reaches it — as a `Commit`, \
-or replayed by a catch-up — its own record contradicts it at a *lower* ballot. \
-Keep that record and the disk is now a lie: after a restart the node reports it as \
-its accepted value, the next election's promise quorum can report it as the \
-highest anybody accepted, and a fresh leader would dutifully re-propose it **over \
-a value that is already chosen**. That is the stale-accept resurrection, and \
-overwriting is not an optimization — it is what makes a restart safe.
+One fault breaks that rule, and it is not a lost write. A node in this level \
+holds an accepted value from an old ballot, and the new leader left it out of \
+the promise quorum. The cluster therefore chose another value at that slot, and \
+the decision reaches the node as a `Commit` or a catch-up. The record of the \
+node disagrees with that decision at a *lower* ballot. If the node keeps that \
+record, a restart reports it as the accepted value, and the next promise quorum \
+can report it as the highest. A new leader then re-proposes it over a chosen \
+value: that fault is the stale-accept resurrection, and the overwrite makes a \
+restart safe.
 
-Play the acceptor's side of that. Crash and restart around every step, and when \
-the contradiction arrives, decide which record the disk keeps.",
+Play the side of the acceptor. Crash and restart the node at every step. When \
+the disagreement arrives, decide which record the disk keeps.",
     field_guide: "restart-safety.html",
     symbols: &[
         "Acceptor::record_accepted",
@@ -905,14 +904,15 @@ the contradiction arrives, decide which record the disk keeps.",
         };
         if let Some(node) = log.promise_regressed() {
             return GoalStatus::Failed(format!(
-                "node {}'s durable promise came back lower than a promise it had already made.",
+                "The durable promise of node {} came back lower than a promise that it \
+                 already made.",
                 node.0
             ));
         }
         let down = crashed(world);
         if let Some(node) = down.first() {
             return GoalStatus::Open(format!(
-                "Restart node {node} and read its disk back — that is the whole question."
+                "Restart node {node} and read its disk back. That is the whole question."
             ));
         }
         let wrong: Vec<u64> = log
@@ -929,28 +929,29 @@ the contradiction arrives, decide which record the disk keeps.",
             .collect();
         if wrong.is_empty() {
             GoalStatus::Reached(
-                "Every disk holds the chosen value at slot 0, every promise came back at least \
-                 as high as it went down, and the stale record that would have been resurrected \
-                 by the next election is gone."
+                "Every disk holds the chosen value at slot 0. Every promise came back at \
+                 least as high as it was before the crash. The stale record is gone, so the \
+                 next election cannot bring it back."
                     .to_string(),
             )
         } else {
             GoalStatus::Open(format!(
-                "Get the chosen value onto every disk at slot 0 — node(s) {wrong:?} still hold \
-                 something else."
+                "Get the chosen value onto every disk at slot 0. Node(s) {wrong:?} still hold \
+                 another value."
             ))
         }
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Ask what the next election's promise quorum would report if this node were in it, \
-             and what a fresh leader would do with that report."
+            "Ask what the next promise quorum reports if this node is a member of it. Then ask \
+             what a new leader does with that report."
                 .to_string(),
         ),
         _ => Some(
-            "The ballot that chose the value is higher than the ballot of the record held here. \
-             The choosing ballot wins: overwrite, or a restart resurrects a value nobody chose."
+            "The ballot that chose the value is higher than the ballot of the record here. The \
+             higher ballot decides, so overwrite the record. If you keep it, a restart brings \
+             back a value that no node chose."
                 .to_string(),
         ),
     },
@@ -1000,29 +1001,27 @@ pub static THE_READ_THAT_LIES: Level = Level {
     act: 2,
     title: "The read that lies",
     briefing: "\
-A write is safe because a quorum voted for it. A read has no quorum — it changes \
-nothing, so there is nothing to vote on — and that is exactly why it is the \
-easiest thing in the system to get wrong. The tempting answer is that the leader \
-just knows: it has the whole log, so let it answer from memory. But leadership is \
-a **belief**, not a fact a node can check locally. Nothing tells a leader it has \
-been replaced. From the inside, \"my followers are quiet\" and \"a newer ballot has \
-been committing without me for a minute\" are the same silence.
+A write is safe because a quorum voted for it. A read changes nothing, so no \
+node votes on it, and a read has no quorum. For that reason a read is easy to \
+get wrong. The simple answer is that the leader holds the whole log and answers \
+from memory. But leadership is a **belief**, and a node cannot check that belief \
+on its own. No message tells a leader that another node replaced it, so a quiet \
+follower and a newer ballot look the same to it.
 
-So a read has to prove leadership at the moment it is asked, and the proof costs \
-no log write at all: capture the watermark the read must observe, broadcast a \
-beat, and wait for a **Phase-2 quorum** to ack *that* beat — not an older one. A \
-quorum of acks to a beat sent after the read began means no other ballot could \
-have been committing behind this node's back, because any quorum that decided \
-something shares a member with this one. Then, once the applied prefix covers the \
-captured watermark, answer.
+A read must therefore prove the leadership at the moment of the question, and \
+the proof needs no log write. Capture the watermark that the read must observe, \
+and send a beat to every node. Wait for a **Phase-2 quorum** to ack *that* beat, \
+not an older one. A quorum of acks to a beat sent after the read started shows \
+that no other ballot decided anything. Any quorum that decided a value shares a \
+member with this quorum. Answer the read after the applied prefix covers the \
+captured watermark.
 
-Here there are five nodes, a leader that has been replaced without noticing, and \
-one follower that has not heard the news either. The old leader will collect \
-exactly one ack — its own vote plus one is two of five — and it will feel like \
-progress. Decide whether that is enough, then ask the real leader the same \
-question and watch the proof complete. The rule the level is checking is the only \
-one that matters to a client: a read never goes behind a write that was already \
-acknowledged.",
+This level has five nodes. Another node replaced the leader, and neither the old \
+leader nor one follower knows that. The old leader collects exactly one ack, so \
+its own vote plus that ack is two of five. Decide whether two of five is enough. \
+Then ask the real leader the same question and look at the complete proof. The \
+level checks one rule: a read must not observe less than a write that the \
+cluster already acknowledged.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "ColocatedNode::read_index",
@@ -1059,8 +1058,8 @@ acknowledged.",
             .find(|(_, index)| index.map(|s| s.0) < acked.map(|s| s.0))
         {
             return GoalStatus::Failed(format!(
-                "A read served by node {} observed {} while a write had already been \
-                 acknowledged at {}. That read lied.",
+                "A read that node {} served observed {}, but the cluster had already \
+                 acknowledged a write at {}. That read gave a wrong answer.",
                 node.0,
                 at(*index),
                 at(acked)
@@ -1069,18 +1068,19 @@ acknowledged.",
         let unserved = reads.iter().filter(|(_, _, served)| !*served).count();
         match (served.len(), unserved) {
             (0, _) => GoalStatus::Open(
-                "Ask for a linearizable read and answer for the leader that has to prove itself."
+                "Ask for a linearizable read. Then answer for the leader that must prove its \
+                 leadership."
                     .to_string(),
             ),
             (_, 0) => GoalStatus::Open(
-                "Ask the deposed leader for a read as well: the interesting answer is the one it \
-                 must not give."
+                "Ask the replaced leader for a read as well. The answer to look at is the \
+                 answer that it must not give."
                     .to_string(),
             ),
             (_, _) => GoalStatus::Reached(format!(
-                "One read was served, at or above the last acknowledged write ({}), and one is \
-                 still waiting at a node that cannot prove it leads — which is the correct thing \
-                 for it to do forever.",
+                "The cluster served one read, at or above the last acknowledged write ({}). \
+                 One read still waits at a node that cannot prove that it leads. That node must \
+                 keep the read open.",
                 at(acked)
             )),
         }
@@ -1088,14 +1088,14 @@ acknowledged.",
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Count the acks against the configuration, not against the nodes that answered. Two \
-             of five is not a quorum of five."
+            "Count the acks against the configuration, not against the nodes that answered. \
+             Two of five is not a quorum of five."
                 .to_string(),
         ),
         _ => Some(
-            "A read is served on a quorum of acks to a beat sent *after* the read began, and \
-             only once the applied prefix covers the watermark it captured. Anything less and \
-             the leader is answering from a belief."
+            "A node serves a read on a quorum of acks to a beat sent *after* the read \
+             started. It must also wait until the applied prefix covers the captured \
+             watermark. With less proof, the leader answers from a belief."
                 .to_string(),
         ),
     },

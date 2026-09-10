@@ -160,12 +160,12 @@ pub(crate) fn phase1_note(system: QuorumSystem, members: usize) -> String {
             system.phase1_quorum_size(members)
         ),
         QuorumSystem::Flexible { q1, q2 } => format!(
-            "A Phase-1 quorum here is {q1} of {members}, because Phase 2 takes only {q2}: the \
-             two must add up to more than {members}, and nothing else is required of either."
+            "A Phase-1 quorum here is {q1} of {members}. Phase 2 takes only {q2}. The two \
+             numbers must add up to more than {members}. Nothing else is required of either."
         ),
         QuorumSystem::Grid { rows, cols } => format!(
-            "A Phase-1 quorum here is one whole row of the {rows} by {cols} grid — those \
-             acceptors, not any {cols} of them."
+            "A Phase-1 quorum here is one whole row of the {rows} by {cols} grid. It must be \
+             those named acceptors, and not any {cols} of them."
         ),
     }
 }
@@ -178,13 +178,13 @@ pub(crate) fn phase2_note(system: QuorumSystem, members: usize) -> String {
             system.phase2_quorum_size(members)
         ),
         QuorumSystem::Flexible { q1, q2 } => format!(
-            "A Phase-2 quorum here is {q2} of {members}. Two of them need not share an acceptor \
-             at all; what safety needs is that every Phase-1 quorum of {q1} meets every one of \
-             them."
+            "A Phase-2 quorum here is {q2} of {members}. Two Phase-2 quorums do not have to \
+             share an acceptor. Safety needs only one thing: every Phase-1 quorum of {q1} meets \
+             every Phase-2 quorum."
         ),
         QuorumSystem::Grid { rows, cols } => format!(
-            "A Phase-2 quorum here is one whole column of the {rows} by {cols} grid — {rows} \
-             named acceptors, and every row meets every column in exactly one of them."
+            "A Phase-2 quorum here is one whole column of the {rows} by {cols} grid. A column \
+             holds {rows} named acceptors. Every row meets every column in exactly one acceptor."
         ),
     }
 }
@@ -273,8 +273,8 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
         Message::Prepare {
             ballot, from_slot, ..
         } => format!(
-            "{node} receives Prepare {} for every slot from {}. Its promise was {p}, and it \
-             holds {} to report.",
+            "{node} receives Prepare {} for every slot from {}. Its promise was {p}. It holds \
+             {} to report.",
             show_ballot(*ballot),
             from_slot.0,
             many(before.record_count(), "accepted record")
@@ -285,8 +285,8 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             accepted,
             ..
         } => format!(
-            "{node} receives a Promise for ballot {} from node {}: it reports the {} it holds \
-             at or above the slot the Prepare asked about.",
+            "{node} receives a Promise for ballot {} from node {}. The Promise reports the {} \
+             it holds at or above the slot the Prepare asked about.",
             show_ballot(*ballot),
             from.0,
             many(accepted.len(), "accepted value")
@@ -309,7 +309,7 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
                 },
             );
             format!(
-                "{node} receives Accept {} for slot {}, carrying {}. Its promise was {p} and it \
+                "{node} receives Accept {} for slot {}, carrying {}. Its promise was {p}. It \
                  holds {held}.",
                 show_ballot(*ballot),
                 slot.0,
@@ -330,9 +330,8 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
                         "Its round for that slot held {} before this one.",
                         many(*votes, "vote")
                     ),
-                    None => {
-                        "It has no round open there, so the vote is counted by nobody.".to_string()
-                    }
+                    None => "It has no open round for that slot, so no tally counts the vote."
+                        .to_string(),
                 }
             };
             format!(
@@ -419,9 +418,9 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             pending,
             ..
         } => format!(
-            "{node} receives a hand-off from node {}: ballot {}, the frontier at slot {}, and \
-             the tail below it — {} already chosen and {} still in flight. Its own promise was \
-             {p}.",
+            "{node} receives a hand-off from node {}. It carries ballot {}, the frontier at slot \
+             {}, and the tail below the frontier: {} already chosen and {} still in flight. Its \
+             own promise was {p}.",
             from.0,
             show_ballot(*ballot),
             next_slot.0,
@@ -429,8 +428,8 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             many(pending.len(), "slot")
         ),
         Message::PreRead { reply_to, ctx } => format!(
-            "{node} is asked one question by node {} for read #{ctx}: what is the highest slot \
-             you have voted in? Answering writes nothing down and moves no promise.",
+            "{node} receives one question from node {} for read #{ctx}: what is the highest slot \
+             you have voted in? An answer writes nothing down and moves no promise.",
             reply_to.0
         ),
         Message::PreReadAck {
@@ -476,8 +475,8 @@ pub(crate) fn describe(
         out.push(say(
             NarrationKind::Crash,
             format!(
-                "{node} stops here, inside the batch: whatever the durability seam let through is \
-                 all that survives."
+                "{node} stops here, inside the batch. Only the part of the batch that the \
+                 durability seam let through survives."
             ),
         ));
     }
@@ -497,8 +496,8 @@ pub(crate) fn describe(
                     NarrationKind::Leader,
                     format!(
                         "{node} takes ballot {b} over from node {}. It runs no Phase 1 of its \
-                         own: node {} already holds the promises for {b}, and it has told {node} \
-                         where the frontier is and what sits below it. That is the saving — a \
+                         own. Node {} already holds the promises for {b}, and it told {node} \
+                         where the frontier is and what sits below it. That is the gain: a \
                          leader change without a round trip.",
                         from.0, from.0
                     ),
@@ -506,8 +505,9 @@ pub(crate) fn describe(
                 LeadershipOrigin::Elected => say(
                     NarrationKind::Leader,
                     format!(
-                        "{node} wins ballot {b}. A promise quorum answered, so no ballot below \
-                         {b} can decide anything any more, and {node} may run Phase 2 alone."
+                        "{node} is the leader at ballot {b}. A promise quorum answered its \
+                         Prepare. No ballot below {b} can decide anything now, and {node} may \
+                         run Phase 2 alone."
                     ),
                 ),
             },
@@ -517,14 +517,14 @@ pub(crate) fn describe(
                     LeadershipOrigin::Handoff { .. } if before.role == Some(NodeRole::Leader) => {
                         format!(
                             "{node} gives up the leadership it was handed. It skipped Phase 1, \
-                             so it never recovered the slots below the frontier it inherited — \
-                             and it has waited long enough for them to arrive by ordinary \
-                             replication. An election does run Phase 1, and that is the fallback."
+                             so it never recovered the slots below the frontier it inherited. It \
+                             waited long enough for those slots to arrive by ordinary \
+                             replication. An election runs Phase 1, and that is the fallback."
                         )
                     }
                     _ => format!(
-                        "{node} falls back to follower. Its rounds are volatile and go with the \
-                         leadership: nothing it had in flight is re-sent by anybody now."
+                        "{node} becomes a follower again. Its rounds are volatile, so they go \
+                         with the leadership. Nobody re-sends what it had in flight."
                     ),
                 },
             ),
@@ -551,8 +551,8 @@ pub(crate) fn describe(
                     show_ballot(after.promised)
                 ),
                 Some(n) => format!(
-                    "{raised}, and reports the {} it accepted — the report a new leader must \
-                     re-propose rather than overwrite.",
+                    "{raised}, and reports the {} it accepted. A new leader must re-propose that \
+                     report. It must not overwrite it.",
                     many(n, "value")
                 ),
                 None => format!("{raised}. The promise is durable before anything leaves."),
@@ -566,8 +566,9 @@ pub(crate) fn describe(
         }
         let text = match before.record(*slot) {
             Some((held_at, held)) => format!(
-                "{node} replaces its record for slot {}: it held {} at {}, and now holds {} at \
-                 {} — the higher ballot wins, which is what makes a restart safe.",
+                "{node} replaces its record for slot {}. It held {} at ballot {}, and it now \
+                 holds {} at ballot {}. The record at the higher ballot replaces the record at \
+                 the lower one, and that rule makes a restart safe.",
                 slot.0,
                 show_command(held),
                 show_ballot(*held_at),
@@ -596,8 +597,8 @@ pub(crate) fn describe(
         let ballot = after.records.get(slot).map_or(after.ballot, |(b, _)| *b);
         let text = if let Some(votes) = before.votes.get(slot) {
             format!(
-                "Slot {} is chosen: {} of the {members} acceptors voted for {} at ballot {}. {} \
-                 That is final — no later ballot can decide it differently.",
+                "Slot {} is chosen. {} of the {members} acceptors voted for {} at ballot {}. {} \
+                 This decision is final. No later ballot can decide this slot differently.",
                 slot.0,
                 votes + 1,
                 show_command(command),
@@ -628,14 +629,14 @@ pub(crate) fn describe(
             .range(from..=after.chosen_index.unwrap_or(from))
             .any(|(slot, _)| before.chosen.contains_key(slot));
         let mut text = format!(
-            "{node} applies {} — its contiguous prefix now ends at {}.",
+            "{node} applies {}. Its contiguous prefix now ends at {}.",
             applied.join(", "),
             at(after.chosen_index)
         );
         if waited {
             text.push_str(
-                " Some of those were chosen a while ago and could not be applied: a state machine \
-                 executes in log order, so a hole in front of them held them back.",
+                " Some of those slots were chosen earlier and could not be applied. A state \
+                 machine executes in log order, so a hole in front of them held them back.",
             );
         }
         out.push(say(NarrationKind::Applied, text));
@@ -648,8 +649,9 @@ pub(crate) fn describe(
         out.push(say(
             NarrationKind::Info,
             format!(
-                "{node} now knows slot {} is chosen while slot {} is not. Its applied prefix is \
-                 frozen below the hole, and no catch-up can help: nobody has slot {} to replay.",
+                "{node} now knows slot {} is chosen while slot {} is not. Its applied prefix \
+                 stops below the hole. No catch-up can help, because nobody holds slot {} to \
+                 replay.",
                 highest.0, hole.0, hole.0
             ),
         ));
@@ -697,8 +699,9 @@ fn describe_sent(
         out.push(say(
             NarrationKind::Election,
             format!(
-                "{node} campaigns at ballot {}: one Prepare to {}, claiming every slot from {} \
-                 at once. Phase 1 asks about no value — it asks what has already been accepted.",
+                "{node} campaigns at ballot {}. It sends one Prepare to {}, and it claims every \
+                 slot from {} at once. Phase 1 asks about no value. It asks what the acceptors \
+                 have already accepted.",
                 show_ballot(ballot),
                 many(peers, "peer"),
                 from_slot.0
@@ -713,7 +716,7 @@ fn describe_sent(
         out.push(say(
             NarrationKind::Nack,
             format!(
-                "{node} refuses ballot {}: it has promised {}, and a promise is the only fence \
+                "{node} refuses ballot {}. It has promised {}, and a promise is the only fence \
                  Paxos has.",
                 show_ballot(ballot),
                 show_ballot(after.promised)
@@ -748,9 +751,9 @@ fn describe_sent(
             out.push(say(
                 NarrationKind::Accept,
                 format!(
-                    "{node} proposes {} for slot {} at ballot {}, to column {column} — {}. The \
-                     column is not on the wire. It is slot {} modulo the number of columns, so \
-                     every node that re-proposes this slot derives the same column.",
+                    "{node} proposes {} for slot {} at ballot {}, to column {column}: {}. The \
+                     column is not on the wire. The column is slot {} modulo the number of \
+                     columns, so every node that re-proposes this slot derives the same column.",
                     show_command(&command),
                     slot.0,
                     show_ballot(ballot),
@@ -765,9 +768,9 @@ fn describe_sent(
             if noop {
                 format!(
                     "{node} proposes a Noop for slot {} at ballot {ballot_text}, to {}. Its \
-                     promise quorum reported nothing there, and quorum intersection turns that \
-                     silence into a licence: anything already chosen would have been reported by \
-                     somebody who promised.",
+                     promise quorum reported nothing for that slot. Quorum intersection makes \
+                     that silence safe to act on: an acceptor that promised would have reported \
+                     any value already chosen there.",
                     slot.0,
                     many(fan_out, "acceptor"),
                     ballot_text = show_ballot(ballot)
@@ -775,7 +778,7 @@ fn describe_sent(
             } else {
                 format!(
                     "{node} proposes {} for slot {} at ballot {}, to {}. No second Phase 1 is \
-                     needed: the ballot it won already covers the whole suffix.",
+                     needed. The ballot it holds already covers the whole log suffix.",
                     show_command(&command),
                     slot.0,
                     show_ballot(ballot),
@@ -796,8 +799,9 @@ fn describe_sent(
         out.push(say(
             NarrationKind::Heartbeat,
             format!(
-                "{node} beats: #{seq} to {}, carrying its commit index. The beat costs nothing \
-                 extra — the commit watermark rides a message it was sending anyway.",
+                "{node} sends beat #{seq} to {}, and the beat carries its commit index. The beat \
+                 costs nothing extra. The commit watermark travels on a message the leader sends \
+                 anyway.",
                 many(peers, "peer")
             ),
         ));
@@ -825,10 +829,10 @@ fn describe_sent(
         out.push(say(
             NarrationKind::Info,
             format!(
-                "{node} asks {} for any slot from {} it may have missed. It is not claiming to \
-                 be behind — it is asking, because a decision reaches a follower only as a \
-                 commit watermark, and a watermark it never received looks exactly like one \
-                 that was never set.",
+                "{node} asks {} for any slot from {} it may have missed. It does not claim to be \
+                 behind. A decision reaches a follower only as a commit watermark. A \
+                 watermark that it did not receive looks the same as a watermark that was never \
+                 set.",
                 many(peers, "peer"),
                 from_slot.0
             ),

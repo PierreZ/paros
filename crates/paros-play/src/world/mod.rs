@@ -599,16 +599,16 @@ impl World {
         self.seams_fired.push((id, seam));
         let text = match seam {
             Seam::BeforeSync => format!(
-                "{} dies before the flush. The batch is gone whole: nothing was written and \
-                 nothing was sent, so its disk is exactly what it was — which is why this seam \
-                 is always safe.",
+                "{} stops before the flush. The whole batch is gone. Nothing was written and \
+                 nothing was sent, so its disk is exactly what it was. That is why this seam is \
+                 always safe.",
                 who(id)
             ),
             Seam::AfterSyncBeforeSend => format!(
-                "{} dies after the flush and before the send. The writes are durable and the \
-                 messages are lost: it now holds a promise (or a vote) that nobody in the \
-                 cluster has ever heard about. That is the safe half of the seam — the \
-                 dangerous half is the other order.",
+                "{} stops after the flush and before the send. The writes are durable and the \
+                 messages are lost. It now holds a promise, or a vote, that no other node has \
+                 heard about. That is the safe half of the seam. The dangerous half is the \
+                 other order.",
                 who(id)
             ),
         };
@@ -895,9 +895,9 @@ impl World {
                 };
                 if acked < began && write.at > read.at {
                     return Err(format!(
-                        "client {}'s read at node {} observed {}, while client {}'s write at {} \
-                         had already been acknowledged. A read never goes behind a write that \
-                         completed before it began.",
+                        "client {}'s read at node {} observed {}. Client {}'s write at {} was \
+                         already acknowledged before that read began. A read must not go behind \
+                         a write that completed before the read began.",
                         read.client,
                         read.node.0,
                         at(read.at),
@@ -914,8 +914,8 @@ impl World {
             for later in &reads {
                 if later.started >= done && later.at < earlier.at {
                     return Err(format!(
-                        "a read at node {} observed {} after a read at node {} had already \
-                         observed {}. A watermark never moves backwards.",
+                        "a read at node {} observed {}. A read at node {} had already observed \
+                         {} before it. A watermark must not move backwards.",
                         later.node.0,
                         at(later.at),
                         earlier.node.0,
@@ -929,8 +929,9 @@ impl World {
             for write in &writes {
                 if write.started > done && write.at <= read.at {
                     return Err(format!(
-                        "client {}'s write landed at {}, at or below the {} a read at node {} \
-                         had already observed — a write issued after a read must land above it.",
+                        "client {}'s write landed at {}. That is at or below {}, which a read at \
+                         node {} had already observed. A write issued after a read must land \
+                         above the watermark of that read.",
                         write.client,
                         at(write.at),
                         at(read.at),
@@ -1046,10 +1047,10 @@ impl World {
         }
         if let LeadershipOrigin::Handoff { from } = node.leadership_origin() {
             return Some(format!(
-                "node {} did not win ballot {} — node {} handed it over. An authority moves \
-                 once: only the node that minted a ballot may pass it on, because a replayed \
-                 hand-off would otherwise install it at a node that had already given it up, \
-                 beside the node exercising it now. Hold an election instead.",
+                "node {} did not create ballot {}; node {} handed it over. An authority moves \
+                 once: only the node that created a ballot may pass it on. A replayed hand-off \
+                 would otherwise install that authority at a node that had already given it up, \
+                 beside the node that exercises it now. Hold an election instead.",
                 id.0,
                 show_ballot(node.ballot()),
                 from.0
@@ -1062,9 +1063,10 @@ impl World {
             || !node.acceptor().faulty().is_empty()
         {
             return Some(format!(
-                "node {} still has work that only a promise quorum can finish: an inherited slot \
-                 to settle, a damaged record to repair, or an application prefix to pull. A \
-                 successor runs no Phase 1, so it could not finish any of it. An election can.",
+                "node {} still has work that only a promise quorum can finish. It must settle \
+                 an inherited slot, repair a damaged record, or complete an application prefix. \
+                 A successor runs no Phase 1, so it cannot finish that work. An election can \
+                 finish it.",
                 id.0
             ));
         }
@@ -1076,8 +1078,8 @@ impl World {
         if tail > u64::try_from(HANDOFF_BATCH).unwrap_or(u64::MAX) {
             return Some(format!(
                 "node {}'s tail is {tail} slots long, and a hand-off carries at most {}. The \
-                 successor must be told about every slot below the frontier, or it would never \
-                 propose the ones it was not told about.",
+                 successor must learn every slot below the frontier. A slot it does not learn \
+                 about is a slot nobody proposes again.",
                 id.0, HANDOFF_BATCH
             ));
         }
@@ -1163,8 +1165,8 @@ impl World {
                 NarrationKind::Info,
                 format!(
                     "{summary} reaches {}, which is not running, so it is discarded. A message \
-                     to a machine that is not there is simply lost — that is the whole of this \
-                     failure model.",
+                     to a machine that is not there is lost. That is the complete failure model \
+                     here.",
                     who(to)
                 ),
             );
@@ -1206,8 +1208,9 @@ impl World {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "{summary} is lost. There is no partition object in this game: a partition is \
-                 you not delivering, and the protocol may not assume the difference."
+                "{summary} is lost. This game has no partition object. A partition is you not \
+                 delivering a message. The protocol must treat a lost message and a partition \
+                 the same way."
             ),
         );
         Ok(())
@@ -1259,14 +1262,14 @@ impl World {
             match to {
                 None => format!(
                     "A second copy of {summary} is on the wire. Every rule in the protocol is \
-                     stated so that a message arriving twice changes nothing the first arrival \
-                     did not."
+                     stated so that a second copy changes nothing. The first copy already did \
+                     all the work."
                 ),
                 Some(_) => format!(
                     "A copy of {summary} is on the wire, addressed to {} instead. Networks \
-                     misroute messages, and the protocol answers for it: every guard asks who a \
-                     message is *from* and what the configuration says about them. No guard \
-                     asks what the transport did with it.",
+                     misroute messages, and the protocol answers for that. Every guard asks who \
+                     a message is *from*, and what the configuration says about that sender. No \
+                     guard asks what the transport did with the message.",
                     name(misrouted)
                 ),
             },
@@ -1381,9 +1384,9 @@ impl World {
         self.narrate(
             NarrationKind::Election,
             format!(
-                "{}'s election timeout fires: it has waited long enough without hearing from a \
-                 leader. Nothing about that is a safety decision — a timeout only ever costs a \
-                 round.",
+                "{}'s election timeout fires. It waited long enough without hearing from a \
+                 leader. A timeout is not a safety decision. A timeout costs one round and \
+                 nothing more.",
                 who(id)
             ),
         );
@@ -1428,10 +1431,10 @@ impl World {
         let index = self.require_live(id)?;
         let disk = &self.disks[index];
         let text = format!(
-            "{} crashes. Its disk keeps promise {} and {}; its role, its open rounds, its read \
-             rounds and its election timer are gone. Leadership in paros is entirely volatile, \
-             so a crash *is* an abdication and needs no durable fence — and the Phase-2 rounds \
-             that die with it are the ones nobody will ever re-send.",
+            "{} crashes. Its disk keeps promise {} and {}. Its role, its open rounds, its read \
+             rounds and its election timer are gone. Leadership is entirely volatile here, so a \
+             crash *is* an abdication and needs no durable fence. Nobody re-sends the Phase-2 \
+             rounds that were lost with it.",
             who(id),
             show_ballot(disk.hard_state().max_promised_ballot),
             many(disk.records().len(), "accepted record")
@@ -1468,14 +1471,14 @@ impl World {
         self.armed_seams[index] = Some(seam);
         let text = match seam {
             Seam::BeforeSync => format!(
-                "{} is armed to die before its next batch is durable: nothing will be written and \
-                 nothing will be sent, so the disk will be exactly what it is now.",
+                "{} is armed to stop before its next batch is durable. Nothing will be written \
+                 and nothing will be sent. The disk will be exactly what it is now.",
                 who(id)
             ),
             Seam::AfterSyncBeforeSend => format!(
-                "{} is armed to die after its next batch is durable but before it is sent: the \
-                 writes will survive and the messages will not. That is how a promise nobody \
-                 ever heard about ends up on a disk.",
+                "{} is armed to stop after its next batch is durable, and before it is sent. \
+                 The writes will survive and the messages will not. That is how a disk holds a \
+                 promise no other node has heard about.",
                 who(id)
             ),
         };
@@ -1530,8 +1533,9 @@ impl World {
         self.armed_seams[index] = None;
         let booted = self.nodes[index].as_ref().expect("just installed");
         let text = format!(
-            "{} restarts from its disk: promise {}, {}, applied prefix ending at {}. It boots as \
-             a follower — the disk carries the promise and the log, never the leadership.",
+            "{} restarts from its disk. It reads back promise {}, {}, and an applied prefix that \
+             ends at {}. It boots as a follower. The disk carries the promise and the log, and \
+             it does not carry the leadership.",
             who(id),
             show_ballot(booted.acceptor().promised()),
             many(booted.acceptor().records().len(), "accepted record"),
@@ -1579,8 +1583,9 @@ impl World {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "{} re-sends the Accepts it is still waiting on. Re-sending is always safe and \
-                 never necessary: an acceptor that already voted answers the same way twice.",
+                "{} re-sends the Accepts it is still waiting for. A re-send is always safe, and \
+                 it is never required. An acceptor that already voted answers the same way \
+                 twice.",
                 who(id)
             ),
         );
@@ -1680,7 +1685,7 @@ impl World {
                     ActionErrorCode::NotLeader,
                     match hint {
                         Some(leader) => format!(
-                            "node {} is not the leader; the client should ask node {}",
+                            "node {} is not the leader; the client must ask node {}",
                             id.0, leader.0
                         ),
                         None => format!(
@@ -1715,17 +1720,17 @@ impl World {
                 match (admitted, fresh) {
                     (None, _) => "It is not running, so nothing happens.".to_string(),
                     (Some(slot), true) => format!(
-                        "The leader hands it the next free slot, {}, and goes straight to Phase \
-                         2 — one round trip, because the ballot it won already covers the whole \
-                         suffix.",
+                        "The leader gives it the next free slot, {}, and goes directly to Phase \
+                         2. That costs one round trip, because the ballot the leader holds \
+                         already covers the whole log suffix.",
                         slot.0
                     ),
                     // `Duplicate` and `Chosen`: no new slot, no new round. The
                     // narration must not claim one was opened.
                     (Some(slot), false) => format!(
-                        "The leader recognises this command: it is already at slot {}, so \
-                         nothing new is proposed. At-most-once execution is a property of the \
-                         log, not of the network.",
+                        "The leader recognises this command. It is already at slot {}, so the \
+                         leader proposes nothing new. At-most-once execution is a property of \
+                         the log, and not of the network.",
                         slot.0
                     ),
                 }
@@ -1767,7 +1772,7 @@ impl World {
         {
             return Err(ActionError::new(
                 ActionErrorCode::UnknownParty,
-                format!("client {client} never sent a write with sequence number {seq}"),
+                format!("client {client} did not send a write with sequence number {seq}"),
             ));
         }
         if let Some(prompt) = self.ack_write_prompt(id, index, ClientId(client), ClientSeq(seq)) {
@@ -1830,23 +1835,23 @@ impl World {
         });
         let text = match result {
             Some(ProposeResult::Chosen(slot)) => format!(
-                "{} answers immediately: write #{seq} applied at slot {}. The ledger the \
-                 contiguous walk writes is the only thing that licenses that answer — an ack \
-                 names a slot this node has really executed.",
+                "{} answers at once: it applied write #{seq} at slot {}. The contiguous walk \
+                 writes a ledger, and that ledger is the only thing that permits this answer. \
+                 An ack names a slot this node has really executed.",
                 who(id),
                 slot.0
             ),
             Some(ProposeResult::Duplicate(slot)) => format!(
-                "{} holds write #{seq} in flight at slot {}: chosen, perhaps, but not yet \
-                 applied here. The client waits — and it waits on the *same* slot, which is why \
-                 the command is never executed twice.",
+                "{} holds write #{seq} in flight at slot {}. That slot may be chosen already, \
+                 but this node has not applied it yet. The client waits, and it waits on the \
+                 *same* slot. That is why the command is not executed twice.",
                 who(id),
                 slot.0
             ),
             Some(ProposeResult::Accepted(slot)) => format!(
-                "{} has never seen write #{seq}: it takes the next free slot, {}. Neither dedup \
-                 table knew the identity, so this really is a first attempt as far as the log is \
-                 concerned.",
+                "{} has not seen write #{seq} before, so it takes the next free slot, {}. \
+                 Neither at-most-once table held this identity. For the log, this really is a \
+                 first attempt.",
                 who(id),
                 slot.0
             ),
@@ -1938,18 +1943,19 @@ impl World {
             match (accepted, covered) {
                 (true, Some(point)) => format!(
                     "A client asks {} to drop everything up to slot {up_to}. A quorum holds a \
-                     decided snapshot at slot {}, so the leader proposes a Truncate — through \
-                     ordinary consensus, into the next free slot, exactly like a client value. \
-                     Every node will drop its prefix when it *applies* that slot.",
+                     decided snapshot at slot {}, so the leader proposes a Truncate. The \
+                     Truncate goes through ordinary consensus, into the next free slot, exactly \
+                     like a client value. Every node drops its prefix when it *applies* that \
+                     slot.",
                     who(id),
                     point.0
                 ),
                 (_, None) => format!(
                     "A client asks {} to drop everything up to slot {up_to}, and the leader \
-                     refuses. No quorum holds a decided snapshot covering that prefix, and past \
-                     a floor the entries are gone everywhere — the snapshot is the only thing \
-                     left to rescue a node that was away. It seeds a snapshot point instead; ask \
-                     again once that is decided.",
+                     refuses. No quorum holds a decided snapshot that covers that prefix. Below \
+                     a floor the entries are gone on every node, and the snapshot is the only \
+                     way to recover a node that was away. The leader seeds a snapshot point \
+                     instead. Ask again once that point is decided.",
                     who(id)
                 ),
                 (false, Some(point)) => format!(
@@ -2088,9 +2094,9 @@ impl World {
         let opening = say(
             NarrationKind::Read,
             format!(
-                "Client {client} asks {} for a linearizable read. The read captures {} and asks \
-                 for nothing to be written: what it needs is a fresh proof that {} still leads, \
-                 and a beat's acks are that proof.",
+                "Client {client} asks {} for a linearizable read. The read captures {}, and it \
+                 writes nothing. It needs fresh proof that {} still leads, and the acks of one \
+                 beat are that proof.",
                 who(id),
                 captured.map_or_else(
                     || "the empty prefix".to_string(),
@@ -2163,7 +2169,7 @@ impl World {
             format!(
                 "Client {client} asks {} for a read, and {} does not ask the leader. It asks \
                  {row} one question: what is the highest slot you have voted in? The largest of \
-                 those answers is the index this read must reach before it may be answered.",
+                 those answers is the index this read must reach before it is answered.",
                 who(id),
                 who(id)
             ),
@@ -2235,11 +2241,11 @@ impl World {
         let opening = say(
             NarrationKind::Election,
             format!(
-                "{} hands ballot {} to {} and stops leading inside the same call, before the \
-                 message exists. It sends the frontier — slot {} is the next free slot — and the \
-                 tail below it: {} already chosen, {} still in flight. The two exactly cover the \
-                 range. That is what lets the successor skip Phase 1 and still know it has been \
-                 told about every slot.",
+                "{} hands ballot {} to {}, and it stops leading inside the same call, before the \
+                 message exists. It sends the frontier: slot {} is the next free slot. It also \
+                 sends the tail below the frontier: {} already chosen, {} still in flight. The \
+                 two parts cover the whole range. The successor can therefore skip Phase 1 and \
+                 still know every slot below the frontier.",
                 who(id),
                 show_ballot(receipt.ballot),
                 who(to),
@@ -2277,10 +2283,10 @@ impl World {
         self.narrate(
             NarrationKind::Crash,
             format!(
-                "{}'s record for slot {} rots. The value is gone and the identity survives: the \
-                 disk still knows it voted there, at ballot {}. At its next boot it reports that \
-                 slot as damaged. It does not report \"nothing accepted here\", because that \
-                 answer tells a candidate it may decide something else at a slot a quorum may \
+                "{}'s record for slot {} is damaged. The value is gone and the identity survives: \
+                 the disk still knows it voted there, at ballot {}. At its next boot it reports \
+                 that slot as damaged. It must not report \"nothing accepted here\". That answer \
+                 would tell a candidate it may decide another value at a slot a quorum may \
                  already have decided.",
                 who(id),
                 slot.0,
@@ -2308,8 +2314,8 @@ impl World {
             NarrationKind::Crash,
             format!(
                 "{}'s disk is erased. It had promised {}, and that promise is gone from the one \
-                 place it was written down. Nothing in the cluster returns it: no peer knows what \
-                 this node has promised, and a snapshot restores the log and not a promise.",
+                 place it was written down. Nothing in the cluster returns it. No peer knows \
+                 what this node promised, and a snapshot restores the log and not a promise.",
                 who(id),
                 show_ballot(promised)
             ),
@@ -2413,17 +2419,17 @@ impl World {
         let text = if leaderless {
             format!(
                 "The read at ctx {} is served at {at}, and no leader was asked. A Phase-1 quorum \
-                 reported the highest slot each of them had voted in, every write acknowledged \
-                 before this read began was chosen by a Phase-2 quorum, and the two always share \
-                 an acceptor — so the maximum they reported is at or above that write. This \
-                 node has now applied that far.",
+                 reported the highest slot each member had voted in. A Phase-2 quorum chose \
+                 every write acknowledged before this read began. A Phase-1 quorum and a Phase-2 \
+                 quorum always share an acceptor, so the maximum they reported is at or above \
+                 that write. This node has now applied that far.",
                 state.ctx
             )
         } else {
             format!(
-                "The read at ctx {} is served at {at}. A quorum acked a beat sent after the read \
-                 began, so no other node could have been committing behind this one's back, and \
-                 the applied prefix covers the watermark the read captured.",
+                "The read at ctx {} is served at {at}. A quorum acked a beat that was sent after \
+                 the read began, so no other node was deciding slots at the same time. The \
+                 applied prefix covers the watermark the read captured.",
                 state.ctx
             )
         };
@@ -2438,8 +2444,9 @@ impl World {
         let clock = self.clock;
         let text = if timeout == NO_CHECK_QUORUM {
             format!(
-                "{} ticks (logical time {clock}). Its election clock is parked while you deliver \
-                 heartbeats by hand, so CheckQuorum will not depose it between your moves.",
+                "{} ticks (logical time {clock}). Its election clock is held while you deliver \
+                 heartbeats by hand. CheckQuorum therefore does not depose it between your \
+                 moves.",
                 who(id)
             )
         } else {
@@ -2529,13 +2536,12 @@ impl World {
         self.narrate(
             NarrationKind::Restart,
             format!(
-                "{} is refused. Its disk is empty and this identity was provisioned once, so \
-                 what is missing is a promise it already made — it last promised {}. A node that \
-                 booted here with an empty promise would answer a ballot below {} that it had \
-                 already sworn to refuse, and a quorum built behind that older ballot could \
-                 choose a second value for a slot. What heals the cluster is a change of the \
-                 acceptor set, decided by the cluster: the survivors go on without this \
-                 identity.",
+                "{} is refused. Its disk is empty, and the operator provisioned this identity \
+                 once, so a promise it already made is missing. It last promised {}. A node that \
+                 booted here with an empty promise would answer a ballot below {}, and it had \
+                 already promised to refuse that ballot. A quorum behind that older ballot could \
+                 then choose a second value for one slot. The cluster heals by a change of the \
+                 acceptor set: the surviving nodes continue without this identity.",
                 who(id),
                 show_ballot(promised),
                 show_ballot(promised)
@@ -2544,8 +2550,8 @@ impl World {
         ActionError::new(
             ActionErrorCode::Amnesia,
             format!(
-                "node {} lost its disk: it may never rejoin, because a promise cannot be \
-                 restored from anywhere.",
+                "node {} lost its disk. It must not rejoin, because nothing can restore a \
+                 promise.",
                 id.0
             ),
         )
