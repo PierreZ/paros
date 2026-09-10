@@ -13,9 +13,14 @@ slot: number,
  */
 ballot: string | null, 
 /**
- * The command's text.
+ * The command's plain text (see [`value_text`]) — no Rust quoting.
  */
 value: string, 
+/**
+ * Which control command it is (`noop`, `truncate`, `snap`), or `None` for
+ * an opaque client entry.
+ */
+control: string | null, 
 /**
  * Whether this node knows the slot is chosen.
  */

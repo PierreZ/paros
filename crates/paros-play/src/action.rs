@@ -58,8 +58,8 @@ pub enum Phase {
 /// The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
 /// (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
 /// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
-/// (`Propose`, `ReadIndex`), and — when a level makes a role manual — the role
-/// itself (`Answer`).
+/// (`Propose`, `Retry`, `ReadIndex`, `Compact`), and — when a level makes a
+/// role manual — the role itself (`Answer`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -130,6 +130,28 @@ pub enum Action {
     ReadIndex {
         /// The node the client asks (must be the leader).
         node: u64,
+        /// Which client is reading. Omitted (or `null`) means the level's
+        /// first client, which is what every single-client level wants and
+        /// what the field meant before there were two of them.
+        #[serde(default)]
+        client: Option<u64>,
+    },
+    /// A client asks `node` again for a write it already sent — same client,
+    /// same sequence number, same bytes.
+    Retry {
+        /// The node the client asks (must be the leader).
+        node: u64,
+        /// The client's id.
+        client: u64,
+        /// The sequence number of the write being retried.
+        seq: u64,
+    },
+    /// A client asks `node` to drop the log prefix up to `up_to`.
+    Compact {
+        /// The node the client asks (must be the leader).
+        node: u64,
+        /// The last slot the client permits dropping, inclusive.
+        up_to: u64,
     },
     /// Re-broadcast a leader's still-pending `Accept`s.
     ResendPending {
@@ -200,6 +222,10 @@ pub enum ActionKind {
     SetElectionTimeout,
     /// [`Action::ReadIndex`].
     ReadIndex,
+    /// [`Action::Retry`].
+    Retry,
+    /// [`Action::Compact`].
+    Compact,
     /// [`Action::ResendPending`].
     ResendPending,
     /// [`Action::StepDown`].
@@ -231,6 +257,8 @@ impl Action {
             Action::StartElection { .. } => ActionKind::StartElection,
             Action::SetElectionTimeout { .. } => ActionKind::SetElectionTimeout,
             Action::ReadIndex { .. } => ActionKind::ReadIndex,
+            Action::Retry { .. } => ActionKind::Retry,
+            Action::Compact { .. } => ActionKind::Compact,
             Action::ResendPending { .. } => ActionKind::ResendPending,
             Action::StepDown { .. } => ActionKind::StepDown,
             Action::OpenBallot { .. } => ActionKind::OpenBallot,
@@ -263,7 +291,16 @@ impl Action {
             Action::SetElectionTimeout { node, ticks } => {
                 format!("node {node} election timeout = {ticks}")
             }
-            Action::ReadIndex { node } => format!("read at node {node}"),
+            Action::ReadIndex { node, client } => match client {
+                Some(client) => format!("client {client} reads at node {node}"),
+                None => format!("read at node {node}"),
+            },
+            Action::Retry { node, client, seq } => {
+                format!("client {client} retries write #{seq} at node {node}")
+            }
+            Action::Compact { node, up_to } => {
+                format!("compact node {node} up to slot {up_to}")
+            }
             Action::ResendPending { node } => format!("node {node} re-sends its accepts"),
             Action::StepDown { node } => format!("node {node} resigns"),
             Action::OpenBallot { proposer, value } => {

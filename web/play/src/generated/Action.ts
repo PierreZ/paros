@@ -9,8 +9,8 @@ import type { Seam } from "./Seam";
  * The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
  * (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
  * (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
- * (`Propose`, `ReadIndex`), and — when a level makes a role manual — the role
- * itself (`Answer`).
+ * (`Propose`, `Retry`, `ReadIndex`, `Compact`), and — when a level makes a
+ * role manual — the role itself (`Answer`).
  */
 export type Action = { "kind": "deliver", 
 /**
@@ -72,7 +72,33 @@ ticks: number, } | { "kind": "read_index",
 /**
  * The node the client asks (must be the leader).
  */
-node: number, } | { "kind": "resend_pending", 
+node: number, 
+/**
+ * Which client is reading. Omitted (or `null`) means the level's
+ * first client, which is what every single-client level wants and
+ * what the field meant before there were two of them.
+ */
+client: number | null, } | { "kind": "retry", 
+/**
+ * The node the client asks (must be the leader).
+ */
+node: number, 
+/**
+ * The client's id.
+ */
+client: number, 
+/**
+ * The sequence number of the write being retried.
+ */
+seq: number, } | { "kind": "compact", 
+/**
+ * The node the client asks (must be the leader).
+ */
+node: number, 
+/**
+ * The last slot the client permits dropping, inclusive.
+ */
+up_to: number, } | { "kind": "resend_pending", 
 /**
  * The node's id.
  */

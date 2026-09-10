@@ -7,21 +7,8 @@ use std::collections::BTreeSet;
 use paros_play::action::{Action, ActionKind};
 use paros_play::auto::AutomationFlag;
 use paros_play::level::{Level, levels};
-use paros_play::prompt::PromptKind;
+use paros_play::prompt::{ALL_PROMPTS, PromptKind};
 use paros_play::{Game, GoalStatus};
-
-/// Every prompt kind, so a level's pinned-off flags can be turned into the
-/// questions it promises to ask.
-const ALL_PROMPTS: &[PromptKind] = &[
-    PromptKind::AcceptorPrepare,
-    PromptKind::AcceptorAccept,
-    PromptKind::ProposerValue,
-    PromptKind::LeaderRecovery,
-    PromptKind::ReplicaApply,
-    PromptKind::PersistOrder,
-    PromptKind::CommitOverwrite,
-    PromptKind::ReadServe,
-];
 
 /// The questions a level pins manual — the ones it exists to teach. A level may
 /// pin a flag that governs no prompt (heartbeat delivery, say); that promises
@@ -279,4 +266,72 @@ fn an_action_a_level_does_not_offer_is_refused() {
 fn the_level_map_lists_every_level() {
     let summaries = Game::levels();
     assert_eq!(summaries.len(), levels().len());
+}
+
+#[test]
+fn every_act_is_registered_in_play_order() {
+    let acts: Vec<u8> = levels().into_iter().map(|level| level.act).collect();
+    assert!(
+        acts.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the level map is in act order: {acts:?}"
+    );
+    for act in 1..=3u8 {
+        assert!(acts.contains(&act), "act {act} has levels registered");
+    }
+}
+
+#[test]
+fn every_field_guide_link_is_a_bare_book_filename() {
+    // The frontend prefixes `../`: the game is served from `/play/` beside the
+    // book. A path here would resolve somewhere else entirely.
+    for level in levels() {
+        let link = level.field_guide;
+        assert!(
+            std::path::Path::new(link)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("html")),
+            "{}: the field guide {link:?} is not a book page",
+            level.id
+        );
+        assert!(
+            !link.contains('/') && !link.starts_with('.'),
+            "{}: the field guide {link:?} must be a bare filename",
+            level.id
+        );
+    }
+}
+
+#[test]
+fn every_level_briefs_the_mechanism_before_the_task() {
+    // Two or three paragraphs of Paxos (plus at most a short list), not a
+    // sentence of instructions: the briefing is what the book no longer
+    // carries.
+    for level in levels() {
+        let blocks = level.briefing.split("\n\n").count();
+        assert!(
+            (2..=6).contains(&blocks),
+            "{}: the briefing has {blocks} block(s); a mechanism briefing is two or three \
+             paragraphs, plus at most a short list",
+            level.id
+        );
+        assert!(
+            !level.symbols.is_empty(),
+            "{}: the level names the symbols it exercises",
+            level.id
+        );
+    }
+}
+
+#[test]
+fn a_levels_unlocks_are_flags_it_pins_manual() {
+    // A level rewards the decision it made you take by hand, and nothing else.
+    for level in levels() {
+        for flag in level.unlocks {
+            assert!(
+                level.pinned_off.contains(flag),
+                "{}: it unlocks {flag:?} without ever making it manual",
+                level.id
+            );
+        }
+    }
 }

@@ -109,6 +109,9 @@ pub struct DecreeWorld {
     prompt: Option<Prompt>,
     paused: Option<Paused>,
     next_prompt_id: u64,
+    /// A decision that contradicted one this world already held — two values
+    /// for one slot. See [`DecreeWorld::violation`].
+    violation: Option<String>,
     /// What the action in progress has done so far, in Paxos.
     narration: Vec<NarrationEvent>,
 }
@@ -203,6 +206,7 @@ impl DecreeWorld {
             prompt: None,
             paused: None,
             next_prompt_id: 1,
+            violation: None,
             narration: Vec::new(),
         }
     }
@@ -256,6 +260,24 @@ impl DecreeWorld {
     #[must_use]
     pub fn completed_phase1(&self) -> &[CompletedPhase1] {
         &self.completed
+    }
+
+    /// The one thing this world must never be able to do: hold two different
+    /// values for [`DECREE`]. `None` is the invariant holding.
+    ///
+    /// The branch that sets it is a `Commit` at or below a record this
+    /// acceptor already holds, carrying a *different* command. It is
+    /// unreachable through the protocol — one value is chosen, and every
+    /// later ballot's P2c re-proposes exactly it, so a duplicate or replayed
+    /// `Commit` always carries the same command — and it used to be a silent
+    /// `return`, which is the worst possible answer: the game would quietly
+    /// swallow the very outcome it exists to say is impossible. It is
+    /// surfaced instead (a `violation` narration and a failed goal), and the
+    /// core is still never handed the contradiction, whose own agreement
+    /// assert would abort the wasm module with no stack.
+    #[must_use]
+    pub fn violation(&self) -> Option<&str> {
+        self.violation.as_deref()
     }
 
     /// What acceptor `id` has promised and accepted.
@@ -528,7 +550,7 @@ impl DecreeWorld {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "That is what `paros-core` does here, so node {node} really does it: {}",
+                "That is what the protocol does here, so node {node} really does it: {}",
                 crate::prompt::confirmation(kind)
             ),
         );
@@ -695,9 +717,9 @@ impl DecreeWorld {
             _ => (
                 NarrationKind::Accept,
                 format!(
-                    "{} votes for {} at ballot {} — its promise was {}, and the test for a vote \
-                     is `>=`, not `>`. It raises its promise and writes the record down before \
-                     the Accepted reports it.",
+                    "{} votes for {} at ballot {} — its promise was {}, and nothing at or above \
+                     the promise is refused. It re-affirms its promise and writes the record \
+                     down before the Accepted reports it.",
                     actor(to),
                     show_command(command),
                     show_ballot(ballot),
@@ -713,17 +735,36 @@ impl DecreeWorld {
         let Some(index) = self.acceptor_index(to) else {
             return;
         };
-        let acceptor = &mut self.acceptors[index];
-        // A replayed or duplicated `Commit` below a record this acceptor
-        // already holds is refused here rather than handed to the role, whose
-        // own agreement assert would abort: the game validates before it calls
-        // the core, always.
-        if let Some((held_at, held)) = acceptor.role.record(DECREE)
-            && ballot <= *held_at
-            && held != command
-        {
+        // A `Commit` at or below a record this acceptor already holds, carrying
+        // a *different* command, is two values for one slot. It is not handed
+        // to the core — whose own agreement assert would abort the module with
+        // no stack, and the game always validates before it calls the core —
+        // but it is not swallowed either: it is the one outcome this whole
+        // game exists to say cannot happen, so it is said out loud. See
+        // `DecreeWorld::violation`.
+        let contradiction = self.acceptors[index]
+            .role
+            .record(DECREE)
+            .filter(|(held_at, held)| ballot <= *held_at && *held != *command)
+            .map(|(held_at, held)| (*held_at, held.clone()));
+        if let Some((held_at, held)) = contradiction {
+            let detail = format!(
+                "{} was told slot {} holds {} at ballot {}, while it already holds {} at ballot \
+                 {}. That is two values for one slot — the one thing Paxos promises can never \
+                 happen. Nothing in this game can produce it through the protocol, so if you are \
+                 reading this, the game is wrong, not Paxos.",
+                actor(to),
+                DECREE.0,
+                show_command(command),
+                show_ballot(ballot),
+                show_command(&held),
+                show_ballot(held_at)
+            );
+            self.violation = Some(detail.clone());
+            self.narrate(NarrationKind::Violation, detail);
             return;
         }
+        let acceptor = &mut self.acceptors[index];
         let promise = acceptor.role.promised().max(ballot);
         acceptor.role.set_promise(promise, &mut acceptor.disk);
         acceptor

@@ -4,4 +4,4 @@
  * The payload-free discriminant of an [`Action`]: what a level's
  * `allowed_actions` lists and what the action log renders as a family.
  */
-export type ActionKind = "deliver" | "drop" | "duplicate" | "tick" | "tick_all" | "crash" | "crash_at" | "restart" | "propose" | "start_election" | "set_election_timeout" | "read_index" | "resend_pending" | "step_down" | "open_ballot" | "set_reach" | "answer" | "set_automation";
+export type ActionKind = "deliver" | "drop" | "duplicate" | "tick" | "tick_all" | "crash" | "crash_at" | "restart" | "propose" | "start_election" | "set_election_timeout" | "read_index" | "retry" | "compact" | "resend_pending" | "step_down" | "open_ballot" | "set_reach" | "answer" | "set_automation";

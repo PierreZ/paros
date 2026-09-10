@@ -11,6 +11,23 @@
 //! appends `Ready::committed` to it in slot order, exactly where a real driver
 //! would hand each command to its state machine. Nothing in the engine reads
 //! the bytes.
+//!
+//! # Snapshot custody
+//!
+//! Act III adds the other half of the storage seam: the **opaque application
+//! snapshot**. [`Disk::snapshot`] serialises the applied log — that is this
+//! game's whole application, so its state at a boundary *is* the list of
+//! commands it executed — and [`Disk::record_snapshot`] retains it at a
+//! decided [`Control::Snap`](paros_core::Control::Snap) point, which is what
+//! a `Truncate` is later coupled to. A peer serving a below-floor node reads
+//! those bytes back through [`Disk::snapshot`] and the receiver installs them
+//! through [`WriteOp::InstallSnapshot`].
+//!
+//! The bytes are opaque *to paros*, not to the game: the game **is** the
+//! application here, so it is the one party entitled to read them back. That
+//! is exactly the split the doctrine asks for — the engine's driver half ships
+//! and stores the blob without looking inside, and only the apply side, which
+//! owns the state machine, decodes it.
 
 use std::collections::BTreeMap;
 
@@ -28,9 +45,9 @@ pub struct Disk {
     first_slot: Slot,
     sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
     applied: Vec<(Slot, Command)>,
-    /// The retained decided snapshot point, if any. Act III fills it through
-    /// `Control::Snap`; today only [`WriteOp::InstallSnapshot`] writes it, and
-    /// nothing reads the bytes.
+    /// The retained decided snapshot point and its opaque bytes. Written when
+    /// a decided [`Control::Snap`](paros_core::Control::Snap) is applied
+    /// ([`Disk::record_snapshot`]) and when a peer's snapshot is installed.
     snapshot: Option<(Slot, Value)>,
 }
 
@@ -108,6 +125,32 @@ impl Disk {
         self.snapshot.as_ref().map(|(at, _)| *at)
     }
 
+    /// The highest slot the application has executed — the boundary any
+    /// snapshot this disk serves describes.
+    #[must_use]
+    pub fn applied_slot(&self) -> Option<Slot> {
+        self.applied.last().map(|(slot, _)| *slot)
+    }
+
+    /// The **opaque application snapshot** at the current applied prefix: this
+    /// game's application is the applied log, so its state is that list.
+    ///
+    /// The bytes travel through `paros-core` and the wire without anything
+    /// looking inside — only [`Disk::apply`]'s install arm, which is the
+    /// application side of the seam, decodes them again.
+    #[must_use]
+    pub fn snapshot(&self) -> Value {
+        Value(serde_json::to_vec(&self.applied).unwrap_or_default())
+    }
+
+    /// Retain the snapshot at a decided
+    /// [`Control::Snap`](paros_core::Control::Snap) point — the driver-side
+    /// half of `NodeStorage::record_snapshot`, taken at exactly the instant of
+    /// the contiguous walk that applied the marker.
+    pub fn record_snapshot(&mut self, at: Slot) {
+        self.snapshot = Some((at, self.snapshot()));
+    }
+
     /// Apply one durable write, in the order the batch surfaced it.
     ///
     /// The world hands `Truncate` in *after* the application apply below, for
@@ -147,17 +190,29 @@ impl Disk {
                 self.first_slot = self.first_slot.max(Slot(chosen_index.0 + 1));
                 self.records.retain(|slot, _| *slot >= self.first_slot);
                 self.snapshot = Some((*chosen_index, snapshot.clone()));
-                // The application state the snapshot folds is opaque; what the
-                // game can show is that everything up to the boundary is
-                // covered, so the apply log is reset to it.
-                self.applied.clear();
+                // The application side of the seam, and the only place the
+                // bytes are read: the game's application state *is* the
+                // applied log, so installing the snapshot means adopting the
+                // serving peer's list wholesale. A blob the game cannot decode
+                // leaves the prefix empty rather than half-applied — the same
+                // "restore or nothing" contract a real `install_snapshot` has.
+                self.applied = serde_json::from_slice(&snapshot.0).unwrap_or_default();
             }
         }
     }
 
     /// Hand one newly committed `(slot, command)` to the application.
+    ///
+    /// A decided [`Control::Snap`](paros_core::Control::Snap) also **retains**
+    /// the snapshot, at the marker's own slot and at exactly this instant of
+    /// the contiguous walk — which is what makes the retained bytes describe
+    /// the boundary they advertise, and what a later `Truncate` is coupled to.
     pub fn apply_committed(&mut self, slot: Slot, command: Command) {
+        let snap = matches!(command, Command::Control(paros_core::Control::Snap { .. }));
         self.applied.push((slot, command));
+        if snap {
+            self.record_snapshot(slot);
+        }
     }
 
     /// Whether the application has applied `slot`.

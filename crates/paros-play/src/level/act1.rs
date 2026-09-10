@@ -185,21 +185,31 @@ pub static BE_THE_ACCEPTOR: Level = Level {
     title: "Be the acceptor",
     briefing: "\
 Now you are the acceptor. Every `Prepare` and every `Accept` that arrives is \
-yours to answer, and the real `paros_core::acceptor::Acceptor` marks your work.
+yours to answer, and the protocol marks your work.
 
 An acceptor keeps exactly two things: the highest ballot it has **promised**, \
-and the value it has **accepted**. Two rules govern them, and the difference \
-between the two comparisons is the whole of Paxos safety:
+and the value it has **accepted**. One rule governs both questions, and it is \
+the whole of Paxos safety: **refuse anything below the promise you hold.** \
+Anything at or above it is admitted. An *equal* ballot is not a special case — \
+a ballot is minted by exactly one proposer, so \"equal\" always means \"that \
+same proposer, again\", and the honest answer is the answer you already gave.
 
-- **Promise a ballot at or above the one you hold.** Below it, refuse. The \
-  promise is a fence: once you promise `b`, whatever you reported to `b`'s \
-  proposer is your last word about every lower ballot, and the proposer is \
-  entitled to act on it.
-- **Vote for an `Accept` at or above your promise** — `>=`, not `>`. A proposer \
-  that ran Phase 1 at `b` and got your promise has earned your vote at `b`.
+What differs between the two questions is what your answer is *for*:
 
-Two proposers compete here, so both answers come up: the same acceptor promises \
-a higher ballot and then refuses a vote from the ballot it just fenced out.",
+- A **Promise reports and fences.** It tells the proposer everything you have \
+  accepted at or above the slot it asked about — the report its \
+  value-selection rule is built on — and it closes the door on every lower \
+  ballot for good. Once you promise `b`, that report is your last word about \
+  everything below `b`, and `b`'s proposer is entitled to act on it.
+- A **vote records.** It writes a durable `(ballot, value)` for one slot, and \
+  that record is what some *later* ballot's Phase 1 will find and be forced to \
+  re-propose. A vote does not promise anything new; it is the thing a promise \
+  is about.
+
+Two proposers compete here, so both answers come up: the same acceptor \
+promises a higher ballot and then refuses a vote from the ballot it just \
+fenced out — refused because that ballot is *below* what it now holds, not \
+because votes are judged more harshly than promises.",
     field_guide: "choose-one-value.html",
     symbols: &[
         "Acceptor::prepare",
@@ -232,9 +242,9 @@ a higher ballot and then refuses a vote from the ballot it just fenced out.",
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "Compare the message's ballot with the promise you already hold. A Prepare needs \
-             to be at or above it to be promised; an Accept needs to be at or above it to be \
-             voted for. Anything below either is refused."
+            "Compare the message's ballot with the promise you already hold. One comparison \
+             answers both questions: below it, refuse; at or above it, answer. Nothing here \
+             turns on which kind of message arrived."
                 .to_string()
         })
     },
@@ -281,7 +291,7 @@ did not. From here, the two look identical.
 
 You are proposer 8, at the higher ballot `1.8`, and your client wants \
 `\"new-value\"`. Phase 1 will complete; then you choose what goes in the \
-`Accept`, and the real `Proposer::close_phase1` marks your answer.
+`Accept`, and the protocol marks your answer.
 
 The rule — Lamport calls it **P2c** — is: if any promise reported a value, \
 propose the one reported at the **highest** ballot, not your own. It looks like \

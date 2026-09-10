@@ -9,7 +9,7 @@ export type ProposalView = {
  */
 seq: number, 
 /**
- * The command's text.
+ * The command's text, exactly as the client wrote it — no Rust quoting.
  */
 value: string, 
 /**

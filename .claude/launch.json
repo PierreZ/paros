@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "play-dev",
+      "runtimeExecutable": "nix",
+      "runtimeArgs": ["develop", "--command", "bash", "-c", "cd web/play && npm run dev -- --port 5173 --strictPort"],
+      "port": 5173
+    }
+  ]
+}

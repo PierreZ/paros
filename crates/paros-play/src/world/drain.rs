@@ -15,16 +15,20 @@
 //! 3. Send: one wire entry per resolved addressee.
 //! 4. Apply `committed` to the application log, then flush the held-back
 //!    truncates.
-//! 5. Answer the batch's read states.
-//! 6. `advance_recovery()`, and drain again until the node is quiet.
+//! 5. Serve the batch's snapshot offers — after the apply, so the bytes read
+//!    back really do cover the boundary the message advertises.
+//! 6. Answer the batch's read states.
+//! 7. `advance_recovery()`, and drain again until the node is quiet.
 
 use std::collections::BTreeMap;
 
 use paros_core::proposer::RecoveryStep;
-use paros_core::{Ballot, ColocatedNode, Command, Message, NodeId, ReadState, Slot, WriteOp};
+use paros_core::{
+    Ballot, ColocatedNode, Command, Control, Message, NodeId, ReadState, Slot, WriteOp,
+};
 
 use crate::action::Seam;
-use crate::narration::{self, NodeSnapshot};
+use crate::narration::{self, NarrationKind, NodeSnapshot, many, who};
 use crate::prompt::{Prompt, PromptKind};
 use crate::world::{InFlight, World};
 
@@ -39,6 +43,11 @@ pub(super) struct Batch {
     messages: Vec<(NodeId, Message)>,
     committed: Vec<(Slot, Command)>,
     read_states: Vec<ReadState>,
+    /// `(to, chosen_index, ballot)` per peer the core decided needs a
+    /// snapshot. The core holds no application state, so the *world* — which
+    /// owns the disks — fills in the opaque bytes (see
+    /// [`World::serve_snapshot_offers`]).
+    snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
     /// `(started, gap fills, remaining)` when this batch carried a
     /// leader-recovery page — the marker the `LeaderRecovery` prompt gates on.
     recovery: Option<(usize, usize, usize)>,
@@ -50,17 +59,27 @@ impl Batch {
             && self.messages.is_empty()
             && self.committed.is_empty()
             && self.read_states.is_empty()
+            && self.snapshot_offers.is_empty()
     }
 
     /// What this batch's recovery page did, one entry per slot in slot order.
     ///
-    /// Read off the batch's own `Accept`s rather than re-derived: a
-    /// [`paros_core::Control::Noop`] is the gap fill
-    /// ([`RecoveryStep::Fill`]), anything else is the P2c re-proposal
-    /// ([`RecoveryStep::Recovered`]). [`RecoveryStep::Undescribed`] leaves no
-    /// message at all, and is unreachable here — it needs a cooperative
-    /// handoff, which the game has no verb for yet.
-    fn recovery_steps(&self) -> Vec<(Slot, RecoveryStep<Command>)> {
+    /// The slots come from the batch's own `Accept`s; **what each one means
+    /// comes from the core**, through [`World::recovery_plan`], which was read
+    /// off the proposer before the call that pumped this page. That
+    /// distinction is the whole point: a `Noop` on the wire is a
+    /// [`RecoveryStep::Fill`] *or* a [`RecoveryStep::Recovered`] carrying a
+    /// predecessor's own gap fill, and only the recovery knows which. Guessing
+    /// from the command told the player "the quorum reported nothing" about a
+    /// slot a Promise had explicitly reported.
+    ///
+    /// The fallback is the old guess, and it is unreachable in practice: every
+    /// slot the pump starts a round for was handed out by `recovery_next`, so
+    /// the plan names it.
+    fn recovery_steps(
+        &self,
+        plan: &BTreeMap<Slot, RecoveryStep<Command>>,
+    ) -> Vec<(Slot, RecoveryStep<Command>)> {
         let mut by_slot: BTreeMap<Slot, Command> = BTreeMap::new();
         for (_, message) in &self.messages {
             if let Message::Accept { slot, command, .. } = message {
@@ -70,11 +89,12 @@ impl Batch {
         by_slot
             .into_iter()
             .map(|(slot, command)| {
-                let step = if matches!(command, Command::Control(paros_core::Control::Noop)) {
+                let guess = if matches!(command, Command::Control(Control::Noop)) {
                     RecoveryStep::Fill
                 } else {
                     RecoveryStep::Recovered(command)
                 };
+                let step = plan.get(&slot).cloned().unwrap_or(guess);
                 (slot, step)
             })
             .collect()
@@ -86,6 +106,8 @@ impl Batch {
 pub(super) enum Paused {
     /// A delivered message the manual role has not answered for yet.
     Message { node: NodeId, message: Box<Message> },
+    /// A client retry the `AckWrite` answer has not been given for yet.
+    Retry { node: NodeId, client: u64, seq: u64 },
     /// A drained batch waiting on the persist-order answer.
     Batch { node: NodeId, batch: Box<Batch> },
     /// A drained recovery batch, and the slots still to be quizzed on.
@@ -106,6 +128,9 @@ impl World {
         let known = NodeSnapshot::capture(self.node(id));
         let receipt = narration::receipt(id, &message, &known);
         self.narration_push(receipt);
+        // A won Phase 1 opens *and* pumps its first recovery page inside this
+        // one `step`, so the oracle for that page has to be taken now.
+        self.plan_recovery(id, Some(&message));
         self.observe(id, move |world| {
             if let Some(index) = world.index_of(id)
                 && let Some(node) = world.nodes[index].as_mut()
@@ -114,6 +139,82 @@ impl World {
             }
             world.pump(id);
         });
+    }
+
+    /// Read off the proposer, **before** the call that pumps it, what the core
+    /// will do with each slot of the recovery page that call produces.
+    ///
+    /// Two shapes, because a leadership's recovery is opened in one place and
+    /// continued in another:
+    ///
+    /// - a page after the first is pumped by `advance_recovery`, and the
+    ///   recovery is already open when this runs, so a clone's own
+    ///   [`paros_core::proposer::Proposer::recovery_next`] answers — with the
+    ///   per-slot guards `pump_leader_recovery` re-checks (below the floor,
+    ///   already chosen, blocked on the repair probe) applied here too;
+    /// - the **first** page is opened and pumped inside the `step` of the
+    ///   winning `Promise`, so there is no recovery to clone yet. The campaign
+    ///   answers instead: fold that Promise into a clone of the proposer,
+    ///   close Phase 1 on it, and the outcome's `recovered` map is exactly the
+    ///   map the real `open_recovery` is about to be handed. A slot it does
+    ///   not name is a Phase-1-backed gap fill — the licence quorum
+    ///   intersection buys — which is what the lookup's absent entry means.
+    ///
+    /// Either way the answer is the core's own, computed on a clone; nothing
+    /// here re-derives a rule.
+    pub(super) fn plan_recovery(&mut self, id: NodeId, arriving: Option<&Message>) {
+        self.recovery_plan.clear();
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        let Some(node) = self.nodes[index].as_ref() else {
+            return;
+        };
+        if node.proposer().recovery().is_some() {
+            let floor = node.acceptor().first_slot();
+            let mut clone = node.proposer().clone();
+            let mut plan: BTreeMap<Slot, RecoveryStep<Command>> = BTreeMap::new();
+            while let Some((slot, step)) = clone.recovery_next() {
+                if slot < floor || node.replica().is_chosen(slot) || clone.recovery_blocked(slot) {
+                    continue;
+                }
+                plan.insert(slot, step);
+            }
+            self.recovery_plan = plan;
+            return;
+        }
+        let Some(Message::Promise {
+            from,
+            ballot,
+            from_slot,
+            accepted,
+            faulty,
+            next_from_slot,
+        }) = arriving
+        else {
+            return;
+        };
+        if node.role() != paros_core::NodeRole::Candidate {
+            return;
+        }
+        let mut clone = node.proposer().clone();
+        clone.fold_promise(
+            *from,
+            *ballot,
+            *from_slot,
+            accepted.clone(),
+            faulty.clone(),
+            *next_from_slot,
+        );
+        if !clone.phase1_won(node.acceptor().promised()) {
+            return;
+        }
+        let outcome = clone.close_phase1(|slot| node.replica().is_chosen(slot));
+        self.recovery_plan = outcome
+            .recovered
+            .into_iter()
+            .map(|(slot, (_at, command))| (slot, RecoveryStep::Recovered(command)))
+            .collect();
     }
 
     /// Drain `id` until it is quiet, honouring the seams and the prompts.
@@ -150,6 +251,8 @@ impl World {
                 return;
             };
             self.commit_batch(index, batch);
+            // The oracle for the page `advance_recovery` is about to pump.
+            self.plan_recovery(id, None);
             if let Some(node) = self.nodes[index].as_mut() {
                 node.advance_recovery();
             } else {
@@ -188,7 +291,7 @@ impl World {
             return None;
         }
         if batch.recovery.is_some() && self.policy.manual.contains(&PromptKind::LeaderRecovery) {
-            let steps = batch.recovery_steps();
+            let steps = batch.recovery_steps(&self.recovery_plan);
             if !steps.is_empty() {
                 self.raise_recovery(index, Box::new(batch), steps);
                 return None;
@@ -201,6 +304,7 @@ impl World {
     fn release(&mut self, index: usize, batch: Batch) {
         let id = self.pool[index];
         self.commit_batch(index, batch);
+        self.plan_recovery(id, None);
         if let Some(node) = self.nodes[index].as_mut() {
             node.advance_recovery();
         }
@@ -230,6 +334,7 @@ impl World {
                 .collect(),
             committed: ready.committed().to_vec(),
             read_states: ready.read_states().to_vec(),
+            snapshot_offers: ready.snapshot_offers().to_vec(),
             recovery: ready.recovery_batch(),
         };
         ready.advance();
@@ -243,7 +348,18 @@ impl World {
             match seam {
                 Seam::BeforeSync => {}
                 Seam::AfterSyncBeforeSend => {
-                    for write in &batch.writes {
+                    // Exactly the split `commit_batch` makes, for exactly the
+                    // same reason: a durable floor must never outrun the
+                    // durable application state covering the slots it drops,
+                    // and this cut *skips* the application apply. So the
+                    // truncates go with the half that was lost, not the half
+                    // that survived — a floor is pure space reclamation, and
+                    // the next decided `Truncate` raises it again.
+                    for write in batch
+                        .writes
+                        .iter()
+                        .filter(|write| !matches!(write, WriteOp::Truncate { .. }))
+                    {
                         self.disks[index].apply(write);
                     }
                 }
@@ -255,7 +371,7 @@ impl World {
         Some(batch)
     }
 
-    /// Persist, send, apply, answer — in that order.
+    /// Persist, send, apply, truncate, offer, answer — in that order.
     fn commit_batch(&mut self, index: usize, batch: Batch) {
         let id = self.pool[index];
         // `Truncate` waits until after the application apply: see the module
@@ -267,6 +383,7 @@ impl World {
         for write in &writes {
             self.disks[index].apply(write);
         }
+        self.narrate_installs(id, &writes);
         for (to, message) in batch.messages {
             self.wire.push(InFlight {
                 id: self.next_message_id,
@@ -278,13 +395,138 @@ impl World {
             self.next_message_id += 1;
         }
         for (slot, command) in batch.committed {
+            let marker = match &command {
+                Command::Control(Control::Snap { .. }) => Some(slot),
+                _ => None,
+            };
             self.disks[index].apply_committed(slot, command);
+            if let Some(at) = marker {
+                self.narrate(
+                    NarrationKind::Snapshot,
+                    format!(
+                        "{} retains a snapshot of its application at slot {}. A snapshot point \
+                         is a *decided* slot, so every node takes it at the same place in the \
+                         same order — which is what lets one node's copy stand in for another's \
+                         log.",
+                        who(id),
+                        at.0
+                    ),
+                );
+            }
         }
         for write in &truncates {
+            if let WriteOp::Truncate { first, .. } = write {
+                let dropped = self.disks[index]
+                    .records()
+                    .keys()
+                    .filter(|slot| *slot < first)
+                    .count();
+                self.narrate(
+                    NarrationKind::Truncate,
+                    format!(
+                        "{} truncates: {} dropped, and its floor is now slot {}. It happens here, \
+                         when the node *applies* the decided Truncate — not when the leader asked \
+                         — so every node lands on the same floor without anybody broadcasting it.",
+                        who(id),
+                        many(dropped, "accepted record"),
+                        first.0
+                    ),
+                );
+            }
             self.disks[index].apply(write);
         }
+        self.serve_snapshot_offers(index, &batch.snapshot_offers);
         for state in batch.read_states {
             self.serve_read(state);
+        }
+    }
+
+    /// Say what an `InstallSnapshot` write did to this node's disk.
+    fn narrate_installs(&mut self, id: NodeId, writes: &[WriteOp]) {
+        for write in writes {
+            let WriteOp::InstallSnapshot {
+                chosen_index,
+                ballot,
+                ..
+            } = write
+            else {
+                continue;
+            };
+            let promised = self
+                .index_of(id)
+                .map(|index| self.disks[index].hard_state().max_promised_ballot);
+            self.narrate(
+                NarrationKind::Snapshot,
+                format!(
+                    "{} installs the snapshot: its chosen prefix jumps to slot {}, its log below \
+                     that is gone (the state is in the bytes now), and its durable promise is {} \
+                     — the snapshot's ballot was {}, and a promise is only ever raised. A \
+                     snapshot restores the log, never a promise.",
+                    who(id),
+                    chosen_index.0,
+                    promised.map_or_else(|| "unchanged".to_string(), crate::view::show_ballot),
+                    crate::view::show_ballot(*ballot)
+                ),
+            );
+        }
+    }
+
+    /// Fill in the opaque bytes for every snapshot offer the core recorded, and
+    /// put the `InstallSnapshot` on the wire like any other message.
+    ///
+    /// This is the driver's half of the seam (`paros::driver::ready`): the core
+    /// decided *who* needs a snapshot and *up to where* and holds no
+    /// application state, so the world, which owns the disks, reads the bytes.
+    /// The guard is the driver's too — an offer must describe **exactly** the
+    /// application prefix its message names, so an offer whose boundary the
+    /// applied log does not reach is skipped rather than sent wrong. The peer
+    /// re-asks on its next catch-up.
+    fn serve_snapshot_offers(&mut self, index: usize, offers: &[(NodeId, Slot, Ballot)]) {
+        let id = self.pool[index];
+        for &(to, at, ballot) in offers {
+            if self.disks[index].applied_slot() != Some(at) {
+                self.narrate(
+                    NarrationKind::Snapshot,
+                    format!(
+                        "{} does not serve a snapshot at slot {}: its own application has not \
+                         executed that far, so the bytes would not describe the boundary the \
+                         message claims. The peer asks again.",
+                        who(id),
+                        at.0
+                    ),
+                );
+                continue;
+            }
+            let sessions = self.nodes[index]
+                .as_ref()
+                .map(ColocatedNode::session_ledger)
+                .unwrap_or_default();
+            let snapshot = self.disks[index].snapshot();
+            self.narrate(
+                NarrationKind::Snapshot,
+                format!(
+                    "{} offers {} a snapshot instead of a replay: the slots it asked for are \
+                     below this node's floor and no longer exist anywhere. The bytes are the \
+                     application's own state at slot {}, which paros ships without ever reading.",
+                    who(id),
+                    who(to),
+                    at.0
+                ),
+            );
+            self.wire.push(InFlight {
+                id: self.next_message_id,
+                from: id,
+                to,
+                message: Message::InstallSnapshot {
+                    from: id,
+                    ballot,
+                    chosen_index: at,
+                    snapshot,
+                    sessions,
+                },
+                sent_at: self.clock,
+            });
+            self.next_message_id += 1;
         }
     }
 
@@ -313,6 +555,7 @@ impl World {
     pub(super) fn resume(&mut self, paused: Paused) {
         match paused {
             Paused::Message { node, message } => self.step(node, *message),
+            Paused::Retry { node, client, seq } => self.retry_now(node, client, seq),
             Paused::Batch { node, batch } => {
                 let Some(index) = self.index_of(node) else {
                     return;

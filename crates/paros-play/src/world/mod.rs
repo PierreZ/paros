@@ -10,10 +10,11 @@
 //! # The drain contract
 //!
 //! After **any** call into a node, exactly once: `ready()`, copy the buckets
-//! out, `advance()`, persist, send, apply, answer, `advance_recovery()`, and
-//! drain again until the node is quiet. The `Ready` guard is never held across
-//! anything else — not a disk write, not a prompt, not a player action. It
-//! lives in the crate-private `drain` module, with the durability seams and
+//! out, `advance()`, persist (`Truncate` held back), send, apply, flush the
+//! truncates, serve the snapshot offers, answer the reads, `advance_recovery()`
+//! — and drain again until the node is quiet. The `Ready` guard is never held
+//! across anything else: not a disk write, not a prompt, not a player action.
+//! It lives in the crate-private `drain` module, with the durability seams and
 //! the two prompts that can hold a batch back.
 //!
 //! # Delivery and time are player choices
@@ -30,11 +31,12 @@ mod drain;
 mod prompts;
 mod render;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Config, Message, NodeId, ProposeResult,
-    ReadIndexResult, ReadState, Slot, Value,
+    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Control, Message, NodeId,
+    ProposeResult, ReadIndexResult, ReadState, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Seam};
@@ -103,6 +105,10 @@ struct Proposal {
     node: NodeId,
     slot: Option<Slot>,
     acked: bool,
+    /// When the client issued it, on the history's own monotone counter.
+    issued: u64,
+    /// When it was acknowledged, on the same counter.
+    acked_at: Option<u64>,
 }
 
 /// One client's reads.
@@ -120,6 +126,10 @@ struct PendingRead {
     /// clone of the real `Proposer`.
     acks: BTreeSet<NodeId>,
     served: bool,
+    /// When the client asked, on the history's own monotone counter.
+    issued: u64,
+    /// When it was answered, on the same counter.
+    served_at: Option<u64>,
 }
 
 /// A narration the world owes the player once a prompt is answered.
@@ -135,6 +145,85 @@ struct Deferred {
     node: NodeId,
     before: NodeSnapshot,
     mark: usize,
+}
+
+/// What a leader answered one `Compact` request with.
+///
+/// The refusal is the interesting one, and it is not a failure: a `Truncate`
+/// may only be proposed once a **quorum holds a decided snapshot point**
+/// covering it, because past that floor the log is gone and the snapshot is
+/// the only thing left to recover a stranded node from. A request no point
+/// covers seeds the next point instead and is answered `accepted: false`; the
+/// client retries once the marker is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactOutcome {
+    /// The node the client asked.
+    pub node: NodeId,
+    /// The prefix the client asked to drop, inclusive.
+    pub requested: Slot,
+    /// Whether a `Truncate` was proposed.
+    pub accepted: bool,
+    /// The decided snapshot point a quorum held, if any — what the request was
+    /// clamped to.
+    pub covered: Option<Slot>,
+    /// Whether the refusal seeded a fresh `Snap` marker.
+    pub seeded_marker: bool,
+}
+
+/// What the leader answered one client **retry** with.
+///
+/// The three answers are the three things the leader can honestly know about a
+/// `(client, seq)`: it executed it, it holds it at a slot but has not executed
+/// it yet, or it has never heard of it. Which one it gives comes from the two
+/// dedup tables, consulted in that order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryAnswer {
+    /// Applied here: the ack names the slot it executed at.
+    Applied(Slot),
+    /// Chosen or in flight at a slot, not executed here yet: the client waits
+    /// on that slot.
+    InFlight(Slot),
+    /// Never seen: it takes the next free slot.
+    Fresh(Slot),
+    /// The node could not answer at all (it is not the leader any more).
+    Refused,
+}
+
+/// One retry and what it was answered with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryOutcome {
+    /// The node the client asked.
+    pub node: NodeId,
+    /// The client's id.
+    pub client: u64,
+    /// The sequence number being retried.
+    pub seq: u64,
+    /// What the leader answered.
+    pub answer: RetryAnswer,
+}
+
+/// One client-visible operation, as the linearizability judge reads it.
+///
+/// The client is the only party that knows its own program order, so this is
+/// recorded **client-side**: what it asked, when it asked, when it was
+/// answered, and the one number the answer carries — the slot a write landed
+/// at, or the watermark a read observed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryOp {
+    /// Whose operation it is.
+    pub client: u64,
+    /// The node it was sent to.
+    pub node: NodeId,
+    /// True for a write, false for a read.
+    pub write: bool,
+    /// A write's slot once acknowledged, or a read's watermark once served.
+    /// `None` on a read means the empty prefix.
+    pub at: Option<Slot>,
+    /// When it was issued, on the history's monotone counter.
+    pub started: u64,
+    /// When it completed, or `None` while it is still outstanding. An
+    /// outstanding operation constrains nothing: it may still complete later.
+    pub completed: Option<u64>,
 }
 
 /// One client.
@@ -175,6 +264,20 @@ pub struct World {
     seams_fired: Vec<(NodeId, Seam)>,
     /// A story the narration is not allowed to tell yet: see [`Deferred`].
     deferred: Option<Deferred>,
+    /// What the core will do with each slot of the recovery page about to be
+    /// pumped — the `LeaderRecovery` prompt's oracle, read off a clone of the
+    /// proposer *before* the call that pumps it. See
+    /// [`World::plan_recovery`](crate::world::World::plan_recovery).
+    recovery_plan: BTreeMap<Slot, RecoveryStep<Command>>,
+    /// Every `Compact` the player asked for and what the leader answered.
+    compacts: Vec<CompactOutcome>,
+    /// Every client retry and what the leader answered it with.
+    retries: Vec<RetryOutcome>,
+    /// The history's own clock: a monotone counter stamped on every client
+    /// operation as it is issued and again as it completes. It is **not** the
+    /// tick clock — a level may never tick at all — and it never goes
+    /// backwards, which is all a linearizability check needs from it.
+    next_event: u64,
     /// What the action in progress has done so far, in Paxos. Cleared by the
     /// [`crate::Game`] before every action and drained after it.
     narration: Vec<NarrationEvent>,
@@ -240,6 +343,10 @@ impl World {
             promise_watermarks: vec![Ballot::zero(); count],
             seams_fired: Vec::new(),
             deferred: None,
+            recovery_plan: BTreeMap::new(),
+            compacts: Vec::new(),
+            retries: Vec::new(),
+            next_event: 1,
             narration: Vec::new(),
         };
         for index in 0..count {
@@ -327,9 +434,13 @@ impl World {
             Some(held) if held.node == id => (held.before, held.mark),
             _ => (NodeSnapshot::capture(self.node(id)), self.wire.len()),
         };
-        let members = self.index_of(id).map_or(self.pool.len(), |index| {
-            self.disks[index].config().peers.len()
-        });
+        // How many acceptors a decision is counted against: the **configuration
+        // in force at this node**, not the pool it happens to be deployed in.
+        // They coincide today, and the line the narration prints ("2 of 3
+        // acceptors voted") is a claim about the configuration.
+        let members = self
+            .node(id)
+            .map_or_else(|| self.pool.len(), |node| node.acceptors().members().len());
         let out = f(self);
         if self.prompt.is_some() {
             self.deferred = Some(Deferred {
@@ -476,6 +587,175 @@ impl World {
     #[must_use]
     pub fn clients(&self) -> Vec<u64> {
         self.clients.iter().map(|client| client.id.0).collect()
+    }
+
+    /// Every client operation, in the order it was issued — the history the
+    /// linearizability judge reads.
+    #[must_use]
+    pub fn history(&self) -> Vec<HistoryOp> {
+        let mut ops: Vec<HistoryOp> = Vec::new();
+        for client in &self.clients {
+            for proposal in &client.proposals {
+                ops.push(HistoryOp {
+                    client: client.id.0,
+                    node: proposal.node,
+                    write: true,
+                    at: proposal.slot.filter(|_| proposal.acked),
+                    started: proposal.issued,
+                    completed: proposal.acked_at,
+                });
+            }
+            for read in &client.reads {
+                ops.push(HistoryOp {
+                    client: client.id.0,
+                    node: read.node,
+                    write: false,
+                    at: read.index.filter(|_| read.served),
+                    started: read.issued,
+                    completed: read.served_at,
+                });
+            }
+        }
+        ops.sort_by_key(|op| (op.started, op.client, !op.write));
+        ops
+    }
+
+    /// Judge the recorded history by the three conditions a totally ordered
+    /// log needs — no search, because the log *is* the order:
+    ///
+    /// 1. a committed read observes every write acknowledged before it began;
+    /// 2. watermarks never move backwards across non-overlapping reads;
+    /// 3. a write issued after a committed read lands **above** that read's
+    ///    watermark.
+    ///
+    /// Operations that never completed constrain nothing: a write whose ack
+    /// never arrived may still be chosen later, and that is not a violation of
+    /// anything.
+    ///
+    /// `Ok(())` is the history being linearizable so far.
+    ///
+    /// # Errors
+    ///
+    /// The sentence naming the condition that failed and the two operations
+    /// that failed it.
+    pub fn linearizable(&self) -> Result<(), String> {
+        let ops = self.history();
+        let reads: Vec<&HistoryOp> = ops
+            .iter()
+            .filter(|op| !op.write && op.completed.is_some())
+            .collect();
+        let writes: Vec<&HistoryOp> = ops
+            .iter()
+            .filter(|op| op.write && op.completed.is_some())
+            .collect();
+        for read in &reads {
+            let began = read.started;
+            for write in &writes {
+                let Some(acked) = write.completed else {
+                    continue;
+                };
+                if acked < began && write.at > read.at {
+                    return Err(format!(
+                        "client {}'s read at node {} observed {}, while client {}'s write at {} \
+                         had already been acknowledged. A read never goes behind a write that \
+                         completed before it began.",
+                        read.client,
+                        read.node.0,
+                        at(read.at),
+                        write.client,
+                        at(write.at)
+                    ));
+                }
+            }
+        }
+        for earlier in &reads {
+            let Some(done) = earlier.completed else {
+                continue;
+            };
+            for later in &reads {
+                if later.started >= done && later.at < earlier.at {
+                    return Err(format!(
+                        "a read at node {} observed {} after a read at node {} had already \
+                         observed {}. A watermark never moves backwards.",
+                        later.node.0,
+                        at(later.at),
+                        earlier.node.0,
+                        at(earlier.at)
+                    ));
+                }
+            }
+        }
+        for read in &reads {
+            let Some(done) = read.completed else { continue };
+            for write in &writes {
+                if write.started > done && write.at <= read.at {
+                    return Err(format!(
+                        "client {}'s write landed at {}, at or below the {} a read at node {} \
+                         had already observed — a write issued after a read must land above it.",
+                        write.client,
+                        at(write.at),
+                        at(read.at),
+                        read.node.0
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every node's compaction floor, in pool order.
+    #[must_use]
+    pub fn floors(&self) -> Vec<(NodeId, Slot)> {
+        self.pool
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, self.disks[index].floor()))
+            .collect()
+    }
+
+    /// Every node's retained decided snapshot point, in pool order.
+    #[must_use]
+    pub fn snapshot_points(&self) -> Vec<(NodeId, Option<Slot>)> {
+        self.pool
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, id)| (id, self.disks[index].snapshot_point()))
+            .collect()
+    }
+
+    /// Every `Compact` the player asked for and what the leader answered.
+    #[must_use]
+    pub fn compacts(&self) -> &[CompactOutcome] {
+        &self.compacts
+    }
+
+    /// Every client retry and what the leader answered it with.
+    #[must_use]
+    pub fn retries(&self) -> &[RetryOutcome] {
+        &self.retries
+    }
+
+    /// Whether some live node's chosen prefix sits **below** another node's
+    /// compaction floor — a node truncation has stranded, which only a
+    /// snapshot can rescue.
+    #[must_use]
+    pub fn stranded(&self) -> Vec<NodeId> {
+        let highest_floor = self.disks.iter().map(Disk::floor).max().unwrap_or(Slot(0));
+        self.pool
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(index, _)| {
+                let next = self.disks[*index]
+                    .hard_state()
+                    .chosen_index
+                    .map_or(Slot(0), |s| Slot(s.0 + 1));
+                next < highest_floor
+            })
+            .map(|(_, id)| id)
+            .collect()
     }
 
     /// The reads a client asked for that have not been served.
@@ -904,6 +1184,7 @@ impl World {
         let seq = ClientSeq(self.clients[slot].next_seq);
         let mark = self.narration.len();
         let bytes = Value(value.as_bytes().to_vec());
+        let issued = self.take_event();
         let result = self.observe(id, move |world| {
             let out = world.nodes[index]
                 .as_mut()
@@ -911,6 +1192,7 @@ impl World {
             world.pump(id);
             out
         });
+        let fresh = matches!(result, Some(ProposeResult::Accepted(_)));
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
@@ -942,25 +1224,311 @@ impl World {
             node: id,
             slot: admitted,
             acked: false,
+            issued,
+            acked_at: None,
         });
         let opening = say(
             NarrationKind::Client,
             format!(
                 "Client {client} asks {} to get {value:?} chosen. {}",
                 who(id),
-                admitted.map_or_else(
-                    || "It is not running, so nothing happens.".to_string(),
-                    |slot| format!(
+                match (admitted, fresh) {
+                    (None, _) => "It is not running, so nothing happens.".to_string(),
+                    (Some(slot), true) => format!(
                         "The leader hands it the next free slot, {}, and goes straight to Phase \
                          2 — one round trip, because the ballot it won already covers the whole \
                          suffix.",
                         slot.0
-                    )
-                )
+                    ),
+                    // `Duplicate` and `Chosen`: no new slot, no new round. The
+                    // narration must not claim one was opened.
+                    (Some(slot), false) => format!(
+                        "The leader recognises this command: it is already at slot {}, so \
+                         nothing new is proposed. At-most-once execution is a property of the \
+                         log, not of the network.",
+                        slot.0
+                    ),
+                }
             ),
         );
         self.narration.insert(mark, opening);
         Ok(())
+    }
+
+    /// A client **retries** a write it already sent: the same
+    /// `(client, seq, bytes)`, asked again.
+    ///
+    /// This is the whole of at-most-once execution from the client's side. The
+    /// leader has three honest answers — it applied this command already, it
+    /// has it in flight at a slot, or it has never seen it — and which one it
+    /// gives is the [`crate::prompt::PromptKind::AckWrite`] question.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn retry(&mut self, id: NodeId, client: u64, seq: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.require_live(id)?;
+        let position = self
+            .clients
+            .iter()
+            .position(|c| c.id == ClientId(client))
+            .ok_or_else(|| {
+                ActionError::new(
+                    ActionErrorCode::UnknownParty,
+                    format!("there is no client {client} in this level"),
+                )
+            })?;
+        if !self.clients[position]
+            .proposals
+            .iter()
+            .any(|proposal| proposal.seq == ClientSeq(seq))
+        {
+            return Err(ActionError::new(
+                ActionErrorCode::UnknownParty,
+                format!("client {client} never sent a write with sequence number {seq}"),
+            ));
+        }
+        if let Some(prompt) = self.ack_write_prompt(id, index, ClientId(client), ClientSeq(seq)) {
+            self.narrate(
+                NarrationKind::Client,
+                format!(
+                    "Client {client} asks {} again for its write #{seq}. {} You answer for it, \
+                     and the protocol marks the answer.",
+                    who(id),
+                    prompt.question
+                ),
+            );
+            self.prompt = Some(prompt);
+            self.paused = Some(Paused::Retry {
+                node: id,
+                client,
+                seq,
+            });
+            return Ok(());
+        }
+        self.retry_now(id, client, seq);
+        Ok(())
+    }
+
+    /// Send the retry for real, once nobody owes an answer for it.
+    pub(super) fn retry_now(&mut self, id: NodeId, client: u64, seq: u64) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        let Some(position) = self.clients.iter().position(|c| c.id == ClientId(client)) else {
+            return;
+        };
+        let Some(bytes) = self.clients[position]
+            .proposals
+            .iter()
+            .find(|proposal| proposal.seq == ClientSeq(seq))
+            .map(|proposal| Value(proposal.value.as_bytes().to_vec()))
+        else {
+            return;
+        };
+        let mark = self.narration.len();
+        let result = self.observe(id, move |world| {
+            let out = world.nodes[index]
+                .as_mut()
+                .map(|node| node.propose(ClientId(client), ClientSeq(seq), bytes));
+            world.pump(id);
+            out
+        });
+        let answer = match result {
+            Some(ProposeResult::Chosen(slot)) => RetryAnswer::Applied(slot),
+            Some(ProposeResult::Duplicate(slot)) => RetryAnswer::InFlight(slot),
+            Some(ProposeResult::Accepted(slot)) => RetryAnswer::Fresh(slot),
+            Some(ProposeResult::NotLeader(_)) | None => RetryAnswer::Refused,
+        };
+        self.retries.push(RetryOutcome {
+            node: id,
+            client,
+            seq,
+            answer,
+        });
+        let text = match result {
+            Some(ProposeResult::Chosen(slot)) => format!(
+                "{} answers immediately: write #{seq} applied at slot {}. The ledger the \
+                 contiguous walk writes is the only thing that licenses that answer — an ack \
+                 names a slot this node has really executed.",
+                who(id),
+                slot.0
+            ),
+            Some(ProposeResult::Duplicate(slot)) => format!(
+                "{} holds write #{seq} in flight at slot {}: chosen, perhaps, but not yet \
+                 applied here. The client waits — and it waits on the *same* slot, which is why \
+                 the command is never executed twice.",
+                who(id),
+                slot.0
+            ),
+            Some(ProposeResult::Accepted(slot)) => format!(
+                "{} has never seen write #{seq}: it takes the next free slot, {}. Neither dedup \
+                 table knew the identity, so this really is a first attempt as far as the log is \
+                 concerned.",
+                who(id),
+                slot.0
+            ),
+            Some(ProposeResult::NotLeader(_)) | None => {
+                format!("{} cannot answer for write #{seq}.", who(id))
+            }
+        };
+        self.narration
+            .insert(mark, say(NarrationKind::Client, text));
+    }
+
+    /// A client asks `id` to drop the log prefix up to `up_to`.
+    ///
+    /// The coupling rule is what makes this more than "raise a number": a
+    /// `Truncate` may only be proposed once a **quorum holds a decided
+    /// snapshot point** at or past what is being dropped. Below the floor the
+    /// entries are gone everywhere, and the snapshot is the only thing left to
+    /// rescue a node that was away. A request no point covers is therefore
+    /// **refused** — and the refusal seeds the next snapshot point, so the
+    /// client's retry can go further.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn compact(&mut self, id: NodeId, up_to: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.require_live(id)?;
+        let node = self.nodes[index].as_ref().ok_or_else(|| unknown_node(id))?;
+        if !node.is_leader() {
+            return Err(ActionError::new(
+                ActionErrorCode::NotLeader,
+                match node.leader() {
+                    Some(leader) => format!(
+                        "node {} is not the leader; a compaction request goes to node {}",
+                        id.0, leader.0
+                    ),
+                    None => format!(
+                        "node {} is not the leader, and it does not know who is",
+                        id.0
+                    ),
+                },
+            ));
+        }
+        let covered = self.covered_snap_point(index);
+        let marker_open = node
+            .proposer()
+            .rounds()
+            .values()
+            .any(|round| matches!(round.command(), Command::Control(Control::Snap { .. })));
+        let mark = self.narration.len();
+        let (accepted, seeded) = if let Some(point) = covered {
+            {
+                let clamped = Slot(up_to.min(point.0));
+                let accepted = self.observe(id, move |world| {
+                    let out = world.nodes[index].as_mut().map(|node| {
+                        matches!(
+                            node.propose_control(Control::Truncate { up_to: clamped }),
+                            ProposeResult::Accepted(_)
+                        )
+                    });
+                    world.pump(id);
+                    out.unwrap_or(false)
+                });
+                // The request outran the covered prefix: seed the next point so
+                // a later compaction may go further.
+                let seed = up_to > point.0 && !marker_open;
+                if seed {
+                    self.seed_snap_marker(id, index);
+                }
+                (accepted, seed)
+            }
+        } else {
+            let seed = !marker_open;
+            if seed {
+                self.seed_snap_marker(id, index);
+            }
+            (false, seed)
+        };
+        self.compacts.push(CompactOutcome {
+            node: id,
+            requested: Slot(up_to),
+            accepted,
+            covered,
+            seeded_marker: seeded,
+        });
+        let opening = say(
+            NarrationKind::Truncate,
+            match (accepted, covered) {
+                (true, Some(point)) => format!(
+                    "A client asks {} to drop everything up to slot {up_to}. A quorum holds a \
+                     decided snapshot at slot {}, so the leader proposes a Truncate — through \
+                     ordinary consensus, into the next free slot, exactly like a client value. \
+                     Every node will drop its prefix when it *applies* that slot.",
+                    who(id),
+                    point.0
+                ),
+                (_, None) => format!(
+                    "A client asks {} to drop everything up to slot {up_to}, and the leader \
+                     refuses. No quorum holds a decided snapshot covering that prefix, and past \
+                     a floor the entries are gone everywhere — the snapshot is the only thing \
+                     left to rescue a node that was away. It seeds a snapshot point instead; ask \
+                     again once that is decided.",
+                    who(id)
+                ),
+                (false, Some(point)) => format!(
+                    "A client asks {} to drop everything up to slot {up_to}. A quorum's snapshot \
+                     covers slot {}, but the leader did not admit the proposal.",
+                    who(id),
+                    point.0
+                ),
+            },
+        );
+        self.narration.insert(mark, opening);
+        Ok(())
+    }
+
+    /// The highest decided snapshot point a **Phase-2 quorum** of the
+    /// configuration in force holds.
+    ///
+    /// The custody tally is read straight off the disks: a real driver learns
+    /// it from the per-tick `SnapAck` advertisements, which are driver-terminal
+    /// and never enter the core, so the game reads the same fact from the one
+    /// place it already owns rather than modelling a message the player would
+    /// have nothing to decide about. The quorum question itself goes through
+    /// the membership boundary, never a count.
+    fn covered_snap_point(&self, index: usize) -> Option<Slot> {
+        let node = self.nodes[index].as_ref()?;
+        let acceptors = node.acceptors();
+        let mut points: Vec<Slot> = self
+            .disks
+            .iter()
+            .filter_map(Disk::snapshot_point)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        points.sort_unstable();
+        points.into_iter().rev().find(|point| {
+            let holders: BTreeSet<NodeId> = self
+                .pool
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| {
+                    self.disks[*index]
+                        .snapshot_point()
+                        .is_some_and(|held| held >= *point)
+                })
+                .map(|(_, id)| id)
+                .collect();
+            acceptors.has_phase2_quorum(&holders)
+        })
+    }
+
+    /// Ask the leader to decide the next snapshot point.
+    fn seed_snap_marker(&mut self, id: NodeId, index: usize) {
+        self.observe(id, move |world| {
+            if let Some(node) = world.nodes[index].as_mut() {
+                node.propose_snap_marker();
+            }
+            world.pump(id);
+        });
     }
 
     /// A client asks `id` for a linearizable read.
@@ -983,6 +1551,7 @@ impl World {
                 )
             })?;
         let ctx = self.next_read_ctx;
+        let issued = self.take_event();
         // The index a read-index round captures, recomputed here because
         // `ReadRound` exposes none of its fields: the applied watermark, or the
         // fresh-leader fence when that sits higher.
@@ -1032,6 +1601,8 @@ impl World {
             required_seq,
             acks: BTreeSet::new(),
             served: false,
+            issued,
+            served_at: None,
         });
         let opening = say(
             NarrationKind::Read,
@@ -1092,7 +1663,7 @@ impl World {
         self.narrate(
             NarrationKind::Info,
             format!(
-                "That is what `paros-core` does here, so node {node} really does it: {}",
+                "That is what the protocol does here, so node {node} really does it: {}",
                 crate::prompt::confirmation(kind)
             ),
         );
@@ -1122,14 +1693,19 @@ impl World {
 
     fn serve_read(&mut self, state: ReadState) {
         let mut served = false;
+        let stamp = self.next_event;
         for client in &mut self.clients {
             for read in &mut client.reads {
                 if read.ctx == state.ctx {
                     read.served = true;
                     read.index = state.index;
+                    read.served_at = Some(stamp);
                     served = true;
                 }
             }
+        }
+        if served {
+            self.next_event += 1;
         }
         if served {
             self.narrate(
@@ -1173,6 +1749,7 @@ impl World {
     /// Re-derive everything that is not the core's business: which writes the
     /// admitting node has applied, and the leadership hold.
     fn settle(&mut self) {
+        let mut stamp = self.next_event;
         for client in &mut self.clients {
             for proposal in &mut client.proposals {
                 if proposal.acked {
@@ -1186,9 +1763,12 @@ impl World {
                 {
                     proposal.slot = Some(at);
                     proposal.acked = true;
+                    proposal.acked_at = Some(stamp);
+                    stamp += 1;
                 }
             }
         }
+        self.next_event = stamp;
         for index in 0..self.pool.len() {
             let seen = self.nodes[index]
                 .as_ref()
@@ -1213,6 +1793,13 @@ impl World {
                 node.set_election_timeout(restore);
             }
         }
+    }
+
+    /// The next reading of the history's monotone counter.
+    fn take_event(&mut self) -> u64 {
+        let event = self.next_event;
+        self.next_event += 1;
+        event
     }
 
     fn take_prompt_id(&mut self) -> u64 {
@@ -1257,6 +1844,15 @@ impl World {
         }
         Ok(())
     }
+}
+
+/// "nothing", or "slot 3" — how the goals and the history judge name a
+/// watermark.
+fn at(slot: Option<Slot>) -> String {
+    slot.map_or_else(
+        || "the empty prefix".to_string(),
+        |s| format!("slot {}", s.0),
+    )
 }
 
 fn unknown_node(id: NodeId) -> ActionError {

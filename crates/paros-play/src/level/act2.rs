@@ -256,7 +256,10 @@ fn tick(node: u64) -> Action {
 }
 
 fn read_index(node: u64) -> Action {
-    Action::ReadIndex { node }
+    Action::ReadIndex {
+        node,
+        client: Some(CLIENT),
+    }
 }
 
 /// The Phase-2 traffic of one slot: its `Accept`s, its `Accepted`s and the

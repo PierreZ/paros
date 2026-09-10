@@ -5,9 +5,13 @@
  */
 export type ChosenView = { 
 /**
- * The chosen value's text.
+ * The chosen value's plain text (see [`value_text`]).
  */
 value: string, 
+/**
+ * Which control command it is, or `None` for a client entry.
+ */
+control: string | null, 
 /**
  * The ballot it was chosen at, as `round.node`.
  */

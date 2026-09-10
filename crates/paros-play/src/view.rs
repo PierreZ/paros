@@ -7,9 +7,12 @@
 //! derived from the world on every read, so the renderer never has to keep
 //! animation state of its own.
 //!
-//! Two rendering conventions, fixed here so every surface agrees: a **ballot**
-//! is `round.node` ([`show_ballot`]), and a **value** is its UTF-8 text
-//! ([`show_command`]) — a control command names itself instead.
+//! Three rendering conventions, fixed here so every surface agrees: a **ballot**
+//! is `round.node` ([`show_ballot`]); a value **in prose** is quoted
+//! ([`show_command`], for a prompt or a narration line); and a value **in the
+//! view** is plain text ([`value_text`]) beside the control command's own kind
+//! ([`control_kind`]), so the renderer styles a `Truncate` differently from a
+//! client's `"alpha"` without parsing either.
 
 use paros_core::{Ballot, Command, Control, NodeRole, Slot};
 use serde::{Deserialize, Serialize};
@@ -26,8 +29,9 @@ pub fn show_ballot(ballot: Ballot) -> String {
     format!("{}.{}", ballot.round, ballot.node.0)
 }
 
-/// A command as the player sees it: a client value is its UTF-8 text, a
-/// control command names itself.
+/// A command **in prose**: a client value is its quoted UTF-8 text, a control
+/// command names itself. Prompts and narration lines use this; the view uses
+/// [`value_text`] plus [`control_kind`] instead.
 #[must_use]
 pub fn show_command(command: &Command) -> String {
     match command {
@@ -35,6 +39,32 @@ pub fn show_command(command: &Command) -> String {
         Command::Control(Control::Noop) => "Noop".to_string(),
         Command::Control(Control::Truncate { up_to }) => format!("Truncate(up to {})", up_to.0),
         Command::Control(Control::Snap { at_index }) => format!("Snap(at {})", at_index.0),
+    }
+}
+
+/// A command **in the view**: plain text, never Rust's `Debug` quoting. A
+/// client entry is its UTF-8 bytes as written; a control command is the label
+/// the stage prints inside its slot box.
+#[must_use]
+pub fn value_text(command: &Command) -> String {
+    match command {
+        Command::User(entry) => String::from_utf8_lossy(&entry.value.0).into_owned(),
+        Command::Control(Control::Noop) => "Noop".to_string(),
+        Command::Control(Control::Truncate { up_to }) => format!("Truncate up to {}", up_to.0),
+        Command::Control(Control::Snap { at_index }) => format!("Snap at {}", at_index.0),
+    }
+}
+
+/// Which control command this is, or `None` for an opaque client entry — the
+/// discriminant the renderer colours by, so it never has to read
+/// [`value_text`].
+#[must_use]
+pub fn control_kind(command: &Command) -> Option<String> {
+    match command {
+        Command::User(_) => None,
+        Command::Control(Control::Noop) => Some("noop".to_string()),
+        Command::Control(Control::Truncate { .. }) => Some("truncate".to_string()),
+        Command::Control(Control::Snap { .. }) => Some("snap".to_string()),
     }
 }
 
@@ -81,12 +111,17 @@ pub struct LevelView {
     pub title: String,
     /// The briefing, in markdown.
     pub briefing: String,
-    /// A link into the book's field guide.
+    /// The field-guide page for this level's mechanism: a **bare book
+    /// filename** (`stable-leader.html`), never a path. The game is served from
+    /// `/play/` beside the book, so the frontend prefixes `../` to link it.
     pub field_guide: String,
     /// The `paros-core` symbols this level names, for the reference panel.
     pub symbols: Vec<String>,
     /// The actions this level offers.
     pub allowed_actions: Vec<ActionKind>,
+    /// The automation flags passing this level unlocks for later ones — what
+    /// the "reward" line in the briefing panel names.
+    pub unlocks: Vec<AutomationFlag>,
     /// A hint, once the player has earned one.
     pub hint: Option<String>,
 }
@@ -118,13 +153,29 @@ pub struct WorldView {
     pub matchmakers: Vec<MatchmakerView>,
     /// The single-decree world's decision, if it has one.
     pub chosen: Option<ChosenView>,
+    /// The single-decree world's phase reach sets — which acceptors a
+    /// `Prepare` and an `Accept` currently get to. `None` in the log world,
+    /// which has no reach: a partition there is the player not delivering.
+    pub reach: Option<ReachView>,
+}
+
+/// Which acceptors each phase's messages reach (the Act I world's only
+/// network).
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ReachView {
+    /// The acceptors a `Prepare` reaches.
+    pub one: Vec<u64>,
+    /// The acceptors an `Accept` reaches.
+    pub two: Vec<u64>,
 }
 
 /// The single-decree world's one decision.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct ChosenView {
-    /// The chosen value's text.
+    /// The chosen value's plain text (see [`value_text`]).
     pub value: String,
+    /// Which control command it is, or `None` for a client entry.
+    pub control: Option<String>,
     /// The ballot it was chosen at, as `round.node`.
     pub ballot: String,
 }
@@ -141,6 +192,36 @@ pub enum NodeFlavour {
     Colocated,
 }
 
+/// A log node's role in the current ballot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleView {
+    /// It follows whoever it believes leads.
+    Follower,
+    /// Its Phase 1 is in flight.
+    Candidate,
+    /// It won a promise quorum and runs Phase 2 alone.
+    Leader,
+}
+
+/// Where a single-decree proposer's attempt has got to. The Act I world's
+/// proposers hold no role in the log sense, so this is what the stage prints
+/// under them instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptView {
+    /// It has not opened a ballot yet.
+    Idle,
+    /// Phase 1 is in flight.
+    Phase1,
+    /// Phase 2 is in flight.
+    Phase2,
+    /// An acceptor refused it: a higher ballot is promised somewhere.
+    Preempted,
+    /// Its value was chosen.
+    Won,
+}
+
 /// One node.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct NodeView {
@@ -150,8 +231,13 @@ pub struct NodeView {
     pub flavour: NodeFlavour,
     /// False while it is crashed (its disk survives).
     pub alive: bool,
-    /// `follower`, `candidate` or `leader`; `None` for a bare role.
-    pub role: Option<String>,
+    /// Its role in the current ballot; `None` for a crashed node and for the
+    /// Act I world's bare roles, whose [`NodeView::flavour`] already says what
+    /// they are.
+    pub role: Option<RoleView>,
+    /// Where a single-decree proposer's attempt has got to; `None` for every
+    /// other node.
+    pub attempt: Option<AttemptView>,
     /// Its operating ballot, as `round.node`.
     pub ballot: Option<String>,
     /// The node it believes is leader.
@@ -227,8 +313,11 @@ pub struct SlotView {
     pub slot: u64,
     /// The ballot the record was accepted at, as `round.node`.
     pub ballot: Option<String>,
-    /// The command's text.
+    /// The command's plain text (see [`value_text`]) — no Rust quoting.
     pub value: String,
+    /// Which control command it is (`noop`, `truncate`, `snap`), or `None` for
+    /// an opaque client entry.
+    pub control: Option<String>,
     /// Whether this node knows the slot is chosen.
     pub chosen: bool,
     /// Whether this node has applied it.
@@ -256,6 +345,11 @@ pub struct MessageView {
     /// `commit`, `heartbeat`, `catchup`, `snapshot`, `read`, `handoff`,
     /// `match`, `gc`, `reconfigure`.
     pub phase: String,
+    /// Whether this message **answers** one (a `Promise`, an `Accepted`, a
+    /// `Nack`, an ack, a catch-up or snapshot reply) rather than asking
+    /// something. The stage draws the two directions differently, and this is
+    /// the fact it draws from — never the variant's name.
+    pub reply: bool,
     /// The clock reading when it was queued.
     pub sent_at: u64,
 }
@@ -276,7 +370,7 @@ pub struct ClientView {
 pub struct ProposalView {
     /// The client's sequence number.
     pub seq: u64,
-    /// The command's text.
+    /// The command's text, exactly as the client wrote it — no Rust quoting.
     pub value: String,
     /// The node it was sent to.
     pub node: u64,
@@ -420,7 +514,8 @@ impl SlotView {
         Self {
             slot: slot.0,
             ballot: Some(show_ballot(ballot)),
-            value: show_command(command),
+            value: value_text(command),
+            control: control_kind(command),
             chosen,
             applied,
         }
@@ -432,20 +527,21 @@ impl SlotView {
         Self {
             slot: slot.0,
             ballot: None,
-            value: show_command(command),
+            value: value_text(command),
+            control: control_kind(command),
             chosen: true,
             applied: true,
         }
     }
 }
 
-/// The `role` string for a [`NodeRole`].
+/// The [`RoleView`] for a [`NodeRole`].
 #[must_use]
-pub fn show_role(role: NodeRole) -> &'static str {
+pub fn show_role(role: NodeRole) -> RoleView {
     match role {
-        NodeRole::Follower => "follower",
-        NodeRole::Candidate => "candidate",
-        NodeRole::Leader => "leader",
+        NodeRole::Follower => RoleView::Follower,
+        NodeRole::Candidate => RoleView::Candidate,
+        NodeRole::Leader => RoleView::Leader,
     }
 }
 
@@ -673,6 +769,25 @@ pub fn message_view(
         slot: slot.map(|s| s.0),
         summary,
         phase: phase.to_string(),
+        reply: is_reply(message),
         sent_at,
     }
+}
+
+/// Whether a message answers one. Stated over the variants rather than over
+/// their names, so a renderer never has to guess from a string.
+fn is_reply(message: &paros_core::Message) -> bool {
+    use paros_core::Message as M;
+    matches!(
+        message,
+        M::Promise { .. }
+            | M::Accepted { .. }
+            | M::Nack { .. }
+            | M::HeartbeatAck { .. }
+            | M::CatchUpResponse { .. }
+            | M::InstallSnapshot { .. }
+            | M::SnapAck { .. }
+            | M::SnapChunkResponse { .. }
+            | M::PreReadAck { .. }
+    )
 }

@@ -58,6 +58,10 @@ pub enum NarrationKind {
     Restart,
     /// A linearizable read opened, or was served.
     Read,
+    /// A log prefix was dropped: a `Truncate` decided, or a floor that rose.
+    Truncate,
+    /// A snapshot point was recorded, offered, or installed.
+    Snapshot,
     /// A client asked for something.
     Client,
     /// The rule the player's answer would have broken.
@@ -224,8 +228,8 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             accepted,
             ..
         } => format!(
-            "{node} receives a Promise for ballot {} from node {}: it reports {} it has not \
-             been told the fate of.",
+            "{node} receives a Promise for ballot {} from node {}: it reports the {} it holds \
+             at or above the slot the Prepare asked about.",
             show_ballot(*ballot),
             from.0,
             many(accepted.len(), "accepted value")
@@ -677,13 +681,24 @@ fn describe_sent(id: NodeId, after: &NodeSnapshot, sent: &Sent) -> Vec<Narration
             ),
         ));
     }
-    if sent
-        .iter()
-        .any(|(_, m)| matches!(m, Message::CatchUpRequest { .. }))
-    {
+    if let Some(from_slot) = sent.iter().find_map(|(_, m)| match m {
+        Message::CatchUpRequest { from_slot, .. } => Some(*from_slot),
+        _ => None,
+    }) {
+        let peers = sent
+            .iter()
+            .filter(|(_, m)| matches!(m, Message::CatchUpRequest { .. }))
+            .count();
         out.push(say(
             NarrationKind::Info,
-            format!("{node} asks a peer to catch it up: it is behind the commit index it heard."),
+            format!(
+                "{node} asks {} for any slot from {} it may have missed. It is not claiming to \
+                 be behind — it is asking, because a decision reaches a follower only as a \
+                 commit watermark, and a watermark it never received looks exactly like one \
+                 that was never set.",
+                many(peers, "peer"),
+                from_slot.0
+            ),
         ));
     }
     if let Some(count) = sent.iter().find_map(|(_, m)| match m {

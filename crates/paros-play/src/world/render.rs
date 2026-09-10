@@ -8,9 +8,9 @@
 use paros_core::NodeId;
 
 use crate::view::{
-    ChosenView, ClientView, ElectionView, GapView, MatchmakerView, NodeFlavour, NodeView,
-    ProposalView, ReadRoundView, ReadView, SlotView, WorldFlavour, WorldView, show_ballot,
-    show_role,
+    AttemptView, ChosenView, ClientView, ElectionView, GapView, MatchmakerView, NodeFlavour,
+    NodeView, ProposalView, ReachView, ReadRoundView, ReadView, SlotView, WorldFlavour, WorldView,
+    show_ballot, show_role,
 };
 use crate::world::{Client, InFlight, NO_CHECK_QUORUM, World, quorum_name};
 
@@ -26,6 +26,9 @@ impl World {
             clients: self.clients.iter().map(client_view).collect(),
             matchmakers: Vec::<MatchmakerView>::new(),
             chosen: None::<ChosenView>,
+            // The log world has no reach: a partition here is the player not
+            // delivering, message by message.
+            reach: None::<ReachView>,
         }
     }
 
@@ -40,6 +43,7 @@ impl World {
                 flavour: NodeFlavour::Colocated,
                 alive: false,
                 role: None,
+                attempt: None::<AttemptView>,
                 ballot: None,
                 leader: None,
                 promised: Some(show_ballot(disk.hard_state().max_promised_ballot)),
@@ -90,7 +94,8 @@ impl World {
             id: id.0,
             flavour: NodeFlavour::Colocated,
             alive: true,
-            role: Some(show_role(node.role()).to_string()),
+            role: Some(show_role(node.role())),
+            attempt: None::<AttemptView>,
             ballot: Some(show_ballot(node.ballot())),
             leader: node.leader().map(|l| l.0),
             promised: Some(show_ballot(node.acceptor().promised())),
@@ -144,7 +149,7 @@ fn client_view(client: &Client) -> ClientView {
             .iter()
             .map(|p| ProposalView {
                 seq: p.seq.0,
-                value: format!("{:?}", p.value),
+                value: p.value.clone(),
                 node: p.node.0,
                 slot: p.slot.map(|s| s.0),
                 acked: p.acked,

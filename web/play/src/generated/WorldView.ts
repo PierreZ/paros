@@ -4,6 +4,7 @@ import type { ClientView } from "./ClientView";
 import type { MatchmakerView } from "./MatchmakerView";
 import type { MessageView } from "./MessageView";
 import type { NodeView } from "./NodeView";
+import type { ReachView } from "./ReachView";
 import type { WorldFlavour } from "./WorldFlavour";
 
 /**
@@ -37,4 +38,10 @@ matchmakers: Array<MatchmakerView>,
 /**
  * The single-decree world's decision, if it has one.
  */
-chosen: ChosenView | null, };
+chosen: ChosenView | null, 
+/**
+ * The single-decree world's phase reach sets — which acceptors a
+ * `Prepare` and an `Accept` currently get to. `None` in the log world,
+ * which has no reach: a partition there is the player not delivering.
+ */
+reach: ReachView | null, };

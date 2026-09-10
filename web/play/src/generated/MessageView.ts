@@ -39,6 +39,13 @@ summary: string,
  */
 phase: string, 
 /**
+ * Whether this message **answers** one (a `Promise`, an `Accepted`, a
+ * `Nack`, an ack, a catch-up or snapshot reply) rather than asking
+ * something. The stage draws the two directions differently, and this is
+ * the fact it draws from — never the variant's name.
+ */
+reply: boolean, 
+/**
  * The clock reading when it was queued.
  */
 sent_at: number, };

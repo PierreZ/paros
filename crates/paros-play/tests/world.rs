@@ -8,10 +8,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{Ballot, Command, Config, Message, NodeId, NodeRole, QuorumSystem, Slot};
+use paros_core::{Ballot, Command, Config, Control, Message, NodeId, NodeRole, QuorumSystem, Slot};
 use paros_play::action::Seam;
 use paros_play::prompt::{PromptKind, Verdict};
-use paros_play::world::{NO_CHECK_QUORUM, World, WorldPolicy};
+use paros_play::world::{Disk, NO_CHECK_QUORUM, World, WorldPolicy};
 
 const CLIENT: u64 = 7;
 
@@ -705,4 +705,411 @@ fn a_prompt_blocks_every_other_move() {
     assert!(world.prompt().is_some());
     let err = world.tick_all().expect_err("the world waits on the answer");
     assert_eq!(err.code, paros_play::ActionErrorCode::PromptOpen);
+}
+
+// ---- truncation and snapshots (Act III) --------------------------------------
+
+/// Drive `world` to a state where a `Truncate` has been decided: seed a
+/// snapshot point (the leader refuses the first request and proposes a `Snap`
+/// marker), then ask again.
+fn truncate_through(world: &mut World, leader: u64, up_to: u64) {
+    world
+        .compact(NodeId(leader), up_to)
+        .expect("the leader answers a compaction request");
+    deliver_all(world);
+    world
+        .compact(NodeId(leader), up_to)
+        .expect("the leader answers a compaction request");
+    deliver_all(world);
+}
+
+#[test]
+fn a_truncate_is_refused_until_a_quorum_holds_a_snapshot_point() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    deliver_all(&mut world);
+    // Nothing has been snapshotted, so the coupling rule refuses: past the
+    // floor the entries are gone everywhere, and a snapshot nobody holds
+    // rescues nobody.
+    world.compact(NodeId(0), 8).expect("the leader answers");
+    let first = *world.compacts().first().expect("one request answered");
+    assert!(!first.accepted, "the first request is refused");
+    assert_eq!(first.covered, None, "no quorum holds a point yet");
+    assert!(first.seeded_marker, "and the refusal seeds one");
+    assert_eq!(
+        world.disk(NodeId(0)).expect("a disk").floor(),
+        Slot(0),
+        "nothing was truncated"
+    );
+    deliver_all(&mut world);
+    // Now a quorum holds a decided snapshot point, and the retry goes through.
+    assert!(
+        world
+            .snapshot_points()
+            .iter()
+            .filter(|(_, point)| point.is_some())
+            .count()
+            >= 2,
+        "a quorum recorded the decided snapshot point"
+    );
+    world.compact(NodeId(0), 8).expect("the leader answers");
+    let second = *world.compacts().last().expect("two requests answered");
+    assert!(second.accepted, "the retry is admitted");
+    assert!(second.covered.is_some(), "and it names the covered point");
+}
+
+#[test]
+fn a_truncate_is_applied_lazily_by_every_node() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    deliver_all(&mut world);
+    world.compact(NodeId(0), 8).expect("answers");
+    deliver_all(&mut world);
+    world.compact(NodeId(0), 8).expect("answers");
+    // The decision exists but nobody outside the leader has applied it yet, so
+    // hold back everything and watch the floors move one node at a time.
+    let floor_before: Vec<Slot> = world.floors().iter().map(|(_, first)| *first).collect();
+    deliver_where(&mut world, |message| {
+        matches!(message, Message::Accept { .. } | Message::Accepted { .. })
+    });
+    let after_decision: Vec<Slot> = world.floors().iter().map(|(_, first)| *first).collect();
+    assert!(
+        after_decision[0] > floor_before[0],
+        "the leader applied the decided Truncate and its floor rose"
+    );
+    assert_eq!(
+        after_decision[1], floor_before[1],
+        "a follower that has not applied that slot has not truncated"
+    );
+    deliver_all(&mut world);
+    let floors: Vec<Slot> = world.floors().iter().map(|(_, first)| *first).collect();
+    assert!(
+        floors.iter().all(|first| *first == floors[0]),
+        "one cluster-wide floor, forwarded by ordinary replication: {floors:?}"
+    );
+    assert!(floors[0] > Slot(0), "and it really moved");
+}
+
+#[test]
+fn a_below_floor_catch_up_is_answered_with_a_snapshot() {
+    let mut world = cluster(3);
+    world.crash(NodeId(2)).expect("a live node may crash");
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    deliver_all(&mut world);
+    truncate_through(&mut world, 0, 8);
+    let floor = world.disk(NodeId(0)).expect("a disk").floor();
+    assert!(floor > Slot(0), "the survivors truncated past node 2");
+
+    world.restart(NodeId(2)).expect("a crashed node restarts");
+    assert!(
+        !world.stranded().is_empty(),
+        "node 2 needs slots that no longer exist anywhere"
+    );
+    // A candidate broadcasts a catch-up request: it has heard from no leader,
+    // which is exactly the condition under which it may be silently behind.
+    for _ in 0..10 {
+        world.tick(NodeId(2)).expect("a live node ticks");
+    }
+    drop_where(&mut world, |message| {
+        matches!(message, Message::Prepare { .. })
+    });
+    deliver_where(&mut world, |message| {
+        matches!(message, Message::CatchUpRequest { .. })
+    });
+    assert!(
+        world
+            .wire()
+            .iter()
+            .all(|entry| !matches!(entry.message, Message::CatchUpResponse { .. })),
+        "no peer replays a range it has truncated: those entries are gone"
+    );
+    assert!(
+        world
+            .wire()
+            .iter()
+            .any(|entry| matches!(entry.message, Message::InstallSnapshot { .. })),
+        "the peer offers the application's state instead"
+    );
+    deliver_all(&mut world);
+    assert_eq!(
+        applied_text(&world, 2),
+        applied_text(&world, 0),
+        "node 2 was restored from bytes paros never read"
+    );
+}
+
+#[test]
+fn a_snapshot_install_never_lowers_the_promise() {
+    let mut world = cluster(3);
+    world.crash(NodeId(2)).expect("crashes");
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    deliver_all(&mut world);
+    truncate_through(&mut world, 0, 8);
+    world.restart(NodeId(2)).expect("restarts");
+    // Node 2 campaigns before it is healed, so its own promise ends up *above*
+    // the ballot the snapshot's prefix was decided under. That is the case the
+    // rule exists for.
+    for _ in 0..10 {
+        world.tick(NodeId(2)).expect("ticks");
+    }
+    drop_where(&mut world, |message| {
+        matches!(message, Message::Prepare { .. })
+    });
+    let promise_before = world
+        .node(NodeId(2))
+        .expect("running")
+        .acceptor()
+        .promised();
+    let offered = {
+        deliver_where(&mut world, |message| {
+            matches!(message, Message::CatchUpRequest { .. })
+        });
+        world
+            .wire()
+            .iter()
+            .find_map(|entry| match entry.message {
+                Message::InstallSnapshot { ballot, .. } => Some(ballot),
+                _ => None,
+            })
+            .expect("a snapshot is offered")
+    };
+    assert!(
+        offered < promise_before,
+        "the snapshot's ballot ({offered:?}) is below node 2's own promise ({promise_before:?})"
+    );
+    world.set_policy(policy(&[PromptKind::SnapshotPromise]));
+    let id = world
+        .wire()
+        .iter()
+        .find(|entry| matches!(entry.message, Message::InstallSnapshot { .. }))
+        .map(|entry| entry.id)
+        .expect("in flight");
+    world.deliver(id).expect("delivered");
+    let prompt = world.prompt().expect("the installing node is asked");
+    assert_eq!(prompt.kind, PromptKind::SnapshotPromise);
+    let (prompt_id, expected) = (prompt.id, prompt.expected().to_string());
+    assert_eq!(expected, "higher", "it keeps the higher of the two");
+    let wrong = prompt
+        .choices
+        .iter()
+        .map(|choice| choice.id.clone())
+        .find(|choice| *choice != expected)
+        .expect("the other ballot is offered too");
+    assert_eq!(world.answer(prompt_id, &wrong), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(prompt_id, &expected), Ok(Verdict::Right));
+    deliver_all(&mut world);
+    assert!(
+        world
+            .node(NodeId(2))
+            .expect("running")
+            .acceptor()
+            .promised()
+            >= promise_before,
+        "a snapshot restores the log, never a promise"
+    );
+    assert_eq!(world.promise_regressed(), None);
+}
+
+#[test]
+fn the_after_sync_seam_loses_the_truncate_with_the_batch() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    deliver_all(&mut world);
+    world.compact(NodeId(0), 8).expect("answers");
+    deliver_all(&mut world);
+    world.compact(NodeId(0), 8).expect("answers");
+    // Let the Truncate decide at the leader, then hand the decision to node 1
+    // with the seam armed: the batch that would truncate is cut after its
+    // flush and before its send.
+    deliver_where(&mut world, |message| {
+        !matches!(message, Message::Commit { .. })
+    });
+    let floor_before = world.disk(NodeId(1)).expect("a disk").floor();
+    world
+        .crash_at(NodeId(1), Seam::AfterSyncBeforeSend)
+        .expect("a live node arms a seam");
+    let commit = world
+        .wire()
+        .iter()
+        .find(|entry| entry.to == NodeId(1) && matches!(entry.message, Message::Commit { .. }))
+        .map(|entry| entry.id)
+        .expect("a Commit for node 1");
+    world.deliver(commit).expect("delivered");
+    assert!(world.node(NodeId(1)).is_none(), "the seam crashed the node");
+    assert_eq!(
+        world.disk(NodeId(1)).expect("a disk").floor(),
+        floor_before,
+        "the truncate went with the half of the batch that was lost: a durable floor must never \
+         outrun the durable application state covering the slots it drops"
+    );
+    // And it is safe: the floor is pure space reclamation, re-raised the next
+    // time this node applies a decided Truncate.
+    world.restart(NodeId(1)).expect("restarts");
+    deliver_all(&mut world);
+    assert_eq!(world.promise_regressed(), None);
+}
+
+// ---- the recovery judge -------------------------------------------------------
+
+#[test]
+fn a_recovered_noop_is_re_proposed_not_re_filled() {
+    // A predecessor gap-filled slot 0 with a `Noop` and got it accepted at one
+    // node only. That node's Promise reports it, so the fresh leadership's own
+    // recovery says `Recovered(Noop)` — re-propose — and *not* `Fill`. The two
+    // are indistinguishable from the batch's `Accept`, which is why the judge
+    // reads the answer off the core's recovery instead of guessing.
+    let carried = ballot(1, 2);
+    let mut seeded = std::collections::BTreeMap::new();
+    seeded.insert(Slot(0), (carried, Command::Control(Control::Noop)));
+    let peers: Vec<NodeId> = (0..3).map(NodeId).collect();
+    let disks: Vec<Disk> = peers
+        .iter()
+        .map(|id| {
+            let config = Config {
+                id: *id,
+                peers: peers.clone(),
+                quorum_system: QuorumSystem::Majority,
+                ..Config::default()
+            };
+            if id.0 == 1 {
+                Disk::seeded(config, carried, seeded.clone(), None)
+            } else {
+                Disk::seeded(config, carried, std::collections::BTreeMap::new(), None)
+            }
+        })
+        .collect();
+    let mut world = World::from_disks(disks, &[CLIENT], 10);
+    world.set_policy(policy(&[PromptKind::LeaderRecovery]));
+    world.start_election(NodeId(0)).expect("campaigns");
+    // The promise quorum must contain node 1, the only node that knows
+    // anything.
+    deliver_where(&mut world, |message| {
+        matches!(
+            message,
+            Message::Prepare { .. } | Message::Promise { .. } | Message::Nack { .. }
+        )
+    });
+    let prompt = world
+        .prompt()
+        .expect("a fresh leadership is asked about its recovered suffix");
+    assert_eq!(prompt.kind, PromptKind::LeaderRecovery);
+    assert!(
+        prompt
+            .state_summary
+            .iter()
+            .any(|line| line.contains("reported Noop for slot 0")),
+        "the prompt says what the quorum actually reported, not what the command looks like: \
+         {:?}",
+        prompt.state_summary
+    );
+    assert_eq!(
+        prompt.expected(),
+        "repropose",
+        "a Noop a Promise reported is a value like any other: re-propose it"
+    );
+    let id = prompt.id;
+    assert_eq!(world.answer(id, "fill_noop"), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(id, "skip"), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(id, "repropose"), Ok(Verdict::Right));
+}
+
+/// The ballot an earlier leadership ran at: `round`, minted by node `node`.
+fn ballot(round: u64, node: u64) -> Ballot {
+    Ballot {
+        round,
+        node: NodeId(node),
+    }
+}
+
+// ---- the client's two dedup tables --------------------------------------------
+
+#[test]
+fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    world.propose(NodeId(0), CLIENT, "bravo").expect("admitted");
+    // Slot 1 decides while slot 0 is still open: chosen above a hole.
+    let slot0 = |message: &Message| {
+        matches!(
+            message,
+            Message::Accept { slot: Slot(0), .. }
+                | Message::Accepted { slot: Slot(0), .. }
+                | Message::Commit { slot: Slot(0), .. }
+        )
+    };
+    deliver_where(&mut world, |message| !slot0(message));
+    world.set_policy(policy(&[PromptKind::AckWrite]));
+    world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
+    let prompt = world.prompt().expect("the leader is asked");
+    assert_eq!(prompt.kind, PromptKind::AckWrite);
+    assert_eq!(
+        prompt.expected(),
+        "inflight",
+        "chosen is not applied: the reply parks on the slot it is in flight at"
+    );
+    let id = prompt.id;
+    assert_eq!(world.answer(id, "acked"), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(id, "fresh"), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(id, "inflight"), Ok(Verdict::Right));
+
+    // Close the hole and ask again: now it really has been executed here.
+    world.set_policy(policy(&[]));
+    deliver_all(&mut world);
+    world.set_policy(policy(&[PromptKind::AckWrite]));
+    world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
+    let prompt = world.prompt().expect("the leader is asked again");
+    assert_eq!(prompt.expected(), "acked");
+    let id = prompt.id;
+    assert_eq!(world.answer(id, "acked"), Ok(Verdict::Right));
+    assert_eq!(
+        applied_text(&world, 0)
+            .iter()
+            .filter(|entry| entry.ends_with("bravo"))
+            .count(),
+        1,
+        "the command was executed exactly once"
+    );
+}
+
+// ---- the client history ------------------------------------------------------
+
+#[test]
+fn a_read_across_a_leader_change_is_linearizable() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.propose(NodeId(0), CLIENT, "alpha").expect("admitted");
+    deliver_all(&mut world);
+    // Node 1 takes over with node 2; node 0 hears none of it.
+    world.start_election(NodeId(1)).expect("campaigns");
+    isolate(&mut world, NodeId(0));
+    assert!(
+        world
+            .node(NodeId(1))
+            .is_some_and(paros_core::ColocatedNode::is_leader)
+    );
+    world
+        .read_index(NodeId(1), CLIENT)
+        .expect("the leader opens a read round");
+    isolate(&mut world, NodeId(0));
+    assert_eq!(world.served_reads().len(), 1, "the read is served");
+    assert_eq!(
+        world.linearizable(),
+        Ok(()),
+        "a read at the new leader sees the write the old one acknowledged"
+    );
+    assert!(
+        world
+            .history()
+            .iter()
+            .any(|op| !op.write && op.completed.is_some()),
+        "the history records the read's completion"
+    );
 }

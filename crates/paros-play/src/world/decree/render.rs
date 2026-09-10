@@ -8,8 +8,8 @@
 
 use super::{Attempt, DECREE, DecreeAcceptor, DecreeProposer, DecreeWorld};
 use crate::view::{
-    ChosenView, ClientView, MatchmakerView, NodeFlavour, NodeView, SlotView, WorldFlavour,
-    WorldView, show_ballot, show_command,
+    AttemptView, ChosenView, ClientView, MatchmakerView, NodeFlavour, NodeView, ReachView,
+    SlotView, WorldFlavour, WorldView, control_kind, show_ballot, value_text,
 };
 use crate::world::{InFlight, quorum_name};
 use paros_core::Ballot;
@@ -32,8 +32,13 @@ impl DecreeWorld {
             clients: Vec::<ClientView>::new(),
             matchmakers: Vec::<MatchmakerView>::new(),
             chosen: self.chosen.as_ref().map(|(ballot, command)| ChosenView {
-                value: show_command(command),
+                value: value_text(command),
+                control: control_kind(command),
                 ballot: show_ballot(*ballot),
+            }),
+            reach: Some(ReachView {
+                one: self.phase1_reach.iter().map(|id| id.0).collect(),
+                two: self.phase2_reach.iter().map(|id| id.0).collect(),
             }),
         }
     }
@@ -47,7 +52,10 @@ impl DecreeWorld {
             id: acceptor.id.0,
             flavour: NodeFlavour::Acceptor,
             alive: true,
-            role: Some("acceptor".to_string()),
+            // An Act I acceptor holds no log role: `flavour` already says what
+            // it is, and it is never anything else.
+            role: None,
+            attempt: None::<AttemptView>,
             ballot: None,
             leader: None,
             promised: Some(show_ballot(acceptor.role.promised())),
@@ -83,11 +91,11 @@ impl DecreeWorld {
 
     fn proposer_view(&self, proposer: &DecreeProposer) -> NodeView {
         let attempt = match proposer.attempt {
-            Attempt::Idle => "idle",
-            Attempt::Phase1 => "phase 1",
-            Attempt::Phase2 => "phase 2",
-            Attempt::Preempted => "preempted",
-            Attempt::Won => "won",
+            Attempt::Idle => AttemptView::Idle,
+            Attempt::Phase1 => AttemptView::Phase1,
+            Attempt::Phase2 => AttemptView::Phase2,
+            Attempt::Preempted => AttemptView::Preempted,
+            Attempt::Won => AttemptView::Won,
         };
         let proposing = proposer
             .proposing
@@ -106,7 +114,8 @@ impl DecreeWorld {
             id: proposer.id.0,
             flavour: NodeFlavour::Proposer,
             alive: true,
-            role: Some(attempt.to_string()),
+            role: None,
+            attempt: Some(attempt),
             ballot: proposer.ballot.map(show_ballot),
             leader: None,
             promised: None,

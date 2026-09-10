@@ -13,7 +13,7 @@ never changes.
 >   Promise, Accept and Accepted one message at a time, with one acceptor kept
 >   silent, until a value is chosen by two of three.
 > - [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) — you answer every Prepare
->   and every Accept; the two acceptor rules below are the whole level.
+>   and every Accept; the acceptor rule below is the whole level.
 > - [`act1/the-duel`](play/#act1/the-duel) — two proposers preempting each other:
 >   get a value chosen anyway, and count the rounds it took.
 
@@ -65,24 +65,30 @@ it looks; see [Recovery, not catch-up](safety.md#recovery-not-catch-up).
 ## What each acceptor remembers
 
 An acceptor is tiny. It keeps two facts in durable storage — the highest ballot it
-**promised** and the `(ballot, value)` records it **accepted** — and two rules
-govern every reply it sends:
+**promised** and the `(ballot, value)` records it **accepted** — and **one rule**
+governs every reply it sends: *refuse anything below the promise you hold*, and
+answer anything at or above it, persisting the write before the reply leaves.
+Anything below gets a `Nack`. An equal ballot needs no special case: a ballot is
+minted by exactly one proposer, so "equal" always means that same proposer asking
+again — which is precisely what a proposer that won Phase 1 at `b` does when it
+sends its `Accept` at `b`.
 
-- **promise if `ballot > promised`**, persisting the raise before replying;
-- **vote if `ballot >= promised`**, persisting the record before replying.
-
-Anything below the promise gets a `Nack`. The comparisons differ — strict for a
-Prepare, non-strict for an Accept — so the proposer that just claimed a ballot can
-still use it. That asymmetry is what
+What differs between the two questions is not the comparison but what the answer
+is *for*. A **Promise reports and fences**: it hands the proposer everything this
+acceptor has accepted at or above the slot in question — the report P2c is built
+on — and closes the door on every lower ballot for good. A **vote records**: it
+writes down a `(ballot, value)` that some later ballot's Phase 1 will find and be
+obliged to re-propose. That split is what
 [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) is built around; the "before
-replying" is where [persist before send](restart-safety.md) bites.
+the reply leaves" is where [persist before send](restart-safety.md) bites.
 
 In paros the role is `Acceptor` (`crates/paros-core/src/acceptor.rs`):
 `Acceptor::promised` is the promise, durable as `HardState.max_promised_ballot`
-(`state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` applies the promise
-rule and `Acceptor::admit` the vote rule, each emitting the `AcceptorWrite` the
-driver must flush before the reply leaves. Everything else in the protocol exists
-only to feed those two rules a safe value.
+(`state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` answers the report-
+and-fence question and `Acceptor::admit` the record-a-vote one — both refusing exactly
+`ballot < promised` — each emitting the `AcceptorWrite` the driver must flush before the
+reply leaves. Everything else in the protocol exists only to feed those two answers a
+safe value.
 
 ## The one thing it will never do
 

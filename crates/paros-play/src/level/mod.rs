@@ -12,6 +12,7 @@
 
 pub mod act1;
 pub mod act2;
+pub mod act3;
 mod script;
 
 use crate::action::{Action, ActionError, ActionKind};
@@ -37,6 +38,17 @@ impl WorldKind {
         match self {
             WorldKind::Decree(world) => world.prompt(),
             WorldKind::Log(world) => world.prompt(),
+        }
+    }
+
+    /// A safety violation the world has been asked to enact — today only the
+    /// single-decree world's "two values for one slot" (see
+    /// [`DecreeWorld::violation`]). `None` is the invariant holding.
+    #[must_use]
+    pub fn violation(&self) -> Option<String> {
+        match self {
+            WorldKind::Decree(world) => world.violation().map(str::to_string),
+            WorldKind::Log(_) => None,
         }
     }
 
@@ -269,6 +281,7 @@ pub fn no_hint(_world: &WorldKind, _mistakes: u32) -> Option<String> {
 pub fn levels() -> Vec<&'static Level> {
     let mut all = act1::levels();
     all.extend(act2::levels());
+    all.extend(act3::levels());
     all
 }
 

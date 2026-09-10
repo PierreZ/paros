@@ -53,6 +53,10 @@ pub enum PromptKind {
     CommitOverwrite,
     /// A read's index is captured and the acks are in. Serve, or wait?
     ReadServe,
+    /// A peer's snapshot arrived. What is this node's promise afterwards?
+    SnapshotPromise,
+    /// A client retried a write. Acked as applied, held in flight, or fresh?
+    AckWrite,
 }
 
 impl PromptKind {
@@ -69,9 +73,27 @@ impl PromptKind {
             PromptKind::ReplicaApply => AutomationFlag::ReplicaApply,
             PromptKind::PersistOrder => AutomationFlag::PersistOrder,
             PromptKind::ReadServe => AutomationFlag::ReadServe,
+            PromptKind::SnapshotPromise => AutomationFlag::SnapshotPromise,
+            PromptKind::AckWrite => AutomationFlag::AckWrite,
         }
     }
 }
+
+/// Every prompt kind, in the order the levels introduce them. The
+/// [`crate::Game`] derives the world's manual set from this, and the tests
+/// turn a level's pinned-off flags into the questions it promises to ask.
+pub const ALL_PROMPTS: &[PromptKind] = &[
+    PromptKind::AcceptorPrepare,
+    PromptKind::AcceptorAccept,
+    PromptKind::ProposerValue,
+    PromptKind::LeaderRecovery,
+    PromptKind::ReplicaApply,
+    PromptKind::PersistOrder,
+    PromptKind::CommitOverwrite,
+    PromptKind::ReadServe,
+    PromptKind::SnapshotPromise,
+    PromptKind::AckWrite,
+];
 
 /// What a **right** answer confirms, in one clause. The narration says it back
 /// so the player reads the rule rather than only "correct".
@@ -99,6 +121,12 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
         }
         PromptKind::ReadServe => {
             "a read is answered only on a proof of leadership newer than the read itself."
+        }
+        PromptKind::SnapshotPromise => {
+            "a snapshot restores the log and never a promise, so the promise is only ever raised."
+        }
+        PromptKind::AckWrite => {
+            "an ack names a slot this node has really executed, and nothing else does."
         }
     }
 }
@@ -172,7 +200,7 @@ impl Prompt {
         // prompt kind cannot ship a silent refusal.
         self.feedback = Some(self.explanations.get(choice).cloned().unwrap_or_else(|| {
             format!(
-                "That is not what `paros-core` does here: its own answer is {:?}.",
+                "That is not what the protocol does here: its own answer is {:?}.",
                 self.expected
             )
         }));
@@ -191,9 +219,9 @@ impl Prompt {
     /// `Prepare(ballot)` arrived at an acceptor whose promise is `promised`.
     ///
     /// Judged by [`paros_core::acceptor::Acceptor::prepare`] on a clone: a
-    /// promise is raised for a ballot at or above the one held, and refused
-    /// below it — or refused, without touching the promise, when the range
-    /// starts below the compaction floor.
+    /// promise is raised (or re-affirmed) for any ballot **not below** the one
+    /// held, and refused below it — or refused, without touching the promise,
+    /// when the range starts below the compaction floor.
     #[must_use]
     pub fn acceptor_prepare(
         id: u64,
@@ -224,23 +252,26 @@ impl Prompt {
                     from_slot.0, floor.0
                 ),
                 _ => format!(
-                    "You would promise ballot {b} after already promising {p}. A promise is the \
+                    "Ballot {b} is *below* the promise {p} already held here. A promise is the \
                      only fence Paxos has: having promised {p}, this acceptor's report to \
                      ballot {p}'s proposer was that proposer's *last word* about every lower \
                      ballot. Answering {b} now un-says it — ballot {b} could gather a majority \
-                     behind {p}'s back and choose a second value for the same slot. The rule is \
-                     strict: promise only a ballot at or above the one held."
+                     behind {p}'s back and choose a second value for the same slot. One rule, \
+                     both questions: refuse anything below the promise you hold."
                 ),
             },
         );
         explanations.insert(
             "nack".to_string(),
             format!(
-                "Ballot {b} is at or above the promise {p} held here, so refusing it is not \
+                "Ballot {b} is not below the promise {p} held here, so refusing it is not \
                  unsafe — it is a liveness bug. Nothing has been promised that {b} would \
                  violate, and refusing it costs the cluster an election it could have won. \
-                 The acceptor promises, raises its durable promise to {b} *before* the reply \
-                 leaves, and reports whatever it has accepted from slot {} on.",
+                 (An *equal* ballot is not a puzzle: a ballot is minted by exactly one \
+                 proposer, so ballot {b} arriving twice is that one proposer asking again, and \
+                 the honest answer is the same answer.) The acceptor promises, raises its \
+                 durable promise to {b} *before* the reply leaves, and reports whatever it has \
+                 accepted from slot {} on.",
                 from_slot.0
             ),
         );
@@ -269,8 +300,10 @@ impl Prompt {
     /// `promised`.
     ///
     /// Judged by [`paros_core::acceptor::Acceptor::admit`], which needs no
-    /// clone at all — it takes `&self`. A vote is admissible at or above the
-    /// promise (`>=`, not `>`: accepting at a ballot *is* promising it).
+    /// clone at all — it takes `&self`. The rule is the same one the `Prepare`
+    /// side uses: anything **below** the promise is refused, and a ballot at
+    /// or above it is admitted. An equal ballot is the proposer that already
+    /// holds this acceptor's promise coming back for its vote.
     #[must_use]
     pub fn acceptor_accept(
         id: u64,
@@ -304,11 +337,12 @@ impl Prompt {
         explanations.insert(
             "nack".to_string(),
             format!(
-                "Ballot {b} is at or above the promise {p}, so this vote is safe to cast — the \
-                 test is `>=`, not `>`. Refusing it is a liveness bug: a proposer that ran \
-                 Phase 1 at {b} and got this acceptor's promise is entitled to its vote in \
-                 Phase 2 at the same ballot. Accept, and note the two writes and their order: \
-                 the promise is raised to {b} first, then the record for slot {} — the record \
+                "Ballot {b} is not below the promise {p}, so this vote is safe to cast. Refusing \
+                 it is a liveness bug: a proposer that ran Phase 1 at {b} and got this \
+                 acceptor's promise is entitled to its vote in Phase 2 at the same ballot — a \
+                 ballot is minted by one proposer, so \"equal\" always means \"the same \
+                 proposer, again\". Accept, and note the two writes and their order: the \
+                 promise is re-affirmed at {b} first, then the record for slot {} — the record \
                  must never be durable above the promise that covers it.",
                 slot.0
             ),
@@ -444,9 +478,9 @@ impl Prompt {
             "repropose".to_string(),
             format!(
                 "Nothing was reported for slot {}, so there is no value to re-propose. \
-                 Inventing your client's next command here would be a fresh proposal at a \
-                 slot below your allocator frontier — and the frontier is derived from the \
-                 accepted log, so a restart would step over the slot again.",
+                 Inventing your client's next command here would be a *new* proposal at a slot \
+                 below the frontier you hand fresh commands out from — and that frontier is \
+                 derived from the accepted log, so a restart would step over the slot again.",
                 slot.0
             ),
         );
@@ -482,8 +516,8 @@ impl Prompt {
                     slot.0
                 ),
                 _ => format!(
-                    "Skipping slot {} is exactly the permanent gap. `propose` only ever \
-                     allocates the frontier, and a restart recomputes the frontier from the \
+                    "Skipping slot {} is exactly the permanent gap. A new proposal only ever \
+                     takes the frontier, and a restart recomputes the frontier from the \
                      accepted log, so nothing proposes this slot again: the chosen prefix \
                      freezes one below it cluster-wide, reads are fenced above it, and \
                      commit-replay catch-up cannot help because every node is stuck in the \
@@ -513,9 +547,13 @@ impl Prompt {
 
     /// A message just made `slot` chosen at this node. Apply it, or hold?
     ///
-    /// Judged by [`paros_core::replica::Replica`]'s contiguity rule
-    /// (`first_unchosen` / `covers`): the applied prefix is contiguous, so a
-    /// slot is applied exactly when it is the first unchosen one.
+    /// `applies_now` is the core's own answer, computed by the caller on a
+    /// **clone of the replica**: learn the slot, run the contiguous walk, and
+    /// see whether the walk surfaced this slot as committed. The rule it
+    /// embodies is the contiguity one — the applied prefix has no holes, so a
+    /// slot is executed exactly when the walk reaches it — but the answer
+    /// comes from [`paros_core::replica::Replica::advance`], not from a
+    /// comparison restated here.
     #[must_use]
     pub fn replica_apply(
         id: u64,
@@ -523,13 +561,10 @@ impl Prompt {
         slot: Slot,
         chosen_index: Option<Slot>,
         first_unchosen: Slot,
+        applies_now: bool,
     ) -> Self {
         let at = chosen_index.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
-        let expected = if slot == first_unchosen {
-            "apply"
-        } else {
-            "hold"
-        };
+        let expected = if applies_now { "apply" } else { "hold" };
         let mut explanations = BTreeMap::new();
         explanations.insert(
             "apply".to_string(),
@@ -616,9 +651,15 @@ impl Prompt {
     /// or a catch-up replay — while this acceptor's record says `held` at a
     /// lower ballot.
     ///
-    /// Judged by [`paros_core::acceptor::Acceptor::record_accepted`]'s
-    /// upsert-by-slot contract: the choosing ballot wins, and the stale
-    /// lower-ballot record is overwritten.
+    /// **The answer is a constant, and deliberately so.** There is no clone to
+    /// ask: the core has no "keep the old record" state to be in.
+    /// [`paros_core::acceptor::Acceptor::record_accepted`] is an upsert by
+    /// slot, and the prompt is only ever raised when what arrived was decided
+    /// at a *strictly higher* ballot than the record held, so the choosing
+    /// ballot always wins and the answer is always `take`. What the prompt
+    /// teaches is the consequence of the other answer, which is why the
+    /// `keep` branch carries the whole stale-accept-resurrection story and
+    /// `take` carries none.
     #[must_use]
     pub fn commit_overwrite(
         id: u64,
@@ -712,7 +753,7 @@ impl Prompt {
             id,
             kind: PromptKind::ReadServe,
             node: node.0,
-            question: format!("The read at ctx {ctx} captured {at}. Serve it, or wait?"),
+            question: format!("The client's read (#{ctx}) captured {at}. Serve it, or wait?"),
             state_summary: vec![
                 format!("read index captured: {at}"),
                 format!("heartbeat acks credited to the round: {acks}"),
@@ -722,6 +763,196 @@ impl Prompt {
                 Choice::new("serve", format!("Serve the read at {at}")),
                 Choice::new("wait", "Wait for the ack quorum"),
             ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A peer's snapshot arrived at a node stranded below the cluster's floor.
+    /// What is its durable promise afterwards?
+    ///
+    /// Judged on a **clone of the acceptor**, driven exactly as
+    /// `ColocatedNode::on_install_snapshot` drives the real one: raise the
+    /// promise to the snapshot's ballot only if that ballot is higher, then
+    /// [`paros_core::acceptor::Acceptor::install`]. `promised` is what the
+    /// clone holds afterwards, and the offered ballots are matched against it
+    /// — so the answer is the core's, not a comparison restated here.
+    ///
+    /// The two choices are the two concrete ballots that differ: the higher of
+    /// the pair, and the other one. When the snapshot's ballot is the lower,
+    /// picking it is the mistake the whole level exists for — a snapshot
+    /// restores the log, never a promise, and a node that forgot a promise it
+    /// had already made is free to vote for a ballot it had sworn to refuse.
+    #[must_use]
+    pub fn snapshot_promise(
+        id: u64,
+        node: NodeId,
+        at: Slot,
+        snapshot_ballot: Ballot,
+        held: Ballot,
+        promised: Ballot,
+    ) -> Self {
+        let sb = show_ballot(snapshot_ballot);
+        let hb = show_ballot(held);
+        let higher = held.max(snapshot_ballot);
+        let lower = held.min(snapshot_ballot);
+        let expected = if promised == higher {
+            "higher"
+        } else {
+            "lower"
+        };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "lower".to_string(),
+            format!(
+                "That lowers this node\'s durable promise to {}. A promise is the one thing a \
+                 node may never take back: having promised {hb}, it told some proposer that \
+                 every lower ballot was finished here, and that proposer may already have chosen \
+                 a value on the strength of it. A snapshot restores the *log* — the values, the \
+                 prefix, the application state — and says nothing about promises; the peer that \
+                 sent it does not know what this node has sworn. Take the higher of the two, \
+                 always. (This is also why a node whose disk was *wiped* can never rejoin: a \
+                 snapshot cannot give it back a promise it no longer remembers making.)",
+                show_ballot(lower)
+            ),
+        );
+        Self {
+            id,
+            kind: PromptKind::SnapshotPromise,
+            node: node.0,
+            question: format!(
+                "A snapshot covering everything up to slot {} arrived, taken under ballot {sb}. \
+                 You promised {hb}. What is your promise now?",
+                at.0
+            ),
+            state_summary: vec![
+                format!("my durable promise: {hb}"),
+                format!("the snapshot\'s ballot: {sb}"),
+                format!("the snapshot covers everything up to slot {}", at.0),
+            ],
+            choices: vec![
+                Choice::new("higher", format!("Promise {}", show_ballot(higher))),
+                Choice::new("lower", format!("Promise {}", show_ballot(lower))),
+            ],
+            expected: expected.to_string(),
+            explanations,
+            feedback: None,
+        }
+    }
+
+    /// A client retried a write. Which of the three honest answers is this?
+    ///
+    /// Judged on a **clone of the replica**, through the two ledgers the core
+    /// itself consults in that order:
+    /// [`applied_at`](paros_core::replica::Replica::applied_at) says the
+    /// command is inside this node's applied prefix, so the ack may name its
+    /// slot; [`inflight_at`](paros_core::replica::Replica::inflight_at) says
+    /// it is chosen or in flight at a slot but not executed here yet, so the
+    /// client waits on **that** slot; neither says the node has never seen it,
+    /// and it takes a fresh one.
+    ///
+    /// The two tables move together, and that is the whole lesson: ack from
+    /// the wrong one and the client is told a write is durable that no node
+    /// has applied, or — worse — the retry misses both and the command is
+    /// executed twice.
+    #[must_use]
+    pub fn ack_write(
+        id: u64,
+        node: NodeId,
+        client: u64,
+        seq: u64,
+        applied_at: Option<Slot>,
+        inflight_at: Option<Slot>,
+        chosen_index: Option<Slot>,
+    ) -> Self {
+        let applied =
+            chosen_index.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let expected = match (applied_at, inflight_at) {
+            (Some(_), _) => "acked",
+            (None, Some(_)) => "inflight",
+            (None, None) => "fresh",
+        };
+        let mut explanations = BTreeMap::new();
+        explanations.insert(
+            "acked".to_string(),
+            format!(
+                "Nothing in this node's applied prefix (which ends at {applied}) carries write \
+                 #{seq} for client {client}. Acking it anyway is the classic early ack: the \
+                 client is told its write is durable and readable, then reads at this very node \
+                 a moment later and does not find it — because \"chosen\" is not \"applied\", and \
+                 a slot decided above a hole is executed by nobody until the hole closes."
+            ),
+        );
+        explanations.insert(
+            "inflight".to_string(),
+            match applied_at {
+                Some(slot) => format!(
+                    "Write #{seq} is already applied here, at slot {}. Parking the reply on an \
+                     in-flight slot would make the client wait for something that has already \
+                     happened — and if a later duplicate of it is sitting chosen-but-unapplied \
+                     somewhere above, that duplicate executes as a no-op and the reply never \
+                     fires at all.",
+                    slot.0
+                ),
+                None => format!(
+                    "This node has no record of write #{seq} in either table — not applied, not \
+                     in flight. There is no slot to park the reply on."
+                ),
+            },
+        );
+        explanations.insert(
+            "fresh".to_string(),
+            match (applied_at, inflight_at) {
+                (Some(slot), _) => format!(
+                    "Write #{seq} already applied here, at slot {}. Giving it a fresh slot \
+                     executes the client\'s command a *second* time — the exact thing \
+                     at-most-once execution exists to prevent, and strictly worse than an early \
+                     ack.",
+                    slot.0
+                ),
+                (None, Some(slot)) => format!(
+                    "Write #{seq} is chosen (or still in flight) at slot {}, it just has not \
+                     been executed here yet. Give it a fresh slot and the same command lands \
+                     twice in the log. This is exactly why the two dedup tables have to move \
+                     together: if \"chosen\" left the in-flight table before \"applied\" \
+                     received it, a retry arriving in that window would miss both.",
+                    slot.0
+                ),
+                (None, None) => String::new(),
+            },
+        );
+        let mut choices = vec![
+            Choice::new("acked", "Ack it: already applied here"),
+            Choice::new("inflight", "Hold the reply on the slot it is in flight at"),
+            Choice::new("fresh", "Give it the next free slot"),
+        ];
+        choices.retain(|choice| !choice.id.is_empty());
+        Self {
+            id,
+            kind: PromptKind::AckWrite,
+            node: node.0,
+            question: format!(
+                "Client {client} asks again for its write #{seq}. What do you answer?"
+            ),
+            state_summary: vec![
+                format!("applied prefix ends at: {applied}"),
+                format!(
+                    "the applied ledger says: {}",
+                    applied_at.map_or_else(
+                        || "nothing for this write".to_string(),
+                        |s| format!("applied at slot {}", s.0)
+                    )
+                ),
+                format!(
+                    "the in-flight table says: {}",
+                    inflight_at.map_or_else(
+                        || "nothing for this write".to_string(),
+                        |s| format!("in flight at slot {}", s.0)
+                    )
+                ),
+            ],
+            choices,
             expected: expected.to_string(),
             explanations,
             feedback: None,

@@ -50,21 +50,9 @@ pub use view::{GameView, LevelSummary};
 
 use auto::{ALL_FLAGS, Automation, AutomationFlag};
 use narration::{NarrationEvent, NarrationKind};
-use prompt::{PromptKind, Verdict};
+use prompt::{ALL_PROMPTS, Verdict};
 use view::{ActionView, AutomationFlagView, AutomationView, LevelView, PromptView};
 use world::WorldPolicy;
-
-/// Every prompt kind, so the policy can be derived from the flag set.
-const ALL_PROMPTS: &[PromptKind] = &[
-    PromptKind::AcceptorPrepare,
-    PromptKind::AcceptorAccept,
-    PromptKind::ProposerValue,
-    PromptKind::LeaderRecovery,
-    PromptKind::ReplicaApply,
-    PromptKind::PersistOrder,
-    PromptKind::CommitOverwrite,
-    PromptKind::ReadServe,
-];
 
 /// One level in progress: the world, the automation flags, and the action log
 /// that is also the undo stack.
@@ -123,8 +111,16 @@ impl Game {
     }
 
     /// Whether the level's goal is reached.
+    ///
+    /// A world that has been asked to hold **two values for one slot** fails
+    /// here, ahead of the level's own predicate and whatever it was watching:
+    /// that is the one thing Paxos promises can never happen, so the game says
+    /// so out loud rather than letting a level report progress on top of it.
     #[must_use]
     pub fn goal(&self) -> GoalStatus {
+        if let Some(detail) = self.world.violation() {
+            return GoalStatus::Failed(detail);
+        }
         (self.level.goal)(&self.world)
     }
 
@@ -213,6 +209,7 @@ impl Game {
                     .map(|s| (*s).to_string())
                     .collect(),
                 allowed_actions: self.level.allowed_actions.to_vec(),
+                unlocks: self.level.unlocks.to_vec(),
                 hint: (self.level.hint)(&self.world, self.mistakes),
             },
             world: self.world.view(),
@@ -305,15 +302,24 @@ impl Game {
                 self.log_world()?
                     .set_election_timeout(NodeId(*node), *ticks)?;
             }
-            Action::ReadIndex { node } => {
+            Action::ReadIndex { node, client } => {
                 let world = self.log_world()?;
-                let client = world.clients().first().copied().ok_or_else(|| {
-                    ActionError::new(
-                        ActionErrorCode::UnknownParty,
-                        "this level has no client to read for",
-                    )
-                })?;
+                let client = match client {
+                    Some(client) => *client,
+                    None => world.clients().first().copied().ok_or_else(|| {
+                        ActionError::new(
+                            ActionErrorCode::UnknownParty,
+                            "this level has no client to read for",
+                        )
+                    })?,
+                };
                 world.read_index(NodeId(*node), client)?;
+            }
+            Action::Retry { node, client, seq } => {
+                self.log_world()?.retry(NodeId(*node), *client, *seq)?;
+            }
+            Action::Compact { node, up_to } => {
+                self.log_world()?.compact(NodeId(*node), *up_to)?;
             }
             Action::ResendPending { node } => self.log_world()?.resend_pending(NodeId(*node))?,
             Action::StepDown { node } => self.log_world()?.step_down(NodeId(*node))?,

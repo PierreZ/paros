@@ -22,8 +22,8 @@ use crate::level::WorldKind;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationFlag {
-    /// The acceptor answers `Prepare` and `Accept` on its own (the two rules:
-    /// `>` to promise, `>=` to vote).
+    /// The acceptor answers `Prepare` and `Accept` on its own (one rule for
+    /// both: refuse anything below the promise held).
     AcceptorReplies,
     /// The acceptor replaces a stale lower-ballot record with what the
     /// choosing ballot decided, on its own.
@@ -39,6 +39,11 @@ pub enum AutomationFlag {
     PersistOrder,
     /// A leader serves a confirmed read on its own.
     ReadServe,
+    /// A node installing a peer's snapshot keeps the higher of its own promise
+    /// and the snapshot's ballot, on its own.
+    SnapshotPromise,
+    /// A leader answers a client's retry from its two dedup tables, on its own.
+    AckWrite,
     /// Heartbeats and their acks are delivered without being clicked.
     DeliverHeartbeats,
     /// `Promise`, `Accepted` and `Nack` are delivered without being clicked.
@@ -56,6 +61,8 @@ pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
     AutomationFlag::ReadServe,
+    AutomationFlag::SnapshotPromise,
+    AutomationFlag::AckWrite,
     AutomationFlag::DeliverHeartbeats,
     AutomationFlag::DeliverReplies,
     AutomationFlag::ResendPending,
@@ -73,6 +80,8 @@ impl AutomationFlag {
             AutomationFlag::LeaderRecovery => "leader recovery",
             AutomationFlag::PersistOrder => "persist before send",
             AutomationFlag::ReadServe => "serve reads",
+            AutomationFlag::SnapshotPromise => "promise across a snapshot",
+            AutomationFlag::AckWrite => "answer a client retry",
             AutomationFlag::DeliverHeartbeats => "deliver heartbeats",
             AutomationFlag::DeliverReplies => "deliver replies",
             AutomationFlag::ResendPending => "re-send pending accepts",

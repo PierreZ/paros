@@ -36,6 +36,17 @@ violation a wrong rule would cause, undo a decision — is exactly what this gam
   and the field-guide link. A level is judged by the question it leaves the player able to
   answer ("why must the new proposer adopt a value nobody chose?"), never by the API it
   exercised.
+- **All player-facing text follows ASD-STE100 (Simplified Technical English).** Briefings,
+  prompt questions, choices, explanations, hints, goal texts, narration lines and UI labels,
+  and the book pages written for the game (`play.md`, the field-guide chapters): one
+  instruction per sentence, active voice, present tense, sentences of at most 20 words in
+  procedures and 25 in descriptions, paragraphs of at most six sentences, no idioms, no
+  figurative language, no noun clusters longer than three words, articles always written,
+  approved vocabulary where STE defines one (`must` for obligation, `make sure`, `applicable`
+  is not approved, `do not` rather than `never`), technical names (ballot, promise, quorum,
+  slot, Prepare, Promise, Accept, Accepted, Nack, Commit, Heartbeat) kept as technical names.
+  Warnings and cautions come before the step they apply to. A wrong-answer explanation says
+  first what the result is, then why.
 - **Frontend: full TypeScript + npm (vite, vitest), every tool from Nix.** `nodejs_22` from the
   flake; `package-lock.json` committed; `npm ci` in CI. No global installs, ever.
 - **Levels and goals live in Rust.** The wasm crate owns the world, the action log, the level
@@ -51,9 +62,14 @@ crates/paros-play/                 # the game engine + wasm glue; publish = fals
   src/lib.rs                       # #[wasm_bindgen] Game: new(level_id), act(action_json), undo(),
                                    #   view() -> JSON; also the native API the tests use
   src/world/                       # World: nodes, disks, wire, matchmakers, clock, clients
-    mod.rs                         # World, InFlight, Envelope, the drain/deliver contract
-    disk.rs                        # Disk: Storage impl (HardState, records, floor, sealed, app log)
-    decree.rs                      # the Act I world: Proposer + Acceptor over Slot(0), no ColocatedNode
+    mod.rs                         # World, InFlight, the client history, the deliver contract
+    drain.rs                       # the drain contract: one Ready batch, the seams, the batch prompts
+    prompts.rs                     # which delivery raises which question, on which role clone
+    render.rs                      # the log world's view
+    disk.rs                        # Disk: Storage impl (HardState, records, floor, sealed, app log,
+                                   #   and the opaque application snapshot that log serialises to)
+    decree/mod.rs                  # the Act I world: Proposer + Acceptor over Slot(0), no ColocatedNode
+    decree/render.rs               # its view: an acceptor's promise + record, a proposer's attempt
     matchmakers.rs                 # (PR 3) Matchmaker + MemRegistry + MatchmakerReconfigurer plane
   src/action.rs                    # Action enum (serde): every player verb
   src/prompt.rs                    # Prompt/Answer: the "play the role" questions and their judge
@@ -63,6 +79,8 @@ crates/paros-play/                 # the game engine + wasm glue; publish = fals
     mod.rs                         # Level, Goal, Hint, Briefing, the registry
     act1.rs                        # single decree
     act2.rs                        # log, leader, crash
+    act3.rs                        # truncation, snapshots, reads
+    script.rs                      # a reference solution is *recorded* by driving a real Game
   tests/levels.rs                  # every level's reference solution reaches its goal;
                                    #   every prompt's wrong answers are refused
 web/play/                          # the TypeScript app
@@ -147,14 +165,16 @@ Prompt kinds for PR 1:
 
 | kind | the question | judged by |
 |---|---|---|
-| `AcceptorPrepare` | Prepare at b arrives; promised p. Promise or Nack? | `Acceptor::prepare` on a clone (`b > p`) |
-| `AcceptorAccept` | Accept at b for slot s arrives; promised p. Accepted or Nack? | `Acceptor::admit` (`b >= p`) |
+| `AcceptorPrepare` | Prepare at b arrives; promised p. Promise or Nack? | `Acceptor::prepare` on a clone (refuse `b < p`) |
+| `AcceptorAccept` | Accept at b for slot s arrives; promised p. Accepted or Nack? | `Acceptor::admit` — the **same** test, refuse `b < p`; the two questions differ in what the answer is *for* (a Promise reports and fences, a vote records), not in which comparison they use |
 | `ProposerValue` | Phase 1 complete; Promises reported these (ballot, value)s. Which value goes in the Accept? | `Proposer::close_phase1` → recovered vs own |
-| `LeaderRecovery` | You just won. For slot s the quorum reported X / nothing. Re-propose X, fill Noop, or open fresh slots? | `RecoveryStep` from `recovery_next` |
-| `ReplicaApply` | Slots chosen: {…}. chosen_index = k. Apply slot s? | `Replica::covers` / contiguity |
+| `LeaderRecovery` | You just won. For slot s the quorum reported X / nothing. Re-propose X, fill Noop, or skip? | the `RecoveryStep` the core is about to take, read off a clone **before** the call that pumps the page: `recovery_next` for a page after the first, `close_phase1`'s `recovered` map for the first (which is opened *and* pumped inside one `step`). A `Noop` on the wire is a gap fill *or* a predecessor's gap fill that a Promise reported, and only the recovery knows which |
+| `ReplicaApply` | Slots chosen: {…}. chosen_index = k. Apply slot s? | `Replica::learn` then `Replica::advance` on a clone: did the walk surface s as committed? |
 | `PersistOrder` | A Ready holds writes and messages. Sync first or send first? | always sync first (the seam level's explanation) |
-| `CommitOverwrite` | Commit says slot s is Y; your accepted record says X at a lower ballot. Keep X or take Y? | `record_accepted` at the choosing ballot |
+| `CommitOverwrite` | Commit says slot s is Y; your accepted record says X at a lower ballot. Keep X or take Y? | a **constant** (`take`), and the doc says why: `record_accepted` is an upsert by slot, and the prompt is raised only when what arrived was decided at a strictly higher ballot, so the core has no "keep" state to be in |
 | `ReadServe` | Read ctx captured index i; quorum of acks held; chosen_index = c. Serve or wait? | `confirm_reads` (Act III's fresh-leader trap; the Act II variant is the deposed leader) |
+| `SnapshotPromise` | A peer's snapshot at boundary i, taken under ballot b, arrived; you promised p. What is your promise now? | `set_promise` + `Acceptor::install` on a clone, driven exactly as `on_install_snapshot` drives the real one (Act III) |
+| `AckWrite` | A client retried (client, seq). Acked as applied, held in flight, or given a fresh slot? | `Replica::applied_at` then `Replica::inflight_at` on a clone — the two dedup tables, in the order the core consults them (Act III) |
 
 A prompt kind is unlocked for automation when the level that introduces it is passed; a later
 level may still force it manual for teaching.
@@ -176,7 +196,7 @@ declares `manual_roles`, `pinned_automation`, `allowed_actions`, a markdown `bri
 `field_guide` link into the book, the core symbols it names, and the `reference: Vec<Action>`
 the tests replay. Level ids are stable strings (`act1/choose-a-value`), never indices.
 
-### Act I — single decree (`decree.rs` world; 3 acceptors, 1–2 proposers)
+### Act I — single decree (`world/decree/` world; 3 acceptors, 1–2 proposers)
 
 1. `act1/choose-a-value` — deliver Prepare, Promise, Accept, Accepted by hand with one acceptor
    silent; goal: a value chosen with two of three. Teaches the two phases and "2 of 3 suffices".

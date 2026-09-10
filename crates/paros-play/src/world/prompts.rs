@@ -9,7 +9,9 @@
 //! `paros-core` do with this message?" without doing it — which is what lets a
 //! wrong answer cost a mistake instead of a state.
 
-use paros_core::{AcceptorWrite, Ballot, Command, Message, NodeId, Slot};
+use paros_core::{
+    AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Message, NodeId, Slot, WriteOp,
+};
 
 use crate::prompt::{Prompt, PromptKind};
 use crate::world::World;
@@ -28,9 +30,102 @@ impl World {
         self.vote_prompt(to, index, message)
             .or_else(|| self.learn_prompt(to, index, message))
             .or_else(|| self.read_prompt(to, index, message))
+            .or_else(|| self.snapshot_prompt(to, index, message))
     }
 
-    /// The acceptor's two rules: `>` to promise, `>=` to vote.
+    /// The question a peer's snapshot raises at a node stranded below the
+    /// cluster's floor: what is its durable promise afterwards?
+    ///
+    /// Judged on a clone of the acceptor, driven exactly as
+    /// `ColocatedNode::on_install_snapshot` drives the real one.
+    fn snapshot_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::SnapshotPromise) {
+            return None;
+        }
+        let Message::InstallSnapshot {
+            ballot,
+            chosen_index,
+            snapshot,
+            sessions,
+            ..
+        } = message
+        else {
+            return None;
+        };
+        let node = self.nodes[index].as_ref()?;
+        // A snapshot the core would ignore teaches nothing: it neither
+        // installs nor moves the promise, so there is no decision to play.
+        if node
+            .replica()
+            .chosen_index()
+            .is_some_and(|ci| *chosen_index <= ci)
+        {
+            return None;
+        }
+        let held = node.acceptor().promised();
+        let mut clone = node.acceptor().clone();
+        let mut writes: Vec<WriteOp> = Vec::new();
+        if *ballot > clone.promised() {
+            clone.set_promise(*ballot, &mut writes);
+        }
+        clone.install(
+            *chosen_index,
+            *ballot,
+            snapshot.clone(),
+            sessions.clone(),
+            &mut writes,
+        );
+        let promised = clone.promised();
+        let id = self.take_prompt_id();
+        Some(Prompt::snapshot_promise(
+            id,
+            to,
+            *chosen_index,
+            *ballot,
+            held,
+            promised,
+        ))
+    }
+
+    /// The question a client's retry raises at the leader: which of the three
+    /// honest answers is this one?
+    ///
+    /// Judged on a clone of the replica, through the two ledgers the core
+    /// itself consults — and in the order it consults them.
+    pub(super) fn ack_write_prompt(
+        &mut self,
+        to: NodeId,
+        index: usize,
+        client: ClientId,
+        seq: ClientSeq,
+    ) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::AckWrite) {
+            return None;
+        }
+        let node = self.nodes[index].as_ref()?;
+        if !node.is_leader() {
+            return None;
+        }
+        let clone = node.replica().clone();
+        let applied_at = clone.applied_at(client, seq);
+        let inflight_at = clone.inflight_at(client, seq);
+        let chosen_index = clone.chosen_index();
+        let id = self.take_prompt_id();
+        Some(Prompt::ack_write(
+            id,
+            to,
+            client.0,
+            seq.0,
+            applied_at,
+            inflight_at,
+            chosen_index,
+        ))
+    }
+
+    /// The acceptor's two questions. **One rule governs both**: refuse
+    /// anything *below* the promise held, admit anything at or above it. A
+    /// `Prepare` reports and fences; an `Accept` records. What differs is what
+    /// the answer is *for*, not which comparison it uses.
     fn vote_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
         let manual = |kind: PromptKind| self.policy.manual.contains(&kind);
         let node = self.nodes[index].as_ref()?;
@@ -83,7 +178,7 @@ impl World {
                 {
                     return Some(prompt);
                 }
-                self.replica_apply_prompt(to, index, *slot)
+                self.replica_apply_prompt(to, index, *slot, command)
             }
             Message::CatchUpResponse { entries, .. } if manual(PromptKind::CommitOverwrite) => {
                 let contradiction = entries.iter().find_map(|(slot, (ballot, command))| {
@@ -109,8 +204,8 @@ impl World {
                 if !clone.fold_accepted(*from, *ballot, *slot, *vhash) {
                     return None;
                 }
-                clone.decided(*slot, node.acceptors())?;
-                self.replica_apply_prompt(to, index, *slot)
+                let (_, command) = clone.decided(*slot, node.acceptors())?;
+                self.replica_apply_prompt(to, index, *slot, &command)
             }
             _ => None,
         }
@@ -176,7 +271,19 @@ impl World {
 
     /// The `ReplicaApply` question for a slot that is about to become chosen
     /// at `to`.
-    fn replica_apply_prompt(&mut self, to: NodeId, index: usize, slot: Slot) -> Option<Prompt> {
+    ///
+    /// The answer is the **replica's own**: a clone learns the slot and runs
+    /// the contiguous walk, and whether the walk surfaced this slot as
+    /// committed is the whole judgement. `records_agree` is always true on the
+    /// clone — the coupling it asserts is the acceptor's business, and the
+    /// real node has already been given (or is about to be given) the record.
+    fn replica_apply_prompt(
+        &mut self,
+        to: NodeId,
+        index: usize,
+        slot: Slot,
+        command: &Command,
+    ) -> Option<Prompt> {
         if !self.policy.manual.contains(&PromptKind::ReplicaApply) {
             return None;
         }
@@ -186,6 +293,11 @@ impl World {
         }
         let chosen_index = node.replica().chosen_index();
         let first_unchosen = node.replica().first_unchosen();
+        let mut clone = node.replica().clone();
+        clone.learn(slot, command);
+        let mut writes: Vec<WriteOp> = Vec::new();
+        clone.advance(|_, _| true, &mut writes);
+        let applies_now = clone.committed().iter().any(|(at, _)| *at == slot);
         let id = self.take_prompt_id();
         Some(Prompt::replica_apply(
             id,
@@ -193,6 +305,7 @@ impl World {
             slot,
             chosen_index,
             first_unchosen,
+            applies_now,
         ))
     }
 }
