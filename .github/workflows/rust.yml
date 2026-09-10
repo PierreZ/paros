@@ -71,8 +71,7 @@ jobs:
 
   # The sans-IO core and the library driver stay portable to wasm32: paros-core is
   # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The
-  # gate guards those two contracts, not a browser build (the demo was removed
-  # and will return on top of them).
+  # gate guards those two contracts; the browser build itself is the `play` job.
   portability:
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +86,25 @@ jobs:
         run: nix develop --command cargo check -p paros-core --features serde
       - name: Build paros (the library driver) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
+
+  # paros play, the interactive game: the engine crate's wasm build, the TypeScript
+  # bindings ts-rs generates from its view types (committed; a stale copy fails the
+  # diff), and the web app's type check, unit tests and production bundle. Every
+  # tool comes from the flake; `npm ci` installs the locked dependencies.
+  play:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Regenerate the TypeScript bindings and check they are committed
+        run: |
+          nix develop --command cargo test -p paros-play --test bindings
+          git diff --exit-code -- web/play/src/generated
+      - name: Build the game's wasm and the web app
+        run: nix develop --command scripts/build-play.sh --wasm-only
+      - name: Type-check, test and bundle the web app
+        run: nix develop --command bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
   # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
   # the Paxos sim with sancov instrumentation on the shipped library (paros_core +

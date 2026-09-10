@@ -24,3 +24,9 @@ target
 
 # Claude Code agent worktrees (nested checkouts, never project content)
 .claude/worktrees/
+
+# paros play: installed npm packages, the vite bundle, and the wasm-bindgen output
+# (scripts/build-play.sh produces the last two; src/generated/ is committed).
+/web/play/node_modules/
+/web/play/dist/
+/web/play/src/wasm/
