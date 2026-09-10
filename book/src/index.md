@@ -21,10 +21,21 @@ clock, and no randomness. An async driver (built on
 side effects in the order the `Ready` documents, honoring the persist-before-send
 durability rule at the heart of Paxos safety.
 
-> **How to read this book.** It is a guided tour of the algorithm, grounded in the
-> papers and mapped onto the real `paros-core` code. Part one,
-> *Single-decree Paxos*, covers [how a value is chosen](choose-one-value.md) and
+> **How to play, then read.** The mechanism is taught by
+> [**paros play**](play.md), an interactive game at [`/play/`](play/) that runs this
+> repository's `paros-core` in your browser and puts you in charge of the network,
+> the clock, and — until you have earned the right to automate it — every role that
+> has to answer. Start there: deliver the messages by hand, be the acceptor, adopt
+> the value you did not want to, wedge a log and unwedge it.
+>
+> The chapters are the **field guide** beside the levels. Each one states its
+> mechanism in a paragraph, links to the levels that make you do it, and then gives
+> you what a level cannot: the paper the rule comes from, the derivation behind it,
+> the doctrine paros holds itself to, and the map from every protocol name onto the
+> real symbol in the code. Part one, *Single-decree Paxos*, covers
+> [how a value is chosen](choose-one-value.md) and
 > [why that choice is safe](safety.md). Part two, *Multi-Paxos*, builds the
 > [replicated log](replicated-log.md), elects a [stable leader](stable-leader.md),
-> and works through a [crash and restart safety](restart-safety.md) bug the
-> simulation caught. Every chapter explains with diagrams.
+> survives [crash and restart](restart-safety.md), then
+> [truncates it](truncation-and-snapshots.md) and asks
+> [what a read costs](linearizable-reads.md).

@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](index.md)
+[Play the game](play.md)
 
 # Single-decree Paxos
 

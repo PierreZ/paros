@@ -215,9 +215,14 @@ and fresh-leader reads violate.
 
 ## Proven, not asserted
 
-The `LinearizabilityOracle` in `paros-sim` checks those three conditions over
-the recorded trace of every run, and it is the king oracle of this project:
-from here on, every later stage (storage faults, reconfiguration) inherits a
+The client is the only party that knows its own program order, so this check lives
+in the workload: `ClientHistory` (`crates/paros-sim/src/audit/client.rs`) records
+every operation the sim client issues and asserts the three conditions over that
+history — **"a committed read observes every write completed before it began"**,
+**"committed-read watermarks never move backwards"**, and **"a write issued after a
+committed read lands above its watermark"**. Nothing reads a trace back. It is the
+king check of this project: from here on, every later stage (storage faults,
+reconfiguration) inherits a
 client's-eye definition of "nothing was lost". The workload interleaves a read
 after every write, cycling across nodes on redirects, under the usual chaos:
 swarm network faults, crash/restart attrition, and buggified seam crashes.
@@ -274,11 +279,14 @@ enters the prefix it claims to be in.
 
 The blindfold is worth naming, because it is why the sweep had never caught
 this. The fast path acked with *no slot at all*, and both the workload and the
-oracle were explicitly told to skip slotless acks. The exemption was exactly
+audit were explicitly told to skip slotless acks. The exemption was exactly
 the size of the bug. `ProposeResult::Chosen` now carries its slot, so the ack
-is falsifiable: `AppliedAckOracle` joins every committed ack against the acking
-node's own `log_applied` events and asserts the node had already applied the
-slot it named. It went red on twelve seeds in the first two thousand, and the
+is falsifiable: the audit joins every committed ack (`Audit::client_acked`)
+against the acking node's own applied prefix (`Audit::applied`) and asserts
+**"a committed write ack names a slot the acking node had already applied"**,
+beside **"chain: every acknowledged command was applied"**
+(`crates/paros-sim/src/audit/`). It went red on twelve seeds in the first two
+thousand, and the
 core tests
 `a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied` and
 `a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies` pin the

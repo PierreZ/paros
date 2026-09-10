@@ -56,9 +56,47 @@ config with `--no-sandbox`).
 - Keep every symbol named in a diagram real: it should exist in `paros-core` / `paros-sim`
   so the figure stays mapped to the code, like the rest of the book.
 
-## Live demos
+## The live surface is the game, and the book is its field guide
 
-The browser demo (`paros-wasm-demo`) and its "Watch it live" pages were removed while the
-harness is being simplified; they will come back on top of the audit's data, not the trace.
-Until then the book explains with prose and diagrams only. Do not add demo iframes, `runSeed`
-references, or wasm build steps.
+The interactive half of the book is **paros play**, deployed beside it on the same GitHub
+Pages site at `/play/` (`crates/paros-play` + `web/play`, staged into `book/output/play/`
+by `scripts/build-play.sh` in the Pages workflow). It drives the real `paros-core` compiled
+to wasm — the player is the network and the clock, and plays each role until the core judges
+the answer right — and it **never replays a trace**: there is no seed, no recorded run, and
+no simulation in the browser. `book/src/play.md` is the level map; the levels themselves are
+Rust, in `crates/paros-play/src/level/`.
+
+That splits the writing between the two surfaces, and the split is the rule for every future
+chapter edit:
+
+- **A chapter never re-explains an interleaving a level plays.** State the mechanism in a
+  paragraph, then link to the level. The step-by-step walkthroughs and counterexample traces
+  that used to carry these chapters are level briefings now; re-adding one to the prose is a
+  regression, not an improvement.
+- **What a chapter keeps** is what a level cannot give: the papers and their quotes, the
+  derivation (the invariant ladder), the distinctions that are arguments rather than runs
+  (recovery vs. catch-up), the "Proven, not asserted" doctrine sections, the optimizations
+  table, and the "Where this lives in paros" symbol maps.
+- **A diagram survives only if no level plays it.** Today that is the quorum-intersection
+  pivot flowchart and the invariant ladder in `safety.md`, and the hole picture in
+  `replicated-log.md` — static pictures of *state* or of a proof, not of an interleaving.
+- **Level ids are stable strings** (`act1/choose-a-value`, `act2/the-permanent-gap`) and a
+  chapter cites them **verbatim**. A level is linked as `play/#<level-id>` — relative, because
+  chapters are served at the site root — e.g. `[act1/adopt-the-value](play/#act1/adopt-the-value)`.
+  Never link a level by index or by title.
+- **Every chapter that a level teaches carries a "Play it" callout**, a blockquote placed
+  immediately after the opening paragraph, before the `<!-- toc -->`:
+
+  ```markdown
+  > **Play it.** One sentence of framing.
+  >
+  > - [`act2/elect-a-leader`](play/#act2/elect-a-leader) — what you do by hand, in the
+  >   second person, and what the level's goal is.
+  ```
+
+  One bullet per level, in level order, saying what the player *does* — not what the level
+  is about. Do not list a level in a chapter it does not belong to; `book/src/play.md`'s
+  table is the single source of the mapping, and the two must agree.
+
+Do not add demo iframes, `runSeed` references, or wasm build steps to a chapter: the game is
+a separate page, linked, never embedded.

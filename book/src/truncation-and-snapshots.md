@@ -116,10 +116,13 @@ disk-fault stage.
 Truncation makes the below-floor node *reachable*, and reaching it is how the two
 mechanisms were proven. The sweep widens the attrition recovery window so a
 crashed node stays down long enough for the cluster to truncate past it, and the
-`ConvergenceOracle` — which used to *exempt* a below-floor node as unrecoverable —
-now demands it converge like any other. A new `SnapshotOracle` asserts the
-recovery path actually fires (`EV_SNAPSHOT_INSTALLED`), and the `SafetyOracle`
-keeps watching that no node's promise ever decreases.
+end-of-run convergence claim — **"every node converges to the cluster's chosen
+prefix at the end of the settle tail"**, which used to *exempt* a below-floor node
+as unrecoverable — now demands it converge like any other. A gate on the recovery
+path itself, **"a below-floor node recovers via snapshot transfer"**, proves it
+actually fires (fed by `Audit::snapshot_installed`), while **"a node's promised
+ballot never decreases"** keeps watching the promise
+(`crates/paros-sim/src/audit/`).
 
 That sweep found two bugs before a human did, both fixed here:
 
@@ -128,8 +131,8 @@ That sweep found two bugs before a human did, both fixed here:
   quietly **regressed the promise** — the exact safety property the doctrine turns
   on. (The real `MemStorage` was already correct; the fake had drifted from it.)
 - A node can install *two* snapshots in a single batch when two peers both serve
-  it, so the no-gaps oracle had to track the *set* of snapshot landings, not just
-  the latest, or it flagged the first install as a bad forward jump.
+  it, so the applied-prefix check had to track the *set* of snapshot landings, not
+  just the latest, or it flagged the first install as a bad forward jump.
 
 The sweep drives nodes below a peer's floor and watches them recover through an
 `InstallSnapshot`, and it saturates with the snapshot reachables firing — so the
