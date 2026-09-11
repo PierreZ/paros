@@ -19,6 +19,7 @@ import { cellBadge, columnClass, columnOf, gridCells, gridOf } from './grid';
 import {
   circleLayout,
   dotPositions,
+  headingDegrees,
   gridPoint,
   groupByLink,
   trim,
@@ -554,7 +555,24 @@ export function partyName(id: number, party: string | null | undefined): string 
   return party === 'matchmaker' ? `matchmaker ${id}` : `node ${id}`;
 }
 
-function messageDot(message: MessageView, at: Point, geo: Geometry): SVGGElement {
+/**
+ * The arrowhead that stands for one message in flight.
+ *
+ * Its tip points at the receiver, so the stage shows the direction of every
+ * message without a label: a request is a filled head, a reply a hollow one.
+ * The shape is drawn once around the origin at radius `r` and turned to the
+ * link's heading; the hit circle stays round so a tap lands the same way from
+ * every side.
+ */
+function arrowheadPath(r: number): string {
+  const tip = (r * 1.35).toFixed(1);
+  const back = (-r * 0.85).toFixed(1);
+  const wing = (r * 0.95).toFixed(1);
+  const notch = (-r * 0.35).toFixed(1);
+  return `M ${tip} 0 L ${back} ${wing} L ${notch} 0 L ${back} -${wing} Z`;
+}
+
+function messageDot(message: MessageView, at: Point, heading: number, geo: Geometry): SVGGElement {
   // The column an Accept was addressed to colours the dot's edge: a grid
   // decides a slot by one whole column, so the player must see which one a
   // message belongs to. The engine names it (`MessageView.column`); the
@@ -580,12 +598,14 @@ function messageDot(message: MessageView, at: Point, geo: Geometry): SVGGElement
       cx: 0,
       cy: 0,
     }),
-    svg('circle', {
-      class: 'dot',
-      r: geo.narrow ? NARROW_DOT_RADIUS : DOT_RADIUS,
-      cx: 0,
-      cy: 0,
-    }),
+    svg(
+      'g',
+      { class: 'head', transform: `rotate(${heading.toFixed(1)})` },
+      svg('path', {
+        class: 'dot',
+        d: arrowheadPath(geo.narrow ? NARROW_DOT_RADIUS : DOT_RADIUS),
+      }),
+    ),
     svg('title', {}, `${message.summary} (${from} → ${to})${where}. Click to deliver it.`),
   );
 }
@@ -953,9 +973,10 @@ export function renderStage(view: GameView, viewport: Viewport = WIDE): SVGSVGEl
         y2: ends.to.y,
       }),
     );
+    const heading = headingDegrees(ends.from, ends.to);
     dotPositions(ends.from, ends.to, messages.length, geo.narrow ? 6 : 8).forEach((point, index) => {
       const message = messages[index];
-      if (message) dots.push(messageDot(message, point, geo));
+      if (message) dots.push(messageDot(message, point, heading, geo));
     });
   }
 
