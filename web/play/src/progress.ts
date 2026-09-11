@@ -23,6 +23,14 @@ export interface Progress {
   levels: Record<string, LevelProgress>;
   /** Automation flags the passed levels have unlocked. */
   unlocked: AutomationFlag[];
+  /**
+   * The levels whose briefing the player folded away.
+   *
+   * A phone shows the briefing above the stage, so it must be possible to put
+   * it away after the first read. The choice is per level and it is kept here,
+   * which is why it survives a reload.
+   */
+  folded: string[];
 }
 
 /** The minimum `Storage` surface this module needs. */
@@ -32,7 +40,7 @@ export interface StorageLike {
 }
 
 function emptyProgress(): Progress {
-  return { levels: {}, unlocked: [] };
+  return { levels: {}, unlocked: [], folded: [] };
 }
 
 function backing(storage?: StorageLike): StorageLike | null {
@@ -48,7 +56,11 @@ function backing(storage?: StorageLike): StorageLike | null {
 function sanitise(raw: unknown): Progress {
   const progress = emptyProgress();
   if (typeof raw !== 'object' || raw === null) return progress;
-  const { levels, unlocked } = raw as { levels?: unknown; unlocked?: unknown };
+  const { levels, unlocked, folded } = raw as {
+    levels?: unknown;
+    unlocked?: unknown;
+    folded?: unknown;
+  };
   if (typeof levels === 'object' && levels !== null) {
     for (const [id, value] of Object.entries(levels as Record<string, unknown>)) {
       if (typeof value !== 'object' || value === null) continue;
@@ -61,6 +73,9 @@ function sanitise(raw: unknown): Progress {
   }
   if (Array.isArray(unlocked)) {
     progress.unlocked = unlocked.filter((flag): flag is AutomationFlag => typeof flag === 'string');
+  }
+  if (Array.isArray(folded)) {
+    progress.folded = folded.filter((id): id is string => typeof id === 'string');
   }
   return progress;
 }
@@ -124,6 +139,25 @@ export function recordAttempt(id: string, mistakes: number, storage?: StorageLik
   progress.levels[id] = { passed: false, mistakes };
   save(progress, storage);
   return progress;
+}
+
+/**
+ * Fold a level's briefing away, or open it again.
+ *
+ * The briefing opens by default, so a level the player has not seen shows it.
+ * A player who folds it keeps it folded, on this browser, for that level.
+ */
+export function foldBriefing(id: string, folded: boolean, storage?: StorageLike): Progress {
+  const progress = load(storage);
+  const kept = progress.folded.filter((level) => level !== id);
+  progress.folded = folded ? [...kept, id] : kept;
+  save(progress, storage);
+  return progress;
+}
+
+/** Whether the player folded a level's briefing away. */
+export function isBriefingFolded(id: string, progress: Progress): boolean {
+  return progress.folded.includes(id);
 }
 
 /** Whether a level has been passed. */

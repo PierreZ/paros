@@ -10,8 +10,12 @@ import init, { WasmGame } from './wasm/paros_play.js';
 import { Game, decodeLevels } from './game';
 import { parseHash, type Route } from './route';
 import { h, replace } from './render/dom';
-import { renderStage } from './render/stage';
+import { wipedNodes } from './render/disk';
+import { gridCells, gridOf } from './render/grid';
+import { NARROW_BREAKPOINT } from './render/narrow';
+import { renderStage, type Viewport } from './render/stage';
 import { renderCaption } from './ui/caption';
+import { renderInspector } from './ui/inspector';
 import {
   misrouteTargets,
   newControlState,
@@ -23,7 +27,7 @@ import { renderLevelMap } from './ui/levelmap';
 import { renderPanel } from './ui/panel';
 import { renderRefusal } from './ui/refusal';
 import { renderWire } from './ui/wire';
-import { load, recordAttempt, recordPass, type Progress } from './progress';
+import { foldBriefing, load, recordAttempt, recordPass, type Progress } from './progress';
 import type { Action, ActionKind, GameView, LevelSummary } from './types';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -34,6 +38,24 @@ let progress: Progress = load();
 let game: Game | null = null;
 let controls: ControlState = newControlState();
 let route: Route = parseHash(window.location.hash);
+
+// ---- the viewport -----------------------------------------------------------
+//
+// The stage is drawn for the width it is given, not for the screen. A phone
+// gets the narrow geometry — one SVG unit per pixel, a small disc and full-size
+// text — and everything wider keeps the 960-unit picture it always had. The
+// width comes from the container through a `ResizeObserver`, so a rotated
+// phone, a split screen and a resized window all redraw.
+
+let viewport: Viewport = { narrow: false, width: 960 };
+
+/** The node whose log the player opened, on a narrow stage. */
+let inspecting: number | null = null;
+
+function measure(): Viewport {
+  const width = app?.clientWidth || window.innerWidth || 960;
+  return { narrow: width < NARROW_BREAKPOINT, width };
+}
 
 function reducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -87,6 +109,33 @@ function dispatch(action: Action): void {
   render();
 }
 
+/**
+ * The card that holds one node's whole log.
+ *
+ * It is drawn under the stage, and only on a narrow one: a wide stage draws
+ * every log column beside its node already.
+ */
+function inspector(view: GameView): HTMLElement | null {
+  if (!viewport.narrow || inspecting === null) return null;
+  const node = view.world.nodes.find((entry) => entry.id === inspecting);
+  if (!node) {
+    inspecting = null;
+    return null;
+  }
+  const shape = gridOf(view.world);
+  const cells = shape ? gridCells(view.world, shape) : null;
+  return renderInspector({
+    node,
+    cell: cells?.get(node.id) ?? null,
+    wiped: wipedNodes(view).has(node.id),
+    matchmade: (view.world.matchmakers ?? []).length > 0,
+    close: () => {
+      inspecting = null;
+      render();
+    },
+  });
+}
+
 function render(): void {
   if (!app) return;
   const memory = rememberFocus();
@@ -102,10 +151,12 @@ function render(): void {
   const view = game.view;
   recordProgress(view);
   app.classList.add('playing');
+  viewport = measure();
   const stage = h(
     'main',
     { class: 'board' },
-    h('div', { class: 'stage-host' }, renderStage(view)),
+    h('div', { class: 'stage-host' }, renderStage(view, viewport)),
+    inspector(view),
     renderCaption(view),
     // A refused move leaves the board alone, so the reason belongs beside the
     // controls that made it — and above them, because the controls of a
@@ -131,6 +182,10 @@ function render(): void {
         game?.reset();
         controls = newControlState();
         render();
+      },
+      narrow: viewport.narrow,
+      fold: (folded: boolean) => {
+        progress = foldBriefing(view.level.id, folded);
       },
     }),
   );
@@ -237,8 +292,33 @@ function openMenu(id: number, x: number, y: number): void {
   menu = element;
 }
 
+/**
+ * The node a tap landed on, on a narrow stage.
+ *
+ * A wide stage draws every log beside its node, so a tap there opens nothing.
+ */
+function nodeIdFrom(target: EventTarget | null): number | null {
+  if (!viewport.narrow || !(target instanceof Element)) return null;
+  const host = target.closest('g[data-node]');
+  const raw = host?.getAttribute('data-node');
+  if (raw === undefined || raw === null) return null;
+  const id = Number(raw);
+  return Number.isFinite(id) ? id : null;
+}
+
+/** Open one node's log, or close it if it is the one already open. */
+function inspect(id: number): void {
+  inspecting = inspecting === id ? null : id;
+  render();
+}
+
 document.addEventListener('click', (event) => {
   if (menu && !(event.target instanceof Node && menu.contains(event.target))) closeMenu();
+  const node = nodeIdFrom(event.target);
+  if (node !== null) {
+    inspect(node);
+    return;
+  }
   const id = messageIdFrom(event.target, 'g[data-msg]');
   if (id === null) return;
   const dot = event.target instanceof Element ? event.target.closest('g[data-msg]') : null;
@@ -253,19 +333,43 @@ document.addEventListener('contextmenu', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeMenu();
+  if (event.key === 'Escape') {
+    closeMenu();
+    if (inspecting !== null) {
+      inspecting = null;
+      render();
+    }
+  }
   if (event.key !== 'Enter' && event.key !== ' ') return;
+  const node = nodeIdFrom(document.activeElement);
+  if (node !== null) {
+    event.preventDefault();
+    inspect(node);
+    return;
+  }
   const id = messageIdFrom(document.activeElement, 'g[data-msg]');
   if (id === null) return;
   event.preventDefault();
   dispatch({ kind: 'deliver', id });
 });
 
+// The stage is drawn for the container, so the container is what is watched.
+// A width that crosses the narrow breakpoint, or that moves at all inside it,
+// redraws: the viewBox is the width, and a stale viewBox is a stale scale.
+const sizes = new ResizeObserver(() => {
+  const next = measure();
+  if (next.narrow === viewport.narrow && Math.abs(next.width - viewport.width) < 4) return;
+  viewport = next;
+  render();
+});
+sizes.observe(app);
+
 // ---- routing ----------------------------------------------------------------
 
 function openRoute(next: Route): void {
   route = next;
   controls = newControlState();
+  inspecting = null;
   progress = load();
   if (next.kind === 'map') {
     game = null;

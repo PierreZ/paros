@@ -1,9 +1,16 @@
 // The stage: one hand-drawn SVG, derived from the view on every change.
 //
 // There is no animation state and no scene graph to keep in step — the whole
-// picture is a pure function of `GameView`. Interaction rides on data
-// attributes (`data-msg`, `data-node`) and is handled by delegation in
-// `main.ts`, so a re-render never has to re-bind anything.
+// picture is a pure function of `GameView` and the width it is drawn into.
+// Interaction rides on data attributes (`data-msg`, `data-node`) and is
+// handled by delegation in `main.ts`, so a re-render never has to re-bind
+// anything.
+//
+// Two geometries, one picture. The wide stage draws 960 units and lets the
+// browser fit them to the screen; the narrow stage (`render/narrow.ts`) draws
+// the container's own width, so a label keeps its size and the disc gives up
+// its room. Everything below the geometry — the links, the dots, the roles,
+// the labels — is written once and reads the geometry it was handed.
 
 import type { GameView, MatchmakerView, MessageView, NodeView, SlotView, WorldView } from '../types';
 import { svg } from './dom';
@@ -16,6 +23,7 @@ import {
   groupByLink,
   trim,
   type Cell,
+  type Gap,
   type GridShape,
   type Point,
 } from './layout';
@@ -27,8 +35,19 @@ import {
   matchmakerLabel,
   matchmakerPositions,
   phaseWords,
+  registrationLine,
   registryLines,
 } from './matchmaker';
+import {
+  NARROW_DOT_RADIUS,
+  NARROW_HIT_RADIUS,
+  NARROW_LABEL_HALF,
+  NARROW_LINE,
+  NARROW_META_LINES,
+  clipLabel,
+  narrowLayout,
+  type NarrowNode,
+} from './narrow';
 
 /** The stage without a matchmaker band. */
 const WIDTH = 960;
@@ -60,6 +79,42 @@ const GRID_GAP = { x: 180, y: 176 };
  * the whole log column. A label the log covers names nothing.
  */
 const ROW_LABEL_OFFSET = NODE_RADIUS + 10 + SLOT_WIDTH + 16;
+
+/** The radius of a message dot, and of the transparent circle around it. */
+const DOT_RADIUS = 7;
+const HIT_RADIUS = 13;
+
+/**
+ * How the stage is drawn.
+ *
+ * `narrow` is the phone geometry, and `width` is the container's own width in
+ * CSS pixels — the number `main.ts` reads through a `ResizeObserver`. The wide
+ * stage ignores the width: it draws 960 units and the browser fits them.
+ */
+export interface Viewport {
+  readonly narrow: boolean;
+  readonly width: number;
+}
+
+/** The wide stage, which is what a caller that says nothing wants. */
+export const WIDE: Viewport = { narrow: false, width: WIDTH };
+
+/** Where everything sits, whichever geometry drew it. */
+interface Geometry {
+  readonly narrow: boolean;
+  readonly width: number;
+  readonly height: number;
+  readonly centre: Point;
+  readonly nodeRadius: number;
+  readonly labelHalf: number;
+  readonly bandLabelHalf: number;
+  readonly gridGap: Gap;
+  readonly at: Map<number, Point>;
+  readonly bandAt: Map<number, Point>;
+  readonly band: { readonly size: number; readonly title: number } | null;
+  readonly shape: GridShape | null;
+  readonly cells: Map<number, Cell> | null;
+}
 
 /**
  * Whether a message answers one.
@@ -178,7 +233,7 @@ function slotTitle(slot: SlotView): string {
  *
  * A floor of zero drops nothing, so the stage draws no line for it.
  */
-function floorOf(node: NodeView): number | null {
+function floorOf(node: Pick<NodeView, 'floor'>): number | null {
   const floor = node.floor;
   return typeof floor === 'number' && floor > 0 ? floor : null;
 }
@@ -254,13 +309,13 @@ function logColumn(node: NodeView, at: Point, centre: Point): SVGGElement {
   return svg('g', { class: 'log-column' }, ...rows);
 }
 
-function electionRing(node: NodeView): SVGElement | null {
+function electionRing(node: NodeView, nodeRadius: number): SVGElement | null {
   const election = node.election;
   if (!election) return null;
   if (election.held) {
     return svg('circle', {
       class: 'election held',
-      r: NODE_RADIUS + 7,
+      r: nodeRadius + 7,
       cx: 0,
       cy: 0,
     });
@@ -268,7 +323,7 @@ function electionRing(node: NodeView): SVGElement | null {
   if (election.timeout <= 0) return null;
   // No `elapsed` in the view contract yet: the ring shows the timeout's size,
   // one dash per tick, rather than pretending to know how far it has run.
-  const radius = NODE_RADIUS + 7;
+  const radius = nodeRadius + 7;
   const circumference = 2 * Math.PI * radius;
   const dash = Math.max(2, circumference / (election.timeout * 2));
   return svg('circle', {
@@ -336,6 +391,78 @@ export function nodeMeta(
   return lines;
 }
 
+/**
+ * The accepted log, folded to the lines a phone has room for.
+ *
+ * The wide stage draws the whole column of slot boxes beside the node. A
+ * narrow stage prints this summary instead — how much is decided, how far the
+ * log goes, and the hole if there is one — and the player opens the node to
+ * read the column itself. Every number is counted from the slots the engine
+ * sent; nothing here decides what a slot is.
+ */
+export function logSummary(
+  node: Pick<NodeView, 'accepted' | 'chosen_gap' | 'floor'>,
+): string[] {
+  const accepted = Array.isArray(node.accepted) ? node.accepted : [];
+  const floor = floorOf(node);
+  const lines: string[] = [];
+  if (accepted.length === 0) {
+    lines.push(floor === null ? 'no slot yet' : `floor ${floor} · no slot`);
+  } else {
+    const chosen = accepted.filter((slot) => slot.chosen || slot.applied).length;
+    const applied = accepted.filter((slot) => slot.applied).length;
+    const top = accepted.reduce((high, slot) => Math.max(high, slot.slot), 0);
+    lines.push(`${chosen} chosen · ${applied} applied`);
+    lines.push(floor === null ? `top slot ${top}` : `top slot ${top} · floor ${floor}`);
+  }
+  if (node.chosen_gap) lines.push(`hole at ${node.chosen_gap.hole}`);
+  return lines;
+}
+
+/** One line of a narrow node's label block, and what it says. */
+export interface NarrowLabel {
+  readonly text: string;
+  readonly kind: 'badge' | 'role' | 'summary' | 'meta';
+}
+
+/**
+ * What a narrow stage prints under a node.
+ *
+ * Everything goes below the disc, the role included: a disc of 21 units is
+ * narrower than the word `acceptor`, and a role printed inside it runs over
+ * both edges. The wide list of facts is too long and too wide for a phone, so
+ * this one keeps what the player plays with — what the log holds, what the
+ * node promised, how far it applied — and the node's inspector holds the rest.
+ * A line is short on purpose: the layout says how wide a label may be, and a
+ * line the picture cannot hold is clipped there.
+ */
+export function narrowMeta(
+  node: NodeView,
+  cell: Cell | null,
+  wiped: boolean,
+  matchmade: boolean,
+): NarrowLabel[] {
+  const lines: NarrowLabel[] = [];
+  const badge = cellBadge(cell);
+  if (badge) lines.push({ text: badge, kind: 'badge' });
+  lines.push({ text: roleLabel(node, wiped), kind: 'role' });
+  if (node.retired === true) return [...lines, { text: 'it stays down', kind: 'meta' }];
+  if (wiped) return [...lines, { text: 'the disk is empty', kind: 'meta' }];
+  for (const text of logSummary(node)) lines.push({ text, kind: 'summary' });
+  const meta: string[] = [];
+  if (node.promised) meta.push(`promised ${node.promised}`);
+  if (node.chosen_index !== null) meta.push(`chosen ≤ ${node.chosen_index}`);
+  if (matchmade) {
+    const set = Array.isArray(node.acceptors) ? node.acceptors : [];
+    meta.push(`acceptors ${set.join(',') || '—'}`);
+  }
+  if (node.matchmaking) meta.push(`${node.matchmaking.remaining} must answer`);
+  if (node.gc) meta.push(`gc floor ${node.gc.effective_watermark}`);
+  if (node.handover) meta.push(`handover · ${node.handover}`);
+  for (const text of meta) lines.push({ text, kind: 'meta' });
+  return lines.slice(0, NARROW_META_LINES);
+}
+
 /** The sentence a node's tooltip carries. */
 function nodeTitle(node: NodeView, wiped: boolean): string {
   if (node.retired === true) {
@@ -357,19 +484,30 @@ function nodeGroup(
   cell: Cell | null,
   wiped: boolean,
   matchmade: boolean,
+  geo: Geometry,
 ): SVGGElement {
-  const under = nodeMeta(node, cell, wiped, matchmade);
+  const narrow = geo.narrow;
   const badge = cellBadge(cell);
-  const ring = wiped || node.retired === true ? null : electionRing(node);
-  const labels = under.map((line, index) =>
+  const under: NarrowLabel[] = narrow
+    ? narrowMeta(node, cell, wiped, matchmade).map((label) => ({
+        text: clipLabel(label.text, geo.labelHalf),
+        kind: label.kind,
+      }))
+    : nodeMeta(node, cell, wiped, matchmade).map((text, index) => ({
+        text,
+        kind: index === 0 && badge ? 'badge' : 'meta',
+      }));
+  const ring = wiped || node.retired === true ? null : electionRing(node, geo.nodeRadius);
+  const line = narrow ? NARROW_LINE : 12;
+  const labels = under.map((label, index) =>
     svg(
       'text',
       {
-        class: index === 0 && badge ? 'node-meta cell-badge' : 'node-meta',
+        class: nodeLabelClass(label.kind),
         x: 0,
-        y: NODE_RADIUS + 16 + index * 12,
+        y: geo.nodeRadius + (narrow ? 13 : 16) + index * line,
       },
-      line,
+      label.text,
     ),
   );
   const title = nodeTitle(node, wiped);
@@ -377,17 +515,33 @@ function nodeGroup(
   return svg(
     'g',
     {
-      class: nodeStateClass(node, wiped),
+      class: `${nodeStateClass(node, wiped)}${narrow ? ' tappable' : ''}`,
       transform: `translate(${at.x.toFixed(1)}, ${at.y.toFixed(1)})`,
       'data-node': node.id,
+      tabindex: narrow ? 0 : null,
+      role: narrow ? 'button' : null,
+      'aria-label': narrow ? `${title} Open node ${node.id} to read its log.` : null,
     },
     ring,
-    svg('circle', { class: 'node-disc', r: NODE_RADIUS, cx: 0, cy: 0 }),
-    svg('text', { class: 'node-id', x: 0, y: -2 }, String(node.id)),
-    svg('text', { class: 'node-role', x: 0, y: 14 }, roleLabel(node, wiped)),
+    svg('circle', { class: 'node-disc', r: geo.nodeRadius, cx: 0, cy: 0 }),
+    svg('text', { class: 'node-id', x: 0, y: narrow ? 6 : -2 }, String(node.id)),
+    narrow ? null : svg('text', { class: 'node-role', x: 0, y: 14 }, roleLabel(node, wiped)),
     ...labels,
     svg('title', {}, title),
   );
+}
+
+/**
+ * The class one label line carries.
+ *
+ * The grid badge, the role and the folded log summary are each marked: they
+ * are what the player reads first, and the rest is detail.
+ */
+function nodeLabelClass(kind: NarrowLabel['kind']): string {
+  if (kind === 'badge') return 'node-meta cell-badge';
+  if (kind === 'role') return 'node-meta node-role';
+  if (kind === 'summary') return 'node-meta log-summary';
+  return 'node-meta';
 }
 
 /**
@@ -400,7 +554,7 @@ export function partyName(id: number, party: string | null | undefined): string 
   return party === 'matchmaker' ? `matchmaker ${id}` : `node ${id}`;
 }
 
-function messageDot(message: MessageView, at: Point): SVGGElement {
+function messageDot(message: MessageView, at: Point, geo: Geometry): SVGGElement {
   // The column an Accept was addressed to colours the dot's edge: a grid
   // decides a slot by one whole column, so the player must see which one a
   // message belongs to. The engine names it (`MessageView.column`); the
@@ -420,21 +574,38 @@ function messageDot(message: MessageView, at: Point): SVGGElement {
       role: 'button',
       'aria-label': `${message.summary}, from ${from} to ${to}${where}. Click to deliver it.`,
     },
-    svg('circle', { class: 'dot-hit', r: 13, cx: 0, cy: 0 }),
-    svg('circle', { class: 'dot', r: 7, cx: 0, cy: 0 }),
+    svg('circle', {
+      class: 'dot-hit',
+      r: geo.narrow ? NARROW_HIT_RADIUS : HIT_RADIUS,
+      cx: 0,
+      cy: 0,
+    }),
+    svg('circle', {
+      class: 'dot',
+      r: geo.narrow ? NARROW_DOT_RADIUS : DOT_RADIUS,
+      cx: 0,
+      cy: 0,
+    }),
     svg('title', {}, `${message.summary} (${from} → ${to})${where}. Click to deliver it.`),
   );
 }
 
 /** The row and column labels that name a grid's quorums. */
-function gridLabels(shape: GridShape, centre: Point): SVGGElement {
+function gridLabels(shape: GridShape, geo: Geometry): SVGGElement {
   const marks: SVGElement[] = [];
+  const gap = geo.gridGap;
   for (let row = 0; row < shape.rows; row += 1) {
-    const at = gridPoint({ row, column: 0 }, shape, centre, GRID_GAP);
+    const at = gridPoint({ row, column: 0 }, shape, geo.centre, gap);
+    // A narrow node draws no log column, so the row label goes at the edge of
+    // the board and reads from there. A wide one must clear the whole column.
     marks.push(
       svg(
         'text',
-        { class: 'grid-axis grid-row', x: at.x - ROW_LABEL_OFFSET, y: at.y + 4 },
+        {
+          class: `grid-axis grid-row${geo.narrow ? ' narrow' : ''}`,
+          x: geo.narrow ? 3 : at.x - ROW_LABEL_OFFSET,
+          y: geo.narrow ? at.y - geo.nodeRadius - 4 : at.y + 4,
+        },
         `row ${row}`,
       ),
       svg(
@@ -445,11 +616,15 @@ function gridLabels(shape: GridShape, centre: Point): SVGGElement {
     );
   }
   for (let column = 0; column < shape.cols; column += 1) {
-    const at = gridPoint({ row: 0, column }, shape, centre, GRID_GAP);
+    const at = gridPoint({ row: 0, column }, shape, geo.centre, gap);
     marks.push(
       svg(
         'text',
-        { class: `grid-axis grid-col ${columnClass(column)}`, x: at.x, y: at.y - GRID_GAP.y * 0.5 },
+        {
+          class: `grid-axis grid-col ${columnClass(column)}`,
+          x: at.x,
+          y: geo.narrow ? at.y - geo.nodeRadius - 10 : at.y - gap.y * 0.5,
+        },
         `col ${column}`,
       ),
     );
@@ -465,8 +640,9 @@ function gridLabels(shape: GridShape, centre: Point): SVGGElement {
  * keeps a map from a ballot to an acceptor set; it holds no log and it votes
  * on no slot, so it must not read as one more acceptor.
  */
-function matchmakerGroup(matchmaker: MatchmakerView, at: Point): SVGGElement {
-  const half = MATCHMAKER_SIZE / 2;
+function matchmakerGroup(matchmaker: MatchmakerView, at: Point, geo: Geometry): SVGGElement {
+  const size = geo.band?.size ?? MATCHMAKER_SIZE;
+  const half = size / 2;
   const phase = phaseWords(matchmaker.phase);
   const successor = matchmaker.successor;
   const under: string[] = [`gen ${matchmaker.generation} · ${matchmaker.alive === false ? 'down' : phase}`];
@@ -475,9 +651,25 @@ function matchmakerGroup(matchmaker: MatchmakerView, at: Point): SVGGElement {
     under.push(`next gen ${successor.generation}: ${successor.members.map((id) => `m${id}`).join(',')}`);
   }
 
-  const rows = registryLines(matchmaker).map((line, index) =>
-    svg('text', { class: 'registry-line', x: half + 10, y: -8 + index * 12 }, line),
-  );
+  // A narrow band stacks its lines under the square, because there is no room
+  // beside it. The registry folds to the newest row and a count of the rest;
+  // the panel's own matchmaker controls hold the whole registry.
+  const registry = registryLines(matchmaker);
+  const rows = geo.narrow
+    ? narrowRegistry(matchmaker).map((line, index) =>
+        svg(
+          'text',
+          {
+            class: 'registry-line narrow',
+            x: 0,
+            y: half + 14 + (under.length + index) * NARROW_LINE,
+          },
+          clipLabel(line, geo.bandLabelHalf),
+        ),
+      )
+    : registry.map((line, index) =>
+        svg('text', { class: 'registry-line', x: half + 10, y: -8 + index * 12 }, line),
+      );
   const title =
     matchmaker.alive === false
       ? `matchmaker ${matchmaker.id} is down. Its registry stays on its disk.`
@@ -496,22 +688,66 @@ function matchmakerGroup(matchmaker: MatchmakerView, at: Point): SVGGElement {
       class: 'matchmaker-box',
       x: -half,
       y: -half,
-      width: MATCHMAKER_SIZE,
-      height: MATCHMAKER_SIZE,
-      rx: 9,
+      width: size,
+      height: size,
+      rx: geo.narrow ? 7 : 9,
     }),
     svg('text', { class: 'matchmaker-id', x: 0, y: 5 }, matchmakerLabel(matchmaker)),
     ...under.map((line, index) =>
-      svg('text', { class: 'matchmaker-meta', x: 0, y: half + 14 + index * 12 }, line),
+      svg(
+        'text',
+        { class: 'matchmaker-meta', x: 0, y: half + 14 + index * (geo.narrow ? NARROW_LINE : 12) },
+        geo.narrow ? clipLabel(line, geo.bandLabelHalf) : line,
+      ),
     ),
     ...rows,
     svg('title', {}, title),
   );
 }
 
-/** The whole matchmaker band, and the rule that separates it from the cluster. */
-function matchmakerBand(matchmakers: readonly MatchmakerView[], centre: Point): SVGGElement | null {
+/**
+ * The registry, as a narrow square lists it: the newest row, then a count.
+ *
+ * A phone has room for one row. The row the player works with is the newest
+ * one, which is the one the engine sends last.
+ */
+export function narrowRegistry(
+  matchmaker: Pick<MatchmakerView, 'registrations'>,
+): string[] {
+  const rows = Array.isArray(matchmaker.registrations) ? matchmaker.registrations : [];
+  const newest = rows[rows.length - 1];
+  if (!newest) return ['no registration'];
+  const lines = [registrationLine(newest)];
+  if (rows.length > 1) lines.push(`+${rows.length - 1} more`);
+  return lines;
+}
+
+/**
+ * The whole matchmaker band, and the rule that separates it from the cluster.
+ *
+ * A wide stage puts the band in a gutter on the right, behind a rule. A narrow
+ * stage puts it in a row *under* the acceptors, behind the same rule drawn
+ * across the board: a band beside the cluster on a phone takes a fifth of the
+ * width, and then neither tier is readable.
+ */
+function matchmakerBand(
+  matchmakers: readonly MatchmakerView[],
+  centre: Point,
+  geo: Geometry,
+): SVGGElement | null {
   if (matchmakers.length === 0) return null;
+  if (geo.narrow) {
+    const title = geo.band?.title ?? 0;
+    return svg(
+      'g',
+      { class: 'matchmaker-band narrow' },
+      svg('line', { class: 'band-rule', x1: 0, y1: title - 14, x2: geo.width, y2: title - 14 }),
+      svg('text', { class: 'gutter-title', x: 6, y: title }, 'matchmakers'),
+      ...matchmakers.map((matchmaker, index) =>
+        matchmakerGroup(matchmaker, geo.bandAt.get(matchmaker.id) ?? { x: index, y: title }, geo),
+      ),
+    );
+  }
   const positions = matchmakerPositions(matchmakers.length, centre);
   return svg(
     'g',
@@ -525,7 +761,7 @@ function matchmakerBand(matchmakers: readonly MatchmakerView[], centre: Point): 
     }),
     svg('text', { class: 'gutter-title', x: centre.x - MATCHMAKER_SIZE + 12, y: 30 }, 'matchmakers'),
     ...matchmakers.map((matchmaker, index) =>
-      matchmakerGroup(matchmaker, positions[index] ?? centre),
+      matchmakerGroup(matchmaker, positions[index] ?? centre, geo),
     ),
   );
 }
@@ -566,10 +802,12 @@ function clientColumn(world: WorldView): SVGGElement | null {
 function chosenBanner(world: WorldView, width: number): SVGGElement | null {
   if (!world.chosen) return null;
   const control = controlLabel(world.chosen.control);
+  // The banner is as wide as it needs to be and never wider than the board.
+  const box = Math.min(400, width - 20);
   return svg(
     'g',
     { class: 'chosen-banner' },
-    svg('rect', { x: width / 2 - 200, y: 12, width: 400, height: 34, rx: 6 }),
+    svg('rect', { x: width / 2 - box / 2, y: 12, width: box, height: 34, rx: 6 }),
     svg(
       'text',
       { x: width / 2, y: 34 },
@@ -578,25 +816,70 @@ function chosenBanner(world: WorldView, width: number): SVGGElement | null {
   );
 }
 
-/** Draw the whole stage. */
-export function renderStage(view: GameView): SVGSVGElement {
+/**
+ * Where every part of this world sits, for the viewport it is drawn into.
+ *
+ * The two geometries answer the same questions, so everything the stage draws
+ * below this point is written once. A grid deployment is laid out as a grid —
+ * a row is a Phase-1 quorum and a column is a Phase-2 quorum, and neither is
+ * legible on a ring — and every other quorum system keeps the circle.
+ */
+function geometryOf(view: GameView, viewport: Viewport): Geometry {
   const world = view.world;
-  const hasClients = world.clients.length > 0;
+  const matchmakers = Array.isArray(world.matchmakers) ? world.matchmakers : [];
+  const shape = gridOf(world);
+  const cells = shape ? gridCells(world, shape) : null;
+  const wiped = wipedNodes(view);
+  const matchmade = matchmakers.length > 0;
+
+  if (viewport.narrow) {
+    const nodes: NarrowNode[] = world.nodes.map((node) => ({
+      id: node.id,
+      cell: cells?.get(node.id) ?? null,
+      lines: narrowMeta(node, cells?.get(node.id) ?? null, wiped.has(node.id), matchmade).length,
+    }));
+    const matchmakerLines = matchmakers.reduce(
+      (most, matchmaker) => Math.max(most, 2 + (matchmaker.successor ? 1 : 0) + narrowRegistry(matchmaker).length),
+      3,
+    );
+    const stage = narrowLayout(viewport.width, nodes, {
+      grid: shape,
+      matchmakers: matchmakers.length,
+      matchmakerLines,
+    });
+    const bandAt = new Map<number, Point>();
+    matchmakers.forEach((matchmaker, index) => {
+      const point = stage.band[index];
+      if (point) bandAt.set(matchmaker.id, point);
+    });
+    return {
+      narrow: true,
+      width: stage.width,
+      height: stage.height,
+      centre: stage.centre,
+      nodeRadius: stage.nodeRadius,
+      labelHalf: stage.labelHalf,
+      bandLabelHalf: stage.bandLabelHalf,
+      gridGap: stage.gap ?? GRID_GAP,
+      at: stage.points,
+      bandAt,
+      band: { size: stage.matchmakerSize, title: stage.bandTitle ?? 0 },
+      shape,
+      cells,
+    };
+  }
+
   // A deployment that names matchmakers gets a band of its own on the right
   // and a taller stage for the badges the tier adds. Every other position is
   // exactly where it was, so the acceptor ring never moves under the player.
-  const matchmakers = Array.isArray(world.matchmakers) ? world.matchmakers : [];
-  const width = WIDTH + (matchmakers.length > 0 ? BAND_WIDTH : 0);
-  const height = matchmakers.length > 0 ? TALL : HEIGHT;
-  // A grid deployment is laid out as a grid: a row is a Phase-1 quorum and a
-  // column is a Phase-2 quorum, and neither is legible on a ring. Every other
-  // quorum system keeps the circle. A grid sits further right than a ring: it
-  // spends its left margin on the row labels and on the leftmost logs.
-  const shape = gridOf(world);
+  const hasClients = world.clients.length > 0;
+  const width = WIDTH + (matchmade ? BAND_WIDTH : 0);
+  const height = matchmade ? TALL : HEIGHT;
+  // A grid sits further right than a ring: it spends its left margin on the
+  // row labels and on the leftmost logs.
   const centre: Point = shape
     ? { x: hasClients ? 600 : 520, y: 320 }
     : { x: hasClients ? 560 : 480, y: 320 };
-  const cells = shape ? gridCells(world, shape) : null;
   const at = new Map<number, Point>();
   if (shape && cells) {
     for (const node of world.nodes) {
@@ -609,13 +892,43 @@ export function renderStage(view: GameView): SVGSVGElement {
       at.set(node.id, positions[index] ?? centre);
     });
   }
-  const wiped = wipedNodes(view);
   const bandCentre: Point = { x: WIDTH + MATCHMAKER_SIZE + 20, y: height / 2 };
   const bandAt = new Map<number, Point>();
   matchmakerPositions(matchmakers.length, bandCentre).forEach((point, index) => {
     const matchmaker = matchmakers[index];
     if (matchmaker) bandAt.set(matchmaker.id, point);
   });
+
+  return {
+    narrow: false,
+    width,
+    height,
+    centre,
+    nodeRadius: NODE_RADIUS,
+    labelHalf: NARROW_LABEL_HALF,
+    bandLabelHalf: NARROW_LABEL_HALF,
+    gridGap: GRID_GAP,
+    at,
+    bandAt,
+    band: null,
+    shape,
+    cells,
+  };
+}
+
+/**
+ * Draw the whole stage.
+ *
+ * `viewport` says which geometry the picture gets. A caller that says nothing
+ * gets the wide one, which is what every test and the desktop board want.
+ */
+export function renderStage(view: GameView, viewport: Viewport = WIDE): SVGSVGElement {
+  const world = view.world;
+  const matchmakers = Array.isArray(world.matchmakers) ? world.matchmakers : [];
+  const geo = geometryOf(view, viewport);
+  const wiped = wipedNodes(view);
+  const matchmade = matchmakers.length > 0;
+  const bandCentre: Point = { x: WIDTH + MATCHMAKER_SIZE + 20, y: geo.height / 2 };
 
   const links: SVGElement[] = [];
   const dots: SVGElement[] = [];
@@ -625,10 +938,12 @@ export function renderStage(view: GameView): SVGSVGElement {
     // The tier an endpoint belongs to is the engine's answer: matchmaker 0 and
     // node 0 are two processes, and only `from_party`/`to_party` tell them
     // apart.
-    const from = endpointOf(first.from, first.from_party, at, bandAt);
-    const to = endpointOf(first.to, first.to_party, at, bandAt);
+    const from = endpointOf(first.from, first.from_party, geo.at, geo.bandAt);
+    const to = endpointOf(first.to, first.to_party, geo.at, geo.bandAt);
     if (!from || !to) continue;
-    const ends = trim(from, to, NODE_RADIUS + 4);
+    // A narrow node keeps its labels under its disc, so a link is pulled in
+    // further there: a dot that lands on a label hides a word.
+    const ends = trim(from, to, geo.nodeRadius + (geo.narrow ? 12 : 4));
     links.push(
       svg('line', {
         class: 'link',
@@ -638,40 +953,42 @@ export function renderStage(view: GameView): SVGSVGElement {
         y2: ends.to.y,
       }),
     );
-    dotPositions(ends.from, ends.to, messages.length).forEach((point, index) => {
+    dotPositions(ends.from, ends.to, messages.length, geo.narrow ? 6 : 8).forEach((point, index) => {
       const message = messages[index];
-      if (message) dots.push(messageDot(message, point));
+      if (message) dots.push(messageDot(message, point, geo));
     });
   }
 
-  const matchmade = matchmakers.length > 0;
   const nodes = world.nodes.map((node) => {
-    const point = at.get(node.id) ?? centre;
+    const point = geo.at.get(node.id) ?? geo.centre;
     return svg(
       'g',
       {},
       // A retired node draws no log: it shut down for good, and its log says
-      // nothing about the cluster now.
-      node.retired === true ? null : logColumn(node, point, centre),
-      nodeGroup(node, point, cells?.get(node.id) ?? null, wiped.has(node.id), matchmade),
+      // nothing about the cluster now. A narrow node draws none either: its
+      // log is folded into the labels, and the inspector holds the column.
+      node.retired === true || geo.narrow ? null : logColumn(node, point, geo.centre),
+      nodeGroup(node, point, geo.cells?.get(node.id) ?? null, wiped.has(node.id), matchmade, geo),
     );
   });
 
   return svg(
     'svg',
     {
-      class: 'stage',
-      viewBox: `0 0 ${width} ${height}`,
+      class: `stage${geo.narrow ? ' narrow' : ''}`,
+      viewBox: `0 0 ${geo.width} ${geo.height}`,
       preserveAspectRatio: 'xMidYMid meet',
       role: 'img',
       'aria-label': matchmade
         ? 'the cluster, the matchmakers, the logs and the messages in flight'
         : 'the cluster, the logs and the messages in flight',
     },
-    chosenBanner(world, width),
-    clientColumn(world),
-    shape ? gridLabels(shape, centre) : null,
-    matchmakerBand(matchmakers, bandCentre),
+    chosenBanner(world, geo.width),
+    // The client gutter is a column of prose beside the ring. A phone has no
+    // room for it, and the panel's client history says the same thing.
+    geo.narrow ? null : clientColumn(world),
+    geo.shape ? gridLabels(geo.shape, geo) : null,
+    matchmakerBand(matchmakers, bandCentre, geo),
     svg('g', { class: 'links' }, ...links),
     svg('g', { class: 'nodes' }, ...nodes),
     svg('g', { class: 'wire' }, ...dots),

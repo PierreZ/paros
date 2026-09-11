@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   STORAGE_KEY,
   clear,
+  foldBriefing,
+  isBriefingFolded,
   isPassed,
   load,
   recordAttempt,
@@ -28,7 +30,7 @@ class FakeStorage implements StorageLike {
 describe('the progress store', () => {
   it('starts empty', () => {
     const store = new FakeStorage();
-    expect(load(store)).toEqual({ levels: {}, unlocked: [] });
+    expect(load(store)).toEqual({ levels: {}, unlocked: [], folded: [] });
   });
 
   it('records a pass with the automation it unlocks', () => {
@@ -70,10 +72,10 @@ describe('the progress store', () => {
   it('survives junk in the store', () => {
     const store = new FakeStorage();
     store.items.set(STORAGE_KEY, '{not json');
-    expect(load(store)).toEqual({ levels: {}, unlocked: [] });
+    expect(load(store)).toEqual({ levels: {}, unlocked: [], folded: [] });
 
     store.items.set(STORAGE_KEY, JSON.stringify({ levels: { a: 3 }, unlocked: 'nope' }));
-    expect(load(store)).toEqual({ levels: {}, unlocked: [] });
+    expect(load(store)).toEqual({ levels: {}, unlocked: [], folded: [] });
 
     store.items.set(
       STORAGE_KEY,
@@ -85,14 +87,26 @@ describe('the progress store', () => {
   it('swallows a write that throws', () => {
     const store = new FakeStorage();
     store.throwOnWrite = true;
-    expect(() => save({ levels: {}, unlocked: [] }, store)).not.toThrow();
+    expect(() => save({ levels: {}, unlocked: [], folded: [] }, store)).not.toThrow();
     expect(() => recordPass('act1/choose-a-value', 0, [], store)).not.toThrow();
+  });
+
+  it('remembers which briefings the player folded away', () => {
+    const store = new FakeStorage();
+    expect(isBriefingFolded('act1/choose-a-value', load(store))).toBe(false);
+    foldBriefing('act1/choose-a-value', true, store);
+    expect(isBriefingFolded('act1/choose-a-value', load(store))).toBe(true);
+    // Folding the same level two times records it one time.
+    foldBriefing('act1/choose-a-value', true, store);
+    expect(load(store).folded).toEqual(['act1/choose-a-value']);
+    foldBriefing('act1/choose-a-value', false, store);
+    expect(load(store).folded).toEqual([]);
   });
 
   it('clears', () => {
     const store = new FakeStorage();
     recordPass('act1/choose-a-value', 0, [], store);
-    expect(clear(store)).toEqual({ levels: {}, unlocked: [] });
-    expect(load(store)).toEqual({ levels: {}, unlocked: [] });
+    expect(clear(store)).toEqual({ levels: {}, unlocked: [], folded: [] });
+    expect(load(store)).toEqual({ levels: {}, unlocked: [], folded: [] });
   });
 });
