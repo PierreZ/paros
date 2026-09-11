@@ -3,7 +3,7 @@
     "id": "act1/choose-a-value",
     "act": 1,
     "title": "Choose a value",
-    "briefing": "Three acceptors have to agree on one value, and never disagree afterwards — not when a message is lost, not when one of them is unreachable, not when the machine that started the whole thing dies half-way through. The protocol is two round trips, and you are the network: nothing moves unless you deliver it.\n\nA proposer first claims a **ballot**, a number that gives it the right to propose. It sends `Prepare(b)` and waits for a **majority** of acceptors to promise not to accept anything below `b`. That is Phase 1. Only then does it send `Accept(b, value)`, and once a majority have voted, the value is **chosen** — permanently, whether or not anybody has heard about it yet.\n\nTwo of three is a majority, so run the whole protocol with the third acceptor silent: drop its `Prepare` and drop its `Accept`. Watch the moment the second `Accepted` lands. That is the decision, and it happened at the proposer, out of sight of the acceptor you cut off.",
+    "briefing": "Three acceptors must agree on one value. They must keep that agreement after a message is lost. They must keep it after one acceptor becomes unreachable. They must also keep it if the proposer stops in the middle of the protocol. The protocol uses two round trips. You are the network, and no message moves until you deliver it.\n\nFirst, a proposer claims a **ballot**, a number that gives it the right to propose. The proposer sends `Prepare(b)` and waits for a **majority** of the acceptors to promise. Each promise says that the acceptor refuses every ballot below `b`. That is Phase 1. The proposer then sends `Accept(b, value)`. When a majority votes, the value is **chosen** permanently, even if no node knows about it yet.\n\nTwo of the three acceptors are a majority. Run the full protocol, but keep the third acceptor silent. Drop its `Prepare` and drop its `Accept`. Look at the moment when the second `Accepted` arrives. That moment is the decision. The decision occurs at the proposer, and the third acceptor does not see it.",
     "field_guide": "choose-one-value.html",
     "symbols": [
       "Proposer::open_phase1",
@@ -34,7 +34,7 @@
         "attempt": null,
         "ballot": null,
         "leader": null,
-        "promised": "1.5",
+        "promised": "0.0",
         "accepted": [],
         "chosen_index": null,
         "first_unchosen": null,
@@ -61,7 +61,14 @@
         },
         "grid_cell": null,
         "applied": [],
-        "armed_seam": null
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
       },
       {
         "id": 2,
@@ -98,7 +105,14 @@
         },
         "grid_cell": null,
         "applied": [],
-        "armed_seam": null
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
       },
       {
         "id": 3,
@@ -135,7 +149,14 @@
         },
         "grid_cell": null,
         "applied": [],
-        "armed_seam": null
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
       },
       {
         "id": 5,
@@ -181,15 +202,39 @@
         },
         "grid_cell": null,
         "applied": [],
-        "armed_seam": null
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
       }
     ],
     "wire": [
       {
+        "id": 1,
+        "kind": "Prepare",
+        "from": 5,
+        "from_party": "node",
+        "to": 1,
+        "to_party": "node",
+        "ballot": "1.5",
+        "slot": 0,
+        "column": null,
+        "summary": "Prepare at 1.5 for slots from 0",
+        "phase": "prepare",
+        "reply": false,
+        "sent_at": 0
+      },
+      {
         "id": 2,
         "kind": "Prepare",
         "from": 5,
+        "from_party": "node",
         "to": 2,
+        "to_party": "node",
         "ballot": "1.5",
         "slot": 0,
         "column": null,
@@ -202,26 +247,15 @@
         "id": 3,
         "kind": "Prepare",
         "from": 5,
+        "from_party": "node",
         "to": 3,
+        "to_party": "node",
         "ballot": "1.5",
         "slot": 0,
         "column": null,
         "summary": "Prepare at 1.5 for slots from 0",
         "phase": "prepare",
         "reply": false,
-        "sent_at": 0
-      },
-      {
-        "id": 4,
-        "kind": "Promise",
-        "from": 1,
-        "to": 5,
-        "ballot": "1.5",
-        "slot": 0,
-        "column": null,
-        "summary": "Promise 1.5 from slot 0: 0 accepted, 0 faulty",
-        "phase": "promise",
-        "reply": true,
         "sent_at": 0
       }
     ],
@@ -244,28 +278,17 @@
   "prompt": null,
   "goal": {
     "status": "open",
-    "detail": "Get a value chosen with two of the three acceptors."
+    "detail": "Get one value chosen with two of the three acceptors."
   },
   "log": [
     {
       "index": 0,
       "kind": "open_ballot",
-      "label": "proposer 5 opens a ballot for \"alpha\"",
+      "label": "tell proposer 5 to open a ballot for alpha",
       "narration": [
         {
           "kind": "election",
-          "text": "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value: it claims the ballot and asks what has already been accepted."
-        }
-      ]
-    },
-    {
-      "index": 1,
-      "kind": "deliver",
-      "label": "deliver #1",
-      "narration": [
-        {
-          "kind": "promise",
-          "text": "acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+          "text": "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
         }
       ]
     }
@@ -274,7 +297,7 @@
     "flags": [
       {
         "flag": "acceptor_replies",
-        "label": "acceptor replies",
+        "label": "answer a Prepare and an Accept",
         "on": true,
         "unlocked": false,
         "pinned_off": false
@@ -288,42 +311,42 @@
       },
       {
         "flag": "proposer_p2c",
-        "label": "proposer P2c",
+        "label": "apply the P2c rule",
         "on": true,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "replica_apply",
-        "label": "replica apply",
+        "label": "apply a chosen slot",
         "on": true,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "leader_recovery",
-        "label": "leader recovery",
+        "label": "recover and fill the gaps",
         "on": true,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "persist_order",
-        "label": "persist before send",
+        "label": "persist the batch before the send",
         "on": true,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "read_serve",
-        "label": "serve reads",
+        "label": "serve a confirmed read",
         "on": true,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "snapshot_promise",
-        "label": "promise across a snapshot",
+        "label": "keep the higher promise",
         "on": false,
         "unlocked": false,
         "pinned_off": false
@@ -364,22 +387,57 @@
         "pinned_off": false
       },
       {
+        "flag": "phase1_complete",
+        "label": "judge a Phase 1 across two configurations",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "stale_configuration",
+        "label": "abandon a stale belief",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "generation_fence",
+        "label": "fence a matchmaker generation",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "may_retire",
+        "label": "answer a retire request",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
         "flag": "deliver_heartbeats",
-        "label": "deliver heartbeats",
+        "label": "deliver the heartbeats",
         "on": false,
         "unlocked": false,
         "pinned_off": false
       },
       {
         "flag": "deliver_replies",
-        "label": "deliver replies",
+        "label": "deliver the replies",
         "on": false,
         "unlocked": true,
         "pinned_off": false
       },
       {
+        "flag": "deliver_matchmaker_replies",
+        "label": "deliver the matchmaker messages",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
         "flag": "resend_pending",
-        "label": "re-send pending accepts",
+        "label": "re-send the pending Accepts",
         "on": false,
         "unlocked": false,
         "pinned_off": false
@@ -389,8 +447,8 @@
   "mistakes": 0,
   "narration": [
     {
-      "kind": "promise",
-      "text": "acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
+      "kind": "election",
+      "text": "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
     }
   ]
 }

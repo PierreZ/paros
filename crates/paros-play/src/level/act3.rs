@@ -666,7 +666,11 @@ completes on its own, in the batch that applied the slot.",
             .filter(|(_, _, served)| *served)
             .map(|(_, index, _)| index)
             .collect();
-        let recovered = applied(world, 1).iter().any(|command| command == "alpha");
+        // The inherited value is whatever the client asked for, and the level
+        // reads it back from the history rather than naming it here.
+        let executed = applied(world, 1);
+        let asked = log.proposed_values();
+        let recovered = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
         match (served.first(), recovered) {
             (Some(index), true) => GoalStatus::Reached(format!(
                 "The leader refused the read while the recovered slot was still in flight. It \
@@ -926,17 +930,22 @@ the leader both times.",
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let executed = applied(world, 0);
-        let bravo = executed
+        // At most once, for every value the client asked for: which values
+        // those are is the client's business, and the history reports them.
+        let asked = log.proposed_values();
+        if let Some(twice) = asked
             .iter()
-            .filter(|command| *command == "bravo")
-            .count();
-        if bravo > 1 {
-            return GoalStatus::Failed(
-                "The cluster executed the command bravo twice. A retry that misses both dedup \
+            .find(|value| executed.iter().filter(|command| command == value).count() > 1)
+        {
+            return GoalStatus::Failed(format!(
+                "The cluster executed the command {twice} twice. A retry that misses both dedup \
                  tables gets a fresh slot, and the command runs a second time."
-                    .to_string(),
-            );
+            ));
         }
+        let all_executed = !asked.is_empty()
+            && asked
+                .iter()
+                .all(|value| executed.iter().any(|command| command == value));
         let held = log
             .retries()
             .iter()
@@ -956,8 +965,8 @@ the leader both times.",
                     .to_string(),
             );
         }
-        match (bravo, held, acked) {
-            (1, true, true) => GoalStatus::Reached(format!(
+        match (all_executed, held, acked) {
+            (true, true, true) => GoalStatus::Reached(format!(
                 "The cluster executed the command exactly once ({}). The leader answered both \
                  retries from the table that knew where the command was. It held the retry \
                  while the hole was open. It acknowledged the retry after the hole closed. \
@@ -965,12 +974,12 @@ the leader both times.",
                  only one of them.",
                 executed.join(", ")
             )),
-            (1, false, _) => GoalStatus::Open(
+            (true, false, _) => GoalStatus::Open(
                 "Let the client ask again *while* its command is chosen above the hole. That \
                  window is the subject of this level."
                     .to_string(),
             ),
-            (1, true, false) => {
+            (true, true, false) => {
                 GoalStatus::Open("Now close the hole, and let the client ask again.".to_string())
             }
             _ => GoalStatus::Open(

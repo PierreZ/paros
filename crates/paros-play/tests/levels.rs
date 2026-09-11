@@ -307,12 +307,15 @@ fn act_four_registers_its_ten_levels_in_play_order() {
 }
 
 #[test]
-fn the_matchmaker_levels_ask_their_question_the_hard_way() {
+fn the_act_four_levels_ask_their_question_the_hard_way() {
     // A prompt whose answer is the same every time teaches only half a rule.
-    // Each of these levels must reach the answer that costs something: a
-    // Phase 1 that is complete across two named sets, a belief the cluster has
-    // replaced, a frozen generation, a retirement with evidence behind it.
+    // Each of these levels must reach the answer that costs something: a read
+    // that has to wait, a damaged slot the reports settle, a Phase 1 that is
+    // complete across two named sets, a belief the cluster has replaced, a
+    // frozen generation, a retirement with evidence behind it.
     for (id, kind, wanted) in [
+        ("act4/quorum-reads", PromptKind::QuorumReadServe, "wait"),
+        ("act4/faulty-records", PromptKind::RepairVerdict, "case1"),
         ("act4/matchmaking", PromptKind::Phase1Complete, "complete"),
         (
             "act4/reconfigure",
@@ -359,6 +362,21 @@ fn the_retire_refusal_is_played_before_the_retirement() {
         game.act(action).expect("the reference replays");
     }
     assert!(refusals > 0, "the refusal leg is never played");
+}
+
+#[test]
+fn the_generations_reference_gives_up_a_stalled_handover() {
+    // The stall timeout is driver policy, and the level that sets one must show
+    // what it buys. A proposed member that never answers its bootstrap would
+    // otherwise hold a busy refusal for the rest of the run, and no node could
+    // finish the handover the frozen generation is waiting for.
+    let level = paros_play::level::level("act4/matchmaker-generations").expect("registered");
+    let game = play_reference(level);
+    let log = game.world().log().expect("the replicated-log world");
+    assert!(
+        !log.abandoned_handovers().is_empty(),
+        "the reference never gives up a stalled handover"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@
 // A refused move leaves the board alone, so the player needs to read why next
 // to the buttons that made it. The engine's own sentence comes first, because
 // it carries this move's numbers and the reason — `handoff_refused` names the
-// rule that closed the second hop, `amnesia` names the promise that is gone.
+// rule that closed the second hop.
 // The second line is what the player does next, and it is written here.
 
 import type { ActionErrorCode, ErrorView } from '../types';
@@ -13,8 +13,6 @@ import { h } from '../render/dom';
 const ADVICE: Partial<Record<ActionErrorCode, string>> = {
   handoff_refused:
     'Only the node that won the ballot may give it away. To move the leadership again, run an election.',
-  amnesia:
-    'The disk of this node is empty, and a promise cannot come back. The node must stay out, and the cluster must change its acceptor set instead.',
   bad_column:
     'Give a column of this grid. The column of a slot is the slot number modulo the number of columns.',
   not_leader: 'Ask the leader. Only the leader puts a command in a slot.',

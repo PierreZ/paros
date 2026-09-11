@@ -35,44 +35,71 @@ Two corollaries that bite in review:
   no clock, so it is bit-exact. The `#[wasm_bindgen] WasmGame` surface is here too.
 - `src/action.rs` — every player verb and the one error type. `ActionKind` is the
   payload-free family a level's `allowed_actions` lists.
-- `src/world/` — **two worlds**, one wire renderer:
+- `src/world/` — **two worlds**, one wire renderer. One file per concern: the types and
+  the constructors, then the verbs, the client's history, the machine's lifecycle, the
+  reads, the drain, the prompts and the view, each in its own.
   - `world/decree/` — Act I: bare `Proposer` + `Acceptor` over slot 0, with the phase
     **reach** sets as the only network. No `ColocatedNode`, no disk, no clock.
-  - `world/mod.rs` — Act II onward: `ColocatedNode`s, `Disk`s, a wire, a clock, clients,
-    and the client history the linearizability judge reads.
+  - `world/mod.rs` — Act II onward: `World` itself — `Party`, `Envelope`, `InFlight`,
+    `WorldPolicy`, the constructors, `observe` (the narration diff) and `settle` (the
+    bookkeeping that is nobody else's business).
+  - `world/verbs.rs` — every player verb: the wire (deliver, drop, duplicate), the
+    clock (tick, the election timeout), the client (propose, retry, compact), the
+    operator's hand-off, and the answer to an open prompt. An accessor lives beside the
+    verb that fills it. Act IV's verbs are here too: a proposal may name a grid
+    **column** (`World::propose(.., column)` → `propose_in`, validated against
+    `AcceptorConfig` before the core is called), and `World::relinquish` moves a
+    leadership (`World::handoff_refusal` gives the reason a refusal has, and the goals
+    read the same function).
+  - `world/history.rs` — the client's own record: what it asked, when, and the
+    linearizability judge. `World::proposed_values` is where a goal reads a value back
+    from, so no goal compares an applied log against a literal.
+  - `world/lifecycle.rs` — crash, the two durability seams, restart, wipe, corrupt, and
+    the boot an erased disk earns. `Disk::wipe` erases a disk while keeping the
+    operator's record that the identity was provisioned, which is what lets
+    `World::restart` refuse the boot; that refusal is `Ok` and narrated, never an
+    `Err`, because undo and replay rebuild the world from the action log.
+    `Disk::corrupt` rots one record into the tri-state `Storage::faulty_entries`
+    reports at the next boot.
+  - `world/reads.rs` — the read-index round and the leaderless `World::quorum_read`,
+    both served through the same `ReadState`.
   - `world/disk.rs` — the `Storage` impl plus the application: the applied log, and the
     opaque snapshot that log serialises to. The game *is* the application here, so the
     apply side is the one party entitled to read those bytes back.
   - `world/drain.rs` — **the drain contract**, and the only place a `Ready` is held.
   - `world/prompts.rs` — which delivery raises which question, and the clone it is
     judged on.
-  - Act IV's world support lives in the same files, not in new ones: the quorum
-    system is level data (`Config::quorum_system`, `DecreeWorld::with_system`), a
-    proposal may name a grid **column** (`World::propose(.., column)` →
-    `propose_in`, validated against `AcceptorConfig` before the core is called),
-    `World::quorum_read` opens a leaderless read that surfaces through the same
-    `ReadState` the read-index path uses, `World::relinquish` moves a leadership
-    (`World::handoff_refusal` gives the reason a refusal has, and the goals read
-    the same function), `Disk::corrupt` rots one record into the tri-state
-    `Storage::faulty_entries` reports at the next boot, and `Disk::wipe` erases a
-    disk while keeping the operator's record that the identity was provisioned —
-    which is what lets `World::restart` refuse the boot.
-  - `world/matchmakers.rs` — **the matchmaker plane**, Act IV part two. A
-    `MatchmakerProcess` is `examples/matchmaker.rs`'s node: a `Matchmaker` role, a
-    `MatchmakerConfig`, and a `MemRegistry` disk it reboots from, driven **step →
-    persist → reply → advance**. One `MatchmakerReconfigurer` per node (it is a
-    *driver* object, as in `paros::driver::handover`), the operator's verbs
-    (`reconfigure`, `retire`, `reconfigure_matchmakers`, the three re-sends, the two
-    matchmaker crash verbs), and the two decisions the **driver** owns rather than an
-    ack: closing a freeze and abandoning a stalled handover, both on a beat.
+  - The quorum system is level data (`Config::quorum_system`, `DecreeWorld::with_system`),
+    and so is the handover stall timeout (`World::with_reconfigure_timeout`): both are
+    deployment or driver policy, never a constant in a state machine.
+  - `world/matchmakers/` — **the matchmaker plane**, Act IV part two, split the same
+    way: `process.rs` (a `MatchmakerProcess` is `examples/matchmaker.rs`'s node — a
+    `Matchmaker` role, a `MatchmakerConfig`, and a `MemRegistry` disk it reboots from,
+    driven **step → persist → reply → advance**, every batch acknowledged),
+    `verbs.rs` (`reconfigure`, `retire`, `reconfigure_matchmakers`, the three re-sends,
+    the two matchmaker crash verbs), `delivery.rs` (the wire, and the two decisions the
+    **driver** owns rather than an ack: closing a freeze and abandoning a stalled
+    handover, both on a beat), `render.rs` and `prompts.rs`. One
+    `MatchmakerReconfigurer` per node — it is a *driver* object, as in
+    `paros::driver::handover`.
+  - **A retirement needs evidence, and the number is not the evidence.**
+    `ColocatedNode::may_retire` asks one question of the watermark it is handed, so an
+    operator who typed a large enough number would pass it. `World::retire` therefore
+    refuses any watermark that no live node reports as a floor of its own
+    (`World::reports_gc_floor`), which is the contract the core documents: the operator
+    reads that number off a leader whose garbage collection reached a matchmaker
+    quorum, and off nothing else.
   - The wire is one queue of `InFlight { from: Party, to: Party, envelope: Envelope }`.
     A `Party` is a node **or** a matchmaker: the two identity spaces are distinct, so
     nothing may compare a node id with a matchmaker id, and a duplicate is re-addressed
     inside its own tier. `Envelope::Node` carries the node protocol; the six other
     variants are the matchmaker plane's, and a matchmaker is never stepped with a
     `Message`.
-- `src/prompt.rs` — the questions, the choices, the judge, and one authored explanation
-  per **wrong** choice (nothing is explained when nothing broke).
+- `src/prompt/` — the questions, the choices, the judge, and one authored explanation
+  per **wrong** choice (nothing is explained when nothing broke). `mod.rs` holds
+  `PromptKind`, `Choice`, `Prompt`, `Verdict` and `confirmation`; the constructors sit
+  with the role they are judged on — `acceptor.rs`, `proposer.rs`, `replica.rs`,
+  `reads.rs`, `storage.rs`, `matchmaker.rs`.
 - `src/auto.rs` — automation as reward: one flag per decision, and the deterministic
   pump the delivery flags enable.
 - `src/narration.rs` — what the game says just happened, **derived from the transition**.
@@ -133,13 +160,25 @@ refuses such a boot rather than branching on it.
 Part two's four: `Phase1Complete` (a `Proposer` clone folded with the arriving
 `Promise`, then `phase1_won` — the completion predicate is per configuration, never
 over the union), `MayRetire` (`ColocatedNode::may_retire` on the target itself; it
-takes `&self`, so there is nothing to clone), `GenerationFence` (a `Matchmaker` clone
-stepped with the very request, and its own reply read back) and `StaleConfiguration`
-— the one prompt whose oracle is **not** read off the node. `ColocatedNode` hands out
-no reference to its own `Matchmaking`, so the world drives a second instance of the
-same core role with the same answers (`World::matchmaking_shadow`, synced in
-`settle`, folded in `fold_match_reply` before the node is). If the core ever exposes
-`matchmaking()` as a role rather than a triple, delete the shadow and clone it.
+takes `&self` and the evidence the operator shows is checked before it),
+`GenerationFence` (a `Matchmaker` clone stepped with the very request, and its own
+reply read back) and `StaleConfiguration` — the one prompt whose oracle is **not**
+read off the node. `ColocatedNode` hands out no reference to its own `Matchmaking`,
+so the world drives a second instance of the same core role with the same answers
+(`World::matchmaking_shadow`, synced in `settle`, folded in `fold_match_reply` before
+the node is).
+
+**The shadow is a liability, and it is the only one.** A second instance is only the
+node's own tally while it is fed *exactly* what the node is fed, guards included:
+`ColocatedNode::on_match_reply` ignores a reply addressed to another node, one from a
+matchmaker outside the set this node believes authoritative, and one for another
+generation, so `fold_match_reply` applies the same three before it folds the shadow.
+Every guard the core adds must be copied here, and a copied guard is a guard that can
+fall out of step. The fix is upstream, not here: a `ColocatedNode::matchmaking_role()`
+accessor that hands the role out read-only — the way `acceptor()`, `proposer()` and
+`replica()` already do — would let this prompt clone the node's own tally like every
+other prompt, and the shadow, its `settle` sync, its guards and its field would all be
+deleted in the same change.
 
 ## Narration is derived, never scripted
 

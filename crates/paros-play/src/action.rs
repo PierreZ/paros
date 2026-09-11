@@ -618,14 +618,16 @@ pub enum ActionErrorCode {
     /// The node is not in a state a cooperative handoff may leave from, or
     /// the peer named cannot take one.
     HandoffRefused,
-    /// The store was provisioned once and no longer carries its format
-    /// marker: the node's promise is gone, and it may never rejoin.
-    Amnesia,
     /// This deployment names no matchmakers, so it has no matchmaker set to
     /// change and no reconfiguration to honour.
     NoMatchmakers,
     /// The node is already driving a matchmaker-set handover.
     HandoverBusy,
+    /// The watermark shown with a retire request is not a floor any live
+    /// leadership reports, so it is not evidence of anything.
+    NoEvidence,
+    /// The node retired for good, and a retired node does not come back.
+    Retired,
     /// The node is driving no matchmaker-set handover.
     NoHandover,
     /// The level pins this automation flag off.

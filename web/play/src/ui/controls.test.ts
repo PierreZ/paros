@@ -211,7 +211,6 @@ describe('the quorums, in words', () => {
 describe('what a refusal tells the player to do', () => {
   it('adds a next step to the refusals that have one', () => {
     expect(refusalAdvice('handoff_refused')).toContain('run an election');
-    expect(refusalAdvice('amnesia')).toContain('promise cannot come back');
     expect(refusalAdvice('bad_column')).toContain('modulo');
   });
 

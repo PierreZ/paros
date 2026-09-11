@@ -103,6 +103,7 @@ impl DecreeWorld {
             gc: None,
             handover: None,
             retired: false,
+            wiped: false,
         }
     }
 
@@ -163,6 +164,7 @@ impl DecreeWorld {
             gc: None,
             handover: None,
             retired: false,
+            wiped: false,
         }
     }
 }

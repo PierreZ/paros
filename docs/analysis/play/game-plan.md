@@ -70,15 +70,15 @@ crates/paros-play/                 # the game engine + wasm glue; publish = fals
                                    #   and the opaque application snapshot that log serialises to)
     decree/mod.rs                  # the Act I world: Proposer + Acceptor over Slot(0), no ColocatedNode
     decree/render.rs               # its view: an acceptor's promise + record, a proposer's attempt
-    matchmakers.rs                 # (PR 3) Matchmaker + MemRegistry + MatchmakerReconfigurer plane
+    matchmakers/                   # the matchmaker plane: process, delivery, verbs, prompts, render
   src/action.rs                    # Action enum (serde): every player verb
-  src/prompt.rs                    # Prompt/Answer: the "play the role" questions and their judge
+  src/prompt/                      # the "play the role" questions and their judges, one file per role
   src/auto.rs                      # Automation flags and the auto-pump they enable
   src/view.rs                      # serde + ts-rs view structs (the one JS contract)
   src/level/                       # Level trait/DSL + one module per act
     mod.rs                         # Level, Goal, Hint, Briefing, the registry
-    act1.rs                        # single decree
-    act2.rs                        # log, leader, crash
+    script.rs                      # references recorded by driving a real Game
+    act1.rs … act4.rs              # the four acts
     act3.rs                        # truncation, snapshots, reads
     script.rs                      # a reference solution is *recorded* by driving a real Game
   tests/levels.rs                  # every level's reference solution reaches its goal;
@@ -299,7 +299,7 @@ the tests replay. Level ids are stable strings (`act1/choose-a-value`), never in
     identity, and the wiped node's refusal explained.
 
 The Act III world adds snapshots and truncation to `Disk` and the driver-side snapshot offer;
-the Act IV world adds the matchmaker plane (`world/matchmakers.rs`), the grid column choice,
+the Act IV world adds the matchmaker plane (`world/matchmakers/`), the grid column choice,
 quorum reads, handoff, faulty records and the wipe.
 
 ## Narration: the game explains what just happened

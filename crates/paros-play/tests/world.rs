@@ -1595,10 +1595,11 @@ fn a_wiped_node_may_never_rejoin() {
         Ballot::zero(),
         "the promise is gone from the only place it was written"
     );
-    let err = world
+    // The refusal is a move that happened, not a move that was not available:
+    // it is answered, narrated and recorded, so a replay reproduces it.
+    world
         .restart(NodeId(2))
-        .expect_err("a wiped member may not boot");
-    assert_eq!(err.code, paros_play::ActionErrorCode::Amnesia);
+        .expect("the boot is answered, and refused");
     assert!(world.node(NodeId(2)).is_none(), "it stays out");
     assert_eq!(world.refused_boots().len(), 1);
     // The survivors keep going, and nothing regressed.
@@ -1614,6 +1615,41 @@ fn a_wiped_node_may_never_rejoin() {
         world.promise_regressed(),
         None,
         "no node's durable promise came back lower than one it had made"
+    );
+}
+
+#[test]
+fn an_automatic_refused_boot_is_answered_and_replays() {
+    // A boot the library refuses is a move that **happened**: it is answered,
+    // narrated and recorded. An `Err` would leave the engine holding a
+    // `refused_boots` entry that its own action log cannot rebuild, and undo
+    // and replay both read that log. The same script, played twice from a
+    // fresh world, must therefore end in the same view.
+    let run = || {
+        let mut world = cluster(3);
+        elect(&mut world, 0);
+        world
+            .propose(NodeId(0), CLIENT, "alpha", None)
+            .expect("admitted");
+        deliver_all(&mut world);
+        world.wipe(NodeId(2)).expect("a disk may be erased");
+        world
+            .restart(NodeId(2))
+            .expect("the boot is answered, and refused");
+        world
+    };
+    let first = run();
+    assert_eq!(first.refused_boots().len(), 1, "the refusal is recorded");
+    assert!(first.node(NodeId(2)).is_none(), "node 2 stays out");
+    assert!(
+        first.view().nodes[2].wiped,
+        "the stage says the disk is erased and the node is not back"
+    );
+    let second = run();
+    assert_eq!(
+        serde_json::to_string(&first.view()).expect("the view encodes"),
+        serde_json::to_string(&second.view()).expect("the view encodes"),
+        "a refused boot replays exactly"
     );
 }
 
@@ -1819,10 +1855,12 @@ fn a_removed_acceptor_retires_only_on_the_effective_watermark() {
     world.reconfigure(NodeId(0), &config).expect("started");
     deliver_everything(&mut world);
     assert!(world.gc_effective(NodeId(0)).is_none(), "no floor yet");
-    // A retire with no evidence is refused.
-    world
+    // A retire with no evidence never reaches the node: no leader reports that
+    // floor, so the request is refused before the target is asked anything.
+    let err = world
         .retire(NodeId(0), NodeId(3), Ballot::zero())
-        .expect("the request is answered");
+        .expect_err("no leader reports that floor");
+    assert_eq!(err.code, paros_play::ActionErrorCode::NoEvidence);
     assert!(world.node(NodeId(3)).is_some(), "node 3 stays");
     // Beats carry the chosen index the GC condition needs.
     for _ in 0..3 {
@@ -1837,10 +1875,112 @@ fn a_removed_acceptor_retires_only_on_the_effective_watermark() {
         vec![NodeId(3)],
         "the removed acceptor is released"
     );
+    // A watermark the operator invented is refused, even though it sits above
+    // every ballot that bound a set naming node 3. The number is not the fact:
+    // the fact is that a leadership reports this floor.
+    let forged = Ballot {
+        round: watermark.round + 100,
+        node: watermark.node,
+    };
+    let err = world
+        .retire(NodeId(0), NodeId(3), forged)
+        .expect_err("a forged watermark is not evidence");
+    assert_eq!(err.code, paros_play::ActionErrorCode::NoEvidence);
+    assert!(
+        !world.retired(NodeId(3)),
+        "node 3 did not retire on a number"
+    );
     world
         .retire(NodeId(0), NodeId(3), watermark)
         .expect("the request is answered");
     assert!(world.retired(NodeId(3)), "node 3 retired on the evidence");
+    assert_eq!(
+        world.retirements(),
+        [(NodeId(3), watermark)],
+        "the world recorded the floor the shutdown rested on"
+    );
+    // And a retired node does not come back.
+    let err = world
+        .restart(NodeId(3))
+        .expect_err("a retired node does not start again");
+    assert_eq!(err.code, paros_play::ActionErrorCode::Retired);
+}
+
+#[test]
+fn a_freeze_closes_on_a_beat_and_not_on_the_ack_that_completed_it() {
+    // The ack that completes the quorum only makes the close possible. Closing
+    // is the **driver's** decision, taken on a beat, so a straggler that
+    // arrives in between widens the reconstruction the successor is built
+    // from. `paros::run_node` closes the freeze under `resend_due` for exactly
+    // this reason, and the core's own P5 finding is about a driver that closed
+    // it early.
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    // Every freeze goes out and every answer comes back: two of three is a
+    // quorum of the old generation, and the third answers too.
+    deliver_everything(&mut world);
+    assert_eq!(
+        world.view().nodes[0].handover,
+        Some(paros_play::view::HandoverPhaseView::Stopping),
+        "the acks alone do not close the freeze"
+    );
+    world.tick(NodeId(0)).expect("a live node");
+    assert_eq!(
+        world.view().nodes[0].handover,
+        Some(paros_play::view::HandoverPhaseView::Bootstrapping),
+        "the beat closes it"
+    );
+}
+
+#[test]
+fn a_stalled_handover_is_given_up_after_the_stall_timeout() {
+    // A proposed member that never answers its bootstrap must not hold a busy
+    // refusal for the rest of the run: the phase is abandoned, and the freeze
+    // and the votes stay on the matchmakers' own disks.
+    let mut world =
+        matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]).with_reconfigure_timeout(4);
+    world.set_policy(policy(&[]));
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .crash_matchmaker(MatchmakerId(3))
+        .expect("a deployed matchmaker");
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    for _ in 0..8 {
+        deliver_everything(&mut world);
+        world.tick(NodeId(0)).expect("a live node");
+    }
+    assert_eq!(
+        world.abandoned_handovers(),
+        [NodeId(0)],
+        "the driver gave the stalled handover up"
+    );
+    // And the node may drive one again once the member is back.
+    world
+        .restart_matchmaker(MatchmakerId(3))
+        .expect("a crashed matchmaker");
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("nothing is busy any more");
+    for _ in 0..10 {
+        deliver_everything(&mut world);
+        world.tick(NodeId(0)).expect("a live node");
+    }
+    deliver_everything(&mut world);
+    for id in [0, 1, 3] {
+        let role = world
+            .matchmaker(MatchmakerId(id))
+            .expect("deployed")
+            .role()
+            .expect("running");
+        assert_eq!(role.set().generation.0, 1, "matchmaker {id} serves g1");
+    }
 }
 
 #[test]
@@ -2085,6 +2225,80 @@ fn a_floor_is_in_force_only_once_a_matchmaker_quorum_acked_it() {
         world.gc_effective(NodeId(0)).is_some(),
         "two of three is, and the floor is in force"
     );
+}
+
+#[test]
+fn a_matchmaker_writes_once_for_each_garbage_collection_request() {
+    // One request, one durable write, and the batch is acknowledged. A
+    // `MatchmakerReady` that is dropped instead leaves the raise pending, and
+    // the next delivery applies it to the disk a second time — which is what a
+    // repeated request would show here.
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .propose(NodeId(0), CLIENT, "alpha", None)
+        .expect("admitted");
+    deliver_everything(&mut world);
+    let config = world
+        .compose(&[0, 1, 2], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.reconfigure(NodeId(0), &config).expect("started");
+    deliver_everything(&mut world);
+    // Beat until the leader asks the matchmakers for a floor.
+    // The request is queued when the beat's acks land, so the node protocol is
+    // delivered and the plane is left on the wire.
+    let mut request = None;
+    for _ in 0..8 {
+        world.tick(NodeId(0)).expect("a live node");
+        deliver_where(&mut world, |_| true);
+        request = gc_request_to(&world, 0);
+        if request.is_some() {
+            break;
+        }
+        deliver_where_plane(&mut world, "gc");
+    }
+    let request = request.expect("the leader asks for a floor");
+    let before = matchmaker_writes(&world, 0);
+    world.deliver(request).expect("in flight");
+    assert_eq!(
+        matchmaker_writes(&world, 0),
+        before + 1,
+        "raising the floor is one durable write"
+    );
+    // The leader asks again — its ack is still on the wire, so as far as it
+    // knows this matchmaker has not answered. The floor is already there, so
+    // the second request writes nothing at all.
+    world.resend_gc(NodeId(0)).expect("a live node");
+    let again = gc_request_to(&world, 0).expect("the leader asks again");
+    let before = matchmaker_writes(&world, 0);
+    world.deliver(again).expect("in flight");
+    assert_eq!(
+        matchmaker_writes(&world, 0),
+        before,
+        "a repeated request writes nothing, and no earlier batch is applied twice"
+    );
+}
+
+/// How many durable writes matchmaker `id` has taken.
+fn matchmaker_writes(world: &World, id: u64) -> usize {
+    world
+        .matchmaker(MatchmakerId(id))
+        .expect("a deployed matchmaker")
+        .disk()
+        .writes()
+}
+
+/// The in-flight garbage-collection request addressed to matchmaker `id`.
+fn gc_request_to(world: &World, id: u64) -> Option<u64> {
+    world
+        .wire()
+        .iter()
+        .find(|entry| {
+            entry.to == Party::Matchmaker(MatchmakerId(id))
+                && world.render(entry).kind == "GcRequest"
+        })
+        .map(|entry| entry.id)
 }
 
 /// Deliver every matchmaker-plane entry of one render family.

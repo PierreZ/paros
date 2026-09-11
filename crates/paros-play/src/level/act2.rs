@@ -784,10 +784,13 @@ permission to fill the slot.",
             ));
         }
         let executed = applied(world, 1);
+        // `Noop` is the protocol's own control command, so the level may name
+        // it. The client's values are the client's, so they are read back from
+        // the history rather than written down here.
         let filled = executed.iter().any(|command| command == "Noop");
-        let alpha = executed.iter().any(|command| command == "alpha");
-        let bravo = executed.iter().any(|command| command == "bravo");
-        match (filled, alpha && bravo) {
+        let asked = log.proposed_values();
+        let chosen = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
+        match (filled, chosen) {
             (true, true) => GoalStatus::Reached(format!(
                 "No node holds a hole, and the cluster executed the commands of the client: {}. \
                  No client asked for the Noop. Quorum intersection makes the Noop the proof \

@@ -16,6 +16,11 @@ import type { SlotView } from "./SlotView";
 
 /**
  * One node.
+ *
+ * The four flags are four independent facts the stage draws, and they cross to
+ * TypeScript as fields: a node is running or not, it holds accepts it could
+ * re-send or not, an operator retired it or not, its disk was erased or not. A
+ * state machine over them would have to name states no node is ever in.
  */
 export type NodeView = { 
 /**
@@ -149,4 +154,11 @@ handover: HandoverPhaseView | null,
  * Whether an operator retired this node: it answered the evidence, shut
  * down, and it never comes back.
  */
-retired: boolean, };
+retired: boolean, 
+/**
+ * Whether this node's disk was erased and the node is not back. An empty
+ * disk and a new disk look alike from inside, so this is the operator's
+ * own record: the identity was provisioned once, and the store no longer
+ * carries the marker that says so. The library refuses such a boot.
+ */
+wiped: boolean, };

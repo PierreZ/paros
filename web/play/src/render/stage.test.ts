@@ -57,6 +57,7 @@ function node(over: Partial<NodeView> = {}): NodeView {
     gc: null,
     handover: null,
     retired: false,
+    wiped: false,
     ...over,
   };
 }

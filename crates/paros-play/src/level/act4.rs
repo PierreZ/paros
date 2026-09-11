@@ -48,6 +48,14 @@ pub fn levels() -> Vec<&'static Level> {
 /// The client every Act IV level gives the player.
 const CLIENT: u64 = 7;
 
+/// How many beats a matchmaker-set handover may make no progress for before
+/// the node driving it gives it up, on the level that teaches the handover.
+///
+/// Its floor is structural: a phase must get more beats than one round trip
+/// needs, or a handover that is merely slow is given up every time. Four is
+/// three beats above the one beat a freeze or a bootstrap answer takes here.
+const HANDOVER_STALL: u64 = 4;
+
 /// The election timeout every Act IV node starts with, in ticks.
 const TIMEOUT: u64 = 5;
 
@@ -288,7 +296,19 @@ fn fresh(size: u64, system: QuorumSystem) -> WorldKind {
 /// A node outside `bootstrap` is a spare acceptor: it is addressable, it
 /// answers Phase 1 for the ballots it takes part in, and it becomes an acceptor
 /// only when a reconfiguration names it.
-fn deployed(pool: &[u64], bootstrap: &[u64], matchmakers: &[u64], spares: &[u64]) -> WorldKind {
+///
+/// `stall` is how many beats a matchmaker-set handover may make no progress
+/// for before the node driving it gives up. It is **driver policy**, never a
+/// constant inside the state machine, so every level names its own; `0`
+/// disables it, which is what a level that never wants a handover abandoned
+/// asks for.
+fn deployed(
+    pool: &[u64],
+    bootstrap: &[u64],
+    matchmakers: &[u64],
+    spares: &[u64],
+    stall: u64,
+) -> WorldKind {
     let nodes: Vec<NodeId> = pool.iter().copied().map(NodeId).collect();
     let members: Vec<NodeId> = bootstrap.iter().copied().map(NodeId).collect();
     let set: Vec<MatchmakerId> = matchmakers.iter().copied().map(MatchmakerId).collect();
@@ -313,7 +333,9 @@ fn deployed(pool: &[u64], bootstrap: &[u64], matchmakers: &[u64], spares: &[u64]
         .map(|id| MatchmakerProcess::new(*id, set.clone()))
         .collect();
     WorldKind::Log(Box::new(
-        World::from_disks(disks, &[CLIENT], TIMEOUT).with_matchmakers(processes),
+        World::from_disks(disks, &[CLIENT], TIMEOUT)
+            .with_matchmakers(processes)
+            .with_reconfigure_timeout(stall),
     ))
 }
 
@@ -746,20 +768,42 @@ serve the read.",
             .map(|(node, index, _)| (node, index))
             .collect();
         let leader = log.leader();
+        // A read the cluster could answer at once teaches nothing: the wait is
+        // the half of the rule this level exists for. So the read must reach at
+        // least the slot of a write the client already holds an ack for, which
+        // is the write a stale answer would lose.
+        let acked = log.highest_acked_slot();
         match served.first() {
-            Some((node, index)) if Some(*node) != leader => GoalStatus::Reached(format!(
-                "Node {} answered the read at {}, and it does not lead. No node sent a beat, \
-                 the leader opened no read round, and the history is linearizable.",
+            Some((node, index)) if Some(*node) != leader && *index >= acked && acked.is_some() => {
+                GoalStatus::Reached(format!(
+                    "Node {} answered the read at {}, and it does not lead. No node sent a \
+                     beat, and the leader opened no read round. The client already holds an ack \
+                     for {}, and the answer is at or above that slot. The history is \
+                     linearizable.",
+                    node.0,
+                    index.map_or_else(
+                        || "the empty prefix".to_string(),
+                        |s| format!("slot {}", s.0)
+                    ),
+                    acked.map_or_else(
+                        || "the empty prefix".to_string(),
+                        |s| format!("slot {}", s.0)
+                    )
+                ))
+            }
+            Some((node, _)) if Some(*node) == leader => GoalStatus::Open(format!(
+                "Node {} served the read, and it is the leader. Ask a follower instead, \
+                 because any replica can answer.",
+                node.0
+            )),
+            Some((node, index)) => GoalStatus::Open(format!(
+                "Node {} answered the read at {}, and the client holds no ack at or below that \
+                 slot. Get a command chosen and acknowledged first. Then ask for the read.",
                 node.0,
                 index.map_or_else(
                     || "the empty prefix".to_string(),
                     |s| format!("slot {}", s.0)
                 )
-            )),
-            Some((node, _)) => GoalStatus::Open(format!(
-                "Node {} served the read, and it is the leader. Ask a follower instead, \
-                 because any replica can answer.",
-                node.0
             )),
             None => GoalStatus::Open(
                 "Ask a follower for a read. Then decide when the follower may answer it."
@@ -998,7 +1042,7 @@ Phase 1 is complete.",
         AutomationFlag::DeliverMatchmakerReplies,
     ],
     allowed_actions: MATCHMAKING_ACTIONS,
-    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]),
+    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
         let Some(log) = log_world(world) else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
@@ -1124,7 +1168,7 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
     unlocked: MATCHMAKER_TOGGLES,
     unlocks: &[AutomationFlag::StaleConfiguration],
     allowed_actions: RECONFIGURE_ACTIONS,
-    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]),
+    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
         let Some(log) = log_world(world) else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
@@ -1151,7 +1195,13 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
                 leader.0
             ));
         }
-        if !commands(world, 3).iter().any(|command| command == "bravo") {
+        // Which command that is belongs to the client, not to this level: the
+        // last value it asked for is the one the new set decided.
+        let latest = log.proposed_values().last().cloned();
+        let executed = latest
+            .as_ref()
+            .is_some_and(|value| commands(world, 3).iter().any(|command| command == value));
+        if !executed {
             return GoalStatus::Open(
                 "Get one more command chosen under the new set, and let node 3 execute it."
                     .to_string(),
@@ -1276,7 +1326,7 @@ reports.",
     unlocked: MATCHMAKER_TOGGLES,
     unlocks: &[AutomationFlag::MayRetire],
     allowed_actions: GC_ACTIONS,
-    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[]),
+    setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[], 0),
     goal: |world| {
         let Some(log) = log_world(world) else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
@@ -1306,13 +1356,34 @@ reports.",
                     .to_string(),
             );
         }
-        GoalStatus::Reached(
-            "Node 3 is retired. The first request carried no watermark, and node 3 refused it \
-             with \"not collected\". An installed successor set does not mean a collected \
-             predecessor. Only a floor that a matchmaker quorum wrote to disk permits the \
-             shutdown. That floor must be above every ballot that bound a set naming node 3."
-                .to_string(),
-        )
+        // The evidence itself, and not only the outcome: the watermark the
+        // shutdown rested on must be a floor a leadership really reports. A
+        // number that no leader reports is not evidence, whatever it is above.
+        let Some((_, watermark)) = log
+            .retirements()
+            .iter()
+            .copied()
+            .find(|(id, _)| *id == NodeId(3))
+        else {
+            return GoalStatus::Failed(
+                "Node 3 is retired, and the world recorded no watermark for it.".to_string(),
+            );
+        };
+        if !log.reports_gc_floor(watermark) {
+            return GoalStatus::Failed(format!(
+                "Node 3 retired on the watermark {}, and no leader reports that floor. An \
+                 operator reads a floor from a leader that made it effective.",
+                crate::view::show_ballot(watermark)
+            ));
+        }
+        GoalStatus::Reached(format!(
+            "Node 3 is retired, on the floor {}. The leader reports that floor, and a \
+             matchmaker quorum wrote it to disk. The first request carried no such evidence, and \
+             node 3 refused it with \"not collected\". An installed successor set does not mean \
+             a collected predecessor. That floor is above every ballot that bound a set that \
+             names node 3.",
+            crate::view::show_ballot(watermark)
+        ))
     },
     hint: |world, mistakes| {
         let effective = log_world(world)
@@ -1436,7 +1507,7 @@ the matchmaker does with it.",
     unlocked: MATCHMAKER_TOGGLES,
     unlocks: &[AutomationFlag::GenerationFence],
     allowed_actions: GENERATIONS_ACTIONS,
-    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]),
+    setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3], HANDOVER_STALL),
     goal: |world| {
         let Some(log) = log_world(world) else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
@@ -1459,6 +1530,10 @@ the matchmaker does with it.",
                 active.len()
             ));
         }
+        // The node that registered through generation 1 must be the leader
+        // itself. Another node's completed campaign proves nothing about this
+        // leadership: `H_b` is per campaign, and a campaign that a node
+        // abandoned or lost took its own registration with it.
         let registered = log.pool().iter().copied().find(|id| {
             log.node(*id).is_some_and(|node| {
                 node.matchmaker_set()
@@ -1470,12 +1545,7 @@ the matchmaker does with it.",
                 "Generation 1 serves. Now elect a leader through it.".to_string(),
             );
         };
-        if registered.is_none()
-            || log
-                .node(leader)
-                .and_then(|node| node.matchmaker_set().map(|set| set.generation.0))
-                != Some(1)
-        {
+        if registered != Some(leader) {
             return GoalStatus::Open(
                 "Elect a leader that registers its ballot with generation 1.".to_string(),
             );
@@ -1514,7 +1584,25 @@ the matchmaker does with it.",
         // Node 1 opens a campaign against generation 0 and its registrations
         // stay in flight: this is the straggler the fence will refuse.
         script.play(start_election(1));
-        // The handover runs while they wait.
+        // Matchmaker 3 is down, and a set is bootstrapped at **every** member
+        // it names, so this handover can never leave that step. The node
+        // driving it gives it up after the stall timeout, and it must: a
+        // proposed member that never answers would otherwise hold a busy
+        // refusal for the rest of the run. Nothing is lost — the freeze is on
+        // the old members' own disks.
+        script.play(Action::CrashMatchmaker { matchmaker: 3 });
+        script.play(Action::ReconfigureMatchmakers {
+            node: 0,
+            members: vec![0, 1, 3],
+        });
+        for _ in 0..8 {
+            script.settle(phase("reconfigure"));
+            script.play(tick(0));
+        }
+        // Matchmaker 3 comes back, and the handover is asked for again. It
+        // re-freezes members that are already frozen, which changes nothing,
+        // and this time every proposed member holds the bootstrap.
+        script.play(Action::RestartMatchmaker { matchmaker: 3 });
         script.play(Action::ReconfigureMatchmakers {
             node: 0,
             members: vec![0, 1, 3],
@@ -1607,13 +1695,20 @@ and say which case each report gives the slot.",
         let value = log
             .node(NodeId(2))
             .and_then(|node| node.replica().chosen_at(Slot(0)).map(show_command));
+        // The value the damaged record held is the one the client asked for
+        // first. The level reads it back rather than naming it: a repair is
+        // correct when the slot holds *the value that was voted for*, and any
+        // other value in that slot is a second value for one slot.
+        let voted = log.proposed_values().first().cloned();
         match (damaged, blocked, repaired, value) {
-            (None, 0, true, Some(value)) if value == "alpha" => GoalStatus::Reached(
-                "Slot 0 holds alpha. The damaged acceptor voted for that value, and then it \
-                 could not read the value. Every node can read the record again, because the \
-                 acceptor wrote the value back when it voted for the proposal of the leader."
-                    .to_string(),
-            ),
+            (None, 0, true, Some(value)) if Some(&value) == voted.as_ref() => {
+                GoalStatus::Reached(format!(
+                    "Slot 0 holds {value}. The damaged acceptor voted for that value, and then \
+                     it could not read the value. Every node can read the record again, because \
+                     the acceptor wrote the value back when it voted for the proposal of the \
+                     leader."
+                ))
+            }
             (None, 0, true, Some(value)) => GoalStatus::Failed(format!(
                 "Slot 0 holds {value}. The repair re-proposed a value that no acceptor \
                  reported for that slot."

@@ -14,8 +14,9 @@ use crate::view::{
     matchmaker_set_view, quorum_view, registration_kind_view, registration_view, show_ballot,
     show_role,
 };
+use crate::world::history::Client;
 use crate::world::matchmakers::MatchmakerProcess;
-use crate::world::{Client, NO_CHECK_QUORUM, World, quorum_name};
+use crate::world::{NO_CHECK_QUORUM, World, quorum_name};
 
 impl World {
     /// Render the whole world.
@@ -39,6 +40,11 @@ impl World {
     fn node_view(&self, index: usize) -> NodeView {
         let id = self.pool[index];
         let disk = &self.disks[index];
+        // The disk was erased and the node has not come back: a store the
+        // operator provisioned once that no longer carries its format marker.
+        // A running node can never be in that state, because the library
+        // refuses the boot.
+        let wiped = disk.provisioned() && !disk.is_formatted();
         let Some(node) = self.nodes[index].as_ref() else {
             // A crashed node shows its disk: that is exactly what survives.
             return NodeView {
@@ -84,6 +90,7 @@ impl World {
                 gc: None,
                 handover: handover_view(&self.reconfigurers[index]),
                 retired: self.retired[index],
+                wiped,
             };
         };
         let accepted = node
@@ -166,6 +173,7 @@ impl World {
             }),
             handover: handover_view(&self.reconfigurers[index]),
             retired: self.retired[index],
+            wiped,
         }
     }
 

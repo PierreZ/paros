@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { diskIsEmpty, wipedNodes } from './disk';
+import { wipedNodes } from './disk';
 import { roleLabel } from './stage';
-import type { ActionView, GameView, NodeView, SlotView } from '../types';
+import type { GameView, NodeView, SlotView } from '../types';
 
 function slot(over: Partial<SlotView> = {}): SlotView {
   return { slot: 0, ballot: '1.0', value: 'alpha', control: null, chosen: true, applied: true, ...over };
 }
 
 /**
- * One node, with every field the contract has today.
+ * One node, with the fields the stage reads.
  *
  * The literal is cast rather than typed: the engine adds fields to `NodeView`
  * as later acts land, and a fixture that has to grow with each of them tests
@@ -42,11 +42,13 @@ function node(id: number, over: Partial<NodeView> = {}): NodeView {
     grid_cell: null,
     applied: [slot()],
     armed_seam: null,
+    retired: false,
+    wiped: false,
     ...over,
   } as unknown as NodeView;
 }
 
-/** A node whose disk was erased: nothing on it, and it is not running. */
+/** A node the engine reports as wiped: nothing on its disk, and it is not running. */
 function erased(id: number): NodeView {
   return node(id, {
     alive: false,
@@ -57,50 +59,30 @@ function erased(id: number): NodeView {
     accepted: [],
     applied: [],
     chosen_index: null,
+    wiped: true,
   });
 }
 
-function entry(kind: string, label: string): ActionView {
-  return { index: 0, kind, label, narration: [] } as unknown as ActionView;
+function view(nodes: NodeView[]): GameView {
+  return { world: { nodes } } as unknown as GameView;
 }
-
-function view(nodes: NodeView[], log: ActionView[] = []): GameView {
-  return { world: { nodes }, log } as unknown as GameView;
-}
-
-describe('an empty disk', () => {
-  it('holds no promise, no record and nothing applied', () => {
-    expect(diskIsEmpty(erased(2))).toBe(true);
-    expect(diskIsEmpty(node(2))).toBe(false);
-    expect(diskIsEmpty(node(2, { accepted: [], applied: [], chosen_index: null }))).toBe(false);
-  });
-});
 
 describe('which nodes the player erased', () => {
-  it('draws none until a wipe is played', () => {
-    expect(wipedNodes(view([node(0), erased(2)]))).toEqual(new Set());
+  it('draws none until the engine reports a wipe', () => {
+    expect(wipedNodes(view([node(0), node(1)]))).toEqual(new Set());
   });
 
-  it('names the node the log names, when that disk reads empty', () => {
-    const log = [entry('wipe', "wipe node 2's disk")];
-    expect(wipedNodes(view([node(0), node(1), erased(2)], log))).toEqual(new Set([2]));
+  it('names the nodes the engine reports as wiped', () => {
+    expect(wipedNodes(view([node(0), node(1), erased(2)]))).toEqual(new Set([2]));
   });
 
   it('never draws a crash as a lost disk', () => {
     // Node 1 is merely down: its promise and its records survived.
-    const log = [entry('wipe', "wipe node 2's disk")];
     const down = node(1, { alive: false, role: null });
-    expect(wipedNodes(view([node(0), down, erased(2)], log))).toEqual(new Set([2]));
+    expect(wipedNodes(view([node(0), down, erased(2)]))).toEqual(new Set([2]));
   });
 
-  it('takes the engine at its word when it reports the fact itself', () => {
-    const reported = { ...node(2), wiped: true } as unknown as NodeView;
-    // No log entry at all, and the node still reports a promise: the engine
-    // said so, and the engine decides.
-    expect(wipedNodes(view([node(0), reported]))).toEqual(new Set([2]));
-  });
-
-  it('does not explode on a view with no log and no nodes', () => {
+  it('does not explode on a view with no nodes', () => {
     expect(wipedNodes({ world: {} } as unknown as GameView)).toEqual(new Set());
     expect(wipedNodes({} as unknown as GameView)).toEqual(new Set());
   });
