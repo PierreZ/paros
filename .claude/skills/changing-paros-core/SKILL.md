@@ -24,7 +24,7 @@ because the perturbation is a caller that stops calling.
 | the leaderless read tally (#143): a row's vote watermarks, the maximum, bound to one configuration, TTL-bounded; the acceptor answers `vote_watermark`, the replica answers `covers` | `quorum_read.rs` (`QuorumRead`, `QuorumReads`) |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
 | the registry and generations, the handover, the single decree over the shared roles at slot zero, the model checker | `matchmaker.rs`, `matchmaker/{reconfigurer,decree,generation,handover_model,storage,message,state,write}.rs` |
-| wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally**; `phase2` opens, fans out or delegates, folds, decides and takes back; `learn` is the learner half | `node.rs`, `node/{election,replication,phase2,learn,handoff,gc,matchmaking,reconfigure,reads,quorum_reads,catch_up_snapshot,boot,acceptor,helpers,invariants}.rs` |
+| wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally**; `phase2` opens, fans out or delegates, folds, decides and takes back; `learn` is the learner half | `node.rs`, `node/{election,replication,authority,phase2,learn,handoff,gc,matchmaking,reconfigure,reads,quorum_reads,catch_up_snapshot,boot,acceptor,helpers,invariants}.rs` |
 
 A component must not learn something merely because the deployment colocates
 it: the proposer builds no message and knows no role, the acceptor never reads

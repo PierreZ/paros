@@ -2,6 +2,7 @@
 //! `step`/`tick`/`ready`/`advance` contract.
 
 mod acceptor;
+mod authority;
 mod boot;
 mod catch_up_snapshot;
 mod election;
@@ -282,9 +283,10 @@ pub struct ColocatedNode {
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
-    /// Monotone count of `CheckQuorum` step-downs this incarnation, for the
-    /// driver's audit report (mirrors `duplicates_suppressed`).
-    quorum_lost_step_downs: u64,
+    /// The monotone observability counters of this incarnation
+    /// ([`Counters`]): what the driver's audit report reads, never a
+    /// decision.
+    counters: Counters,
 
     // ---- proposer (multi-decree) ----
     /// The proposer component: the open Phase 1, the CTRL repair probe, the
@@ -318,12 +320,6 @@ pub struct ColocatedNode {
     /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
     /// Leader-only, volatile, `None` on plain Multi-Paxos.
     gc: Option<Collector>,
-    /// Monotone campaign-phase counters this incarnation, for the driver's
-    /// audit report: campaigns this node declined to open because it is not
-    /// a member of the configuration it would register, and leaderships it
-    /// resigned once its own reconfiguration removed it from the acceptor set.
-    non_member_campaigns_skipped: u64,
-    non_member_step_downs: u64,
     /// The round every later campaign opens strictly above, raised by a
     /// `Stale` matchmaking refusal to the refuser's highest registered round.
     /// Volatile: a restart starts from the durable promise again. Without it
@@ -333,19 +329,6 @@ pub struct ColocatedNode {
     /// matchmaking cousin of the dueling-proposer livelock, seen in the
     /// hunt as two hundred registrations for three completed campaigns.
     round_floor: u64,
-    /// Election timeouts that found a matchmaking phase still open and
-    /// re-sent its requests instead of abandoning the campaign (see
-    /// [`ColocatedNode::tick`]). Observability only.
-    matchmaking_timeouts: u64,
-    /// Monotone count of recovery-timeout step-downs this incarnation (a leader
-    /// resigning because it could not finish repairing its blocked slots).
-    repair_step_downs: u64,
-    /// Monotone count of blocked slots resolved as Case 1 (re-proposed from a
-    /// straggler's `have`) after the election closed.
-    repair_case1: u64,
-    /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
-    /// assembled from stragglers; decided `Noop`).
-    repair_case2: u64,
     /// How this node came to hold its current leadership (see
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,
@@ -357,11 +340,39 @@ pub struct ColocatedNode {
     /// Monotone cooperative-handoff counters this incarnation, for the
     /// driver's audit report.
     handoff: HandoffCounters,
-    /// How many undecided holes this node filled with a [`Control::Noop`] when it
-    /// won its *current* leadership (0 until it wins one, and re-set at each
-    /// election). Purely observational: the driver reads it on the transition to
-    /// Leader and surfaces it, so the simulation can prove the gap-fill path is
-    /// genuinely reached rather than merely present.
+}
+
+/// The node's **observability counters**: monotone per incarnation, read by
+/// the driver's audit report and by the examples, and never a decision —
+/// deleting every one of them leaves the state machine unchanged. Each
+/// names a path the simulation proves reached rather than merely present.
+/// The handoff's own live in [`HandoffCounters`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Counters {
+    /// `CheckQuorum` step-downs: full election-timeout windows without an
+    /// ack quorum.
+    quorum_lost_step_downs: u64,
+    /// Campaigns this node declined to open because it is not a member of
+    /// the configuration it would register.
+    non_member_campaigns_skipped: u64,
+    /// Leaderships resigned once this node's own reconfiguration removed it
+    /// from the acceptor set.
+    non_member_step_downs: u64,
+    /// Election timeouts that found a matchmaking phase still open and
+    /// re-sent its requests instead of abandoning the campaign (see
+    /// [`ColocatedNode::tick`]).
+    matchmaking_timeouts: u64,
+    /// Recovery-timeout step-downs: a leader resigning because it could not
+    /// finish repairing its blocked slots.
+    repair_step_downs: u64,
+    /// Blocked slots resolved as Case 1 (re-proposed from a straggler's
+    /// `have`) after the election closed.
+    repair_case1: u64,
+    /// Blocked slots resolved as Case 2 (a full Q1 of `none` assembled from
+    /// stragglers; decided `Noop`).
+    repair_case2: u64,
+    /// Undecided holes filled with a [`Control::Noop`] when this node won its
+    /// *current* leadership (0 until it wins one, re-set at each election).
     election_gap_fills: u64,
 }
 
@@ -803,7 +814,6 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn tick(&mut self) {
         self.tick_count += 1;
-        let me = self.config.id;
         if self.role == NodeRole::Leader {
             // A leader beats on every tick ([`HEARTBEAT_TICKS`] is the
             // cadence the audit's oracle assumes, not a tunable). Re-sending
@@ -817,33 +827,7 @@ impl ColocatedNode {
             // confirm all older pending rounds.
             let now = self.tick_count;
             self.proposer.expire_reads(now, READ_ROUND_TTL_TICKS);
-            // CheckQuorum (#95): a leader must re-prove, once per election
-            // timeout, that an ack quorum can still reach it. Without this, an
-            // idle leader cut off from its quorum stays Leader forever — its
-            // election clock is frozen (the branch below runs only for
-            // non-leaders), below-promise beats are ignored unacked rather than
-            // Nacked, and an idle leader emits no `Accept`s whose Nack could
-            // demote it — while it keeps admitting proposals into a stale
-            // suffix for the whole partition, feeding #94's double-apply. The
-            // window is the same length as the election timeout (etcd-raft's
-            // CheckQuorum), so a demoted leader's peers are already eligible to
-            // campaign by the time it steps down. Every beat is acked by every
-            // reachable follower each tick, so a healthy leader trivially
-            // refills the window.
-            // A **Phase-2** quorum, for the reason spelled out at the read
-            // fence (`node/reads.rs`): a leader's authority is the claim that
-            // no later ballot has decided behind it, which every future
-            // Phase-1 quorum's intersection with this ack set rules out.
-            if self.election_timeout != 0 && self.proposer.tick_authority() >= self.election_timeout
-            {
-                if self.proposer.authority_holds(&self.acceptors) {
-                    self.proposer
-                        .renew_authority(self.is_acceptor().then_some(me));
-                } else {
-                    self.quorum_lost_step_downs += 1;
-                    self.become_follower(None);
-                }
-            }
+            self.tick_check_quorum();
             // A leader its own reconfiguration removed from the acceptor set
             // (#122): it drives the change to completion — its inherited
             // rounds decided, its recovery and repair closed — and then
@@ -855,7 +839,8 @@ impl ColocatedNode {
                 && self.proposer.probe().is_none()
                 && self.proposer.rounds().is_empty()
             {
-                self.non_member_step_downs = self.non_member_step_downs.saturating_add(1);
+                self.counters.non_member_step_downs =
+                    self.counters.non_member_step_downs.saturating_add(1);
                 self.become_follower(None);
             }
         } else {
@@ -876,7 +861,8 @@ impl ColocatedNode {
                     // saw 203 registrations at one matchmaker for 3
                     // completed campaigns and no leader in a 50 s tail).
                     let ballot = self.ballot;
-                    self.matchmaking_timeouts = self.matchmaking_timeouts.saturating_add(1);
+                    self.counters.matchmaking_timeouts =
+                        self.counters.matchmaking_timeouts.saturating_add(1);
                     self.resend_matchmaking();
                     // Postconditions: the clock moved nothing — same ballot,
                     // same open phase, still a candidate — and only re-asked.
@@ -925,7 +911,7 @@ impl ColocatedNode {
                 .election_timeout
                 .saturating_mul(REPAIR_TIMEOUT_ELECTIONS);
             if self.election_timeout != 0 && elapsed >= timeout {
-                self.repair_step_downs += 1;
+                self.counters.repair_step_downs += 1;
                 self.become_follower(None);
             } else {
                 let (ballot, from_slot, unanswered) = {
@@ -1240,8 +1226,8 @@ impl ColocatedNode {
     #[must_use]
     pub fn membership_counters(&self) -> (u64, u64) {
         (
-            self.non_member_campaigns_skipped,
-            self.non_member_step_downs,
+            self.counters.non_member_campaigns_skipped,
+            self.counters.non_member_step_downs,
         )
     }
 
@@ -1250,7 +1236,7 @@ impl ColocatedNode {
     /// only (see [`ColocatedNode::tick`]).
     #[must_use]
     pub fn matchmaking_timeouts(&self) -> u64 {
-        self.matchmaking_timeouts
+        self.counters.matchmaking_timeouts
     }
 
     /// The current durable scalars (promised ballot, chosen
@@ -1334,7 +1320,7 @@ impl ColocatedNode {
     /// is genuinely reached.
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
-        self.election_gap_fills
+        self.counters.election_gap_fills
     }
 
     /// The full at-most-once session ledger: every `(client, seq) -> slot`
@@ -1357,7 +1343,7 @@ impl ColocatedNode {
     /// batch and reports it through its audit port.
     #[must_use]
     pub fn quorum_lost_step_downs(&self) -> u64 {
-        self.quorum_lost_step_downs
+        self.counters.quorum_lost_step_downs
     }
 
     /// How this node came to hold its current leadership: won by ordinary
@@ -1394,9 +1380,9 @@ impl ColocatedNode {
     pub fn repair_counters(&self) -> (u64, u64, u64, u64) {
         (
             self.acceptor.faulty_repaired(),
-            self.repair_case1,
-            self.repair_case2,
-            self.repair_step_downs,
+            self.counters.repair_case1,
+            self.counters.repair_case2,
+            self.counters.repair_step_downs,
         )
     }
 

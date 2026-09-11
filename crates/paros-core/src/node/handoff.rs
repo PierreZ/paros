@@ -561,15 +561,13 @@ impl ColocatedNode {
         if let Some(config) = config {
             // Registration precedes exercise: the successor counts Phase 2
             // over exactly the configuration the ballot was registered with.
-            self.acceptors = config;
-            self.acceptors_since = ballot;
-            self.record_membership();
+            self.adopt_configuration(config, ballot);
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;
-        self.election_gap_fills = 0;
+        self.counters.election_gap_fills = 0;
         self.proposer.set_next_slot(next_slot);
         // A fresh leadership's beat sequence and read rounds, exactly as
         // `try_become_leader` resets them: acks must echo the current ballot,

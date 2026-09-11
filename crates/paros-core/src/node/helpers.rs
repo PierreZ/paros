@@ -55,19 +55,28 @@ impl ColocatedNode {
         if !config.members().iter().all(|m| self.in_pool(*m)) {
             return;
         }
+        self.adopt_configuration(config, ballot);
+    }
+
+    /// **The one way the configuration in force moves**: bind `config` to
+    /// `since` and record what that does to this node's membership. Every
+    /// site that moves it — [`ColocatedNode::learn_config`], a won election,
+    /// a handoff install, the adoption of an effective configuration — comes
+    /// through here, so none can forget the membership record that
+    /// [`ColocatedNode::may_retire`] and the quorum reads depend on.
+    pub(super) fn adopt_configuration(&mut self, config: AcceptorConfig, since: Ballot) {
         self.acceptors = config;
-        self.acceptors_since = ballot;
+        self.acceptors_since = since;
         self.record_membership();
     }
 
     /// Record that `acceptors`/`acceptors_since` just moved: if the new
     /// configuration names this node, the ballot it is bound to is the newest
     /// at which this node was a member. Called from every assignment to
-    /// `acceptors_since` — [`ColocatedNode::learn_config`], `try_become_leader`, a
-    /// handoff install, and the adoption of an effective configuration — so
+    /// `acceptors_since` ([`ColocatedNode::adopt_configuration`]), so
     /// [`ColocatedNode::may_retire`] never under-reports the membership it must
     /// outlive.
-    pub(super) fn record_membership(&mut self) {
+    fn record_membership(&mut self) {
         if self.is_acceptor() {
             self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
         }

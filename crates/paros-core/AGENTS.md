@@ -31,7 +31,7 @@ doctrine; this file is the map.
 - `node.rs` `ColocatedNode` (`step`/`tick`/`ready`/`advance`, the client entry
   points with their `Delegation`, the driver-policy surface such as `resend_pending`,
   `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`) + `node/*.rs` named
-  by **concern** (`election`, `replication`, `phase2` — open, fan out or delegate, fold,
+  by **concern** (`election`, `replication`, `authority` — `CheckQuorum` — `phase2` — open, fan out or delegate, fold,
   decide, take back — `learn` — a chosen value reaching the record and the prefix —
   `handoff`, `gc`, `matchmaking`, `reconfigure`, `reads`, `quorum_reads`,
   `catch_up_snapshot`, `boot`, `acceptor`, `helpers`, `invariants`). Wiring only; no
@@ -53,6 +53,10 @@ doctrine; this file is the map.
 - Hard `assert!` everywhere, no `debug_assert!`; every public function that
   can panic has a `# Panics` section (pedantic enforces it).
 - `AcceptorConfig::new` / `MatchmakerSet::new` are the only constructors.
+- `ColocatedNode::adopt_configuration` is the one way the configuration in force moves:
+  it binds the ballot and records the membership in one call.
+- The observability counters are one struct (`Counters` in `node.rs`) behind the public
+  accessors; a new one is a field there, never a loose `u64` on the node.
 - Spans are `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`;
   `serde` adds derives; both features are observation-only.
 - The two model checkers — the handover's (`matchmaker/handover_model.rs`) and the

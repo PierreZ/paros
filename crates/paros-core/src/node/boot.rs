@@ -9,8 +9,8 @@
 //! read back rather than persisted beside it.
 
 use super::{
-    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, HandoffCounters, LeadershipOrigin,
-    NodeRole, Proposer, Replica, Slot, Storage,
+    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, Counters, HandoffCounters,
+    LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
 use crate::quorum_read::QuorumReads;
@@ -117,7 +117,7 @@ impl ColocatedNode {
             election_timeout: 0,
             needs_election_timeout: true,
             heartbeat_seq: 0,
-            quorum_lost_step_downs: 0,
+            counters: Counters::default(),
             proposer: {
                 let mut proposer = Proposer::new();
                 // The allocator frontier the durable log implies: one past the
@@ -130,17 +130,10 @@ impl ColocatedNode {
             pending_gc_requests: Vec::new(),
             matchmakers,
             gc: None,
-            non_member_campaigns_skipped: 0,
-            non_member_step_downs: 0,
             round_floor: 0,
-            matchmaking_timeouts: 0,
-            repair_step_downs: 0,
-            repair_case1: 0,
-            repair_case2: 0,
             leadership_origin: LeadershipOrigin::Elected,
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),
-            election_gap_fills: 0,
         };
         node.assert_invariants();
         node
