@@ -48,7 +48,7 @@ pub use self::authority::ReadRound;
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
-pub use self::rounds::{PendingAccept, Round, Rounds};
+pub use self::rounds::{Custody, PendingAccept, Round, Rounds};
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};

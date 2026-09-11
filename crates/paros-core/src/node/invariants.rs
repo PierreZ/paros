@@ -10,6 +10,7 @@
 //! that may exist only on a leader.
 
 use super::{Ballot, ColocatedNode, LeadershipOrigin, NodeRole};
+use crate::proposer::Round;
 
 impl ColocatedNode {
     /// Assert every cross-field invariant of the node's volatile state, plus
@@ -120,76 +121,7 @@ impl ColocatedNode {
     /// may each hold.
     fn assert_role_invariants(&self) {
         match self.role {
-            NodeRole::Leader => {
-                assert!(
-                    self.proposer.election().is_none(),
-                    "a leader has no open campaign"
-                );
-                assert!(
-                    self.matchmaking.is_none(),
-                    "a leader has no open matchmaking phase"
-                );
-                assert!(
-                    self.leader == Some(self.config.id),
-                    "a leader knows itself as leader"
-                );
-                // Whose node id the operating ballot names is exactly what
-                // separates the two leadership origins — an elected leader owns
-                // its ballot, a handoff leader is exercising a predecessor's.
-                match self.leadership_origin {
-                    LeadershipOrigin::Elected => assert!(
-                        self.ballot.node == self.config.id,
-                        "an elected leader's ballot names its own node"
-                    ),
-                    LeadershipOrigin::Handoff { from } => {
-                        // The ballot names whoever *minted* it, and under the
-                        // one-hop rule (`can_relinquish` requires
-                        // `LeadershipOrigin::Elected`) the minter is the
-                        // predecessor itself — always someone else, and pooled.
-                        assert!(
-                            from != self.config.id,
-                            "a handoff leader inherited its authority from another node"
-                        );
-                        assert!(
-                            self.in_pool(from),
-                            "a handoff leader inherited from a pooled node"
-                        );
-                    }
-                }
-                // The #67/#88 allocator bound, gated exactly like the note
-                // above: a still-Leader that learned a higher-ballot `Commit`
-                // (or replayed catch-up decided past it) can see the chosen
-                // prefix pass its allocator before any deposing message
-                // arrives — but while its ballot still covers its own promise,
-                // quorum intersection guarantees the winning Phase 1 reported
-                // everything decided, so the allocator sits at or past the
-                // prefix.
-                if self.ballot >= self.acceptor.promised() {
-                    assert!(
-                        self.proposer.next_slot() >= self.first_unchosen(),
-                        "a leader's next slot never falls inside the chosen prefix"
-                    );
-                }
-                assert!(
-                    self.proposer
-                        .rounds()
-                        .keys()
-                        .next_back()
-                        .is_none_or(|s| *s < self.proposer.next_slot()),
-                    "a leader never allocates at or below an in-flight round"
-                );
-                // Every in-flight round runs at the leadership ballot: rounds
-                // are opened only by this leader, and every promise-raising
-                // path that could strand one demotes (clearing `proposer`)
-                // first. O(N) structural, always-on by choice.
-                assert!(
-                    self.proposer
-                        .rounds()
-                        .values()
-                        .all(|p| p.ballot() == self.ballot),
-                    "a leader's in-flight rounds all run at its own ballot"
-                );
-            }
+            NodeRole::Leader => self.assert_leader_invariants(),
             NodeRole::Candidate => {
                 // Exactly one campaign phase is open: matchmaking (the
                 // registration round trip, #120) or Phase 1 — never both,
@@ -227,6 +159,105 @@ impl ColocatedNode {
                 );
             }
         }
+    }
+
+    /// What a leader may hold: no campaign, itself as leader, a ballot that
+    /// matches its origin, an allocator past the prefix and above every
+    /// round, every round at its ballot and in its log, and delegation only
+    /// where the deployment has proxies.
+    fn assert_leader_invariants(&self) {
+        assert!(
+            self.proposer.election().is_none(),
+            "a leader has no open campaign"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "a leader has no open matchmaking phase"
+        );
+        assert!(
+            self.leader == Some(self.config.id),
+            "a leader knows itself as leader"
+        );
+        // Whose node id the operating ballot names is exactly what
+        // separates the two leadership origins — an elected leader owns
+        // its ballot, a handoff leader is exercising a predecessor's.
+        match self.leadership_origin {
+            LeadershipOrigin::Elected => assert!(
+                self.ballot.node == self.config.id,
+                "an elected leader's ballot names its own node"
+            ),
+            LeadershipOrigin::Handoff { from } => {
+                // The ballot names whoever *minted* it, and under the
+                // one-hop rule (`can_relinquish` requires
+                // `LeadershipOrigin::Elected`) the minter is the
+                // predecessor itself — always someone else, and pooled.
+                assert!(
+                    from != self.config.id,
+                    "a handoff leader inherited its authority from another node"
+                );
+                assert!(
+                    self.in_pool(from),
+                    "a handoff leader inherited from a pooled node"
+                );
+            }
+        }
+        // The #67/#88 allocator bound, gated exactly like the note
+        // above: a still-Leader that learned a higher-ballot `Commit`
+        // (or replayed catch-up decided past it) can see the chosen
+        // prefix pass its allocator before any deposing message
+        // arrives — but while its ballot still covers its own promise,
+        // quorum intersection guarantees the winning Phase 1 reported
+        // everything decided, so the allocator sits at or past the
+        // prefix.
+        if self.ballot >= self.acceptor.promised() {
+            assert!(
+                self.proposer.next_slot() >= self.first_unchosen(),
+                "a leader's next slot never falls inside the chosen prefix"
+            );
+        }
+        assert!(
+            self.proposer
+                .rounds()
+                .keys()
+                .next_back()
+                .is_none_or(|s| *s < self.proposer.next_slot()),
+            "a leader never allocates at or below an in-flight round"
+        );
+        // Every in-flight round runs at the leadership ballot: rounds
+        // are opened only by this leader, and every promise-raising
+        // path that could strand one demotes (clearing `proposer`)
+        // first. O(N) structural, always-on by choice.
+        assert!(
+            self.proposer
+                .rounds()
+                .values()
+                .all(|p| p.ballot() == self.ballot),
+            "a leader's in-flight rounds all run at its own ballot"
+        );
+        // The allocator frontier is durable by construction
+        // (`record_own_round`): every round this leader opened while
+        // its promise allowed is in its own log, so a reboot derives
+        // the frontier it had. O(N) structural, always-on by choice.
+        if self.ballot >= self.acceptor.promised() {
+            assert!(
+                self.proposer
+                    .rounds()
+                    .keys()
+                    .all(|slot| self.acceptor.record(*slot).is_some()),
+                "a leader's every open round is recorded in its own log"
+            );
+        }
+        // Delegation (#142) is the `None` arm's opt-in: a deployment
+        // without proxies delegates nothing, and a delegated round
+        // names a proxy the deployment has.
+        assert!(
+            self.proposer
+                .rounds()
+                .values()
+                .filter_map(Round::proxy)
+                .all(|proxy| proxy.is_in(self.config.proxy_count)),
+            "a delegated round names a proxy of the deployment"
+        );
     }
 
     /// Volatile leadership state exists only on a leader.

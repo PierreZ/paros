@@ -1683,6 +1683,7 @@ fn matchmaker_cluster(
                 nodes: nodes.clone(),
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
+                proxy_count: 0,
             })
         })
         .collect();

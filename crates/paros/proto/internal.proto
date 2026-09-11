@@ -148,7 +148,8 @@ message FaultySlot {
 }
 
 message Accept {
-  // Where the Accepted/Nack is addressed.
+  // Where the Accepted/Nack is addressed: the node, unless `reply_to_proxy`
+  // is set, in which case this is zero and ignored.
   uint64 reply_to = 1;
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
@@ -156,9 +157,18 @@ message Accept {
   reserved 5; // was config_id, the dropped configuration tag
   // The node exercising the ballot's Phase-2 authority (the leader hint an
   // acceptor adopts). Absent means "the reply address is the leader", which
-  // is every deployment paros ships today, so this field is never on the wire
-  // and the encoding is unchanged.
+  // is every colocated round, so a deployment without proxies never puts
+  // it on the wire and its encoding is unchanged.
   optional uint64 leader = 6;
+  // The proxy leader the Accepted/Nack is addressed to (#142): set on a
+  // delegated round — the leader's delegation to the proxy and the proxy's
+  // fan-out to the acceptors alike. Absent on a deployment without proxies.
+  optional uint64 reply_to_proxy = 7;
+  // The configuration the ballot was registered with, on the delegation a
+  // matchmaker deployment's leader hands a proxy (the proxy learns a
+  // configuration no other way). Absent on plain Multi-Paxos and on every
+  // acceptor-bound Accept.
+  optional .paros.common.v1.AcceptorConfig config = 8;
 }
 
 message Accepted {
@@ -179,11 +189,16 @@ message Nack {
 }
 
 message Commit {
+  // The deciding node, unless `from_proxy` is set, in which case this is
+  // zero and ignored.
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
   reserved 5; // was config_id, the dropped configuration tag
+  // The proxy leader that folded the delegated round and decided it
+  // (#142). Absent on a deployment without proxies.
+  optional uint64 from_proxy = 6;
 }
 
 message CatchUpRequest {

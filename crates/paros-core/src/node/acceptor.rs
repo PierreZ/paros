@@ -6,7 +6,7 @@
 //! the reply and keeps the node's volatile leadership consistent with it.
 
 use super::{
-    Audience, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot, WriteOp,
+    Audience, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Party, Slot, WriteOp,
     command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
@@ -64,7 +64,7 @@ impl ColocatedNode {
                     self.pending_writes.len() == writes_at_entry,
                     "a nacked prepare queues no durable write"
                 );
-                self.push_nack(reply_to, ballot, from_slot);
+                self.push_nack(Party::Node(reply_to), ballot, from_slot);
             }
             PrepareOutcome::Refused => {
                 // Negative space: a Nack means the prepare lost — the promise
@@ -77,7 +77,7 @@ impl ColocatedNode {
                     self.pending_writes.len() == writes_at_entry,
                     "a nacked prepare queues no durable write"
                 );
-                self.push_nack(reply_to, ballot, from_slot);
+                self.push_nack(Party::Node(reply_to), ballot, from_slot);
             }
             PrepareOutcome::Promised { raised } => {
                 // A same-ballot continuation can arrive after this node
@@ -137,26 +137,34 @@ impl ColocatedNode {
         }
     }
 
-    /// Acceptor: a leader asks us to accept `entry` for `slot` at `ballot`.
-    /// Accept (and persist) if we have not promised a higher ballot; else `Nack`.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, round = ballot.round, slot = slot.0)))]
+    /// Acceptor: a leader — or the proxy leader it delegated the round to
+    /// (#142) — asks us to accept `entry` for `slot` at `ballot`. Accept
+    /// (and persist) if we have not promised a higher ballot; else `Nack`.
+    /// Either way the answer goes to `reply_to`, the party that folds it,
+    /// while `leader` is the node this acceptor adopts as its leader hint.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = %reply_to, round = ballot.round, slot = slot.0)))]
     pub(super) fn on_accept(
         &mut self,
-        reply_to: NodeId,
+        reply_to: Party,
         leader: NodeId,
         ballot: Ballot,
         slot: Slot,
         command: Command,
+        config: Option<AcceptorConfig>,
     ) {
         // Wire hygiene: this handler adopts `leader` as the leader hint,
         // answers `reply_to`, and promises the ballot, so none of the three
-        // ids may sit outside the pool — the same refusal every
-        // quorum-counting handler
+        // ids may sit outside what this deployment knows — a node of the
+        // pool, or a proxy of the deployment for the reply party — the same
+        // refusal every quorum-counting handler
         // (`on_promise`/`on_accepted`/`on_nack`/`on_heartbeat_ack`) already
         // applies to its sender. Membership of the ballot's configuration is
         // the leader's tally's business: an acceptor accepts any ballot at or
         // above its promise.
-        if !self.in_pool(reply_to) || !self.in_pool(leader) || !self.in_pool(ballot.node) {
+        if !self.is_party_addressable(reply_to)
+            || !self.in_pool(leader)
+            || !self.in_pool(ballot.node)
+        {
             return;
         }
         let me = self.config.id;
@@ -191,6 +199,10 @@ impl ColocatedNode {
                 if ballot > self.ballot {
                     self.ballot = ballot;
                 }
+                // A delegation carries the configuration for its proxy; an
+                // acceptor-bound `Accept` carries none, and a plain node
+                // ignores the field either way (`learn_config`).
+                self.learn_config(ballot, config);
                 self.acceptor.set_promise(ballot, &mut self.pending_writes);
                 let vhash = command_fingerprint(&command);
                 // An accept landing *inside* the durable chosen prefix with no
@@ -226,7 +238,7 @@ impl ColocatedNode {
                     "an accepted reply ships with its durable append in the batch"
                 );
                 self.pending_messages.push((
-                    Audience::Node(reply_to),
+                    reply_to.audience(),
                     Message::Accepted {
                         from: me,
                         ballot,
@@ -257,9 +269,9 @@ impl ColocatedNode {
     }
 
     /// Queue a `Nack` for `ballot` at `slot` to `to`.
-    fn push_nack(&mut self, to: NodeId, ballot: Ballot, slot: Slot) {
+    fn push_nack(&mut self, to: Party, ballot: Ballot, slot: Slot) {
         self.pending_messages.push((
-            Audience::Node(to),
+            to.audience(),
             Message::Nack {
                 from: self.config.id,
                 ballot,

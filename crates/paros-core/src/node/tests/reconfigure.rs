@@ -168,9 +168,17 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
     let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
     let q = drain(&mut nodes[0]);
     assert_eq!(accept_targets(&q), vec![NodeId(1), NodeId(2), NodeId(3)]);
-    // The removed leader recorded nothing of its own for the slot: it is a
-    // proposer and learner, not an acceptor.
-    assert!(!nodes[0].acceptor().records().contains_key(&Slot(0)));
+    // The removed leader recorded the round in its own log — the allocator
+    // is durable by construction — but the record is a stray copy under
+    // `C_new`, not a vote: it is a proposer and learner, not an acceptor.
+    assert!(nodes[0].acceptor().records().contains_key(&Slot(0)));
+    assert!(
+        nodes[0].proposer().rounds()[&Slot(0)]
+            .accepted_by()
+            .expect("colocated")
+            .is_empty(),
+        "a removed leader's own record is not a vote under C_new"
+    );
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
     // Settled: the next tick resigns.

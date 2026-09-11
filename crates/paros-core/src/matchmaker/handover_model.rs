@@ -71,6 +71,7 @@ use super::{
 };
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
+use crate::model_support::{Mailbox, Rng};
 use crate::types::{Ballot, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
@@ -96,29 +97,6 @@ const MAILBOX: usize = 96;
 /// The bounded drain that empties the network before the converged state is
 /// judged: the recovery tail's last probe leaves replies in flight.
 const DRAIN_STEPS: usize = 4_000;
-
-/// A seeded `splitmix64`: deterministic, dependency-free.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        assert!(n > 0, "a draw needs a range");
-        self.next() % n
-    }
-
-    /// `true` with probability `num / den`.
-    fn chance(&mut self, num: u64, den: u64) -> bool {
-        self.below(den) < num
-    }
-}
 
 /// A matchmaker's disk: what a restart boots from. The library's own
 /// reference registry, so every write lands with the semantics the driver's
@@ -570,7 +548,7 @@ struct World {
     rng: Rng,
     sites: Vec<Site>,
     nodes: Vec<Node>,
-    network: Vec<Envelope>,
+    network: Mailbox<Envelope>,
     ledger: Ledger,
     reach: Reach,
     /// Whether faults are still being injected.
@@ -613,10 +591,10 @@ impl World {
         let mut ledger = Ledger::default();
         ledger.observe_authoritative(&believed, "bootstrap");
         Self {
-            rng: Rng(seed),
+            rng: Rng::new(seed),
             sites,
             nodes,
-            network: Vec::new(),
+            network: Mailbox::new(MAILBOX),
             ledger,
             reach: Reach::default(),
             chaos: true,
@@ -662,11 +640,7 @@ impl World {
 
     /// Put one message in flight, evicting a random one past the bound.
     fn send(&mut self, envelope: Envelope) {
-        self.network.push(envelope);
-        if self.network.len() > MAILBOX {
-            let index = usize::try_from(self.rng.below(self.network.len() as u64)).expect("index");
-            self.network.swap_remove(index);
-        }
+        self.network.push(envelope, &mut self.rng);
     }
 
     // ---- durable observation ------------------------------------------------
@@ -1646,11 +1620,9 @@ impl World {
     }
 
     fn deliver_random(&mut self) {
-        if self.network.is_empty() {
+        let Some(envelope) = self.network.take(&mut self.rng) else {
             return;
-        }
-        let index = usize::try_from(self.rng.below(self.network.len() as u64)).expect("index");
-        let envelope = self.network.swap_remove(index);
+        };
         if self.chaos {
             if self.rng.chance(1, 8) {
                 return; // dropped
@@ -2036,14 +2008,14 @@ fn two_finishers_with_different_stop_quorums_choose_one_successor() {
             to == b || to == c
         }
     };
-    let mut pending: Vec<Envelope> = std::mem::take(&mut world.network);
+    let mut pending: Vec<Envelope> = world.network.take_all();
     while let Some(envelope) = pending.first().cloned() {
         pending.remove(0);
         match &envelope {
             Envelope::Reconfigure { to, request } if !reachable(request.from(), *to) => {}
             _ => world.deliver(envelope),
         }
-        pending.append(&mut std::mem::take(&mut world.network));
+        pending.append(&mut world.network.take_all());
     }
     // Each closes its own freeze on its own beat, with what answered it.
     let first = world
@@ -2110,7 +2082,7 @@ fn a_straggler_that_answers_before_the_close_widens_the_finish() {
     // Every freeze answer arrives, and none of them closes the phase: the
     // quorum is a floor, not a deadline.
     while !world.network.is_empty() {
-        let envelope = world.network.remove(0);
+        let envelope = world.network.pop_front().expect("checked above");
         world.deliver(envelope);
     }
     assert!(matches!(
@@ -2174,7 +2146,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         .start(&believed, vec![MatchmakerId(3)])
         .expect("start");
     world.queue_requests(node);
-    let stops: Vec<Envelope> = std::mem::take(&mut world.network);
+    let stops: Vec<Envelope> = world.network.take_all();
     for envelope in stops {
         if let Envelope::Reconfigure { to, .. } = &envelope
             && *to != c
@@ -2188,7 +2160,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
     // (C is still unreachable).
     let finisher = NodeId(1);
     world.probe_pool(finisher);
-    let probes: Vec<Envelope> = std::mem::take(&mut world.network);
+    let probes: Vec<Envelope> = world.network.take_all();
     for envelope in probes {
         if let Envelope::Register { to, .. } = &envelope
             && *to == c
@@ -2206,7 +2178,7 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         if world.network.is_empty() {
             break;
         }
-        let envelope = world.network.remove(0);
+        let envelope = world.network.pop_front().expect("checked above");
         match &envelope {
             Envelope::Reconfigure { to, .. } | Envelope::Register { to, .. } if *to == c => {
                 c_late.push(envelope);
@@ -2278,7 +2250,7 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
             if world.network.is_empty() {
                 world.tick_nodes();
             }
-            let envelope = world.network.remove(0);
+            let envelope = world.network.pop_front().expect("checked above");
             world.deliver(envelope);
             if let Some(set) = world.ledger.authoritative.get(&MatchmakerGeneration(1)) {
                 chosen = Some(set.clone());
@@ -2291,7 +2263,7 @@ fn killing_the_reconfigurer_after_chosen_cannot_change_the_outcome() {
             if world.network.is_empty() {
                 break;
             }
-            let envelope = world.network.remove(0);
+            let envelope = world.network.pop_front().expect("checked above");
             world.deliver(envelope);
         }
         world.network.clear();
@@ -2347,7 +2319,7 @@ fn a_second_handover_runs_on_the_activated_generation() {
             if world.network.is_empty() {
                 break;
             }
-            let envelope = world.network.remove(0);
+            let envelope = world.network.pop_front().expect("checked above");
             world.deliver(envelope);
             if !world.node(node).reconfigurer.is_busy() {
                 done = true;
@@ -2459,7 +2431,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                         world
                             .network
                             .retain(|e| !matches!(e, Envelope::Reconfigure { .. }));
-                        while let Some(envelope) = world.network.pop() {
+                        while let Some(envelope) = world.network.pop_back() {
                             world.deliver(envelope);
                             world
                                 .network

@@ -160,11 +160,12 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     let old = ballot(1, 0);
     let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
-        reply_to: NodeId(0),
+        reply_to: Party::Node(NodeId(0)),
         leader: NodeId(0),
         ballot: old,
         slot: Slot(0),
         command: recovered.clone(),
+        config: None,
     });
     let _ = drain(&mut nodes[1]); // Accepted reply, dropped (node 0 is gone)
     assert!(nodes[1].acceptor().records().contains_key(&Slot(0)));
@@ -381,7 +382,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     let _ = drain(&mut n);
     let learned = ballot(stale_campaign.round + 1, 1);
     n.step(Message::Commit {
-        from: NodeId(1),
+        from: Party::Node(NodeId(1)),
         ballot: learned,
         slot: Slot(0),
         command: ucmd(5, 1, 9),
@@ -598,7 +599,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     // was not part of, and decided slot 0. X learns it as a *learner*; the
     // campaign stays open, but the promise is now above the campaign's ballot.
     x.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: b_prime,
         slot: Slot(0),
         command: Command::Control(Control::Noop),
@@ -712,11 +713,12 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
 
     // It rejects the stale leader's `Accept` …
     p.step(Message::Accept {
-        reply_to: NodeId(0),
+        reply_to: Party::Node(NodeId(0)),
         leader: NodeId(0),
         ballot: b,
         slot: Slot(3),
         command: ucmd(1, 2, 3),
+        config: None,
     });
     let out = drain(&mut p);
     assert!(

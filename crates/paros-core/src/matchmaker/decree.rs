@@ -25,7 +25,7 @@
 //! ([`MatchmakerSet::has_quorum`] is the same rule), and the handover is safe
 //! exactly under that model.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{MatchmakerId, MatchmakerSet};
 use crate::membership::{AcceptorConfig, QuorumSystem};
@@ -163,13 +163,17 @@ impl Decree {
                 .election()
                 .map(|e| e.unpromised(None))
                 .unwrap_or_default(),
-            Some(round) => self
-                .acceptors
-                .members()
-                .iter()
-                .copied()
-                .filter(|m| !round.accepted_by().contains(m))
-                .collect(),
+            Some(round) => {
+                // A decree is never delegated: its rounds are always the
+                // reconfigurer's own.
+                let accepted_by = round.accepted_by().expect("a decree round is colocated");
+                self.acceptors
+                    .members()
+                    .iter()
+                    .copied()
+                    .filter(|m| !accepted_by.contains(m))
+                    .collect()
+            }
         }
     }
 
@@ -241,7 +245,11 @@ impl Decree {
         // repeated `Accepted` deliberately — it is leader contact for its
         // `CheckQuorum` window — so the round tally counts it either way and
         // this is the one place that has to tell them apart.
-        if round.accepted_by().contains(&from) {
+        if round
+            .accepted_by()
+            .expect("a decree round is colocated")
+            .contains(&from)
+        {
             return AcceptFold::Ignored;
         }
         let vhash = round.command().fingerprint();
@@ -258,7 +266,7 @@ impl Decree {
             .proposer
             .rounds()
             .get(&DECREE_SLOT)
-            .map_or(0, |round| round.accepted_by().len());
+            .map_or(0, |round| round.accepted_by().map_or(0, BTreeSet::len));
         // How many more accepts the decree still waits for — the one thing
         // a quorum *predicate* cannot report, so the one place a decree
         // quorum is spelled as a number (a majority: `Decree::new` builds

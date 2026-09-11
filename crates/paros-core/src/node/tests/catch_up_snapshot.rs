@@ -471,7 +471,7 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
     // Slot 10 arrives out of order (reordered/duplicated `Commit`): chosen,
     // but far above the (empty) contiguous prefix.
     x.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: ballot(3, 2),
         slot: Slot(10),
         command: ucmd(1, 1, 0xAA),

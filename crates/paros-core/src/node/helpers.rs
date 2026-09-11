@@ -1,5 +1,6 @@
 use super::{
-    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Slot,
+    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Party,
+    Slot,
 };
 use crate::membership::AcceptorConfig;
 
@@ -86,37 +87,15 @@ impl ColocatedNode {
             .push((Audience::Learners, msg.clone()));
     }
 
-    /// Queue an `Accept` for `slot` to every Phase-2 addressee of the active
-    /// configuration in `column` except this node — the Phase-2 fan-out: a
-    /// removed node is never contacted for a new ballot's accepts. The
-    /// addressee list comes from the membership boundary
-    /// ([`AcceptorConfig::phase2_addressees`]), never from iterating the
-    /// membership here: a grid addresses the one column the round was
-    /// opened against, a majority or a flexible split the whole membership.
-    /// Both the first send ([`ColocatedNode::start_accept_round`]) and the
-    /// re-send ([`ColocatedNode::resend_pending`]) come through here with
-    /// the column the round recorded, so the two always agree.
-    pub(super) fn send_accept(
-        &mut self,
-        slot: Slot,
-        ballot: Ballot,
-        command: Command,
-        column: Option<usize>,
-    ) {
-        let me = self.config.id;
-        self.pending_messages.push((
-            Audience::AcceptorsOf {
-                config: self.acceptors.clone(),
-                column,
-            },
-            Message::Accept {
-                reply_to: me,
-                leader: me,
-                ballot,
-                slot,
-                command,
-            },
-        ));
+    /// Whether `party` is one this deployment can answer: a node of the
+    /// pool ([`ColocatedNode::in_pool`]) or a proxy of the deployment
+    /// (`ProxyId(0..proxy_count)`) — the wire-hygiene boundary an `Accept`'s
+    /// reply address is checked against (#142).
+    pub(super) fn is_party_addressable(&self, party: Party) -> bool {
+        match party {
+            Party::Node(node) => self.in_pool(node),
+            Party::Proxy(proxy) => proxy.is_in(self.config.proxy_count),
+        }
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign

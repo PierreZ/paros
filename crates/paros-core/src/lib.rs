@@ -53,6 +53,11 @@
 //!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
 //!    matchmaker set itself chosen by the same single-decree Paxos over
 //!    `Vec<MatchmakerId>`, persisted through a [`MemRegistry`].
+//!
+//! Beside them, `flexible_quorums.rs`, `acceptor_grid.rs` and
+//! `quorum_read.rs` change the *data* the same roles run over, and
+//! `proxy_leader.rs` runs the first **second deployment**: a
+//! [`ProxyLeader`] beside a leader, the Phase-2 tally on another process.
 
 pub mod acceptor;
 mod collector;
@@ -60,8 +65,13 @@ mod matchmaker;
 pub mod matchmaking;
 pub mod membership;
 mod message;
+#[cfg(test)]
+mod model_support;
 mod node;
 pub mod proposer;
+pub mod proxy_leader;
+#[cfg(test)]
+mod proxy_model;
 pub mod quorum_read;
 mod ready;
 pub mod replica;
@@ -80,15 +90,16 @@ pub use matchmaker::{
     StartRefusal,
 };
 pub use membership::{
-    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+    AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,
 };
-pub use message::{Audience, Message};
+pub use message::{Audience, Message, Party};
 pub use node::{
-    ColocatedNode, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS, Handoff,
-    HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH,
-    ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState, ReconfigureRefusal,
-    ReconfigureResult,
+    ColocatedNode, Delegation, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS,
+    Handoff, HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole,
+    PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState,
+    ReconfigureRefusal, ReconfigureResult,
 };
+pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
 pub use retained::RetainedWindow;

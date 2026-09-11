@@ -4,13 +4,14 @@
 mod acceptor;
 mod boot;
 mod catch_up_snapshot;
-mod decide_apply;
 mod election;
 mod gc;
 mod handoff;
 mod helpers;
 mod invariants;
+mod learn;
 mod matchmaking;
+mod phase2;
 mod quorum_reads;
 mod reads;
 mod reconfigure;
@@ -30,8 +31,8 @@ use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::Matchmaking;
-use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
-use crate::message::{Audience, Message};
+use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
+use crate::message::{Audience, Message, Party};
 use crate::proposer::Proposer;
 use crate::quorum_read::QuorumReads;
 use crate::ready::Ready;
@@ -114,6 +115,29 @@ pub enum ReadIndexResult {
     Pending,
 }
 
+/// **Where a proposal's Phase 2 runs** (#142): on the leader itself, or
+/// handed to a proxy leader that fans the `Accept` out, folds the
+/// `Accepted`s and emits the `Commit`. The driver names it at the
+/// delegation call ([`ColocatedNode::propose_in`],
+/// [`ColocatedNode::propose_control_in`]); production passes
+/// [`Delegation::Auto`] and the core's pure function decides, the
+/// deterministic simulation overrides from the node loop to reach the proxy
+/// mixes the modulus alone never would. Every choice is **always safe**: a
+/// proxy contributes nothing to the decision, and two fan-outs of one
+/// `(slot, ballot, command)` are P2b-idempotent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Delegation {
+    /// The core's own rule: `ProxyId(slot % proxy_count)`
+    /// ([`ProxyId::of`]), colocated on a deployment without proxies.
+    #[default]
+    Auto,
+    /// Run this round on the leader whatever the deployment's proxy count
+    /// — the driver's "skip the delegation" choice.
+    Colocated,
+    /// Hand this round to this proxy.
+    To(ProxyId),
+}
+
 /// A confirmed read-index round, surfaced via [`Ready::read_states`]: at the
 /// moment the round began this node was leader (a heartbeat-ack quorum at its
 /// ballot proved it afterwards) and `index` was covered by the applied prefix
@@ -153,9 +177,13 @@ pub struct ReadState {
 ///   (`ColocatedNode::assert_invariants`).
 ///
 /// It holds **no protocol tally of its own**: every quorum question goes to a
-/// role, and every role's answer comes back as data. A second deployment —
-/// a compartmentalized proxy leader, a bare acceptor, a read-only replica —
-/// is a different wiring over the same three roles, not a different core.
+/// role, and every role's answer comes back as data. A second deployment is
+/// a different wiring over the same roles, not a different core — and the
+/// first one exists: the compartmentalized **proxy leader**
+/// ([`crate::proxy_leader::ProxyLeader`], #142) is the proposer's Phase-2
+/// tally ([`crate::proposer::Rounds`]) plus routing, on a process that is
+/// neither an acceptor nor a replica; a bare acceptor and a read-only
+/// replica would be the next two.
 ///
 /// Pure, synchronous and single-threaded: no I/O, no clock, no randomness.
 /// Inputs arrive via [`ColocatedNode::step`] (peer messages and
@@ -371,8 +399,9 @@ impl ColocatedNode {
                 ballot,
                 slot,
                 command,
+                config,
                 ..
-            } => self.on_accept(reply_to, leader, ballot, slot, command),
+            } => self.on_accept(reply_to, leader, ballot, slot, command, config),
             Message::Accepted {
                 from,
                 ballot,
@@ -459,15 +488,17 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
-        self.propose_in(client, seq, value, None)
+        self.propose_in(client, seq, value, None, Delegation::Auto)
     }
 
     /// [`ColocatedNode::propose`] with the driver naming the **column** the
-    /// proposal's Phase 2 is addressed to (#141): `Some(c)` overrides the
-    /// core's own `slot % cols` ([`AcceptorConfig::column_of`]) for this one
-    /// round, `None` is exactly [`ColocatedNode::propose`].
+    /// proposal's Phase 2 is addressed to (#141) and the **proxy** it is
+    /// delegated to (#142): `Some(c)` overrides the core's own `slot % cols`
+    /// ([`AcceptorConfig::column_of`]) for this one round, and `delegation`
+    /// overrides its `slot % proxy_count` ([`ProxyId::of`]); `None` and
+    /// [`Delegation::Auto`] are exactly [`ColocatedNode::propose`].
     ///
-    /// **Always safe, which is why it is a method and not a fault.** Every
+    /// **Always safe, which is why these are methods and not faults.** Every
     /// full column of a grid is a Phase-2 quorum of it, and every Phase-1
     /// quorum (a row) meets every column, so a value chosen through any
     /// column is learned by every later election; which column a slot uses
@@ -476,25 +507,34 @@ impl ColocatedNode {
     /// stay on that column; a handoff successor or a restarted leader that
     /// re-proposes the slot derives `slot % cols` afresh, and two fan-outs
     /// of one `(slot, ballot, command)` to two columns are P2b-idempotent.
-    /// Production never overrides; the deterministic simulation does, from
-    /// the node loop, to reach the column mixes the modulus alone never
-    /// would.
+    /// A proxy contributes nothing to the decision, so which proxy runs a
+    /// round — or whether the leader runs it itself — is the same kind of
+    /// choice. Production never overrides; the deterministic simulation
+    /// does, from the node loop, to reach the column and proxy mixes the
+    /// modulus alone never would.
+    ///
+    /// A round is delegated only on a **settled** leadership — no election
+    /// recovery and no repair probe open — whatever `delegation` says;
+    /// before that it runs colocated, so a fresh leadership's recovery
+    /// depends on no proxy.
     ///
     /// # Panics
     ///
     /// If `column` names a column the active configuration does not have —
     /// one at or past its `cols`, or any column at all under a majority or
-    /// a flexible split, which name none. The driver derives the override
-    /// from [`ColocatedNode::acceptors`], so this is a programmer error,
-    /// never an operating condition. Also if an internal invariant is
-    /// broken.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column)))]
+    /// a flexible split, which name none — or `delegation` names a proxy at
+    /// or past the deployment's `proxy_count`. The driver derives both
+    /// overrides from [`ColocatedNode::acceptors`] and
+    /// [`ColocatedNode::config`], so this is a programmer error, never an
+    /// operating condition. Also if an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column, delegation = ?delegation)))]
     pub fn propose_in(
         &mut self,
         client: ClientId,
         seq: ClientSeq,
         value: Value,
         column: Option<usize>,
+        delegation: Delegation,
     ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -536,9 +576,21 @@ impl ColocatedNode {
         let entry = Entry { client, seq, value };
         self.replica.track_inflight(client, seq, slot);
         let column = column.or_else(|| self.acceptors.column_of(slot));
-        self.start_accept_round_in(slot, Command::User(entry), column);
+        let delegation = self.settled_delegation(delegation);
+        self.start_accept_round_in(slot, Command::User(entry), column, delegation);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
+    }
+
+    /// `delegation` on a settled leadership, colocated otherwise: only the
+    /// rounds a settled leadership opens are ever delegated
+    /// (`node/phase2.rs`).
+    fn settled_delegation(&self, delegation: Delegation) -> Delegation {
+        if self.may_delegate() {
+            delegation
+        } else {
+            Delegation::Colocated
+        }
     }
 
     /// Leader entry point for a **control command**: get `control` chosen into the
@@ -558,11 +610,31 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
+        self.propose_control_in(control, Delegation::Auto)
+    }
+
+    /// [`ColocatedNode::propose_control`] with the driver naming the proxy
+    /// the round is delegated to (#142), under exactly the rules of
+    /// [`ColocatedNode::propose_in`]: always safe, delegated only on a
+    /// settled leadership, [`Delegation::Auto`] is the core's own rule.
+    ///
+    /// # Panics
+    ///
+    /// If `delegation` names a proxy the deployment does not have, or an
+    /// internal invariant is broken (a programmer error, never an operating
+    /// condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control, delegation = ?delegation)))]
+    pub fn propose_control_in(
+        &mut self,
+        control: Control,
+        delegation: Delegation,
+    ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
         let slot = self.proposer.allocate();
-        self.start_accept_round(slot, Command::Control(control));
+        let delegation = self.settled_delegation(delegation);
+        self.start_accept_round(slot, Command::Control(control), delegation);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -583,7 +655,12 @@ impl ColocatedNode {
             return ProposeResult::NotLeader(self.leader);
         }
         let slot = self.proposer.allocate();
-        self.start_accept_round(slot, Command::Control(Control::Snap { at_index: slot }));
+        let delegation = self.settled_delegation(Delegation::Auto);
+        self.start_accept_round(
+            slot,
+            Command::Control(Control::Snap { at_index: slot }),
+            delegation,
+        );
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -927,6 +1004,11 @@ impl ColocatedNode {
     /// deterministic simulation drives exactly that by skipping calls; production
     /// never skips.
     ///
+    /// **A delegated round is re-delegated** (#142): its re-send goes to
+    /// the proxy it was handed to, whose re-fan-out is P2b-idempotent, and
+    /// the round counts the re-delegation so a proxy that never answers
+    /// becomes visible ([`ColocatedNode::take_back_delegated`]).
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
@@ -939,10 +1021,63 @@ impl ColocatedNode {
         let pending = self.proposer.resend_page();
         for accept in pending {
             // The same column the round was opened against: a re-send never
-            // widens a grid round to another column.
-            self.send_accept(accept.slot, accept.ballot, accept.command, accept.column);
+            // widens a grid round to another column — and the same proxy.
+            self.send_accept(
+                accept.slot,
+                accept.ballot,
+                accept.command,
+                accept.column,
+                accept.proxy,
+            );
         }
         self.assert_invariants();
+    }
+
+    /// **Take back** every delegated round re-delegated at least
+    /// `after_resends` times without the proxy's `Commit` arriving, and run
+    /// each colocated from here on (#142). A no-op on a node that is not
+    /// the leader, on a deployment without proxies, and while every
+    /// delegated round is young.
+    ///
+    /// **The driver is expected to call this each beat**, right after
+    /// [`ColocatedNode::resend_pending`], with its own budget: how many
+    /// re-delegations a proxy may swallow is driver policy (a tunable, born
+    /// buggified), not a constant of the state machine, exactly as the
+    /// handoff-fence and repair budgets are. Liveness under a dead proxy is
+    /// the leader's, and this is the whole of it: the fallback is always
+    /// today's colocated Phase 2, as a failed handoff's fallback is an
+    /// election. **Skipping a call is always safe** — a delegated round
+    /// nobody takes back is simply undecided until its proxy answers or the
+    /// next leadership recovers it — and so is taking a round back early:
+    /// the proxy may still decide it behind this call, and two fan-outs of
+    /// one `(slot, ballot, command)` are P2b-idempotent, so the two
+    /// verdicts can only agree.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, after_resends)))]
+    pub fn take_back_delegated(&mut self, after_resends: u64) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        for slot in self.proposer.stalled_delegations(after_resends) {
+            self.take_back(slot);
+        }
+        self.assert_invariants();
+    }
+
+    /// The slots this leader currently holds **delegated** to a proxy, with
+    /// the proxy each went to — for drivers / oracles (a node that is not the
+    /// leader holds none).
+    #[must_use]
+    pub fn delegated_rounds(&self) -> Vec<(Slot, ProxyId)> {
+        self.proposer
+            .rounds()
+            .iter()
+            .filter_map(|(slot, round)| round.proxy().map(|proxy| (*slot, proxy)))
+            .collect()
     }
 
     /// Advance the next bounded page of deferred chosen-prefix application or

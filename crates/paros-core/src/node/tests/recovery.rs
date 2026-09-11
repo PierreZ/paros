@@ -99,11 +99,12 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // The leader re-sends its pending Accept: the fresh record replaces the
     // lost one.
     let accept = Message::Accept {
-        reply_to: NodeId(0),
+        reply_to: Party::Node(NodeId(0)),
         leader: NodeId(0),
         ballot: nodes[0].ballot(),
         slot: Slot(3),
         command: ucmd(1, 4, 40),
+        config: None,
     };
     n.step(accept);
     assert!(

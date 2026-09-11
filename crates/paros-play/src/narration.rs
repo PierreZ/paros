@@ -241,7 +241,7 @@ impl NodeSnapshot {
                 .proposer()
                 .rounds()
                 .iter()
-                .map(|(slot, round)| (*slot, round.accepted_by().len()))
+                .map(|(slot, round)| (*slot, round.accepted_by().map_or(0, BTreeSet::len)))
                 .collect(),
             gap: node.replica().chosen_gap(),
             recovery_remaining: node.proposer().recovery_remaining(),
@@ -879,6 +879,6 @@ pub(crate) fn votes_of<Id: Copy + Ord, V>(
 ) -> BTreeSet<Id> {
     rounds
         .get(&slot)
-        .map(|round| round.accepted_by().clone())
+        .and_then(|round| round.accepted_by().cloned())
         .unwrap_or_default()
 }

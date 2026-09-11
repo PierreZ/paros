@@ -43,13 +43,15 @@
 //! row 1  [  3   |   4   |   5  ]
 //! ```
 //!
-//! 1. Node 1 leads and streams three commands; every node applies slots
+//! 1. Node 5 leads and streams three commands; every node applies slots
 //!    0, 1 and 2.
-//! 2. Node 1 proposes a fourth command. Slot 3 goes to column 0 =
+//! 2. Node 5 proposes a fourth command. Slot 3 goes to column 0 =
 //!    `{0, 3}`; node 3's copy lands, node 0's copy is **in flight**. The
 //!    column is half full: nothing is chosen, nothing is acked.
 //! 3. Node 4 (a follower in row 1) opens a quorum read. Its row `{3, 4, 5}`
-//!    answers `3, 2, 2` — node 3 has voted the in-flight slot — so the read
+//!    answers `3, 2, 3` — node 3 has voted the in-flight slot, and node 5,
+//!    the leader, recorded the round it opened (a leader's own log holds
+//!    every round it opens, whichever column it went to) — so the read
 //!    settles on `i = 3` and **waits**: node 4's replica has applied up to
 //!    slot 2. This is the safety trade: a watermark raised by a vote that
 //!    has not decided costs the reader a wait, never a stale answer.
@@ -240,7 +242,7 @@ fn main() {
         wire: Vec::new(),
         served: BTreeMap::new(),
         sent_by_leader: BTreeMap::new(),
-        leader: NodeId(1),
+        leader: NodeId(5),
     };
 
     let leader = cluster.leader;
@@ -254,13 +256,13 @@ fn main() {
 
 /// Step: see the module doc.
 fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
-    // ---- 1. node 1 leads and streams three commands ------------------------
-    println!("-- 1. node 1 campaigns and streams three commands");
+    // ---- 1. node 5 leads and streams three commands ------------------------
+    println!("-- 1. node 5 campaigns and streams three commands");
     cluster.node(leader).set_election_timeout(1);
     cluster.node(leader).tick();
     cluster.drain(leader);
     cluster.deliver_all();
-    assert!(cluster.node(leader).is_leader(), "node 1 wins its election");
+    assert!(cluster.node(leader).is_leader(), "node 5 wins its election");
     cluster.node(leader).set_election_timeout(NO_CHECK_QUORUM);
     cluster.node(leader).tick(); // one beat, so every follower adopts the leader
     cluster.drain(leader);
@@ -286,7 +288,7 @@ fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
 /// Step: see the module doc.
 fn half_a_column(cluster: &mut Cluster, leader: NodeId) {
     // ---- 2. a fourth command, half-way through its column -------------------
-    println!("\n-- 2. node 1 proposes \"delta\" for slot 3 → column 0 = {{0, 3}}");
+    println!("\n-- 2. node 5 proposes \"delta\" for slot 3 → column 0 = {{0, 3}}");
     let _ = cluster
         .node(leader)
         .propose(ClientId(7), ClientSeq(4), command("delta", 4));
