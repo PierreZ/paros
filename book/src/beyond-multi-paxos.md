@@ -138,6 +138,54 @@ node abandons its open reads when it learns a newer configuration.
 Paper: Whittaker et al., *Compartmentalized Paxos* §3.4, *Paxos Quorum Reads*.
 Play it: [`act4/quorum-reads`](play/#act4/quorum-reads).
 
+## Proxy leaders
+
+A leader does two jobs per command. It **sequences**: it picks the slot, which is
+serial and cheap. And it **broadcasts**: it sends the `Accept` to the column,
+collects the `Accepted`s, and sends the `Commit` to every learner. That second
+job costs `3f + 4` messages through one process, and it is why adding acceptors
+or replicas makes a classic leader slower. Only the first job has to be the
+leader's.
+
+So the leader hands the very same `Accept` to a **proxy leader** instead. The
+message names the proxy as its reply party and still names the leader as the
+hint an acceptor adopts. The proxy fans it out to the column, folds the
+`Accepted`s, and emits the `Commit`. The leader sends one message and receives
+one, whatever the width of the grid. A proxy contributes **nothing to the
+decision**. It votes on nothing, orders nothing, and adopts no ballot, so a
+chosen value is still what a Phase-2 quorum durably accepted at one ballot, and
+moving the broadcast to another process cannot break agreement.
+
+The proxy is not a second Phase-2 engine. It is the proposer's own round tally
+on another process, plus routing. Which proxy a slot goes to is `slot %
+proxy_count`, a pure function the driver may override, and a count of zero is
+the plain deployment, message for message. A leader delegates only on a settled
+leadership: an election's recovery and its gap fills always run on the leader,
+so a fresh leadership depends on no proxy. A handoff successor re-delegates what
+it inherited with itself as the hint.
+
+Liveness under a dead proxy is the leader's. It keeps a delegated round for every
+slot it hands out, re-delegates on every beat, and after a budget of unanswered
+re-delegations it **takes the round back** and runs it itself. The fallback is
+always the classic Phase 2, and safety never rests on it, because two fan-outs of
+one `(slot, ballot, command)` are idempotent at every acceptor.
+
+The model checker that proves this found one rule the core was missing. A
+delegated round left no record at the leader, so a handoff successor that
+crashed rebooted with its allocator rewound, and a duplicated `Relinquish`
+re-installed the authority at the old frontier. Two commands then ran at one
+`(slot, ballot)`. A grid leader proposing outside its own column had the same
+hole. The rule that closes both is in the next section.
+
+**In the code.** `ProxyLeader`, `ProxyReady` (`proxy_leader.rs`); `Custody`,
+`Rounds::open_delegated`, `Rounds::take_back` (`proposer/rounds.rs`);
+`Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
+(`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
+`Config::proxy_count` (`state.rs`); the model checker `proxy_model.rs`; the
+example `paros-core/examples/proxy_leader.rs`. Paper: Whittaker et al.,
+*Compartmentalized Paxos* §3.1. No level yet: the proxy's driver and process
+group are the second half of the work.
+
 ## Cooperative leader handoff
 
 Leadership changes hands for two reasons, and only one of them needs an election.
@@ -166,9 +214,20 @@ authority at a node that has already handed it on, beside the successor that sti
 uses it. A second hop costs an ordinary election, and the general case would cost
 a new durable fence.
 
+The fourth rule is that **the allocator frontier is durable by construction**. A
+successor refuses a replayed `Relinquish` that would rewind its allocator, and
+the allocator is rederived from the successor's own accepted log at every boot.
+So a leader records every round it opens in its own log whenever its promise
+allows, whether the round is delegated to a proxy, and whether or not the leader
+sits in the slot's column. A record outside the column is the stray copy the grid
+already admits, a vote that counts for nothing. Without that record, a successor
+that crashed after exercising an installed authority rebooted blind, and the
+proxy model checker re-installed a duplicated `Relinquish` on it.
+
 **In the code.** `ColocatedNode::relinquish_to`, `ColocatedNode::can_relinquish`
 (`node/handoff.rs`); `Message::Relinquish`, `LeadershipOrigin` (`message.rs`);
-`RecoveryPolicy::Inherited` (`proposer/recovery.rs`). Paper: Nawab, Agrawal and
+`RecoveryPolicy::Inherited` (`proposer/recovery.rs`); the record every open
+round leaves, `record_own_round` (`node/phase2.rs`). Paper: Nawab, Agrawal and
 El Abbadi, *DPaxos*, SIGMOD 2018, the Relinquishment section; design note
 `docs/analysis/consensus/dpaxos-leader-handoff.md`. Play it:
 [`act4/the-handoff`](play/#act4/the-handoff).
