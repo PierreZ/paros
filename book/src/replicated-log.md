@@ -1,45 +1,45 @@
 # From one value to a log
 
-Single-decree Paxos agrees on **one** value. A real system needs to agree on a
-*sequence*: command 1, then command 2, then command 3, applied in the same order
-on every node so that every replica of a deterministic state machine ends up in
-the same state. That sequence is the **replicated log**, and Multi-Paxos is how we
-fill it.
+Single-decree Paxos agrees on **one** value, and a real system needs a *sequence*.
+Every node applies that sequence in the same order, so every replica of a
+deterministic state machine reaches the same state. The sequence is the
+**replicated log**, and Multi-Paxos fills it with one independent single-decree
+instance **per slot**. Safety does not change, because a slot still chooses at most
+one value. Two new facts appear: slots decide out of order, and a node applies the
+log only as a contiguous prefix.
+
+> **Play it.**
+>
+> - [`act2/a-log-of-decisions`](play/#act2/a-log-of-decisions) — propose three
+>   commands, deliver their Accepts and Accepteds by hand, and deliver slot 3's
+>   Accepted before slot 2's. Then answer the apply question: slot 4 is chosen and
+>   `chosen_index` is 2, so may it apply? The level ends when a hole stops the walk
+>   and you fill it.
 
 <!-- toc -->
 
 ## A single decision never changes
 
-A single Paxos instance agrees on one value, and that value is then frozen
-forever. That is perfect for "what is slot 5", but useless on its own for anything
-that changes over time. Picture a bank balance. You cannot agree once that "the
-balance is 100" and be done, because the next deposit has to change it. The way
-out is not to mutate the agreed value (you never can), but to agree *again*, on the
-next slot:
-
-- slot 0: account opened, balance 100
-- slot 1: deposit 50
-- slot 2: withdraw 20
-
-Each slot is its own immutable single-decree decision. Replaying them in order
-gives the current balance of 130. A value that changes over time becomes a **log
-of decisions that never change**. That reframing, one consensus per log position,
-is the whole idea behind real systems like Megastore, and it is what the rest of
-this part builds.
+A Paxos instance agrees on one value and freezes it forever — perfect for "what is
+slot 5", useless for anything that changes over time. You cannot agree once that a
+bank balance "is 100" and be done, because the next deposit has to change it. The way
+out is not to mutate the agreed value (you never can) but to agree *again*, on the
+next slot — opened at 100, deposit 50, withdraw 20 — and replay them in order for the
+current balance of 130. A value that changes over time becomes a **log of decisions
+that never change**: one consensus per log position, the idea behind real systems like
+Megastore.
 
 ## One Paxos instance per slot
 
-The idea is almost embarrassingly direct. Lamport's
-[Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf) puts
-it in one sentence:
+Lamport's [Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
+puts it in one sentence:
 
 > run a separate instance of Paxos consensus per command slot. The value chosen
 > by the `i`-th instance is the `i`-th command.
 
-A **slot** is a numbered position in the log. Each slot runs its own independent
-single-decree Paxos: its own Prepare/Promise/Accept/Accepted, its own "at most one
-value chosen". In paros a slot is just `Slot(u64)`, and the value chosen for it is
-an `Entry`:
+A **slot** is a numbered log position, `Slot(u64)`, and the value chosen for it is a
+`Command`: either a `User(Entry)` carrying opaque client bytes, or a `Control`
+command the log itself needs (`Truncate`, `Noop`, `Snap`).
 
 ```rust
 pub struct Entry {
@@ -50,29 +50,27 @@ pub struct Entry {
 ```
 
 The `(client, seq)` tag rides along with every command so a node can recognise a
-request it has already placed and never execute it twice, even across a leader
-change or a restart. (More on that in [Crash and restart safety](restart-safety.md).)
+request it has already placed and never execute it twice, even across a leader change
+or a restart (see [Crash and restart safety](restart-safety.md)).
 
 ## The log is a gapless prefix plus the future
 
 A node's durable state is two small scalars — the promised ballot and a single
-**commit index** — persisted whole, plus a per-slot accepted log persisted one
-record at a time (mirroring etcd-raft's `HardState`-vs-`entries` split):
+**commit index** — persisted whole, plus a per-slot accepted log persisted one record
+at a time (mirroring etcd-raft's `HardState`-vs-`entries` split):
 
 ```rust
 pub struct HardState {
     pub max_promised_ballot: Ballot,
     pub chosen_index: Option<Slot>,   // highest contiguous chosen slot
 }
-// The accepted log — `Slot -> (Ballot, Entry)` — is persisted separately, one
-// record per `WriteOp::AppendAccepted`, never as a blob.
+// The accepted log — `Slot -> (Ballot, Command)` — is persisted separately, one
+// record per `AcceptorWrite::AppendAccepted`, never as a blob.
 ```
 
-`chosen_index` is the highest slot such that **every** slot up to it is chosen. It
-is the boundary between the part of the log that is safe to apply and the part
-that is still being decided. This boundary matters because consensus can choose
-slots out of order. A leader can get slot 3 chosen before slot 2, leaving a
-**hole**:
+`chosen_index` is the highest slot such that **every** slot up to it is chosen: the
+boundary between the log that is safe to apply and the log still being decided. It
+exists because consensus can choose slots out of order, leaving a **hole**:
 
 ```mermaid
 flowchart TD
@@ -89,48 +87,38 @@ flowchart TD
     classDef ci fill:#2f4f6e,stroke:#1f3147,color:#fff
 ```
 
-Here slots 5 and 6 are chosen, slot 7 is still a hole, and slot 8 is already
-chosen. The commit index is `Some(Slot(6))`: the application may apply slots 5 and
-6, but it **must not** apply slot 8 yet, because applying slot 8 before slot 7
-would execute commands out of order on this node but maybe in a different order on
-another. The log advances only as a contiguous prefix. In paros,
-`advance_chosen_index` walks that prefix forward one slot at a time and surfaces
-each newly applied `(slot, entry)` in order (`node.rs`); a hole simply stops the
-walk until it is filled.
-
-The simulation pins this with the `NoGapsOracle`, which asserts that each node's
-applied prefix **"advances one slot at a time (no gaps)"** and **"starts at slot
-0"** (`crates/paros-sim/src/oracle.rs`). A node can never reveal a value it skipped a
-slot to reach.
+Slots 5 and 6 may apply; slot 8 **must not**, because applying it before slot 7 would
+execute commands in an order no other node will reproduce. In paros the walk is the
+`Replica` role (`crates/paros-core/src/replica.rs`): `advance_chosen_index` steps it
+forward one slot at a time, surfacing each newly applied `(slot, command)` in order,
+and a hole stops the walk until it is filled. A hole that *never* fills is a permanent
+cluster-wide wedge — see [The stable leader](stable-leader.md). The audit pins the walk
+from both ends: **"a node's applied prefix advances one slot at a time (a forward jump
+only at the compaction floor or a snapshot install)"** and **"chain: applies are
+contiguous per node"** (`crates/paros-sim/src/audit/`).
 
 ## Five roles, collapsed into one node
 
 [Paxos Made Moderately Complex](https://www.cs.cornell.edu/home/rvr/Paxos/)
-(van Renesse and Altinbuken) is the canonical engineering account of Multi-Paxos.
-It explains the protocol as five kinds of process:
-
-- **clients** that submit commands,
-- **replicas** that hold the log and apply it in slot order,
-- **leaders** that drive consensus for a ballot (using **scouts** for Phase 1 and
-  **commanders** for Phase 2),
-- **acceptors**, the fault-tolerant memory that promises and votes.
-
-paros does not run these as separate processes. A single `ColocatedNode` plays all of
-them at once: it is an acceptor (it promises and votes), a replica (it holds the
-log and tracks `chosen_index`), and, when it wins an election, a leader. The
-mapping is:
+(van Renesse and Altinbuken) is the canonical engineering account of Multi-Paxos, and
+explains the protocol as five kinds of process: **clients** that submit commands,
+**replicas** that hold the log and apply it in slot order, **leaders** that drive
+consensus for a ballot (**scouts** for Phase 1, **commanders** for Phase 2), and
+**acceptors**, the fault-tolerant memory that promises and votes. paros keeps them as
+separate *types* but runs them on one node: a `ColocatedNode` holds an `Acceptor`, a
+`Replica` and a `Proposer`, and is nothing but the wiring between them.
 
 | Paxos Made Moderately Complex | paros |
 |---|---|
-| replica (log, `slot_num`) | the `ColocatedNode` log + `chosen_index` (`node.rs`) |
-| acceptor (`ballot_num`, accepted pvalues) | `HardState.max_promised_ballot` + `accepted` |
-| pvalue `(b, s, c)` | an `accepted` entry `(Slot, (Ballot, Entry))` |
-| leader / scout / commander | the `Candidate` and `Leader` roles in one node |
-| invariant R1 (one command per slot) | `SafetyOracle`: at most one value chosen per slot |
+| replica (log, `slot_num`) | `Replica`: the chosen prefix, `chosen_index`, the apply walk (`replica.rs`) |
+| acceptor (`ballot_num`, accepted pvalues) | `Acceptor`: `promised` + `records` (`acceptor.rs`) |
+| pvalue `(b, s, c)` | one `Acceptor::records` entry, `Slot -> (Ballot, Command)` |
+| scout (Phase 1) | `Election` inside `Proposer` (`proposer/election.rs`) |
+| commander (Phase 2) | `proposer::Rounds`, the standalone Phase-2 tally (`proposer/rounds.rs`) |
+| invariant R1 (one command per slot) | the audit's "at most one value is ever chosen for a slot" |
 
-PMMC's central correctness invariant is **R1**: "no two different commands decided
-for the same slot." That is single-decree safety, applied per slot, which is
-precisely what the previous two chapters built. The log adds no new safety
-argument: it is many independent instances of the same one. What it *does* add is
-the question of who proposes, and how a leader avoids paying for Phase 1 on every
-single slot. That is the [stable leader](stable-leader.md), next.
+PMMC's central correctness invariant is **R1**: "no two different commands decided for
+the same slot" — single-decree safety applied per slot, which is precisely what the
+previous two chapters built. The log adds no new safety argument, only many independent
+instances of the same one. What it *does* add is who proposes, and how a leader avoids
+paying for Phase 1 on every slot: the [stable leader](stable-leader.md), next.

@@ -1,0 +1,454 @@
+{
+  "level": {
+    "id": "act1/choose-a-value",
+    "act": 1,
+    "title": "Choose a value",
+    "briefing": "Three acceptors must agree on one value. They must keep that agreement after a message is lost. They must keep it after one acceptor becomes unreachable. They must also keep it if the proposer stops in the middle of the protocol. The protocol uses two round trips. You are the network, and no message moves until you deliver it.\n\nFirst, a proposer claims a **ballot**, a number that gives it the right to propose. The proposer sends `Prepare(b)` and waits for a **majority** of the acceptors to promise. Each promise says that the acceptor refuses every ballot below `b`. That is Phase 1. The proposer then sends `Accept(b, value)`. When a majority votes, the value is **chosen** permanently, even if no node knows about it yet.\n\nTwo of the three acceptors are a majority. Run the full protocol, but keep the third acceptor silent. Drop its `Prepare` and drop its `Accept`. Look at the moment when the second `Accepted` arrives. That moment is the decision. The decision occurs at the proposer, and the third acceptor does not see it.",
+    "field_guide": "choose-one-value.html",
+    "symbols": [
+      "Proposer::open_phase1",
+      "Acceptor::prepare",
+      "Proposer::close_phase1",
+      "Acceptor::admit",
+      "Proposer::decided"
+    ],
+    "allowed_actions": [
+      "open_ballot",
+      "deliver",
+      "drop",
+      "duplicate",
+      "set_automation"
+    ],
+    "unlocks": [],
+    "hint": null
+  },
+  "world": {
+    "flavour": "decree",
+    "clock": 0,
+    "nodes": [
+      {
+        "id": 1,
+        "flavour": "acceptor",
+        "alive": true,
+        "role": null,
+        "attempt": null,
+        "ballot": null,
+        "leader": null,
+        "promised": "0.0",
+        "accepted": [],
+        "chosen_index": null,
+        "first_unchosen": null,
+        "next_slot": null,
+        "chosen_gap": null,
+        "floor": 0,
+        "election": null,
+        "open_rounds": [],
+        "pending_accepts": false,
+        "read_rounds": [],
+        "recovery_remaining": 0,
+        "acceptors": [
+          1,
+          2,
+          3
+        ],
+        "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
+        "applied": [],
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
+      },
+      {
+        "id": 2,
+        "flavour": "acceptor",
+        "alive": true,
+        "role": null,
+        "attempt": null,
+        "ballot": null,
+        "leader": null,
+        "promised": "0.0",
+        "accepted": [],
+        "chosen_index": null,
+        "first_unchosen": null,
+        "next_slot": null,
+        "chosen_gap": null,
+        "floor": 0,
+        "election": null,
+        "open_rounds": [],
+        "pending_accepts": false,
+        "read_rounds": [],
+        "recovery_remaining": 0,
+        "acceptors": [
+          1,
+          2,
+          3
+        ],
+        "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
+        "applied": [],
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
+      },
+      {
+        "id": 3,
+        "flavour": "acceptor",
+        "alive": true,
+        "role": null,
+        "attempt": null,
+        "ballot": null,
+        "leader": null,
+        "promised": "0.0",
+        "accepted": [],
+        "chosen_index": null,
+        "first_unchosen": null,
+        "next_slot": null,
+        "chosen_gap": null,
+        "floor": 0,
+        "election": null,
+        "open_rounds": [],
+        "pending_accepts": false,
+        "read_rounds": [],
+        "recovery_remaining": 0,
+        "acceptors": [
+          1,
+          2,
+          3
+        ],
+        "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
+        "applied": [],
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
+      },
+      {
+        "id": 5,
+        "flavour": "proposer",
+        "alive": true,
+        "role": null,
+        "attempt": "phase1",
+        "ballot": "1.5",
+        "leader": null,
+        "promised": null,
+        "accepted": [
+          {
+            "slot": 0,
+            "ballot": "1.5",
+            "value": "alpha",
+            "control": null,
+            "chosen": false,
+            "applied": false
+          }
+        ],
+        "chosen_index": null,
+        "first_unchosen": null,
+        "next_slot": null,
+        "chosen_gap": null,
+        "floor": null,
+        "election": null,
+        "open_rounds": [],
+        "pending_accepts": false,
+        "read_rounds": [],
+        "recovery_remaining": 0,
+        "acceptors": [
+          1,
+          2,
+          3
+        ],
+        "quorum_system": "majority",
+        "quorum": {
+          "kind": "majority",
+          "q1": null,
+          "q2": null,
+          "rows": null,
+          "cols": null
+        },
+        "grid_cell": null,
+        "applied": [],
+        "armed_seam": null,
+        "acceptors_since": null,
+        "matchmakers": null,
+        "matchmaking": null,
+        "gc": null,
+        "handover": null,
+        "retired": false,
+        "wiped": false
+      }
+    ],
+    "wire": [
+      {
+        "id": 1,
+        "kind": "Prepare",
+        "from": 5,
+        "from_party": "node",
+        "to": 1,
+        "to_party": "node",
+        "ballot": "1.5",
+        "slot": 0,
+        "column": null,
+        "summary": "Prepare at 1.5 for slots from 0",
+        "phase": "prepare",
+        "reply": false,
+        "sent_at": 0
+      },
+      {
+        "id": 2,
+        "kind": "Prepare",
+        "from": 5,
+        "from_party": "node",
+        "to": 2,
+        "to_party": "node",
+        "ballot": "1.5",
+        "slot": 0,
+        "column": null,
+        "summary": "Prepare at 1.5 for slots from 0",
+        "phase": "prepare",
+        "reply": false,
+        "sent_at": 0
+      },
+      {
+        "id": 3,
+        "kind": "Prepare",
+        "from": 5,
+        "from_party": "node",
+        "to": 3,
+        "to_party": "node",
+        "ballot": "1.5",
+        "slot": 0,
+        "column": null,
+        "summary": "Prepare at 1.5 for slots from 0",
+        "phase": "prepare",
+        "reply": false,
+        "sent_at": 0
+      }
+    ],
+    "clients": [],
+    "matchmakers": [],
+    "chosen": null,
+    "reach": {
+      "one": [
+        1,
+        2,
+        3
+      ],
+      "two": [
+        1,
+        2,
+        3
+      ]
+    }
+  },
+  "prompt": null,
+  "goal": {
+    "status": "open",
+    "detail": "Get one value chosen with two of the three acceptors."
+  },
+  "log": [
+    {
+      "index": 0,
+      "kind": "open_ballot",
+      "label": "tell proposer 5 to open a ballot for alpha",
+      "narration": [
+        {
+          "kind": "election",
+          "text": "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+        }
+      ]
+    }
+  ],
+  "automation": {
+    "flags": [
+      {
+        "flag": "acceptor_replies",
+        "label": "answer a Prepare and an Accept",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "commit_overwrite",
+        "label": "overwrite a stale record",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "proposer_p2c",
+        "label": "apply the P2c rule",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "replica_apply",
+        "label": "apply a chosen slot",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "leader_recovery",
+        "label": "recover and fill the gaps",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "persist_order",
+        "label": "persist the batch before the send",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "read_serve",
+        "label": "serve a confirmed read",
+        "on": true,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "snapshot_promise",
+        "label": "keep the higher promise",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "ack_write",
+        "label": "answer a client retry",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "grid_column",
+        "label": "address a slot to its column",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "quorum_read_serve",
+        "label": "serve a quorum read",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "repair_verdict",
+        "label": "settle a damaged slot",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "wiped_rejoin",
+        "label": "refuse a wiped node",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "phase1_complete",
+        "label": "judge a Phase 1 across two configurations",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "stale_configuration",
+        "label": "abandon a stale belief",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "generation_fence",
+        "label": "fence a matchmaker generation",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "may_retire",
+        "label": "answer a retire request",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "deliver_heartbeats",
+        "label": "deliver the heartbeats",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "deliver_replies",
+        "label": "deliver the replies",
+        "on": false,
+        "unlocked": true,
+        "pinned_off": false
+      },
+      {
+        "flag": "deliver_matchmaker_replies",
+        "label": "deliver the matchmaker messages",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      },
+      {
+        "flag": "resend_pending",
+        "label": "re-send the pending Accepts",
+        "on": false,
+        "unlocked": false,
+        "pinned_off": false
+      }
+    ]
+  },
+  "mistakes": 0,
+  "narration": [
+    {
+      "kind": "election",
+      "text": "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+    }
+  ]
+}

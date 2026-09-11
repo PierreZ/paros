@@ -49,6 +49,14 @@
             mdbook
             mdbook-toc
             mdbook-mermaid
+
+            # paros play: the interactive game (crates/paros-play + web/play).
+            # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
+            # in crates/paros-play/Cargo.toml (a mismatch fails bindgen with an
+            # opaque schema-version error); bump both together.
+            wasm-bindgen-cli
+            binaryen
+            nodejs_22
           ];
 
           shellHook = ''
@@ -72,6 +80,7 @@
             echo "  • Use 'cargo test' to run tests"
             echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
+            echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-play.sh builds the game"
           '';
 
           # Environment variables

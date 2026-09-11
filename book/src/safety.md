@@ -1,12 +1,24 @@
 # Why one value is safe
 
-The previous chapter showed *how* a value gets chosen. This one shows *why* the
-choice can never be contradicted, even with lost messages, crashed nodes, and
-several proposers competing at once. Single-decree Paxos is famous because the
-algorithm is not really invented: it is **derived** from the safety properties it
-must satisfy. Lamport's [Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
-walks that derivation, and it is worth following once, because every line of
-`paros-core` is a consequence of it.
+The previous chapter shows *how* a value gets chosen. This chapter shows *why*
+nothing can contradict that choice. Single-decree Paxos is famous because nobody
+invented the algorithm: it is **derived** from the safety properties it must
+satisfy. Lamport's [Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf)
+walks through that derivation. Follow it once, because every line of `paros-core`
+is a consequence of it.
+
+> **Play it.** Three Act I levels put you on the wrong side of this argument.
+>
+> - [`act1/adopt-the-value`](play/#act1/adopt-the-value) — choose what a second
+>   proposer puts in its Accept, after a lower ballot already accepted a value.
+>   Choose its own value and the game explains the double choice.
+> - [`act1/quorum-intersection`](play/#act1/quorum-intersection) — pick the Phase-1
+>   and Phase-2 reach sets, and try to choose a value with a Phase-1 quorum that
+>   misses the acceptor that voted. The set does not exist, and the explanation of
+>   *why* is the win.
+> - [`act1/recovery-is-not-catch-up`](play/#act1/recovery-is-not-catch-up) — adopt
+>   a value that one acceptor accepted, when nothing is chosen and nobody is
+>   behind.
 
 <!-- toc -->
 
@@ -29,9 +41,8 @@ argument, because:
 
 > any two majorities intersect.
 
-Take three acceptors. The majority that chose `SET x=1` is some set of two. Any later
-majority is also a set of two. Two sets of two, drawn from three, must share at
-least one acceptor:
+Take three acceptors. The majority that chose `SET x=1` is a set of two; any later
+majority is also a set of two; two sets of two drawn from three must share one:
 
 ```mermaid
 flowchart TD
@@ -47,18 +58,21 @@ flowchart TD
     classDef shared fill:#c97a2b,stroke:#7a4718,color:#fff
 ```
 
-That shared acceptor (A1) is the pivot. It saw `SET x=1` get chosen, and it
-will be consulted by anyone who tries to choose later. If we can force every
-later proposal to respect what that pivot remembers, two different values can
-never both be chosen. The rest of the protocol exists to do exactly that.
+That shared acceptor (A1) is the pivot: it saw `SET x=1` get chosen, and it will be
+consulted by anyone who tries to choose later. Force every later proposal to respect
+what the pivot remembers and two different values can never both be chosen; the rest
+of the protocol exists to do exactly that. A majority is only the simplest way to
+guarantee the overlap — what safety actually needs is that every *Phase-1* quorum
+meets every *Phase-2* quorum, `q1 + q2 > n`, which is why paros asks that question
+through one boundary, `QuorumSystem` (`crates/paros-core/src/membership.rs`), and can
+answer it with flexible or grid quorums instead.
 
 ## The invariant ladder
 
-A value is chosen the moment a majority has accepted it, but no acceptor knows
-when that instant arrives (the proposer might still be collecting replies). So we
-cannot make a rule that triggers "on chosen". Lamport instead strengthens a
-single invariant down a ladder until it becomes a rule a proposer can actually
-follow before it acts:
+A value is chosen the moment a majority has accepted it, but no acceptor knows when
+that instant arrives (the proposer might still be collecting replies), so no rule can
+trigger "on chosen". Lamport instead strengthens a single invariant down a ladder
+until it becomes a rule a proposer can follow *before* it acts:
 
 ```mermaid
 flowchart TD
@@ -72,55 +86,31 @@ flowchart TD
 ```
 
 Each step implies the one above it. `P2` is what we want. `P2a` makes it about
-*accepted* (not just chosen) proposals, because an acceptor that never heard about
-`v` would otherwise happily accept a conflicting value. `P2b` pushes the
-constraint onto the *proposer*, since acceptors are passive and cannot be trusted
-to police themselves. And `P2c` turns "issued by any proposer" into something
-checkable with one round of messages:
+*accepted* (not just chosen) proposals, because an acceptor that never heard about `v`
+would otherwise happily accept a conflicting value. `P2b` pushes the constraint onto the
+*proposer*, since acceptors are passive and cannot police themselves. And `P2c` turns
+"issued by any proposer" into something checkable with one round of messages:
 
 > **P2c.** For any `v, n`: if a proposal `(n, v)` is issued, there is a majority
 > set `S` of acceptors such that **either** (a) no acceptor in `S` has accepted
 > any proposal numbered `< n`, **or** (b) `v` is the value of the
 > **highest-numbered proposal `< n` accepted by the acceptors in `S`**.
 
-`P2c` is the value-selection rule from the previous chapter, stated precisely. It
-is the whole reason Phase 1 exists.
-
-## How the two phases enforce P2c
-
-A proposer cannot predict what acceptors will do, so it **controls** them with a
-promise. That is Phase 1.
-
-1. **Phase 1 (Prepare / Promise).** The proposer picks a ballot `n` and asks a
-   majority to promise never to accept anything below `n`, and to report the
-   highest-numbered proposal each has already accepted. The promise freezes the
-   past: nothing numbered below `n` can be newly accepted by that majority from
-   now on. The reports reveal whether `v` is already constrained.
-2. **Phase 2 (Accept / Accepted).** With a majority of promises in hand, the
-   proposer applies `P2c`: if any acceptor **piggybacked** an accepted value on
-   its Promise, it must re-propose the **highest-numbered** one; only if the whole
-   majority reported nothing is it free to propose its own value.
-
-The pivot acceptor from the intersection picture is why this works. If `v` was
-already chosen, the promise-majority overlaps the choosing-majority, so at least
-one acceptor reports `v`, and the proposer is forced to re-propose it. A later
-proposer, made to re-propose the same value, can never change the choice. That is
-how a value, once chosen, stays chosen forever.
+The two phases are how a proposer satisfies it: Phase 1's promise freezes the past and
+its reports reveal whether `v` is constrained, and Phase 2 re-proposes the
+highest-numbered value any Promise piggybacked. The pivot is why that suffices — if `v`
+was already chosen, the promise majority overlaps the choosing majority, so some Promise
+reports `v` and the proposer is *forced* to re-propose it.
 
 ## Recovery, not catch-up
 
-It is tempting to read this rule as a way to help slow acceptors catch up: the
-proposer sees "SET x=1", so it spreads "SET x=1" to the others. That intuition is
-half right, and the wrong half is the important one.
-
-The literature calls this step **recovery**: a new leader, before it may lead,
-recovers any value that might already be committed and re-commits it under its own
-ballot. When "SET x=1" really was chosen, re-proposing it does heal acceptors that
-missed it, so it looks like catch-up. But the rule **also fires when nothing was
-chosen and no acceptor is behind**. If one acceptor accepted "SET x=1" at a low
-ballot and it never reached a majority, the proposer must *still* re-propose
-"SET x=1", because it cannot tell that world apart from the one where "SET x=1" is
-already chosen.
+It is tempting to read this rule as helping slow acceptors catch up: the proposer sees
+"SET x=1", so it spreads "SET x=1" to the others. That intuition is half right, and
+the wrong half matters. The literature calls the step **recovery**: a new leader, before
+it may lead, re-commits any value that *might* already be committed under its own
+ballot. When the value really was chosen, re-proposing it does heal acceptors that
+missed it — but the rule **also fires when nothing was chosen and no acceptor is
+behind**, because the proposer cannot tell those two worlds apart.
 
 | | Recovery (adopt the highest) | Catch-up (`Commit`, heartbeat resend) |
 |---|---|---|
@@ -129,38 +119,32 @@ already chosen.
 | Purpose | safety: never contradict a possible decision | liveness: help slow nodes converge |
 | Value carried | the highest-ballot value seen in Phase 1 | the known-committed value |
 
-So recovery repairs an **invariant**, not **data**. It does not heal a stale copy
-back to a known-good value; it forces the future to agree with any decision the
-past *might* have made, so that "at most one value chosen" can never break. And lag
-is not even the hazard: with a perfect network and zero laggards, two proposers
-racing at different ballots still need this rule. Catch-up addresses slowness;
-recovery addresses concurrency.
+So recovery repairs an **invariant**, not **data**, and lag is not even the hazard:
+with a perfect network and zero laggards, two proposers racing at different ballots
+still need the rule. Catch-up addresses slowness; recovery addresses concurrency.
+paros's real catch-up mechanisms are separate — the `Commit` broadcast and, in
+Multi-Paxos, the leader's heartbeat resend of un-acked `Accept`s.
 
 > A new ballot inherits the unfinished business of every lower ballot. Phase 1
 > reads that unfinished business; "adopt the highest" is the proposer agreeing to
 > honor it.
 
-paros's real catch-up mechanisms are separate: the `Commit` broadcast that tells a
-learner a value is chosen, and, in Multi-Paxos, the leader resending un-acked
-`Accept`s on each heartbeat (see [The stable leader](stable-leader.md)).
-
 ## Where this lives in paros
-
-The single-decree safety rules map directly onto the acceptor code:
 
 | Paxos Made Simple | paros |
 |---|---|
-| highest promised prepare number | `HardState.max_promised_ballot` (`state.rs`) |
-| highest accepted proposal | the per-slot accepted log `Slot -> (Ballot, Entry)`, persisted via `WriteOp::AppendAccepted` (`write.rs`) |
-| promise rule (P1a) | `ballot > max_promised_ballot` in `on_prepare` (`node.rs`) |
-| vote rule | `ballot >= max_promised_ballot` in `on_accept` |
-| value-selection rule (P2c) | adopt the highest `(ballot, entry)` from the `Promise` replies |
-| "inform a rejected proposer" | the explicit `Message::Nack` |
-| chosen by a majority | an `Accepted` quorum in `try_decide` |
+| highest promised prepare number | `Acceptor::promised`, durable as `HardState.max_promised_ballot` (`state.rs`) |
+| highest accepted proposal | `Acceptor::records`, a `Slot -> (Ballot, Command)` map persisted per record via `AcceptorWrite::AppendAccepted` (`write.rs`) |
+| promise rule (P1a) | `ballot > promised` in `Acceptor::prepare` (`acceptor.rs`) |
+| vote rule | `ballot >= promised` in `Acceptor::admit` |
+| value-selection rule (P2c) | the highest `(ballot, value)` over the promise quorum, merged by `Election::close_phase1` (`proposer/election.rs`) |
+| "inform a rejected proposer" | the explicit `Message::Nack` (`message.rs`) |
+| chosen by a majority | a Phase-2 quorum in `try_decide` (`node/decide_apply.rs`), judged by `AcceptorConfig::has_phase2_quorum` (`membership.rs`) |
+| any two quorums intersect | `QuorumSystem::cross_intersects` — `q1 + q2 > n` (`membership.rs`) |
 
-paros never has to *prove* this safety property by hand. The deterministic
-simulation asserts it directly: the `SafetyOracle` checks, on every step of every
-seed, that **"at most one value is ever chosen for a slot"** (`crates/paros-sim/src/audit`).
-That is the same property `P2` names, watched on every transition. The
-[crash and restart safety](restart-safety.md) chapter shows it catching a real
-bug.
+paros never proves this property by hand. The deterministic simulation asserts it on
+every transition of every seed — **"at most one value is ever chosen for a slot"**,
+the property `P2` names, beside **"a durable accept quorum never decides two values
+for a slot"**, the same claim read off the disks rather than off the decisions
+(`crates/paros-sim/src/audit/`). The [crash and restart
+safety](restart-safety.md) chapter shows it catching a real bug.

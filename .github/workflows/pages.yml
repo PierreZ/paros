@@ -23,6 +23,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build book
         run: nix develop --command mdbook build
+      - name: Build and stage the game at /play/
+        run: nix develop --command scripts/build-play.sh
       - uses: actions/upload-pages-artifact@v5
         with:
           path: ./book/output

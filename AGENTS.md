@@ -795,6 +795,12 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
   corpus. Depends on `paros` + `moonpool-sim`.
 - `crates/paros-sim-runner/` — native sim runner + hunt binaries (`publish = false`).
+- `crates/paros-play/` — the interactive Paxos game's engine + its wasm glue
+  (`publish = false`): a **driver** over the core's public API with a player where the
+  network and the clock would be — worlds, player verbs, the levels and their goals, the
+  role prompts (judged on clones of `Acceptor` / `Proposer` / `Replica`, so a wrong
+  answer never enters the core), the derived narration, and the one `ts-rs` view contract
+  the browser reads. The TypeScript app is beside it in `web/play/`.
 - `crates/xtask/` — build automation (the sancov sim runner).
 - `docs/references/papers/` — Paxos/consensus papers with transcripts.
 - `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`

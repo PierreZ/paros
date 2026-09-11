@@ -1,141 +1,102 @@
 # How Paxos chooses one value
 
-Single-decree Paxos answers one question: how can a cluster of acceptors agree on
-a single value, and never disagree, even when the network drops, delays, and
-reorders messages, and even when several proposers compete at once?
+Single-decree Paxos agrees on one value over a network that drops, delays and
+reorders messages, while several proposers compete. It needs two round trips over
+a majority. In Phase 1 a proposer claims a **ballot** and learns what the
+acceptors have already accepted. In Phase 2 it asks them to accept a value at that
+ballot. A value that a majority accepts is **chosen**, and a chosen value does not
+change.
 
-This chapter walks through how, step by step, with diagrams.
+> **Play it.** Act I runs this by hand: three acceptors, one slot, no clock and no
+> disk.
+>
+> - [`act1/choose-a-value`](play/#act1/choose-a-value) — deliver the Prepare,
+>   Promise, Accept and Accepted one message at a time, with one acceptor silent,
+>   until two of three choose a value.
+> - [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) — answer every Prepare and
+>   every Accept yourself. The acceptor rule below is the whole level.
+> - [`act1/the-duel`](play/#act1/the-duel) — run two proposers that preempt each
+>   other, get a value chosen anyway, and count the rounds it costs.
+
+<!-- toc -->
 
 ## Ballots
 
-A proposer never just announces a value. It first claims a **ballot**: a number
-that gives it the right to propose. Ballots are totally ordered as `(round,
-node)`, so a higher round always wins and ties are broken by the proposer's node
-id (two proposers can therefore never hold the same ballot).
+A proposer never just announces a value. It first claims a **ballot**: a number that
+gives it the right to propose. Ballots are totally ordered as `(round, node)`, so a
+higher round always wins and ties break by node id — two proposers can therefore
+never hold the same ballot.
 
 ## Two phases
 
-A proposer drives two round trips, each needing a **majority** (2 of 3) to make
-progress:
+Each phase is one round trip needing a **majority** (2 of 3):
 
-1. **Phase 1, Prepare then Promise.** The proposer asks the acceptors to promise
-   not to accept anything older than its ballot. An acceptor that promises also
-   reports any value it has already accepted. Once a majority promise, the
-   proposer owns the ballot.
+1. **Phase 1, Prepare then Promise.** The proposer asks the acceptors to promise not
+   to accept anything older than its ballot. An acceptor that promises also reports
+   any value it has already accepted. Once a majority promise, the proposer owns the
+   ballot.
 2. **Phase 2, Accept then Accepted.** The proposer asks the acceptors to accept a
-   value at its ballot. Once a majority accept, the value is **chosen**: every
+   value at its ballot. Once a majority accept, the value is **chosen**, and every
    node then learns it (Commit).
 
-Two round trips, two of three acceptors each time:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as Proposer N2 at ballot (4,2)
-    participant A0 as Acceptor 0
-    participant A1 as Acceptor 1
-    participant A2 as Acceptor 2
-    Note over P,A2: Phase 1, claim the ballot
-    P->>A0: Prepare(ballot=(4,2))
-    P->>A1: Prepare(ballot=(4,2))
-    P->>A2: Prepare(ballot=(4,2))
-    A0-->>P: Promise(ballot=(4,2), accepted=none)
-    A1-->>P: Promise(ballot=(4,2), accepted=none)
-    Note over A0,A1: promised ballot raised to (4,2),<br/>now refuse anything below it
-    Note over P: a majority promised, so N2 owns ballot (4,2).<br/>No acceptor reported a value, so N2 may use its own: "SET x=1".
-    Note over P,A2: Phase 2, get a value chosen
-    P->>A0: Accept(ballot=(4,2), value="SET x=1")
-    P->>A1: Accept(ballot=(4,2), value="SET x=1")
-    P->>A2: Accept(ballot=(4,2), value="SET x=1")
-    A0-->>P: Accepted(ballot=(4,2))
-    A1-->>P: Accepted(ballot=(4,2))
-    Note over A0,A1: accepted "SET x=1" at (4,2)
-    Note over P: a majority accepted, so "SET x=1" is chosen.<br/>N2 broadcasts Commit and every node learns it.
-```
-
-(Acceptor 2 never replies above: a majority is two of three, so the proposer
-makes progress even while one acceptor is slow or unreachable.)
-
-Why a majority? Any two majorities of three share at least one acceptor. That one
-overlapping acceptor is what makes it impossible for two different values to both
-be chosen. The next chapter, [Why one value is safe](safety.md), turns that
-sentence into the actual argument.
+Two of three means the proposer makes progress while one acceptor is slow, crashed
+or unreachable. Why a *majority* specifically: any two majorities share an acceptor,
+and that overlap is what makes two different values impossible.
+[Why one value is safe](safety.md) turns that into the argument.
 
 ## The value-selection rule
 
-A proposer does not always get to propose its own value. If any acceptor's Promise
-reports an already-accepted value, the proposer must **adopt the highest-ballot
-value it saw** instead of its own. This is the rule that protects a value that may
-already be chosen: a later proposer, forced to re-propose the same value, can
-never change the choice.
+A proposer does not always get to propose its own value. If any Promise reports an
+already-accepted value, the proposer must **adopt the highest-ballot value it saw**
+— a later proposer, forced to re-propose the same value, can never change the
+choice. Precisely stated this is Lamport's `P2c`, the whole reason Phase 1 exists;
+[Why one value is safe](safety.md) derives it and
+[`act1/adopt-the-value`](play/#act1/adopt-the-value) makes you obey it.
 
-The mechanism behind that rule has a name from the literature: **piggybacking**.
-To piggyback is to attach extra information to a message that is already being
-sent, so it travels at no extra cost (every Paxos paper uses the word, so it is
-worth knowing). Here, a `Promise` is never just a bare "yes": it also carries any
-value the acceptor has already accepted, together with the ballot it was accepted
-at. The proposer reads those carried-along values, and if it sees any, it must drop
-its own value and re-propose the one with the highest ballot:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P2 as Proposer N2 at ballot (4,2)
-    participant A0 as Acceptor 0
-    participant A1 as Acceptor 1
-    Note over A0,A1: both already accepted "SET x=1" at ballot (2,1)
-    P2->>A0: Prepare(ballot=(4,2))
-    P2->>A1: Prepare(ballot=(4,2))
-    A0-->>P2: Promise(ballot=(4,2), accepted=(2,1) "SET x=1")
-    A1-->>P2: Promise(ballot=(4,2), accepted=(2,1) "SET x=1")
-    Note over P2: a value came back on the Promises,<br/>so N2 may not propose its own.<br/>It must re-propose the highest-ballot one: "SET x=1".
-    P2->>A0: Accept(ballot=(4,2), value="SET x=1")
-    P2->>A1: Accept(ballot=(4,2), value="SET x=1")
-```
-
-In paros the piggybacked values are the `accepted` map inside `Message::Promise`
-(`crates/paros-core/src/message.rs`), which `on_prepare` fills with every entry the
-acceptor has accepted. The same trick is how a proposer or learner that *missed* a
-decision catches up: it proposes, the already-chosen value is piggybacked back to
-it, and it is forced to adopt that value, learning the consensus in the act of
-trying to overwrite it.
-
-That duel really happens. Node 0 starts proposing at ballot `(1,0)`, node 1 interrupts
-with a higher ballot `(2,1)`, node 0's late Accept is **nacked** (rejected), node
-1's ballot wins, and a value is still chosen by all three acceptors. The duel
-resolves; safety never bends.
+The mechanism has a name from the literature: **piggybacking** — attaching extra
+information to a message already being sent, so it travels at no extra cost. A
+`Promise` is never a bare "yes": it carries every value the acceptor accepted with
+the ballot it was accepted at. In paros those ride in `Message::Promise`
+(`crates/paros-core/src/message.rs`), filled by `Acceptor::promise_page`
+(`acceptor.rs`). It is also how a node that *missed* a decision catches up: it
+proposes, the chosen value comes back piggybacked, and it is forced to adopt it —
+learning the consensus in the act of trying to overwrite it. That is narrower than
+it looks; see [Recovery, not catch-up](safety.md#recovery-not-catch-up).
 
 ## What each acceptor remembers
 
-An acceptor is tiny. It keeps just two facts in durable storage: the highest
-ballot it has **promised**, and the value (and ballot) it has **accepted**. Two
-rules govern every reply, and together they are the whole of Paxos safety:
+An acceptor is tiny. It keeps two facts in durable storage — the highest ballot it
+**promised** and the `(ballot, value)` records it **accepted** — and **one rule**
+governs every reply it sends: *refuse anything below the promise you hold*, and
+answer anything at or above it, persisting the write before the reply leaves.
+Anything below gets a `Nack`. An equal ballot needs no special case: a ballot is
+minted by exactly one proposer, so "equal" always means that same proposer asking
+again — which is precisely what a proposer that won Phase 1 at `b` does when it
+sends its `Accept` at `b`.
 
-```mermaid
-stateDiagram-v2
-    direction TB
-    [*] --> Listening
-    Listening --> Promised: Prepare(4,2) > promise,<br/>persist (4,2), reply Promise
-    Promised --> Promised: Prepare(5,0), even higher,<br/>persist (5,0)
-    Promised --> Voted: Accept((4,2), "SET x=1") >= promise,<br/>persist value, reply Accepted
-    Voted --> Voted: Accept((4,2), "SET x=1") >= promise, resend
-    Promised --> Promised: Prepare(1,0) below promise, reply Nack
-    Voted --> Voted: Accept((1,0), ...) below promise, reply Nack
-```
+What differs between the two questions is not the comparison but what the answer
+is *for*. A **Promise reports and fences**: it hands the proposer everything this
+acceptor has accepted at or above the slot in question — the report P2c is built
+on — and closes the door on every lower ballot for good. A **vote records**: it
+writes down a `(ballot, value)` that some later ballot's Phase 1 will find and be
+obliged to re-propose. That split is what
+[`act1/be-the-acceptor`](play/#act1/be-the-acceptor) is built around; the "before
+the reply leaves" is where [persist before send](restart-safety.md) bites.
 
-In paros the promise lives in `max_promised_ballot` and the accepted value in the
-per-slot `accepted` map (`crates/paros-core/src/state.rs`). The promise rule is
-`ballot > max_promised_ballot` (`on_prepare`); the vote rule is
-`ballot >= max_promised_ballot` (`on_accept`). Everything else in the protocol
-exists only to feed these two acceptors' rules a safe value.
+In paros the role is `Acceptor` (`crates/paros-core/src/acceptor.rs`):
+`Acceptor::promised` is the promise, durable as `HardState.max_promised_ballot`
+(`state.rs`); `Acceptor::records` is the log. `Acceptor::prepare` answers the report-
+and-fence question and `Acceptor::admit` the record-a-vote one — both refusing exactly
+`ballot < promised` — each emitting the `AcceptorWrite` the driver must flush before the
+reply leaves. Everything else in the protocol exists only to feed those two answers a
+safe value.
 
 ## The one thing it will never do
 
-The simulation will never show two acceptors choosing different values. That is
-the single safety property the `SafetyOracle` asserts on every step of every seed,
-in CI. Seeds like **42** show proposers dueling without
-ever converging, a livelock: every node has promised a different high ballot, so
-no single ballot wins a promise quorum and nothing is chosen. Annoying, but never
-*unsafe*. Randomized election timeouts cure the livelock once we elect a stable
-leader (see [The stable leader](stable-leader.md)); they were never needed for
-safety.
+The simulation will never show two acceptors choosing different values: the audit
+asserts **"at most one value is ever chosen for a slot"** on every transition of
+every seed, in CI (`crates/paros-sim/src/audit/`). What it *will* show is proposers
+dueling without converging — every node has promised a different high ballot, so no
+ballot wins a promise quorum and nothing is chosen. That is a livelock: annoying,
+never unsafe, and it has a level of its own. Randomized election timeouts cure it
+once we elect a [stable leader](stable-leader.md); they were never needed for safety.

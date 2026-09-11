@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](index.md)
+[Play the game](play.md)
 
 # Single-decree Paxos
 
@@ -14,3 +15,7 @@
 - [Crash and restart safety](restart-safety.md)
 - [Truncation and snapshot restore](truncation-and-snapshots.md)
 - [Why reads are not free](linearizable-reads.md)
+
+# Beyond Multi-Paxos
+
+- [Nine mechanisms, five papers](beyond-multi-paxos.md)
