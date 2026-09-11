@@ -1135,3 +1135,339 @@ code,
   align-items: center;
   gap: 0.3rem;
 }
+
+/* ---- the node inspector ---------------------------------------------------- */
+
+/* A narrow stage folds each node's log into a summary, so the column itself
+   lives here: the player taps a node, and this card opens under the stage. */
+.inspector {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem 0.7rem;
+  margin: 0.6rem 0;
+  background: color-mix(in srgb, var(--panel) 60%, var(--page));
+}
+
+.inspector-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.inspector-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.inspector-log {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.inspector-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.82rem;
+  border-left: 4px solid var(--open);
+  padding: 0.1rem 0.4rem;
+  background: color-mix(in srgb, var(--open) 12%, transparent);
+}
+
+.inspector-slot.chosen {
+  border-left-color: var(--done);
+  background: color-mix(in srgb, var(--done) 18%, transparent);
+}
+
+.inspector-slot.applied {
+  border-left-color: var(--done-dark);
+  background: color-mix(in srgb, var(--done) 30%, transparent);
+}
+
+.inspector-slot.control {
+  border-left-style: dashed;
+  border-left-color: var(--shared-dark);
+}
+
+.inspector-slot-name {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.inspector-slot-ballot,
+.inspector-slot-state {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.inspector-hole {
+  margin: 0.3rem 0 0;
+  color: var(--gap);
+  font-size: 0.85rem;
+}
+
+.inspector-meta {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+/* ---- the narrow stage ------------------------------------------------------ */
+
+/* One SVG unit is one CSS pixel here, so every size below is the size on the
+   glass. Nothing is under 11 pixels, and a dot's transparent hit circle is 28
+   across: the renderer sets those two radii, and these rules set the text. */
+
+.stage.narrow .node-id {
+  font-size: 16px;
+}
+
+.stage.narrow .node-role,
+.stage.narrow .node-meta,
+.stage.narrow .matchmaker-meta,
+.stage.narrow .registry-line,
+.stage.narrow .slot-label,
+.stage.narrow .floor-label,
+.stage.narrow .grid-axis,
+.stage.narrow .gutter-title {
+  font-size: 11px;
+}
+
+.stage.narrow .matchmaker-id {
+  font-size: 13px;
+}
+
+.stage.narrow .chosen-banner text {
+  font-size: 12px;
+}
+
+/* The role and the folded log are the two things read under a node, so they
+   carry the ink colour and the rest of the labels stay soft. The role sits
+   below the disc here: `acceptor` is wider than a 21-unit circle. */
+.stage.narrow .node-meta.node-role {
+  fill: var(--ink);
+  font-weight: 600;
+}
+
+.stage.narrow .log-summary {
+  fill: var(--ink);
+}
+
+/* Every label on a narrow stage is printed over the links, so it carries a
+   halo of the stage's own background and stays readable. The colour is what
+   the host's translucent panel composites to over the page. */
+.stage.narrow .node-id,
+.stage.narrow .node-meta,
+.stage.narrow .matchmaker-id,
+.stage.narrow .matchmaker-meta,
+.stage.narrow .registry-line,
+.stage.narrow .grid-axis,
+.stage.narrow .gutter-title {
+  paint-order: stroke fill;
+  stroke: color-mix(in srgb, var(--panel) 45%, var(--page));
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* A narrow band stacks its lines under the square. */
+.stage.narrow .registry-line.narrow {
+  text-anchor: middle;
+}
+
+/* A narrow row label sits at the edge of the board: there is no log column to
+   clear, and the middle of the board belongs to the nodes. */
+.stage.narrow .grid-axis.grid-row.narrow {
+  text-anchor: start;
+}
+
+/* A node opens its own log on a narrow stage, so it must look like a target. */
+.stage.narrow .node.tappable {
+  cursor: pointer;
+}
+
+.stage.narrow .node.tappable:focus {
+  outline: none;
+}
+
+.stage.narrow .node.tappable:focus .node-disc {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+
+/* ---- the phone layout ------------------------------------------------------ */
+
+/* Below this width the board is one column, and the order is the order the
+   player needs: what the level asks, then the picture, then the moves, then
+   everything that is reference. The renderer decides the same breakpoint from
+   the container's own width (`render/narrow.ts`), so the geometry and the page
+   never disagree about what a narrow screen is.
+   
+   The two halves of the board stop being boxes (`display: contents`), so their
+   sections become the column's own items and one order runs through both. */
+
+@media (max-width: 600px) {
+  .app.playing {
+    display: flex;
+    flex-direction: column;
+    grid-template-columns: none;
+    padding-bottom: 3rem;
+  }
+
+  .board,
+  .panel {
+    display: contents;
+  }
+
+  .board > *,
+  .panel > * {
+    padding-left: 0.8rem;
+    padding-right: 0.8rem;
+    margin-bottom: 1rem;
+    min-width: 0;
+  }
+
+  .board > .stage-host {
+    padding: 0;
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+    margin-bottom: 0.4rem;
+  }
+
+  .board > .refusal {
+    margin-left: 0;
+    margin-right: 0;
+  }
+
+  .panel > * {
+    order: 20;
+  }
+
+  .board > * {
+    order: 12;
+  }
+
+  .panel > .level-header {
+    order: 1;
+    padding-top: 0.8rem;
+  }
+
+  .panel > .briefing {
+    order: 2;
+  }
+
+  .panel > .goal {
+    order: 3;
+  }
+
+  .panel > .prompt-card {
+    order: 4;
+  }
+
+  .board > .caption {
+    order: 5;
+    margin: 0 0 0.6rem;
+  }
+
+  /* The caption sits between the goal and the picture, so it stays small: a
+     phone must reach the board without a long scroll. */
+  .caption-line {
+    font-size: 0.92rem;
+  }
+
+  .caption-line.latest {
+    font-size: 0.98rem;
+  }
+
+  .board > .stage-host {
+    order: 6;
+  }
+
+  .board > .inspector {
+    order: 7;
+  }
+
+  .board > .wire-list {
+    order: 8;
+    margin-top: 0;
+  }
+
+  .board > .refusal {
+    order: 9;
+  }
+
+  .board > .controls {
+    order: 10;
+  }
+
+  /* A folded briefing is one line, and the line says what it is. */
+  .briefing > summary {
+    font-size: 1.02rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  /* Nothing may push the page sideways: a phone that scrolls left and right
+     hides half of every control. Every row that was one line on a desktop
+     wraps here instead. */
+  .wire-table {
+    table-layout: fixed;
+    font-size: 0.8rem;
+  }
+
+  .wire-route,
+  .wire-summary,
+  .wire-actions {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .wire-actions {
+    text-align: left;
+  }
+
+  .controls {
+    gap: 0.6rem;
+  }
+
+  .control-block {
+    flex: 1 1 100%;
+  }
+
+  .control-label {
+    min-width: 0;
+  }
+
+  .retry-row .control-label {
+    min-width: 0;
+  }
+
+  .text-input {
+    width: 7rem;
+  }
+
+  .level-nav {
+    flex-wrap: wrap;
+  }
+
+  .log-list,
+  .narration-list,
+  .symbol-list,
+  .quorum-list {
+    overflow-wrap: anywhere;
+  }
+
+  .wire-menu {
+    max-width: calc(100vw - 1.5rem);
+  }
+}

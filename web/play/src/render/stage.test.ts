@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   controlLabel,
   isReply,
+  logSummary,
+  narrowMeta,
   nodeMeta,
   partyName,
   phaseClass,
@@ -223,5 +225,83 @@ describe('naming a message endpoint', () => {
     expect(partyName(0, 'matchmaker')).toBe('matchmaker 0');
     expect(partyName(0, 'node')).toBe('node 0');
     expect(partyName(0, undefined)).toBe('node 0');
+  });
+});
+
+describe('the folded log a narrow stage prints', () => {
+  it('says nothing was accepted when nothing was', () => {
+    expect(logSummary(node())).toEqual(['no slot yet']);
+    expect(logSummary(node({ floor: 3 }))).toEqual(['floor 3 · no slot']);
+  });
+
+  it('counts what is chosen and what is applied, and names the top slot', () => {
+    const lines = logSummary(
+      node({
+        accepted: [
+          slot({ slot: 0, chosen: true, applied: true }),
+          slot({ slot: 1, chosen: true }),
+          slot({ slot: 2 }),
+        ],
+      }),
+    );
+    expect(lines[0]).toBe('2 chosen · 1 applied');
+    expect(lines[1]).toBe('top slot 2');
+  });
+
+  it('names the floor beside the top slot, and the hole after both', () => {
+    const lines = logSummary(
+      node({
+        floor: 2,
+        accepted: [slot({ slot: 3, chosen: true })],
+        chosen_gap: { hole: 4, highest: 6 },
+      }),
+    );
+    expect(lines[1]).toBe('top slot 3 · floor 2');
+    expect(lines[2]).toBe('hole at 4');
+  });
+});
+
+describe('what a narrow stage prints under a node', () => {
+  it('puts the role in the label block, because the disc is too small for it', () => {
+    const lines = narrowMeta(node({ role: 'leader', promised: '1.0' }), null, false, false);
+    expect(lines[0]).toEqual({ text: 'leader', kind: 'role' });
+    expect(lines.some((line) => line.kind === 'summary')).toBe(true);
+    expect(lines.map((line) => line.text)).toContain('promised 1.0');
+  });
+
+  it('keeps the grid badge first, where a grid is in force', () => {
+    const lines = narrowMeta(node(), { row: 1, column: 2 }, false, false);
+    expect(lines[0]).toEqual({ text: 'row 1 · col 2', kind: 'badge' });
+    expect(lines[1]?.kind).toBe('role');
+  });
+
+  it('says nothing else about a retired node, or about a wiped one', () => {
+    expect(
+      narrowMeta(node({ retired: true, promised: '3.0', chosen_index: 4 }), null, false, true).map(
+        (line) => line.text,
+      ),
+    ).toEqual(['retired', 'it stays down']);
+    expect(narrowMeta(node({ promised: '3.0' }), null, true, true).map((line) => line.text)).toEqual([
+      'wiped',
+      'the disk is empty',
+    ]);
+  });
+
+  it('never prints more lines than the layout made room for', () => {
+    const lines = narrowMeta(
+      node({
+        role: 'leader',
+        promised: '3.0',
+        chosen_index: 4,
+        acceptors: [0, 1, 2],
+        matchmaking: { ballot: '3.0', config: [0, 1, 2], kind: 'belief', remaining: 1 },
+        gc: { effective_watermark: '2.0', retirable: [3] },
+        handover: 'stopping',
+      }),
+      { row: 0, column: 1 },
+      false,
+      true,
+    );
+    expect(lines.length).toBeLessThanOrEqual(6);
   });
 });

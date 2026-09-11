@@ -6,7 +6,7 @@
 // into the field guide.
 
 import type { Action, AutomationFlag, AutomationFlagView, GameView, LevelSummary } from '../types';
-import type { Progress } from '../progress';
+import { isBriefingFolded, type Progress } from '../progress';
 import { narrationStream } from '../narration';
 import { h } from '../render/dom';
 import { markdown } from './markdown';
@@ -22,6 +22,40 @@ export interface PanelDeps {
   dispatch: Dispatch;
   undo: () => void;
   reset: () => void;
+  /** Whether the panel is drawn under the stage, on a phone. */
+  narrow: boolean;
+  /** Fold this level's briefing away, or open it again. */
+  fold: (folded: boolean) => void;
+}
+
+/**
+ * The briefing.
+ *
+ * A wide screen has a column for it and it stays open. A phone puts it above
+ * the stage, where the player reads it once and then wants the board, so there
+ * it folds — and the choice is kept per level, in the progress store.
+ */
+function briefingBlock(deps: PanelDeps): HTMLElement {
+  const { view } = deps;
+  if (!deps.narrow) {
+    return h(
+      'section',
+      { class: 'briefing' },
+      h('h2', {}, 'The briefing'),
+      markdown(view.level.briefing),
+    );
+  }
+  const open = !isBriefingFolded(view.level.id, deps.progress);
+  const block = h(
+    'details',
+    { class: 'briefing', open },
+    h('summary', {}, 'The briefing'),
+    markdown(view.level.briefing),
+  );
+  block.addEventListener('toggle', () => {
+    deps.fold(!block.open);
+  });
+  return block;
 }
 
 function goalBlock(view: GameView): HTMLElement {
@@ -245,12 +279,7 @@ export function renderPanel(deps: PanelDeps): HTMLElement {
     renderPrompt(view, deps.dispatch),
     goalBlock(view),
     quorumBlock(view),
-    h(
-      'section',
-      { class: 'briefing' },
-      h('h2', {}, 'The briefing'),
-      markdown(view.level.briefing),
-    ),
+    briefingBlock(deps),
     unlocksBlock(view),
     view.level.hint ? h('section', { class: 'hint' }, h('h2', {}, 'A hint'), h('p', {}, view.level.hint)) : null,
     automationBlock(view, deps.dispatch),

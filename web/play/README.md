@@ -38,11 +38,42 @@ is `nix develop --command scripts/build-play.sh`, after `mdbook build`.
 | `src/narration.ts` | narration: the last move's lines (the caption) and the log's whole stream |
 | `src/types.ts` | re-exports of the generated contract |
 | `src/ballot.ts` | reads the printed `round.node` ballot back, for the one ballot a player passes on |
-| `src/render/` | the SVG stage: `layout.ts` is the geometry, `grid.ts` reads the acceptor grid, `matchmaker.ts` is the matchmaker band's geometry and labels, `disk.ts` says which disks are gone, `stage.ts` draws |
-| `src/ui/` | the panel, the prompt card, the wire list, the controls, `matchmakers.ts` for the matchmaker plane's own controls, the quorum sentences, the refusal, the client history, the level map |
+| `src/render/` | the SVG stage: `layout.ts` is the wide geometry, `narrow.ts` the phone's, `grid.ts` reads the acceptor grid, `matchmaker.ts` is the matchmaker band's geometry and labels, `disk.ts` says which disks are gone, `stage.ts` draws |
+| `src/ui/` | the panel, the prompt card, the wire list, the controls, `matchmakers.ts` for the matchmaker plane's own controls, the quorum sentences, the refusal, the client history, the node inspector, the level map |
 | `src/generated/` | **the contract — never hand-edited** (see below) |
 | `src/wasm/` | wasm-bindgen output, gitignored, produced by the build script |
 | `src/fixtures/` | one captured `GameView`, for the tests |
+
+## Two layouts
+
+A wide screen gets the board on the left and the panel on the right, and the
+stage draws 960 SVG units (1210 where the deployment names matchmakers) that
+the browser fits to the column.
+
+A screen under 600 pixels gets a different layout, and the two halves of it
+must agree:
+
+- **The page** is one column (`@media (max-width: 600px)` in `styles.css`).
+  `.board` and `.panel` become `display: contents`, so their sections are the
+  column's own items and one `order` runs through both: the level title, the
+  briefing, the goal, the prompt card, the caption, the stage, the node
+  inspector, the wire list, the refusal, the controls, and then the rest of
+  the panel. The briefing folds there, and the fold is kept per level in the
+  progress store.
+- **The stage** is drawn for the container's width, which `main.ts` reads
+  through a `ResizeObserver` and hands to `renderStage` as a `Viewport`. Below
+  the same 600 pixels the geometry comes from `render/narrow.ts`: the viewBox
+  *is* the container's width, so one SVG unit is one CSS pixel. A font size of
+  11 units is then 11 pixels on the glass, a message dot is 14 across inside a
+  transparent hit circle of 28, and the disc shrinks to 21 to make the room.
+  The accepted log is folded into a summary under each node — how much is
+  chosen and applied, how far the log goes, the hole — and the whole column is
+  one tap away in the node inspector. The matchmaker band moves under the
+  acceptors, and a grid's rows stack.
+
+`narrowLayout` is pure and unit-tested: it works out how wide a label may be
+from the picture it just laid out, and `stage.ts` clips every line to that.
+Nothing a player must read is only on the stage.
 
 ## The contract rule
 
