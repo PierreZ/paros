@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { circleLayout, dotPositions, groupByLink, spreadAlongLink, trim } from './layout';
+import { circleLayout, dotPositions, groupByLink, headingDegrees, spreadAlongLink, trim } from './layout';
 
 describe('circleLayout', () => {
   it('starts at the top and goes clockwise', () => {
@@ -100,5 +100,24 @@ describe('groupByLink', () => {
     ]);
     expect(links.get('1->2')).toHaveLength(2);
     expect(links.get('2->1')).toHaveLength(1);
+  });
+});
+
+describe('headingDegrees', () => {
+  it('points the arrowhead at the receiver', () => {
+    expect(headingDegrees({ x: 0, y: 0 }, { x: 10, y: 0 })).toBe(0);
+    expect(headingDegrees({ x: 0, y: 0 }, { x: 0, y: 10 })).toBe(90);
+    expect(headingDegrees({ x: 0, y: 0 }, { x: -10, y: 0 })).toBe(180);
+    expect(headingDegrees({ x: 0, y: 0 }, { x: 0, y: -10 })).toBe(-90);
+  });
+
+  it('reverses with the direction of travel', () => {
+    const a = { x: 3, y: 4 };
+    const b = { x: 30, y: 40 };
+    expect(Math.abs(headingDegrees(a, b) - headingDegrees(b, a))).toBe(180);
+  });
+
+  it('gives a zero-length link a heading of zero', () => {
+    expect(headingDegrees({ x: 1, y: 1 }, { x: 1, y: 1 })).toBe(0);
   });
 });

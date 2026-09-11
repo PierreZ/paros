@@ -116,6 +116,21 @@ export function dotPositions(from: Point, to: Point, count: number, lateral = 8)
 }
 
 /**
+ * The heading from `from` to `to`, in degrees, as SVG `rotate` reads it
+ * (0 points right, 90 points down).
+ *
+ * A message is drawn as an arrowhead turned to this heading, so the stage
+ * shows which node it travels to. A zero-length link has no heading and
+ * points right.
+ */
+export function headingDegrees(from: Point, to: Point): number {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (dx === 0 && dy === 0) return 0;
+  return (Math.atan2(dy, dx) * 180) / Math.PI;
+}
+
+/**
  * The prefix that names a message endpoint's tier.
  *
  * Node ids and matchmaker ids are different identity spaces, so matchmaker 0
