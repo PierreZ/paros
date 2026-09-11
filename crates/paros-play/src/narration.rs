@@ -482,6 +482,12 @@ pub(crate) fn describe(
     }
 
     // ---- role -------------------------------------------------------------
+    // A Prepare that leaves in the same step the node becomes leader cannot
+    // have been answered yet: Phase 1 closed before any Promise, which only
+    // the matchmakers can license (an empty history above the watermark).
+    let prepared_now = sent
+        .iter()
+        .any(|(_, m)| matches!(m, Message::Prepare { ballot, .. } if *ballot == after.ballot));
     if before.role != after.role
         && let Some(role) = after.role
     {
@@ -500,6 +506,16 @@ pub(crate) fn describe(
                          where the frontier is and what sits below it. That is the gain: a \
                          leader change without a round trip.",
                         from.0, from.0
+                    ),
+                ),
+                LeadershipOrigin::Elected if prepared_now => say(
+                    NarrationKind::Leader,
+                    format!(
+                        "{node} is the leader at ballot {b} before any Promise arrives. The \
+                         matchmakers reported no earlier configuration, so no earlier ballot \
+                         could choose a value. Phase 1 has nothing to recover, and {node} may \
+                         run Phase 2 now. Its Prepare still goes out, so the acceptors fence \
+                         out every ballot below {b}."
                     ),
                 ),
                 LeadershipOrigin::Elected => say(
