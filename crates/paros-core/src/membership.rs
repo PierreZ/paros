@@ -804,6 +804,44 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerId(pub u64);
 
+/// Stable identity of a **proxy leader** within the deployment's proxy set
+/// (#142, Compartmentalized Paxos §3.1). A distinct namespace from
+/// [`NodeId`], exactly as [`MatchmakerId`] is and for the same reason: a
+/// proxy is not an acceptor. It is never in `Config::nodes`, never drawn by a
+/// reconfiguration, never counted by retirement, GC, the pool guards or a
+/// dead-node budget; an operator scales proxies by starting processes, never
+/// by reconfiguring the acceptor set.
+///
+/// The core holds only the proxy **count** (`Config::proxy_count`) and
+/// derives a slot's proxy as `ProxyId(slot % proxy_count)`
+/// ([`ProxyId::of`]): a pure function of the slot, so a handoff successor
+/// re-delegating an inherited round and a restarted leader's re-send name
+/// the same proxy without carrying it. The driver's deployment map resolves
+/// the id to a process, as it resolves `Learners` from the pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ProxyId(pub u64);
+
+impl ProxyId {
+    /// The proxy `slot`'s Phase 2 is delegated to under a deployment of
+    /// `proxy_count` proxies: `slot % proxy_count`. `None` when the count is
+    /// zero — the plain deployment, whose Phase 2 stays colocated.
+    #[must_use]
+    pub fn of(slot: Slot, proxy_count: usize) -> Option<Self> {
+        if proxy_count == 0 {
+            return None;
+        }
+        let count = u64::try_from(proxy_count).unwrap_or(u64::MAX);
+        Some(Self(slot.0 % count))
+    }
+
+    /// Whether this id names a proxy of a deployment of `proxy_count`.
+    #[must_use]
+    pub fn is_in(self, proxy_count: usize) -> bool {
+        u64::try_from(proxy_count).is_ok_and(|count| self.0 < count)
+    }
+}
+
 impl Fingerprint for Vec<MatchmakerId> {
     /// The identity a matchmaker set carries through Phase 2: an FNV-1a fold
     /// over the members, in their sorted order. The value a decree chooses is

@@ -533,9 +533,15 @@ impl World {
         let bytes = Value(value.as_bytes().to_vec());
         let issued = self.take_event();
         let result = self.observe(id, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .map(|node| node.propose_in(ClientId(client), seq, bytes, column));
+            let out = world.nodes[index].as_mut().map(|node| {
+                node.propose_in(
+                    ClientId(client),
+                    seq,
+                    bytes,
+                    column,
+                    paros_core::Delegation::Auto,
+                )
+            });
             world.pump(id);
             out
         });

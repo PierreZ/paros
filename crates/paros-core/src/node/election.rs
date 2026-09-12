@@ -7,13 +7,15 @@
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
 use super::{
-    Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, LeadershipOrigin, Message, NodeId,
-    NodeRole, Slot,
+    Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
+    Message, NodeId, NodeRole, Slot,
 };
 use crate::matchmaker::{MatchRequest, RegistrationKind};
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
-use crate::proposer::{Campaign, PromiseFold, RECOVERY_BATCH, RecoveryPolicy, RecoveryStep};
+use crate::proposer::{
+    Campaign, PromiseFold, RECOVERY_BATCH, Recovery, RecoveryPolicy, RecoveryStep,
+};
 
 impl ColocatedNode {
     // ---- election / leadership --------------------------------------------
@@ -34,7 +36,8 @@ impl ColocatedNode {
             return;
         }
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
-            self.non_member_campaigns_skipped = self.non_member_campaigns_skipped.saturating_add(1);
+            self.counters.non_member_campaigns_skipped =
+                self.counters.non_member_campaigns_skipped.saturating_add(1);
             return;
         }
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());
@@ -304,7 +307,7 @@ impl ColocatedNode {
                 continue;
             }
             if decision.command.is_some() {
-                self.repair_case1 += 1;
+                self.counters.repair_case1 += 1;
             } else {
                 // Case 2 invents a `Noop` from a full Q1 of qualifying `none`.
                 // A slot inside this node's own chosen prefix was decided by
@@ -315,7 +318,7 @@ impl ColocatedNode {
                     slot >= self.first_unchosen(),
                     "a quorum of none never resolves a slot inside the chosen prefix"
                 );
-                self.repair_case2 += 1;
+                self.counters.repair_case2 += 1;
             }
             // Case 2's filler is the deployment's to choose: the probe
             // reports "a quorum knows of no value here", and this wiring —
@@ -327,7 +330,8 @@ impl ColocatedNode {
             {
                 self.replica.track_inflight(entry.client, entry.seq, slot);
             }
-            self.start_accept_round(slot, command);
+            // A repair decision is Phase-1-shaped work: never proxied.
+            self.start_accept_round(slot, command, Delegation::Colocated);
         }
     }
 
@@ -382,9 +386,7 @@ impl ColocatedNode {
         // under exactly the configuration this ballot was registered with.
         // The plain path's static configuration stays bound to no ballot.
         if self.config.has_matchmakers() {
-            self.acceptors = outcome.config.clone();
-            self.acceptors_since = outcome.ballot;
-            self.record_membership();
+            self.adopt_configuration(outcome.config.clone(), outcome.ballot);
         } else {
             assert!(
                 self.acceptors == outcome.config,
@@ -459,7 +461,7 @@ impl ColocatedNode {
             .into_iter()
             .map(|(slot, (_ballot, command))| (slot, command))
             .collect();
-        self.election_gap_fills = 0;
+        self.counters.election_gap_fills = 0;
         self.leadership_origin = LeadershipOrigin::Elected;
         // An election *is* the quorum report that licenses no-op filling.
         self.proposer.open_recovery(
@@ -514,6 +516,16 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader || self.pending_recovery_batch.is_some() {
             return;
         }
+        // An election's recovery — the P2c re-proposals and the gap fills —
+        // is never proxied: a fresh leadership's recovery depends on no
+        // proxy. A handoff's inherited rounds are the opposite case: they
+        // are the predecessor's settled Phase-2 work, and the successor
+        // **re-delegates** them with `leader` naming itself, so a proxy the
+        // predecessor used never keeps a stale leader hint (#142).
+        let delegation = match self.proposer.recovery().map(Recovery::policy) {
+            Some(RecoveryPolicy::Inherited) => Delegation::Auto,
+            Some(RecoveryPolicy::Phase1Backed) | None => Delegation::Colocated,
+        };
         let mut processed = 0_usize;
         let mut started = 0_usize;
         let mut gap_fills = 0_usize;
@@ -557,14 +569,15 @@ impl ColocatedNode {
                     "a no-op gap fill never targets a slot inside the chosen prefix"
                 );
                 gap_fills += 1;
-                self.election_gap_fills = self.election_gap_fills.saturating_add(1);
+                self.counters.election_gap_fills =
+                    self.counters.election_gap_fills.saturating_add(1);
             }
             if let Command::User(entry) = &command
                 && !self.replica.applied_elsewhere(entry, slot)
             {
                 self.replica.track_inflight(entry.client, entry.seq, slot);
             }
-            self.start_accept_round(slot, command);
+            self.start_accept_round(slot, command, delegation);
             started += 1;
         }
 

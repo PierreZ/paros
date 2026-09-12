@@ -59,7 +59,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
 
     // The cluster decided a no-op at slot 1 under a later ballot; we learn it.
     n.step(Message::Commit {
-        from: NodeId(1),
+        from: Party::Node(NodeId(1)),
         ballot: ballot(2, 1),
         slot: Slot(1),
         command: Command::Control(Control::Noop),
@@ -281,13 +281,13 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
     let mut n = node(1, &[0, 1, 2]);
     let b = ballot(3, 0);
     n.step(Message::Commit {
-        from: NodeId(0),
+        from: Party::Node(NodeId(0)),
         ballot: b,
         slot: Slot(0),
         command: ucmd(1, 1, 10),
     });
     n.step(Message::Commit {
-        from: NodeId(0),
+        from: Party::Node(NodeId(0)),
         ballot: b,
         slot: Slot(2),
         command: ucmd(1, 3, 30),
@@ -298,7 +298,7 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
         "gap at slot 1 holds the prefix at slot 0"
     );
     n.step(Message::Commit {
-        from: NodeId(0),
+        from: Party::Node(NodeId(0)),
         ballot: b,
         slot: Slot(1),
         command: ucmd(1, 2, 20),
@@ -370,6 +370,7 @@ fn restart_rebuilds_state_from_hard_state() {
             nodes: Vec::new(),
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
+            proxy_count: 0,
         },
         first_slot: Slot(0),
         faulty: Vec::new(),
@@ -420,7 +421,7 @@ fn commit_below_floor_is_not_relearned() {
     let _ = drain(n);
 
     n.step(Message::Commit {
-        from: NodeId(1),
+        from: Party::Node(NodeId(1)),
         ballot: ballot(1, 0),
         slot: Slot(1),
         command: ucmd(7, 7, 88),
@@ -483,7 +484,7 @@ fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
 fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     let mut x = node(0, &[0, 1, 2]);
     x.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: ballot(3, 2),
         slot: Slot(1),
         command: ucmd(1, 1, 0xBB),
@@ -497,7 +498,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
 
     // Slot 0 arrives; the prefix advances through both.
     x.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: ballot(3, 2),
         slot: Slot(0),
         command: ucmd(1, 0, 0xCC),
@@ -508,7 +509,7 @@ fn a_replayed_commit_for_a_known_slot_still_advances_the_prefix() {
     // A duplicated / catch-up-replayed commit for a known slot is a no-op for
     // state but must never wedge: the early return still re-drives the walk.
     x.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: ballot(3, 2),
         slot: Slot(1),
         command: ucmd(1, 1, 0xBB),
@@ -544,7 +545,13 @@ fn a_driver_named_column_is_the_round_s_column() {
     // Slot 0 would go to column 0 = {0, 3}; the driver names column 2 =
     // {2, 5}, of which the leader is not a member.
     assert!(matches!(
-        nodes[0].propose_in(ClientId(1), ClientSeq(1), val(10), Some(2)),
+        nodes[0].propose_in(
+            ClientId(1),
+            ClientSeq(1),
+            val(10),
+            Some(2),
+            Delegation::Auto
+        ),
         ProposeResult::Accepted(Slot(0))
     ));
     let first = drain(&mut nodes[0]);
@@ -553,6 +560,7 @@ fn a_driver_named_column_is_the_round_s_column() {
     assert!(
         nodes[0].proposer.rounds()[&Slot(0)]
             .accepted_by()
+            .expect("colocated")
             .is_empty(),
         "the leader is outside the named column and casts no vote"
     );
@@ -576,7 +584,7 @@ fn a_driver_named_column_is_the_round_s_column() {
     }
     // `None` is exactly `propose`: slot 1 -> column 1 = {1, 4}.
     assert!(matches!(
-        nodes[0].propose_in(ClientId(1), ClientSeq(2), val(20), None),
+        nodes[0].propose_in(ClientId(1), ClientSeq(2), val(20), None, Delegation::Auto),
         ProposeResult::Accepted(Slot(1))
     ));
     assert_eq!(
@@ -590,14 +598,26 @@ fn a_driver_named_column_is_the_round_s_column() {
 fn a_column_the_grid_does_not_have_is_a_programmer_error() {
     let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
     make_leader(&mut nodes, 0);
-    let _ = nodes[0].propose_in(ClientId(1), ClientSeq(1), val(10), Some(3));
+    let _ = nodes[0].propose_in(
+        ClientId(1),
+        ClientSeq(1),
+        val(10),
+        Some(3),
+        Delegation::Auto,
+    );
 }
 
 #[test]
 #[should_panic(expected = "an accept round's column is a column of the active configuration")]
 fn a_column_under_a_majority_is_a_programmer_error() {
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose_in(ClientId(1), ClientSeq(9), val(10), Some(0));
+    let _ = nodes[0].propose_in(
+        ClientId(1),
+        ClientSeq(9),
+        val(10),
+        Some(0),
+        Delegation::Auto,
+    );
 }
 
 /// The mechanism behind #141's column addressing, pinned at the node: a
@@ -622,6 +642,7 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     assert!(
         nodes[0].proposer.rounds()[&Slot(0)]
             .accepted_by()
+            .expect("colocated")
             .contains(&NodeId(0))
     );
 
@@ -643,6 +664,7 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     assert!(
         !nodes[0].proposer.rounds()[&Slot(0)]
             .accepted_by()
+            .expect("colocated")
             .contains(&NodeId(1)),
         "an out-of-column vote is never folded"
     );
@@ -654,8 +676,11 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
         assert_eq!(chosen_at(n, 0), Some(val(10)));
     }
 
-    // Slot 1 -> column 1 = {1, 4}: the leader is not an addressee, casts no
-    // vote and records nothing until the decision; both members must accept.
+    // Slot 1 -> column 1 = {1, 4}: the leader is not an addressee and casts
+    // no vote — both members must accept. It still records the round in its
+    // own log, a stray copy the column does not count: the allocator is
+    // durable by construction (`record_own_round`), so a reboot rederives
+    // the frontier this proposal moved.
     assert!(matches!(
         nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
         ProposeResult::Accepted(_)
@@ -666,9 +691,15 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     assert!(
         nodes[0].proposer.rounds()[&Slot(1)]
             .accepted_by()
-            .is_empty()
+            .expect("colocated")
+            .is_empty(),
+        "the leader's own record outside the column is not a vote"
     );
-    assert_eq!(nodes[0].acceptor().record(Slot(1)), None);
+    assert_eq!(
+        nodes[0].acceptor().record(Slot(1)),
+        Some(&(ballot, ucmd(1, 2, 20))),
+        "the leader records every round it opens, whichever column it went to"
+    );
     // Only node 1 answers: half a column decides nothing.
     let only_node_1: Vec<(NodeId, Message)> = second
         .iter()

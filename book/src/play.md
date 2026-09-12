@@ -105,11 +105,12 @@ Level ids are stable strings, never indices, and a level opens directly at
 
 ## What comes next
 
-The four acts cover what paros implements today. *Compartmentalized Paxos* keeps
-two compartments in reserve: proxy leaders and a separate replica tier. They are
-not in the crate yet, so they have no level and no chapter. The rule holds for
-both halves of this book. A mechanism gets a level when the core can play it for
-real.
+The four acts cover what paros implements today, with one exception.
+*Compartmentalized Paxos*'s proxy leaders are in the core and have a
+[chapter](beyond-multi-paxos.md#proxy-leaders), and no level yet: their driver
+is the next half of that work. The separate replica tier is not in the crate, so
+it has neither. The rule holds for both halves of this book. A mechanism gets a
+level when the core can play it for real.
 
 Correctness itself is not proven in the browser. The game runs one world that you
 schedule by hand, and it draws no randomness at all. The deterministic simulation

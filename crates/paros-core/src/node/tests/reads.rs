@@ -295,7 +295,7 @@ fn read_round_expires_after_its_ttl() {
 
     // No ack ever arrives; the leader garbage-collects the round silently (the
     // driver owns the client-facing retry).
-    for _ in 0..=READ_ROUND_TTL_TICKS {
+    for _ in 0..=READ_TTL_TICKS {
         nodes[0].tick();
     }
     assert!(nodes[0].proposer().read_rounds().is_empty());

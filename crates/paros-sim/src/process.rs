@@ -276,6 +276,7 @@ async fn run_acceptor(
         nodes: pool,
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
+        proxy_count: 0,
     };
 
     // The per-iteration durable-storage world, shared by every node and

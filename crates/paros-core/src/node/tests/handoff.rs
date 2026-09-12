@@ -6,9 +6,9 @@
 
 use super::{
     ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
-    LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, ProposeResult, Slot, TestStorage,
-    ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered, drain,
-    make_leader, node, ucmd, val,
+    LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot,
+    TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered,
+    drain, make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
@@ -407,7 +407,7 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
     assert!(nodes[0].can_relinquish());
     let superseding = ballot(nodes[0].ballot().round + 5, 2);
     nodes[0].step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: superseding,
         slot: nodes[0].proposer().next_slot(),
         command: ucmd(8, 1, 3),

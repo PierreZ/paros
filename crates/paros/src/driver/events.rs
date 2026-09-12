@@ -5,7 +5,7 @@
 //! string literals at their emit sites, for humans only: nothing reads the
 //! trace back (correctness lives in the audit).
 
-use paros_core::{Ballot, Command, Control, Message, NodeId, Registration, Slot};
+use paros_core::{Ballot, Command, Control, Message, Party, Registration, Slot};
 
 use crate::grpc::internal;
 
@@ -110,7 +110,7 @@ pub fn message_kind(m: &Message) -> &'static str {
 /// `None` on a leader that has chosen nothing (an empty prefix is not slot 0;
 /// see [`paros_core::Message::Heartbeat`]). The kinds with no ballot at all
 /// (the catch-up pair) return `None` outright.
-pub(crate) fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>)> {
+pub(crate) fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)> {
     match m {
         // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {
@@ -124,34 +124,35 @@ pub(crate) fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>
             ballot,
             from_slot,
             ..
-        } => Some((*from, *ballot, Some(*from_slot))),
+        } => Some((Party::Node(*from), *ballot, Some(*from_slot))),
+        // The two Phase-2 kinds whose party may be a proxy leader (#142).
         Message::Accept {
             reply_to: from,
             ballot,
             slot,
             ..
         }
-        | Message::Accepted {
+        | Message::Commit {
+            from, ballot, slot, ..
+        } => Some((*from, *ballot, Some(*slot))),
+        Message::Accepted {
             from, ballot, slot, ..
         }
         | Message::Nack {
             from, ballot, slot, ..
-        }
-        | Message::Commit {
-            from, ballot, slot, ..
-        } => Some((*from, *ballot, Some(*slot))),
+        } => Some((Party::Node(*from), *ballot, Some(*slot))),
         Message::Heartbeat {
             from,
             ballot,
             commit,
             ..
-        } => Some((*from, *ballot, *commit)),
+        } => Some((Party::Node(*from), *ballot, *commit)),
         Message::InstallSnapshot {
             from,
             ballot,
             chosen_index,
             ..
-        } => Some((*from, *ballot, Some(*chosen_index))),
+        } => Some((Party::Node(*from), *ballot, Some(*chosen_index))),
         // A handoff's "slot" is the allocator frontier it transfers — the
         // field that carries its meaning on a timeline.
         Message::Relinquish {
@@ -159,7 +160,7 @@ pub(crate) fn message_route(m: &Message) -> Option<(NodeId, Ballot, Option<Slot>
             ballot,
             next_slot,
             ..
-        } => Some((*from, *ballot, Some(*next_slot))),
+        } => Some((Party::Node(*from), *ballot, Some(*next_slot))),
         _ => None,
     }
 }

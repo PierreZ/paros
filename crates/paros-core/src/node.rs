@@ -2,19 +2,24 @@
 //! `step`/`tick`/`ready`/`advance` contract.
 
 mod acceptor;
+mod authority;
 mod boot;
 mod catch_up_snapshot;
-mod decide_apply;
 mod election;
 mod gc;
 mod handoff;
 mod helpers;
 mod invariants;
+mod learn;
 mod matchmaking;
+mod phase2;
 mod quorum_reads;
 mod reads;
 mod reconfigure;
 mod replication;
+
+#[cfg(test)]
+use self::reads::READ_TTL_TICKS;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,7 +27,6 @@ pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
 pub use self::matchmaking::MatchStep;
-use self::reads::READ_ROUND_TTL_TICKS;
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
@@ -30,8 +34,8 @@ use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::Matchmaking;
-use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
-use crate::message::{Audience, Message};
+use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
+use crate::message::{Audience, Message, Party};
 use crate::proposer::Proposer;
 use crate::quorum_read::QuorumReads;
 use crate::ready::Ready;
@@ -114,6 +118,29 @@ pub enum ReadIndexResult {
     Pending,
 }
 
+/// **Where a proposal's Phase 2 runs** (#142): on the leader itself, or
+/// handed to a proxy leader that fans the `Accept` out, folds the
+/// `Accepted`s and emits the `Commit`. The driver names it at the
+/// delegation call ([`ColocatedNode::propose_in`],
+/// [`ColocatedNode::propose_control_in`]); production passes
+/// [`Delegation::Auto`] and the core's pure function decides, the
+/// deterministic simulation overrides from the node loop to reach the proxy
+/// mixes the modulus alone never would. Every choice is **always safe**: a
+/// proxy contributes nothing to the decision, and two fan-outs of one
+/// `(slot, ballot, command)` are P2b-idempotent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Delegation {
+    /// The core's own rule: `ProxyId(slot % proxy_count)`
+    /// ([`ProxyId::of`]), colocated on a deployment without proxies.
+    #[default]
+    Auto,
+    /// Run this round on the leader whatever the deployment's proxy count
+    /// — the driver's "skip the delegation" choice.
+    Colocated,
+    /// Hand this round to this proxy.
+    To(ProxyId),
+}
+
 /// A confirmed read-index round, surfaced via [`Ready::read_states`]: at the
 /// moment the round began this node was leader (a heartbeat-ack quorum at its
 /// ballot proved it afterwards) and `index` was covered by the applied prefix
@@ -153,9 +180,13 @@ pub struct ReadState {
 ///   (`ColocatedNode::assert_invariants`).
 ///
 /// It holds **no protocol tally of its own**: every quorum question goes to a
-/// role, and every role's answer comes back as data. A second deployment —
-/// a compartmentalized proxy leader, a bare acceptor, a read-only replica —
-/// is a different wiring over the same three roles, not a different core.
+/// role, and every role's answer comes back as data. A second deployment is
+/// a different wiring over the same roles, not a different core — and the
+/// first one exists: the compartmentalized **proxy leader**
+/// ([`crate::proxy_leader::ProxyLeader`], #142) is the proposer's Phase-2
+/// tally ([`crate::proposer::Rounds`]) plus routing, on a process that is
+/// neither an acceptor nor a replica; a bare acceptor and a read-only
+/// replica would be the next two.
 ///
 /// Pure, synchronous and single-threaded: no I/O, no clock, no randomness.
 /// Inputs arrive via [`ColocatedNode::step`] (peer messages and
@@ -254,9 +285,10 @@ pub struct ColocatedNode {
     /// echo it, so a read round knows which beats prove leadership *after* it
     /// began.
     heartbeat_seq: u64,
-    /// Monotone count of `CheckQuorum` step-downs this incarnation, for the
-    /// driver's audit report (mirrors `duplicates_suppressed`).
-    quorum_lost_step_downs: u64,
+    /// The monotone observability counters of this incarnation
+    /// ([`Counters`]): what the driver's audit report reads, never a
+    /// decision.
+    counters: Counters,
 
     // ---- proposer (multi-decree) ----
     /// The proposer component: the open Phase 1, the CTRL repair probe, the
@@ -290,12 +322,6 @@ pub struct ColocatedNode {
     /// The leader's open garbage-collection campaign (#123, `node/gc.rs`).
     /// Leader-only, volatile, `None` on plain Multi-Paxos.
     gc: Option<Collector>,
-    /// Monotone campaign-phase counters this incarnation, for the driver's
-    /// audit report: campaigns this node declined to open because it is not
-    /// a member of the configuration it would register, and leaderships it
-    /// resigned once its own reconfiguration removed it from the acceptor set.
-    non_member_campaigns_skipped: u64,
-    non_member_step_downs: u64,
     /// The round every later campaign opens strictly above, raised by a
     /// `Stale` matchmaking refusal to the refuser's highest registered round.
     /// Volatile: a restart starts from the durable promise again. Without it
@@ -305,19 +331,6 @@ pub struct ColocatedNode {
     /// matchmaking cousin of the dueling-proposer livelock, seen in the
     /// hunt as two hundred registrations for three completed campaigns.
     round_floor: u64,
-    /// Election timeouts that found a matchmaking phase still open and
-    /// re-sent its requests instead of abandoning the campaign (see
-    /// [`ColocatedNode::tick`]). Observability only.
-    matchmaking_timeouts: u64,
-    /// Monotone count of recovery-timeout step-downs this incarnation (a leader
-    /// resigning because it could not finish repairing its blocked slots).
-    repair_step_downs: u64,
-    /// Monotone count of blocked slots resolved as Case 1 (re-proposed from a
-    /// straggler's `have`) after the election closed.
-    repair_case1: u64,
-    /// Monotone count of blocked slots resolved as Case 2 (a full Q1 of `none`
-    /// assembled from stragglers; decided `Noop`).
-    repair_case2: u64,
     /// How this node came to hold its current leadership (see
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,
@@ -329,11 +342,39 @@ pub struct ColocatedNode {
     /// Monotone cooperative-handoff counters this incarnation, for the
     /// driver's audit report.
     handoff: HandoffCounters,
-    /// How many undecided holes this node filled with a [`Control::Noop`] when it
-    /// won its *current* leadership (0 until it wins one, and re-set at each
-    /// election). Purely observational: the driver reads it on the transition to
-    /// Leader and surfaces it, so the simulation can prove the gap-fill path is
-    /// genuinely reached rather than merely present.
+}
+
+/// The node's **observability counters**: monotone per incarnation, read by
+/// the driver's audit report and by the examples, and never a decision —
+/// deleting every one of them leaves the state machine unchanged. Each
+/// names a path the simulation proves reached rather than merely present.
+/// The handoff's own live in [`HandoffCounters`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Counters {
+    /// `CheckQuorum` step-downs: full election-timeout windows without an
+    /// ack quorum.
+    quorum_lost_step_downs: u64,
+    /// Campaigns this node declined to open because it is not a member of
+    /// the configuration it would register.
+    non_member_campaigns_skipped: u64,
+    /// Leaderships resigned once this node's own reconfiguration removed it
+    /// from the acceptor set.
+    non_member_step_downs: u64,
+    /// Election timeouts that found a matchmaking phase still open and
+    /// re-sent its requests instead of abandoning the campaign (see
+    /// [`ColocatedNode::tick`]).
+    matchmaking_timeouts: u64,
+    /// Recovery-timeout step-downs: a leader resigning because it could not
+    /// finish repairing its blocked slots.
+    repair_step_downs: u64,
+    /// Blocked slots resolved as Case 1 (re-proposed from a straggler's
+    /// `have`) after the election closed.
+    repair_case1: u64,
+    /// Blocked slots resolved as Case 2 (a full Q1 of `none` assembled from
+    /// stragglers; decided `Noop`).
+    repair_case2: u64,
+    /// Undecided holes filled with a [`Control::Noop`] when this node won its
+    /// *current* leadership (0 until it wins one, re-set at each election).
     election_gap_fills: u64,
 }
 
@@ -371,8 +412,9 @@ impl ColocatedNode {
                 ballot,
                 slot,
                 command,
+                config,
                 ..
-            } => self.on_accept(reply_to, leader, ballot, slot, command),
+            } => self.on_accept(reply_to, leader, ballot, slot, command, config),
             Message::Accepted {
                 from,
                 ballot,
@@ -459,15 +501,17 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
     pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
-        self.propose_in(client, seq, value, None)
+        self.propose_in(client, seq, value, None, Delegation::Auto)
     }
 
     /// [`ColocatedNode::propose`] with the driver naming the **column** the
-    /// proposal's Phase 2 is addressed to (#141): `Some(c)` overrides the
-    /// core's own `slot % cols` ([`AcceptorConfig::column_of`]) for this one
-    /// round, `None` is exactly [`ColocatedNode::propose`].
+    /// proposal's Phase 2 is addressed to (#141) and the **proxy** it is
+    /// delegated to (#142): `Some(c)` overrides the core's own `slot % cols`
+    /// ([`AcceptorConfig::column_of`]) for this one round, and `delegation`
+    /// overrides its `slot % proxy_count` ([`ProxyId::of`]); `None` and
+    /// [`Delegation::Auto`] are exactly [`ColocatedNode::propose`].
     ///
-    /// **Always safe, which is why it is a method and not a fault.** Every
+    /// **Always safe, which is why these are methods and not faults.** Every
     /// full column of a grid is a Phase-2 quorum of it, and every Phase-1
     /// quorum (a row) meets every column, so a value chosen through any
     /// column is learned by every later election; which column a slot uses
@@ -476,25 +520,34 @@ impl ColocatedNode {
     /// stay on that column; a handoff successor or a restarted leader that
     /// re-proposes the slot derives `slot % cols` afresh, and two fan-outs
     /// of one `(slot, ballot, command)` to two columns are P2b-idempotent.
-    /// Production never overrides; the deterministic simulation does, from
-    /// the node loop, to reach the column mixes the modulus alone never
-    /// would.
+    /// A proxy contributes nothing to the decision, so which proxy runs a
+    /// round — or whether the leader runs it itself — is the same kind of
+    /// choice. Production never overrides; the deterministic simulation
+    /// does, from the node loop, to reach the column and proxy mixes the
+    /// modulus alone never would.
+    ///
+    /// A round is delegated only on a **settled** leadership — no election
+    /// recovery and no repair probe open — whatever `delegation` says;
+    /// before that it runs colocated, so a fresh leadership's recovery
+    /// depends on no proxy.
     ///
     /// # Panics
     ///
     /// If `column` names a column the active configuration does not have —
     /// one at or past its `cols`, or any column at all under a majority or
-    /// a flexible split, which name none. The driver derives the override
-    /// from [`ColocatedNode::acceptors`], so this is a programmer error,
-    /// never an operating condition. Also if an internal invariant is
-    /// broken.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column)))]
+    /// a flexible split, which name none — or `delegation` names a proxy at
+    /// or past the deployment's `proxy_count`. The driver derives both
+    /// overrides from [`ColocatedNode::acceptors`] and
+    /// [`ColocatedNode::config`], so this is a programmer error, never an
+    /// operating condition. Also if an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column, delegation = ?delegation)))]
     pub fn propose_in(
         &mut self,
         client: ClientId,
         seq: ClientSeq,
         value: Value,
         column: Option<usize>,
+        delegation: Delegation,
     ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
@@ -536,9 +589,21 @@ impl ColocatedNode {
         let entry = Entry { client, seq, value };
         self.replica.track_inflight(client, seq, slot);
         let column = column.or_else(|| self.acceptors.column_of(slot));
-        self.start_accept_round_in(slot, Command::User(entry), column);
+        let delegation = self.settled_delegation(delegation);
+        self.start_accept_round_in(slot, Command::User(entry), column, delegation);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
+    }
+
+    /// `delegation` on a settled leadership, colocated otherwise: only the
+    /// rounds a settled leadership opens are ever delegated
+    /// (`node/phase2.rs`).
+    fn settled_delegation(&self, delegation: Delegation) -> Delegation {
+        if self.may_delegate() {
+            delegation
+        } else {
+            Delegation::Colocated
+        }
     }
 
     /// Leader entry point for a **control command**: get `control` chosen into the
@@ -558,11 +623,31 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
+        self.propose_control_in(control, Delegation::Auto)
+    }
+
+    /// [`ColocatedNode::propose_control`] with the driver naming the proxy
+    /// the round is delegated to (#142), under exactly the rules of
+    /// [`ColocatedNode::propose_in`]: always safe, delegated only on a
+    /// settled leadership, [`Delegation::Auto`] is the core's own rule.
+    ///
+    /// # Panics
+    ///
+    /// If `delegation` names a proxy the deployment does not have, or an
+    /// internal invariant is broken (a programmer error, never an operating
+    /// condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control, delegation = ?delegation)))]
+    pub fn propose_control_in(
+        &mut self,
+        control: Control,
+        delegation: Delegation,
+    ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
         let slot = self.proposer.allocate();
-        self.start_accept_round(slot, Command::Control(control));
+        let delegation = self.settled_delegation(delegation);
+        self.start_accept_round(slot, Command::Control(control), delegation);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -583,7 +668,12 @@ impl ColocatedNode {
             return ProposeResult::NotLeader(self.leader);
         }
         let slot = self.proposer.allocate();
-        self.start_accept_round(slot, Command::Control(Control::Snap { at_index: slot }));
+        let delegation = self.settled_delegation(Delegation::Auto);
+        self.start_accept_round(
+            slot,
+            Command::Control(Control::Snap { at_index: slot }),
+            delegation,
+        );
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -726,7 +816,6 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn tick(&mut self) {
         self.tick_count += 1;
-        let me = self.config.id;
         if self.role == NodeRole::Leader {
             // A leader beats on every tick ([`HEARTBEAT_TICKS`] is the
             // cadence the audit's oracle assumes, not a tunable). Re-sending
@@ -734,39 +823,7 @@ impl ColocatedNode {
             // makes on the same cadence — see [`ColocatedNode::resend_pending`].
             self.broadcast_heartbeat();
             self.assert_invariants();
-            // GC read rounds that outlived their TTL (lost acks, an unreachable
-            // quorum). No re-broadcast logic is needed for the live ones: every
-            // leader tick already broadcasts a fresh, higher-seq beat whose acks
-            // confirm all older pending rounds.
-            let now = self.tick_count;
-            self.proposer.expire_reads(now, READ_ROUND_TTL_TICKS);
-            // CheckQuorum (#95): a leader must re-prove, once per election
-            // timeout, that an ack quorum can still reach it. Without this, an
-            // idle leader cut off from its quorum stays Leader forever — its
-            // election clock is frozen (the branch below runs only for
-            // non-leaders), below-promise beats are ignored unacked rather than
-            // Nacked, and an idle leader emits no `Accept`s whose Nack could
-            // demote it — while it keeps admitting proposals into a stale
-            // suffix for the whole partition, feeding #94's double-apply. The
-            // window is the same length as the election timeout (etcd-raft's
-            // CheckQuorum), so a demoted leader's peers are already eligible to
-            // campaign by the time it steps down. Every beat is acked by every
-            // reachable follower each tick, so a healthy leader trivially
-            // refills the window.
-            // A **Phase-2** quorum, for the reason spelled out at the read
-            // fence (`node/reads.rs`): a leader's authority is the claim that
-            // no later ballot has decided behind it, which every future
-            // Phase-1 quorum's intersection with this ack set rules out.
-            if self.election_timeout != 0 && self.proposer.tick_authority() >= self.election_timeout
-            {
-                if self.proposer.authority_holds(&self.acceptors) {
-                    self.proposer
-                        .renew_authority(self.is_acceptor().then_some(me));
-                } else {
-                    self.quorum_lost_step_downs += 1;
-                    self.become_follower(None);
-                }
-            }
+            self.tick_check_quorum();
             // A leader its own reconfiguration removed from the acceptor set
             // (#122): it drives the change to completion — its inherited
             // rounds decided, its recovery and repair closed — and then
@@ -778,7 +835,8 @@ impl ColocatedNode {
                 && self.proposer.probe().is_none()
                 && self.proposer.rounds().is_empty()
             {
-                self.non_member_step_downs = self.non_member_step_downs.saturating_add(1);
+                self.counters.non_member_step_downs =
+                    self.counters.non_member_step_downs.saturating_add(1);
                 self.become_follower(None);
             }
         } else {
@@ -799,7 +857,8 @@ impl ColocatedNode {
                     // saw 203 registrations at one matchmaker for 3
                     // completed campaigns and no leader in a 50 s tail).
                     let ballot = self.ballot;
-                    self.matchmaking_timeouts = self.matchmaking_timeouts.saturating_add(1);
+                    self.counters.matchmaking_timeouts =
+                        self.counters.matchmaking_timeouts.saturating_add(1);
                     self.resend_matchmaking();
                     // Postconditions: the clock moved nothing — same ballot,
                     // same open phase, still a candidate — and only re-asked.
@@ -823,7 +882,8 @@ impl ColocatedNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
-        self.tick_quorum_reads();
+        // Both read tallies: expire what outlived the window, serve the rest.
+        self.tick_reads();
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();
@@ -848,7 +908,7 @@ impl ColocatedNode {
                 .election_timeout
                 .saturating_mul(REPAIR_TIMEOUT_ELECTIONS);
             if self.election_timeout != 0 && elapsed >= timeout {
-                self.repair_step_downs += 1;
+                self.counters.repair_step_downs += 1;
                 self.become_follower(None);
             } else {
                 let (ballot, from_slot, unanswered) = {
@@ -927,6 +987,11 @@ impl ColocatedNode {
     /// deterministic simulation drives exactly that by skipping calls; production
     /// never skips.
     ///
+    /// **A delegated round is re-delegated** (#142): its re-send goes to
+    /// the proxy it was handed to, whose re-fan-out is P2b-idempotent, and
+    /// the round counts the re-delegation so a proxy that never answers
+    /// becomes visible ([`ColocatedNode::take_back_delegated`]).
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
@@ -939,10 +1004,63 @@ impl ColocatedNode {
         let pending = self.proposer.resend_page();
         for accept in pending {
             // The same column the round was opened against: a re-send never
-            // widens a grid round to another column.
-            self.send_accept(accept.slot, accept.ballot, accept.command, accept.column);
+            // widens a grid round to another column — and the same proxy.
+            self.send_accept(
+                accept.slot,
+                accept.ballot,
+                accept.command,
+                accept.column,
+                accept.proxy,
+            );
         }
         self.assert_invariants();
+    }
+
+    /// **Take back** every delegated round re-delegated at least
+    /// `after_resends` times without the proxy's `Commit` arriving, and run
+    /// each colocated from here on (#142). A no-op on a node that is not
+    /// the leader, on a deployment without proxies, and while every
+    /// delegated round is young.
+    ///
+    /// **The driver is expected to call this each beat**, right after
+    /// [`ColocatedNode::resend_pending`], with its own budget: how many
+    /// re-delegations a proxy may swallow is driver policy (a tunable, born
+    /// buggified), not a constant of the state machine, exactly as the
+    /// handoff-fence and repair budgets are. Liveness under a dead proxy is
+    /// the leader's, and this is the whole of it: the fallback is always
+    /// today's colocated Phase 2, as a failed handoff's fallback is an
+    /// election. **Skipping a call is always safe** — a delegated round
+    /// nobody takes back is simply undecided until its proxy answers or the
+    /// next leadership recovers it — and so is taking a round back early:
+    /// the proxy may still decide it behind this call, and two fan-outs of
+    /// one `(slot, ballot, command)` are P2b-idempotent, so the two
+    /// verdicts can only agree.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, after_resends)))]
+    pub fn take_back_delegated(&mut self, after_resends: u64) {
+        if self.role != NodeRole::Leader {
+            return;
+        }
+        for slot in self.proposer.stalled_delegations(after_resends) {
+            self.take_back(slot);
+        }
+        self.assert_invariants();
+    }
+
+    /// The slots this leader currently holds **delegated** to a proxy, with
+    /// the proxy each went to — for drivers / oracles (a node that is not the
+    /// leader holds none).
+    #[must_use]
+    pub fn delegated_rounds(&self) -> Vec<(Slot, ProxyId)> {
+        self.proposer
+            .rounds()
+            .iter()
+            .filter_map(|(slot, round)| round.proxy().map(|proxy| (*slot, proxy)))
+            .collect()
     }
 
     /// Advance the next bounded page of deferred chosen-prefix application or
@@ -1105,8 +1223,8 @@ impl ColocatedNode {
     #[must_use]
     pub fn membership_counters(&self) -> (u64, u64) {
         (
-            self.non_member_campaigns_skipped,
-            self.non_member_step_downs,
+            self.counters.non_member_campaigns_skipped,
+            self.counters.non_member_step_downs,
         )
     }
 
@@ -1115,7 +1233,7 @@ impl ColocatedNode {
     /// only (see [`ColocatedNode::tick`]).
     #[must_use]
     pub fn matchmaking_timeouts(&self) -> u64 {
-        self.matchmaking_timeouts
+        self.counters.matchmaking_timeouts
     }
 
     /// The current durable scalars (promised ballot, chosen
@@ -1199,7 +1317,7 @@ impl ColocatedNode {
     /// is genuinely reached.
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
-        self.election_gap_fills
+        self.counters.election_gap_fills
     }
 
     /// The full at-most-once session ledger: every `(client, seq) -> slot`
@@ -1222,7 +1340,7 @@ impl ColocatedNode {
     /// batch and reports it through its audit port.
     #[must_use]
     pub fn quorum_lost_step_downs(&self) -> u64 {
-        self.quorum_lost_step_downs
+        self.counters.quorum_lost_step_downs
     }
 
     /// How this node came to hold its current leadership: won by ordinary
@@ -1259,9 +1377,9 @@ impl ColocatedNode {
     pub fn repair_counters(&self) -> (u64, u64, u64, u64) {
         (
             self.acceptor.faulty_repaired(),
-            self.repair_case1,
-            self.repair_case2,
-            self.repair_step_downs,
+            self.counters.repair_case1,
+            self.counters.repair_case2,
+            self.counters.repair_step_downs,
         )
     }
 

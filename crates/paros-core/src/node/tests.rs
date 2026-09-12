@@ -4,16 +4,16 @@
 use std::collections::BTreeMap;
 
 use super::{
-    ColocatedNode, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH, LeadershipOrigin,
-    MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS, ReadIndexResult,
-    ReadState, ReconfigureRefusal, ReconfigureResult,
+    ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH,
+    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_TTL_TICKS,
+    ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     Registration,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
-use crate::message::Message;
+use crate::message::{Message, Party};
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
@@ -43,6 +43,7 @@ impl TestStorage {
                 nodes: Vec::new(),
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
+                proxy_count: 0,
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
@@ -308,6 +309,7 @@ mod election;
 mod handoff;
 mod invariants;
 mod matchmaking;
+mod phase2;
 mod quorum_reads;
 mod reads;
 mod reconfigure;

@@ -58,7 +58,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use paros_core::{
-        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Slot, Value,
+        Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Party, ProxyId,
+        Slot, Value,
     };
     use prost::Message as ProstMessage;
 
@@ -111,21 +112,36 @@ mod tests {
                 next_from_slot: None,
             },
             Message::Accept {
-                reply_to: NodeId(2),
+                reply_to: Party::Node(NodeId(2)),
                 leader: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 command: command.clone(),
+                config: None,
             },
-            // A reply address that is not the leader: the shape a proxied
-            // Phase 2 would put on the wire, and the only case that encodes
-            // the optional `leader` field at all.
+            // A reply address that is not the leader: the shape a handoff
+            // successor's re-send puts on the wire, and a case that encodes
+            // the optional `leader` field.
             Message::Accept {
-                reply_to: NodeId(5),
+                reply_to: Party::Node(NodeId(5)),
                 leader: NodeId(2),
                 ballot,
                 slot: Slot(6),
                 command: command.clone(),
+                config: None,
+            },
+            // A delegated round (#142): the reply party is a proxy, and on a
+            // matchmaker deployment the delegation carries the configuration.
+            Message::Accept {
+                reply_to: Party::Proxy(ProxyId(1)),
+                leader: NodeId(2),
+                ballot,
+                slot: Slot(6),
+                command: command.clone(),
+                config: Some(paros_core::AcceptorConfig::new(
+                    vec![NodeId(1), NodeId(2), NodeId(3)],
+                    paros_core::QuorumSystem::Majority,
+                )),
             },
             Message::Accepted {
                 from: NodeId(2),
@@ -139,7 +155,14 @@ mod tests {
                 slot: Slot(6),
             },
             Message::Commit {
-                from: NodeId(0),
+                from: Party::Node(NodeId(0)),
+                ballot,
+                slot: Slot(6),
+                command: command.clone(),
+            },
+            // A proxy leader's decision (#142).
+            Message::Commit {
+                from: Party::Proxy(ProxyId(0)),
                 ballot,
                 slot: Slot(6),
                 command,
@@ -538,7 +561,7 @@ mod tests {
                 Some(Kind::Accept(wire)),
             ) = (msg, wire.kind)
             {
-                assert_eq!(wire.leader.is_none(), reply_to == leader);
+                assert_eq!(wire.leader.is_none(), reply_to == Party::Node(leader));
             }
         }
     }

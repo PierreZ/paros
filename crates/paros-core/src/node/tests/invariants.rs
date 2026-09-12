@@ -13,17 +13,18 @@ use super::*;
 
 fn accept(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Accept {
-        reply_to: NodeId(from),
+        reply_to: Party::Node(NodeId(from)),
         leader: NodeId(from),
         ballot: b,
         slot: Slot(slot),
         command,
+        config: None,
     }
 }
 
 fn commit(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
     Message::Commit {
-        from: NodeId(from),
+        from: Party::Node(NodeId(from)),
         ballot: b,
         slot: Slot(slot),
         command,

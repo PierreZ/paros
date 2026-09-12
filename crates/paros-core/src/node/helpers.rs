@@ -1,5 +1,6 @@
 use super::{
-    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Slot,
+    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Party,
+    Slot,
 };
 use crate::membership::AcceptorConfig;
 
@@ -54,19 +55,28 @@ impl ColocatedNode {
         if !config.members().iter().all(|m| self.in_pool(*m)) {
             return;
         }
+        self.adopt_configuration(config, ballot);
+    }
+
+    /// **The one way the configuration in force moves**: bind `config` to
+    /// `since` and record what that does to this node's membership. Every
+    /// site that moves it — [`ColocatedNode::learn_config`], a won election,
+    /// a handoff install, the adoption of an effective configuration — comes
+    /// through here, so none can forget the membership record that
+    /// [`ColocatedNode::may_retire`] and the quorum reads depend on.
+    pub(super) fn adopt_configuration(&mut self, config: AcceptorConfig, since: Ballot) {
         self.acceptors = config;
-        self.acceptors_since = ballot;
+        self.acceptors_since = since;
         self.record_membership();
     }
 
     /// Record that `acceptors`/`acceptors_since` just moved: if the new
     /// configuration names this node, the ballot it is bound to is the newest
     /// at which this node was a member. Called from every assignment to
-    /// `acceptors_since` — [`ColocatedNode::learn_config`], `try_become_leader`, a
-    /// handoff install, and the adoption of an effective configuration — so
+    /// `acceptors_since` ([`ColocatedNode::adopt_configuration`]), so
     /// [`ColocatedNode::may_retire`] never under-reports the membership it must
     /// outlive.
-    pub(super) fn record_membership(&mut self) {
+    fn record_membership(&mut self) {
         if self.is_acceptor() {
             self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
         }
@@ -86,37 +96,15 @@ impl ColocatedNode {
             .push((Audience::Learners, msg.clone()));
     }
 
-    /// Queue an `Accept` for `slot` to every Phase-2 addressee of the active
-    /// configuration in `column` except this node — the Phase-2 fan-out: a
-    /// removed node is never contacted for a new ballot's accepts. The
-    /// addressee list comes from the membership boundary
-    /// ([`AcceptorConfig::phase2_addressees`]), never from iterating the
-    /// membership here: a grid addresses the one column the round was
-    /// opened against, a majority or a flexible split the whole membership.
-    /// Both the first send ([`ColocatedNode::start_accept_round`]) and the
-    /// re-send ([`ColocatedNode::resend_pending`]) come through here with
-    /// the column the round recorded, so the two always agree.
-    pub(super) fn send_accept(
-        &mut self,
-        slot: Slot,
-        ballot: Ballot,
-        command: Command,
-        column: Option<usize>,
-    ) {
-        let me = self.config.id;
-        self.pending_messages.push((
-            Audience::AcceptorsOf {
-                config: self.acceptors.clone(),
-                column,
-            },
-            Message::Accept {
-                reply_to: me,
-                leader: me,
-                ballot,
-                slot,
-                command,
-            },
-        ));
+    /// Whether `party` is one this deployment can answer: a node of the
+    /// pool ([`ColocatedNode::in_pool`]) or a proxy of the deployment
+    /// (`ProxyId(0..proxy_count)`) — the wire-hygiene boundary an `Accept`'s
+    /// reply address is checked against (#142).
+    pub(super) fn is_party_addressable(&self, party: Party) -> bool {
+        match party {
+            Party::Node(node) => self.in_pool(node),
+            Party::Proxy(proxy) => proxy.is_in(self.config.proxy_count),
+        }
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign

@@ -4,9 +4,54 @@
 //! draining a batch.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
-use crate::membership::AcceptorConfig;
+use crate::membership::{AcceptorConfig, ProxyId};
 use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
+
+/// A **party** to the Phase-2 exchange: the address an `Accept` asks its
+/// `Accepted` sent to, and the sender a `Commit` names. A node, or a proxy
+/// leader (#142) — two identity namespaces, because a proxy is not an
+/// acceptor and never has a [`NodeId`]. Every other message keeps naming
+/// nodes: Phase 1 is never proxied, a learner is always a node, and a
+/// proxy holds nothing a snapshot or a catch-up could serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Party {
+    /// A node of the pool.
+    Node(NodeId),
+    /// A proxy leader of the deployment.
+    Proxy(ProxyId),
+}
+
+impl Party {
+    /// The audience a reply to this party is addressed to.
+    #[must_use]
+    pub fn audience(self) -> Audience {
+        match self {
+            Party::Node(node) => Audience::Node(node),
+            Party::Proxy(proxy) => Audience::Proxy(proxy),
+        }
+    }
+
+    /// The node this party is, if it is one.
+    #[must_use]
+    pub fn node(self) -> Option<NodeId> {
+        match self {
+            Party::Node(node) => Some(node),
+            Party::Proxy(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Party {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Party::Node(node) => write!(f, "node:{}", node.0),
+            Party::Proxy(proxy) => write!(f, "proxy:{}", proxy.0),
+        }
+    }
+}
 
 /// **Who a message is addressed to**, in the protocol's own terms rather
 /// than in addresses.
@@ -16,19 +61,27 @@ use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
 /// keeps the batch small — a heartbeat to a six-node pool is one entry, not
 /// six clones of the same bytes — and it is what a compartmentalized
 /// deployment needs, where "the acceptors of this configuration" is a column
-/// of a grid rather than a membership the sender enumerates.
+/// of a grid rather than a membership the sender enumerates, and "the proxy
+/// this slot is delegated to" is an identity outside the pool altogether.
 ///
 /// There is no "the proposer of ballot `b`" audience: since `Prepare` and
-/// `Accept` carry an explicit `reply_to`, a reply is addressed to the address
-/// the request named ([`Audience::Node`]), which is exactly what lets a
-/// proxied request be answered without the acceptor knowing who the leader
-/// is.
+/// `Accept` carry an explicit `reply_to`, a reply is addressed to the party
+/// the request named ([`Audience::Node`], or [`Audience::Proxy`] for a
+/// delegated round), which is exactly what lets a proxied request be
+/// answered without the acceptor knowing who the leader is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Audience {
     /// One node, by id: every reply, every targeted request, the single
     /// successor of a handoff.
     Node(NodeId),
+    /// One proxy leader, by id (#142): the delegated `Accept` a leader hands
+    /// it, and the `Accepted` or `Nack` an acceptor answers it with. The
+    /// variant exists because a proxy has its own identity namespace, so
+    /// [`Audience::Node`] cannot name it; the driver's deployment map
+    /// resolves the id to a process exactly as it resolves
+    /// [`Audience::Learners`] from the pool.
+    Proxy(ProxyId),
     /// The Phase-2 addressees of `config` in `column`
     /// ([`AcceptorConfig::phase2_addressees`]) — an `Accept`'s fan-out. A
     /// removed node is never contacted for a new ballot's accepts. The
@@ -53,16 +106,43 @@ impl Audience {
     /// sender's own id (which is never addressed: a node does not send to
     /// itself). In pool / membership order, so a batch's sends keep the order
     /// the core queued them in.
+    ///
+    /// A proxy audience names **no node**: a proxy lives in its own
+    /// namespace, and the driver's deployment map resolves it through
+    /// [`Audience::proxy`] instead.
     #[must_use]
     pub fn resolve(&self, pool: &[NodeId], me: NodeId) -> Vec<NodeId> {
+        self.resolve_excluding(pool, Some(me))
+    }
+
+    /// [`Audience::resolve`] as a **proxy leader** sends: a proxy is
+    /// nobody's peer, so nothing is filtered out — an `Accept` it fans out
+    /// reaches every addressee of the column, the leader included when it
+    /// sits in it, and a `Commit` reaches the whole pool.
+    #[must_use]
+    pub fn resolve_from_proxy(&self, pool: &[NodeId]) -> Vec<NodeId> {
+        self.resolve_excluding(pool, None)
+    }
+
+    fn resolve_excluding(&self, pool: &[NodeId], me: Option<NodeId>) -> Vec<NodeId> {
         match self {
             Audience::Node(to) => vec![*to],
+            Audience::Proxy(_) => Vec::new(),
             Audience::AcceptorsOf { config, column } => config
                 .phase2_addressees(*column)
                 .into_iter()
-                .filter(|p| *p != me)
+                .filter(|p| Some(*p) != me)
                 .collect(),
-            Audience::Learners => pool.iter().copied().filter(|p| *p != me).collect(),
+            Audience::Learners => pool.iter().copied().filter(|p| Some(*p) != me).collect(),
+        }
+    }
+
+    /// The proxy this audience names, if it is a proxy audience.
+    #[must_use]
+    pub fn proxy(&self) -> Option<ProxyId> {
+        match self {
+            Audience::Proxy(proxy) => Some(*proxy),
+            Audience::Node(_) | Audience::AcceptorsOf { .. } | Audience::Learners => None,
         }
     }
 }
@@ -137,22 +217,34 @@ pub enum Message {
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----
-    /// Proposer → acceptors: "accept `command` for `slot` at `ballot`."
+    /// Proposer → acceptors, or leader → proxy leader: "accept `command` for
+    /// `slot` at `ballot`."
+    ///
+    /// The same message plays two parts (#142). Addressed to the acceptors
+    /// of a column it is the Phase-2 request itself; addressed to a proxy
+    /// ([`Audience::Proxy`], `reply_to` naming that proxy) it is the
+    /// **delegation** — the proxy fans exactly this message out to the
+    /// column, folds the `Accepted`s the acceptors send to `reply_to`, and
+    /// emits the `Commit`. A duplicate at a proxy's open round re-fans-out
+    /// (P2b-idempotent); the leader re-delegates on every re-send, and a
+    /// handoff successor re-delegates every inherited round with `leader`
+    /// naming itself.
     Accept {
-        /// Where the `Accepted` (or `Nack`) is addressed. The **reply address**
-        /// alone.
-        reply_to: NodeId,
+        /// Where the `Accepted` (or `Nack`) is addressed. The **reply
+        /// party** alone: the leader on a colocated round, the proxy on a
+        /// delegated one.
+        reply_to: Party,
         /// The node exercising `ballot`'s Phase-2 authority — the **leader
         /// hint** an acceptor adopts and a client is redirected to. It is
         /// deliberately not [`Ballot::node`](crate::Ballot::node): after a
         /// cooperative handoff the ballot keeps naming the node that won it
         /// while a different node drives Phase 2 (so `leader != ballot.node`
-        /// already happens). It is also deliberately not `reply_to`: a
-        /// compartmentalized deployment's proxy leaders run Phase 2 on the
-        /// leader's behalf and collect the `Accepted`s themselves, so the
-        /// reply address names the proxy while this field still names the
-        /// leader an acceptor adopts — proxy leaders are the reason the two
-        /// are separate fields. Today they are equal on every deployment.
+        /// already happens). It is also deliberately not `reply_to`: on a
+        /// delegated round the reply party is the proxy collecting the
+        /// `Accepted`s while this field still names the leader an acceptor
+        /// adopts — proxy leaders are the reason the two are separate
+        /// fields. On a deployment without proxies `reply_to` is
+        /// `Party::Node(leader)` on every `Accept`.
         leader: NodeId,
         /// The ballot under which the command is proposed.
         ballot: Ballot,
@@ -160,6 +252,15 @@ pub enum Message {
         slot: Slot,
         /// The proposed command (an opaque client entry or a control command).
         command: Command,
+        /// The acceptor configuration `ballot` was registered with (`C_b`),
+        /// on the **delegation** a matchmaker deployment's leader hands a
+        /// proxy: the proxy fans out to `C_b`'s addressees and judges the
+        /// decision over it, and it has no other way to learn a
+        /// configuration (it takes part in no Phase 1 and hears no beat).
+        /// **`None` on plain Multi-Paxos** and on every acceptor-bound
+        /// `Accept`, whose wire is unchanged; an acceptor ignores it.
+        #[cfg_attr(feature = "serde", serde(default))]
+        config: Option<AcceptorConfig>,
     },
     /// Acceptor → proposer: durably accepted the proposal for `slot` at `ballot`.
     Accepted {
@@ -186,10 +287,13 @@ pub enum Message {
     },
 
     // ---- Learning ----
-    /// Any → any: `command` is chosen for `slot` (decided at `ballot`).
+    /// Any → any: `command` is chosen for `slot` (decided at `ballot`). The
+    /// leader's decision on its own tally, or a proxy leader's on the
+    /// delegated round it folded (#142) — a learner treats the two alike,
+    /// and a leader that delegated the round closes it on this message.
     Commit {
-        /// Sender.
-        from: NodeId,
+        /// Sender: the deciding leader, or the proxy that folded the round.
+        from: Party,
         /// The ballot at which the command was chosen.
         ballot: Ballot,
         /// The chosen slot.

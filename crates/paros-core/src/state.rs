@@ -40,7 +40,8 @@ pub struct HardState {
 /// **bootstrap** acceptor configuration, the pool of nodes that may ever be an
 /// acceptor, and the matchmaker set (empty for plain Multi-Paxos).
 ///
-/// Two deployments live in this one struct, told apart by `matchmakers`:
+/// Two deployments live in this one struct, told apart by `matchmakers`
+/// (and, orthogonally, `proxy_count` says whether Phase 2 is delegated):
 ///
 /// - **Plain Multi-Paxos** (`matchmakers` empty — the default, and permanent:
 ///   see AGENTS.md, *Plain Multi-Paxos is first-class*): `peers` is the fixed
@@ -83,6 +84,16 @@ pub struct Config {
     /// matchmaker-set reconfiguration draws from, a superset of
     /// `matchmakers`. Empty means "exactly `matchmakers`".
     pub matchmaker_pool: Vec<MatchmakerId>,
+    /// How many **proxy leaders** the deployment runs (#142, Compartmentalized
+    /// Paxos §3.1): `ProxyId(0..proxy_count)`. **Zero is the plain
+    /// deployment** — every Phase 2 stays colocated on the leader and the
+    /// wire carries exactly today's messages; the `None` arm, like an empty
+    /// `matchmakers`. With a count, a leader delegates the Phase 2 of every
+    /// slot it allocates on a settled leadership to `ProxyId(slot %
+    /// proxy_count)` ([`crate::ProxyId::of`]), and only the count is
+    /// protocol data: which process answers to a `ProxyId` is the driver's
+    /// deployment map, so a dead proxy is replaced without editing this.
+    pub proxy_count: usize,
 }
 
 impl Config {
@@ -101,6 +112,13 @@ impl Config {
     #[must_use]
     pub fn has_matchmakers(&self) -> bool {
         !self.matchmakers.is_empty()
+    }
+
+    /// Whether this deployment runs proxy leaders (the opt-in that delegates
+    /// Phase 2, #142).
+    #[must_use]
+    pub fn has_proxies(&self) -> bool {
+        self.proxy_count > 0
     }
 
     /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.

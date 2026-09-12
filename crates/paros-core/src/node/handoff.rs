@@ -20,7 +20,15 @@
 //! - **`next_slot`** — the allocator frontier. Paxos safety at Phase 2 rests on
 //!   *one* proposer per ballot: two different commands proposed under one
 //!   `(slot, ballot)` can assemble two different accept quorums. The frontier
-//!   is what makes "one proposer" survive a change of physical node.
+//!   is what makes "one proposer" survive a change of physical node — and
+//!   it is **durable by construction** at whoever holds it: a leader records
+//!   every round it opens in its own log (`node/phase2.rs`,
+//!   `record_own_round`), so a successor that crashed after exercising an
+//!   installed authority reboots with the frontier it had and refuses a
+//!   replayed `Relinquish` that would rewind it (the stale-authority guard
+//!   below). Without that record the guard is blind: the proxy model checker
+//!   (#142) re-installed a duplicated `Relinquish` on a rebooted successor
+//!   and allocated one slot twice at one ballot.
 //! - **the tail `[first_unchosen, next_slot)`** — every slot the outgoing
 //!   leader's own Phase 1 already resolved. Each is either *chosen* (learned
 //!   here, exactly as a `Commit` teaches it) or has an *open Phase-2 round at
@@ -553,15 +561,13 @@ impl ColocatedNode {
         if let Some(config) = config {
             // Registration precedes exercise: the successor counts Phase 2
             // over exactly the configuration the ballot was registered with.
-            self.acceptors = config;
-            self.acceptors_since = ballot;
-            self.record_membership();
+            self.adopt_configuration(config, ballot);
         }
         self.leadership_origin = LeadershipOrigin::Handoff { from };
         self.proposer.abandon();
         self.election_elapsed = 0;
         self.handoff_fence_elapsed = 0;
-        self.election_gap_fills = 0;
+        self.counters.election_gap_fills = 0;
         self.proposer.set_next_slot(next_slot);
         // A fresh leadership's beat sequence and read rounds, exactly as
         // `try_become_leader` resets them: acks must echo the current ballot,

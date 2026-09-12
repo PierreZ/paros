@@ -55,9 +55,9 @@ use moonpool_core::{
 };
 use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, GcAck, MatchRefusal,
-    MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole,
-    ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
+    AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
+    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
+    NodeRole, ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
@@ -533,7 +533,7 @@ where
                         .filter(|c| *c < cols),
                     _ => None,
                 };
-                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column) {
+                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, Delegation::Auto) {
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.
@@ -601,7 +601,7 @@ where
                 match message_route(&msg) {
                     Some((from, ballot, Some(slot))) => tracing::info!(
                         node = self_id,
-                        from = from.0,
+                        from = %from,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,
@@ -611,7 +611,7 @@ where
                     // The empty-prefix beat: no slot field, mirroring `msg_sent`.
                     Some((from, ballot, None)) => tracing::info!(
                         node = self_id,
-                        from = from.0,
+                        from = %from,
                         kind,
                         bround = ballot.round,
                         bnode = ballot.node.0,

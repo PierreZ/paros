@@ -25,11 +25,12 @@ fn promise_and_accept_batches_require_fsync() {
 
     // An acceptor accepting a value must fsync before it replies Accepted.
     n.step(Message::Accept {
-        reply_to: NodeId(1),
+        reply_to: Party::Node(NodeId(1)),
         leader: NodeId(1),
         ballot: ballot(3, 1),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
+        config: None,
     });
     {
         let r = n.ready();
@@ -52,11 +53,12 @@ fn acceptor_rejects_below_promised_ballot() {
     });
     let _ = drain(&mut n);
     n.step(Message::Accept {
-        reply_to: NodeId(2),
+        reply_to: Party::Node(NodeId(2)),
         leader: NodeId(2),
         ballot: ballot(3, 2),
         slot: Slot(0),
         command: ucmd(1, 1, 9),
+        config: None,
     });
     assert!(
         !n.acceptor().records().contains_key(&Slot(0)),
@@ -80,17 +82,18 @@ fn chosen_value_survives_restart_over_a_stale_accept() {
     // Accept a value at a low ballot that is never chosen (its proposer died
     // before reaching a quorum); this node was the only acceptor.
     n.step(Message::Accept {
-        reply_to: NodeId(1),
+        reply_to: Party::Node(NodeId(1)),
         leader: NodeId(1),
         ballot: ballot(1, 1),
         slot: Slot(0),
         command: ucmd(9, 9, 1),
+        config: None,
     });
 
     // Learn a DIFFERENT value was chosen for slot 0 at a higher ballot (this node
     // was not in the choosing quorum, so it never accepted that value).
     n.step(Message::Commit {
-        from: NodeId(2),
+        from: Party::Node(NodeId(2)),
         ballot: ballot(2, 2),
         slot: Slot(0),
         command: ucmd(7, 7, 2),
@@ -148,11 +151,12 @@ fn accept_below_floor_is_ignored() {
     let _ = drain(n);
 
     n.step(Message::Accept {
-        reply_to: NodeId(1),
+        reply_to: Party::Node(NodeId(1)),
         leader: NodeId(1),
         ballot: ballot(9, 1),
         slot: Slot(1),
         command: ucmd(1, 1, 99),
+        config: None,
     });
     let out = drain(n);
     assert!(

@@ -26,8 +26,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Proposer, RESEND_BATCH};
-use crate::membership::AcceptorConfig;
+use crate::membership::{AcceptorConfig, ProxyId};
 use crate::types::{Ballot, Fingerprint, Slot};
+
+/// **Who folds a round's `Accepted`s**: the opener itself, or a proxy leader
+/// it delegated the round to (#142). An explicit state beside the counted
+/// one, never a flag: the two answer every question differently — a
+/// delegated round counts no vote here, decides nothing here, and is re-sent
+/// as a re-delegation rather than a fan-out.
+#[derive(Clone, Debug)]
+pub enum Custody<Id> {
+    /// The opener fans the `Accept` out and folds the `Accepted`s.
+    Colocated {
+        /// Acceptors (incl. self) that accepted the round's command at its
+        /// ballot.
+        accepted_by: BTreeSet<Id>,
+    },
+    /// A proxy fans out and folds; the opener learns the decision from the
+    /// proxy's `Commit` and remembers only whom it asked and how often it
+    /// asked again — the count a take-back is judged on.
+    Delegated {
+        /// The proxy the round was handed to.
+        proxy: ProxyId,
+        /// How many re-send pages have re-delegated this round without a
+        /// decision arriving.
+        redelegations: u64,
+    },
+}
 
 /// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
 #[derive(Clone, Debug)]
@@ -36,8 +61,8 @@ pub struct Round<Id, V> {
     ballot: Ballot,
     /// The command being accepted for this slot.
     command: V,
-    /// Acceptors (incl. self) that have accepted this slot's command at `ballot`.
-    accepted_by: BTreeSet<Id>,
+    /// Who folds this round's `Accepted`s ([`Custody`]).
+    custody: Custody<Id>,
     /// The **column** this round was opened against
     /// ([`AcceptorConfig::column_of`] for the slot): the grid column its
     /// `Accept` was addressed to, the column a re-send addresses again, and
@@ -66,16 +91,36 @@ impl<Id, V> Round<Id, V> {
         self.column
     }
 
-    /// The acceptors (incl. self) whose accept at this round's ballot has
-    /// been counted — what a Phase-2 re-send addresses the complement of.
+    /// Who folds this round's `Accepted`s.
     #[must_use]
-    pub fn accepted_by(&self) -> &BTreeSet<Id> {
-        &self.accepted_by
+    pub fn custody(&self) -> &Custody<Id> {
+        &self.custody
+    }
+
+    /// The proxy this round is delegated to, if it is.
+    #[must_use]
+    pub fn proxy(&self) -> Option<ProxyId> {
+        match &self.custody {
+            Custody::Delegated { proxy, .. } => Some(*proxy),
+            Custody::Colocated { .. } => None,
+        }
+    }
+
+    /// The acceptors (incl. self) whose accept at this round's ballot has
+    /// been counted **here** — what a Phase-2 re-send addresses the
+    /// complement of. `None` on a delegated round: its votes are the proxy's.
+    #[must_use]
+    pub fn accepted_by(&self) -> Option<&BTreeSet<Id>> {
+        match &self.custody {
+            Custody::Colocated { accepted_by } => Some(accepted_by),
+            Custody::Delegated { .. } => None,
+        }
     }
 }
 
 /// One round of a re-send page ([`Rounds::resend_page`]): what its
-/// `Accept` carries and the column it goes to.
+/// `Accept` carries, the column it goes to, and the proxy it goes through
+/// when the round is delegated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingAccept<V> {
     /// The round's slot.
@@ -86,6 +131,9 @@ pub struct PendingAccept<V> {
     pub command: V,
     /// The column the round was opened against (`None`: no column).
     pub column: Option<usize>,
+    /// The proxy the round is delegated to (`None`: colocated — the
+    /// re-send fans out to the column itself).
+    pub proxy: Option<ProxyId>,
 }
 
 /// The **Phase-2 tally**: every in-flight per-slot round and the fair cursor
@@ -164,6 +212,21 @@ impl<Id, V> Rounds<Id, V> {
     pub fn is_open_at(&self, slot: Slot, ballot: Ballot) -> bool {
         self.by_slot.get(&slot).is_some_and(|r| r.ballot == ballot)
     }
+
+    /// The delegated rounds re-delegated at least `after` times without a
+    /// decision: what a leader **takes back** and runs colocated
+    /// ([`Rounds::take_back`]). Liveness under a dead proxy is the opener's,
+    /// and this is how it notices; the threshold is the caller's policy.
+    #[must_use]
+    pub fn stalled_delegations(&self, after: u64) -> Vec<Slot> {
+        self.by_slot
+            .iter()
+            .filter(|(_, r)| {
+                matches!(r.custody, Custody::Delegated { redelegations, .. } if redelegations >= after)
+            })
+            .map(|(s, _)| *s)
+            .collect()
+    }
 }
 
 impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
@@ -203,16 +266,76 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             Round {
                 ballot,
                 command,
-                accepted_by,
+                custody: Custody::Colocated { accepted_by },
                 column,
             },
         );
     }
 
+    /// Open the round for `slot` at `ballot` against `column` **delegated**
+    /// to `proxy` (#142): the proxy fans the `Accept` out and folds the
+    /// `Accepted`s, and this tally only remembers the round exists — so the
+    /// allocator, the handoff tiling and the re-send page keep seeing it —
+    /// until the proxy's `Commit` closes it or the opener takes it back.
+    ///
+    /// # Panics
+    ///
+    /// If a round is already open at `slot` (see [`Rounds::open`]).
+    pub fn open_delegated(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: V,
+        column: Option<usize>,
+        proxy: ProxyId,
+    ) {
+        assert!(
+            !self.by_slot.contains_key(&slot),
+            "a slot has at most one open Phase-2 round"
+        );
+        self.by_slot.insert(
+            slot,
+            Round {
+                ballot,
+                command,
+                custody: Custody::Delegated {
+                    proxy,
+                    redelegations: 0,
+                },
+                column,
+            },
+        );
+    }
+
+    /// **Take a delegated round back**: the proxy did not decide it, so the
+    /// opener folds it itself from here on, seeded with `own_vote` when the
+    /// opener already accepted the round's command (its own acceptor record
+    /// says so). Whether the round was delegated — a colocated round is left
+    /// as it is. Always safe: a second fan-out of one `(slot, ballot,
+    /// command)` is P2b-idempotent, so nothing the proxy may still do behind
+    /// this can disagree with what the opener decides.
+    pub fn take_back(&mut self, slot: Slot, own_vote: Option<Id>) -> bool {
+        let Some(round) = self.by_slot.get_mut(&slot) else {
+            return false;
+        };
+        if !matches!(round.custody, Custody::Delegated { .. }) {
+            return false;
+        }
+        let mut accepted_by = BTreeSet::new();
+        if let Some(me) = own_vote {
+            accepted_by.insert(me);
+        }
+        round.custody = Custody::Colocated { accepted_by };
+        true
+    }
+
     /// Fold an `Accepted` from `from` into the round at `slot`: counted only
-    /// for the round's own ballot and command fingerprint. Whether it
-    /// counted. Whether `from` is an addressee of the round's column is the
-    /// caller's guard; the decision ([`Rounds::decided`]) restates it.
+    /// for the round's own ballot and command fingerprint, and only on a
+    /// **colocated** round — a delegated round's votes are the proxy's, and
+    /// an `Accepted` that reaches the opener for one (a stray reply, a reply
+    /// that outran a take-back) is not counted. Whether it counted. Whether
+    /// `from` is an addressee of the round's column is the caller's guard;
+    /// the decision ([`Rounds::decided`]) restates it.
     pub fn fold_accepted(&mut self, from: Id, ballot: Ballot, slot: Slot, vhash: u64) -> bool {
         let Some(round) = self.by_slot.get_mut(&slot) else {
             return false;
@@ -220,15 +343,20 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         if round.ballot != ballot || round.command.fingerprint() != vhash {
             return false;
         }
-        round.accepted_by.insert(from);
-        true
+        match &mut round.custody {
+            Custody::Colocated { accepted_by } => {
+                accepted_by.insert(from);
+                true
+            }
+            Custody::Delegated { .. } => false,
+        }
     }
 
     /// Whether the round at `slot` holds a Phase-2 quorum of `config` **in
     /// the round's column**: then its `(ballot, command)` is chosen. Under a
     /// grid the round was addressed to one column and only that full column
     /// decides it; a majority or a flexible split names no column and the
-    /// whole membership tallies.
+    /// whole membership tallies. A delegated round never decides here.
     ///
     /// # Panics
     ///
@@ -239,12 +367,12 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     #[must_use]
     pub fn decided(&self, slot: Slot, config: &AcceptorConfig<Id>) -> Option<(Ballot, V)> {
         let round = self.by_slot.get(&slot)?;
-        if !config.has_phase2_quorum_in(&round.accepted_by, round.column) {
+        let accepted_by = round.accepted_by()?;
+        if !config.has_phase2_quorum_in(accepted_by, round.column) {
             return None;
         }
         assert!(
-            round
-                .accepted_by
+            accepted_by
                 .iter()
                 .all(|n| config.is_phase2_addressee(*n, round.column)),
             "every vote behind a decision comes from the round's column"
@@ -256,7 +384,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// most [`RESEND_BATCH`] rounds from the cursor up, wrapping
     /// around from the lowest round held, and the cursor advances past the
     /// page. Each entry carries the column the round was opened against, so
-    /// the re-send addresses exactly the column the first send did.
+    /// the re-send addresses exactly the column the first send did, and the
+    /// proxy a delegated round goes through — a re-send of a delegated round
+    /// is a **re-delegation**, counted on the round so a stall is visible
+    /// ([`Rounds::stalled_delegations`]).
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
         // No round survives below the compaction floor (the cross-role
         // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
@@ -267,6 +398,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             ballot: r.ballot,
             command: r.command.clone(),
             column: r.column,
+            proxy: r.proxy(),
         };
         let mut pending: Vec<PendingAccept<V>> = self
             .by_slot
@@ -277,6 +409,15 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         if pending.len() < RESEND_BATCH {
             let remaining = RESEND_BATCH - pending.len();
             pending.extend(self.by_slot.range(..start).take(remaining).map(page));
+        }
+        for accept in &pending {
+            if let Some(Round {
+                custody: Custody::Delegated { redelegations, .. },
+                ..
+            }) = self.by_slot.get_mut(&accept.slot)
+            {
+                *redelegations = redelegations.saturating_add(1);
+            }
         }
         self.resend_cursor = pending
             .last()
@@ -342,6 +483,37 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
         column: Option<usize>,
     ) {
         self.rounds.open(slot, ballot, command, own_vote, column);
+    }
+
+    /// Open the Phase-2 round for `slot` at `ballot` against `column`,
+    /// delegated to `proxy` ([`Rounds::open_delegated`]).
+    ///
+    /// # Panics
+    ///
+    /// If a round is already open at `slot` (see [`Rounds::open`]).
+    pub fn open_delegated_round(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: V,
+        column: Option<usize>,
+        proxy: ProxyId,
+    ) {
+        self.rounds
+            .open_delegated(slot, ballot, command, column, proxy);
+    }
+
+    /// Take the delegated round at `slot` back into this proposer's own
+    /// custody ([`Rounds::take_back`]). Whether it was delegated.
+    pub fn take_back_round(&mut self, slot: Slot, own_vote: Option<Id>) -> bool {
+        self.rounds.take_back(slot, own_vote)
+    }
+
+    /// The delegated rounds re-delegated at least `after` times without a
+    /// decision ([`Rounds::stalled_delegations`]).
+    #[must_use]
+    pub fn stalled_delegations(&self, after: u64) -> Vec<Slot> {
+        self.rounds.stalled_delegations(after)
     }
 
     /// The column the round at `slot` was opened against, if a round is
@@ -482,5 +654,55 @@ mod tests {
         rounds.clear();
         assert!(rounds.is_empty());
         assert!(rounds.resend_page().is_empty());
+    }
+
+    /// A delegated round is remembered, never counted and never decided
+    /// here; its re-send is a counted re-delegation, and a take-back turns
+    /// it into an ordinary colocated round seeded with the opener's own vote.
+    #[test]
+    fn a_delegated_round_is_the_proxys_until_taken_back() {
+        let config = AcceptorConfig::new(
+            vec![NodeId(0), NodeId(1), NodeId(2)],
+            QuorumSystem::Majority,
+        );
+        let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+        rounds.open_delegated(Slot(3), ballot(1, 0), cmd(3), None, ProxyId(1));
+        let round = rounds.by_slot().get(&Slot(3)).expect("open");
+        assert_eq!(round.proxy(), Some(ProxyId(1)));
+        assert!(round.accepted_by().is_none());
+        assert!(
+            !rounds.fold_accepted(
+                NodeId(1),
+                ballot(1, 0),
+                Slot(3),
+                command_fingerprint(&cmd(3))
+            ),
+            "a delegated round counts no vote here"
+        );
+        assert!(rounds.decided(Slot(3), &config).is_none());
+        assert!(rounds.is_open_at(Slot(3), ballot(1, 0)));
+        assert!(rounds.stalled_delegations(1).is_empty());
+        let page = rounds.resend_page();
+        assert_eq!(page[0].proxy, Some(ProxyId(1)));
+        assert_eq!(rounds.stalled_delegations(1), vec![Slot(3)]);
+        assert!(rounds.stalled_delegations(2).is_empty());
+        assert!(rounds.take_back(Slot(3), Some(NodeId(0))));
+        assert!(
+            !rounds.take_back(Slot(3), None),
+            "a colocated round is not taken back"
+        );
+        assert!(rounds.stalled_delegations(0).is_empty());
+        assert!(rounds.fold_accepted(
+            NodeId(1),
+            ballot(1, 0),
+            Slot(3),
+            command_fingerprint(&cmd(3))
+        ));
+        assert_eq!(
+            rounds.decided(Slot(3), &config),
+            Some((ballot(1, 0), cmd(3))),
+            "the opener's own vote plus one is the majority"
+        );
+        assert_eq!(rounds.resend_page()[0].proxy, None);
     }
 }

@@ -5,9 +5,14 @@
 //!
 //! All three answer one question — *does a Phase-2 quorum of this ballot's
 //! configuration still answer me?* — and all three die with the leadership
-//! ([`Proposer::abandon`]). The proposer only tallies and counts; how many
-//! ticks are too many, and what to do when the window empties, stay with the
-//! wiring.
+//! ([`Proposer::abandon`]). They are one **standalone tally**, [`Authority`],
+//! that the [`Proposer`] embeds and delegates to, exactly as it embeds its
+//! Phase-2 [`Rounds`](super::Rounds): none of it is a Paxos tally — it is
+//! what a *leadership* holds beside its rounds, and a deployment that keeps
+//! a leader without the rest of the role (frankenpaxos's leader keeps only
+//! its next slot and its round) keeps this and nothing else. The tally only
+//! counts; how many ticks are too many, and what to do when the window
+//! empties, stay with the wiring.
 
 use std::collections::BTreeSet;
 
@@ -41,7 +46,48 @@ impl<Id> ReadRound<Id> {
     }
 }
 
-impl<Id: Copy + Ord, V> Proposer<Id, V> {
+/// The leadership's **standing authority**: the read fence, the pending
+/// read-index rounds and the `CheckQuorum` window (see the module doc).
+/// Volatile, like everything the proposer holds: it dies whole with the
+/// leadership ([`Authority::clear`]).
+#[derive(Clone, Debug)]
+pub struct Authority<Id> {
+    /// The fresh-leader read fence (see [`Authority::read_floor`]).
+    read_floor: Option<Slot>,
+    /// In-flight read-index rounds, in creation order.
+    read_rounds: Vec<ReadRound<Id>>,
+    /// `CheckQuorum` (#95): the distinct acceptors (incl. self) whose
+    /// ballot-matching `HeartbeatAck` or `Accepted` arrived inside the
+    /// current window.
+    quorum_acked_by: BTreeSet<Id>,
+    /// `CheckQuorum`: ticks since the window last closed with a quorum.
+    quorum_elapsed: u64,
+}
+
+impl<Id> Default for Authority<Id> {
+    fn default() -> Self {
+        Self {
+            read_floor: None,
+            read_rounds: Vec::new(),
+            quorum_acked_by: BTreeSet::new(),
+            quorum_elapsed: 0,
+        }
+    }
+}
+
+impl<Id: Copy + Ord> Authority<Id> {
+    /// An authority with no fence, no read round and an empty window.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop the fence, every read round and the window: the authority dies
+    /// whole with the leadership that held it.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     // ---- the fence ----------------------------------------------------------
 
     /// The fresh-leader read fence: the highest slot the winning prepare
@@ -59,17 +105,17 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// read round the previous leadership left, and start a fresh
     /// `CheckQuorum` window holding `own_vote` (the leader's own acceptor
     /// vote, absent when it is not a member of its own configuration).
-    pub fn open_authority(&mut self, fence: Option<Slot>, own_vote: Option<Id>) {
+    pub fn open(&mut self, fence: Option<Slot>, own_vote: Option<Id>) {
         self.read_floor = fence;
         self.read_rounds.clear();
-        self.renew_authority(own_vote);
+        self.renew(own_vote);
     }
 
     // ---- the CheckQuorum window ---------------------------------------------
 
     /// Start the ack window again from `own_vote` (self is always reachable —
     /// when it is an acceptor at all).
-    pub fn renew_authority(&mut self, own_vote: Option<Id>) {
+    pub fn renew(&mut self, own_vote: Option<Id>) {
         self.quorum_elapsed = 0;
         self.quorum_acked_by.clear();
         if let Some(me) = own_vote {
@@ -80,23 +126,23 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// Credit `from` to the current ack window: an ack (a beat ack or an
     /// `Accepted`) at the leadership's own ballot is proof this peer can
     /// still reach us and has not promised past us.
-    pub fn credit_authority(&mut self, from: Id) {
+    pub fn credit(&mut self, from: Id) {
         self.quorum_acked_by.insert(from);
     }
 
     /// Advance the window's clock by one driver tick and report its new age.
     /// The caller owns the *policy* (how long a window may run); the
     /// proposer only counts, exactly as it does for the repair probe.
-    pub fn tick_authority(&mut self) -> u64 {
+    pub fn tick(&mut self) -> u64 {
         self.quorum_elapsed = self.quorum_elapsed.saturating_add(1);
         self.quorum_elapsed
     }
 
     /// Whether the window holds a **Phase-2** quorum of `config` — the
     /// leader's standing authority, for the reason spelled out at the read
-    /// fence ([`Proposer::confirm_reads`]).
+    /// fence ([`Authority::confirm_reads`]).
     #[must_use]
-    pub fn authority_holds(&self, config: &AcceptorConfig<Id>) -> bool {
+    pub fn holds(&self, config: &AcceptorConfig<Id>) -> bool {
         config.has_phase2_quorum(&self.quorum_acked_by)
     }
 
@@ -108,7 +154,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// # Panics
     ///
     /// If the round is not monotone in index and required beat against the
-    /// previous one: [`Proposer::confirm_reads`] front-scans on exactly that
+    /// previous one: [`Authority::confirm_reads`] front-scans on exactly that
     /// premise, so it is pinned at the only place a round is created (O(1):
     /// the last two entries).
     pub fn open_read(
@@ -161,7 +207,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// the front suffices.
     ///
     /// **A read is confirmed by a Phase-2 quorum**, and so is a leader's
-    /// standing authority ([`Proposer::authority_holds`]). Neither is a
+    /// standing authority ([`Authority::holds`]). Neither is a
     /// Phase-1 question: Phase 1 asks what an earlier ballot *could have
     /// chosen*, and a read asks the opposite — that no later ballot has
     /// chosen anything this leader has not seen. What makes the answer sound
@@ -201,5 +247,98 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     #[must_use]
     pub fn read_rounds(&self) -> &[ReadRound<Id>] {
         &self.read_rounds
+    }
+}
+
+impl<Id: Copy + Ord, V> Proposer<Id, V> {
+    // ---- the standing authority: delegated to the embedded `Authority` ----
+
+    /// The leadership's standing authority, whole.
+    #[must_use]
+    pub fn authority(&self) -> &Authority<Id> {
+        &self.authority
+    }
+
+    /// The fresh-leader read fence ([`Authority::read_floor`]).
+    #[must_use]
+    pub fn read_floor(&self) -> Option<Slot> {
+        self.authority.read_floor()
+    }
+
+    /// Open a fresh leadership's authority ([`Authority::open`]).
+    pub fn open_authority(&mut self, fence: Option<Slot>, own_vote: Option<Id>) {
+        self.authority.open(fence, own_vote);
+    }
+
+    /// Start the `CheckQuorum` window again ([`Authority::renew`]).
+    pub fn renew_authority(&mut self, own_vote: Option<Id>) {
+        self.authority.renew(own_vote);
+    }
+
+    /// Credit `from` to the current window ([`Authority::credit`]): an ack
+    /// at the leadership's own ballot. On a delegated round the votes are
+    /// the proxy's and never reach this tally, so a leader whose rounds all
+    /// run through proxies keeps its authority on `HeartbeatAck` alone.
+    pub fn credit_authority(&mut self, from: Id) {
+        self.authority.credit(from);
+    }
+
+    /// Advance the window's clock by one tick and report its age
+    /// ([`Authority::tick`]).
+    pub fn tick_authority(&mut self) -> u64 {
+        self.authority.tick()
+    }
+
+    /// Whether the window holds a Phase-2 quorum of `config`
+    /// ([`Authority::holds`]).
+    #[must_use]
+    pub fn authority_holds(&self, config: &AcceptorConfig<Id>) -> bool {
+        self.authority.holds(config)
+    }
+
+    /// Open a read-index round ([`Authority::open_read`]).
+    ///
+    /// # Panics
+    ///
+    /// If the round is not monotone against the previous one (see
+    /// [`Authority::open_read`]).
+    pub fn open_read(
+        &mut self,
+        ctx: u64,
+        index: Option<Slot>,
+        required_seq: u64,
+        created_tick: u64,
+        own_vote: Option<Id>,
+    ) {
+        self.authority
+            .open_read(ctx, index, required_seq, created_tick, own_vote);
+    }
+
+    /// Credit an ack of beat `seq` from `from` to every round it qualifies
+    /// for ([`Authority::credit_read_ack`]).
+    pub fn credit_read_ack(&mut self, from: Id, seq: u64) {
+        self.authority.credit_read_ack(from, seq);
+    }
+
+    /// Confirm the eligible prefix of pending read rounds
+    /// ([`Authority::confirm_reads`]).
+    pub fn confirm_reads(
+        &mut self,
+        config: &AcceptorConfig<Id>,
+        chosen_index: Option<Slot>,
+    ) -> Vec<(u64, Option<Slot>)> {
+        self.authority.confirm_reads(config, chosen_index)
+    }
+
+    /// Drop every read round older than `ttl` ticks at `now`
+    /// ([`Authority::expire_reads`]).
+    pub fn expire_reads(&mut self, now: u64, ttl: u64) {
+        self.authority.expire_reads(now, ttl);
+    }
+
+    /// The read rounds pending confirmation ([`Authority::read_rounds`]).
+    #[must_use]
+    pub fn read_rounds(&self) -> &[ReadRound<Id>] {
+        self.authority.read_rounds()
     }
 }

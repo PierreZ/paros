@@ -149,9 +149,41 @@ own**. The roles:
   to (`proposer::Rounds`, `proposer/rounds.rs`, #142 rung 0): the one tally another deployment
   runs *without* the rest of the role — Compartmentalized Paxos's proxy leader is a `Rounds` plus
   routing — so there is never a second Phase-2 kernel, exactly as the decree reuses `Proposer` +
-  `Acceptor` at slot zero. Its policies are **explicit types, never flags**
+  `Acceptor` at slot zero. A round's `Custody` says who folds it: the leader (`Colocated`), or a
+  proxy it was `Delegated` to, in which case the leader keeps the round — for the allocator, the
+  handoff tiling and the re-send — but no vote. Its policies are **explicit types, never flags**
   (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
   `gap_fill: bool` would not).
+- `proxy_leader.rs` — `ProxyLeader` (#142, Compartmentalized Paxos §3.1): the **second
+  deployment**, a `Rounds` plus routing on a process that is neither an acceptor nor a replica.
+  It receives the leader's delegated `Accept { reply_to: Party::Proxy(me), leader, .. }`, fans
+  exactly that message out to the column (`Accept.leader` still names the leader an acceptor
+  adopts — the reason `leader` and `reply_to` are two fields), folds the `Accepted`s, emits
+  `Commit { from: Party::Proxy(me), .. }` to the learners, relays a `Nack` to the leader that
+  delegated the round, and re-fans-out its open rounds on the driver's beat (`resend_pending`).
+  Ephemeral: no `HardState`, no `WriteOp`, a crash reboots it empty. It works for the highest
+  ballot it was handed (a lower delegation is ignored, a higher one closes every older round),
+  and it contributes nothing to the decision — a chosen value is still what a Phase-2 quorum
+  durably accepted at one ballot. The leader's side: a proxy count is deployment data
+  (`Config::proxy_count`, zero is the plain deployment, message for message), a slot's proxy is
+  `ProxyId(slot % proxy_count)` unless the driver names one (`Delegation` at `propose_in` /
+  `propose_control_in`), only a *settled* leadership delegates and never its election recovery
+  or gap fills, a handoff successor re-delegates what it inherited with `leader = self`, and a
+  round re-delegated `take_back_delegated(after)` times without a decision is **taken back**
+  and run colocated (driver policy, a knob born buggified) — liveness under a dead proxy is the
+  leader's and the fallback is always today's colocated Phase 2. Proven by the sans-IO model
+  checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
+  reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
+  per slot, every proxy `Commit` backed by a durable Phase-2 quorum at one ballot, and the
+  take-back liveness claim with proxies dead for the tail); a proxy that commits one `Accepted`
+  short is red on its first seed. **What the model found (seed 756 of its first 2,000):** a
+  delegated round left no record at the leader, so a handoff successor that crashed rebooted
+  with its allocator rewound and re-installed a *duplicated* `Relinquish` — two commands at one
+  `(slot, ballot)`; a grid leader proposing outside its own column had the same hole. Hence
+  the rule **the allocator frontier is durable by construction**: a leader records every round
+  it opens in its own log whenever its promise allows, whichever column it went to
+  (`record_own_round`; a record outside the column is the stray copy the grid already admits, a
+  vote that does not count).
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
   ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else —
   and answers one question about it, `covers(index)`, for the quorum reads below.
@@ -216,9 +248,10 @@ decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decr
 is no second Paxos kernel in the crate); flexible quorums are deployment data
 (`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
 changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, cols }`, #141
-— set-membership predicates and column addressing, still zero tally lines). Still to come: the
-rest of Compartmentalized Paxos (proxy leaders, quorum reads, a replica tier) becomes deployment
-data the same way.
+— set-membership predicates and column addressing, still zero tally lines); the proxy leader is
+the first second deployment (`proxy_leader.rs`, #142 part A — the embedded `Rounds` on another
+process, a count in `Config`, zero tally lines). Still to come: the proxy driver and process
+group (#142 part B), and a replica tier the same way.
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
@@ -774,8 +807,9 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
 - `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
   the membership boundary in `membership.rs`) and `ColocatedNode`, the node that wires them
   (`node.rs`; its `node/*.rs` submodules are named by *concern* — election, replication,
-  handoff, GC, matchmaking, reconfiguration — and hold the wiring for that concern, never a
-  role's state) and, beside it, the sans-IO
+  Phase 2 and the learner half, handoff, GC, matchmaking, reconfiguration — and hold the
+  wiring for that concern, never a role's state), the proxy leader (`proxy_leader.rs`, the
+  Phase-2 tally on its own process) and, beside it, the sans-IO
   matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
   the caller drives, never stepped by `ColocatedNode`), its generation handover
   (`matchmaker/reconfigurer.rs`) and the successor decree it decides with over the shared

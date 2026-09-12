@@ -412,9 +412,7 @@ impl ColocatedNode {
             // record to them). `acceptors_since` is therefore not monotone
             // here, unlike `learn_config`, and the membership fence keeps
             // the higher ballot it already recorded.
-            self.acceptors = config;
-            self.acceptors_since = newest;
-            self.record_membership();
+            self.adopt_configuration(config, newest);
             self.become_follower(None);
             MatchStep::StaleConfiguration { newest }
         } else {

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use super::{
     Ballot, ClientId, ClientSeq, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH,
-    Message, NodeId, NodeRole, PROMISE_BATCH, ProposeResult, Slot, TestStorage, Value,
+    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Slot, TestStorage, Value,
     command_fingerprint,
 };
 
@@ -182,7 +182,7 @@ fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
     };
     for slot in 1..SUFFIX_LEN {
         gapped.step(Message::Commit {
-            from: NodeId(1),
+            from: Party::Node(NodeId(1)),
             ballot: prior,
             slot: Slot(slot),
             command: command(slot),
@@ -239,7 +239,7 @@ fn a_same_ballot_continuation_closes_a_stale_campaign() {
         node: NodeId(1),
     };
     stale.step(Message::Commit {
-        from: NodeId(1),
+        from: Party::Node(NodeId(1)),
         ballot: learned,
         slot: Slot(0),
         command: command(0),

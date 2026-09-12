@@ -6,9 +6,9 @@ use std::sync::Arc;
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, GcAck, GcRequest,
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
-    MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind, SessionEntry, Slot,
-    Value,
+    MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap, ProxyId,
+    QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind,
+    SessionEntry, Slot, Value,
 };
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -387,14 +387,20 @@ pub(crate) fn message_to_proto(
             ballot,
             slot,
             command,
+            config,
         } => Kind::Accept(internal::Accept {
-            reply_to: reply_to.0,
+            reply_to: reply_to.node().map_or(0, |n| n.0),
             // Absent when it would merely repeat the reply address, which is
-            // every message paros sends today: the plain wire is unchanged.
-            leader: (leader != reply_to).then_some(leader.0),
+            // every colocated round: the plain wire is unchanged.
+            leader: (*reply_to != Party::Node(*leader)).then_some(leader.0),
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
             command: Some(command_to_proto(command)),
+            reply_to_proxy: match reply_to {
+                Party::Proxy(proxy) => Some(proxy.0),
+                Party::Node(_) => None,
+            },
+            config: config.as_ref().map(config_to_proto),
         }),
         Message::Accepted {
             from,
@@ -418,10 +424,14 @@ pub(crate) fn message_to_proto(
             slot,
             command,
         } => Kind::Commit(internal::Commit {
-            from: from.0,
+            from: from.node().map_or(0, |n| n.0),
             ballot: Some(ballot_to_proto(*ballot)),
             slot: slot.0,
             command: Some(command_to_proto(command)),
+            from_proxy: match from {
+                Party::Proxy(proxy) => Some(proxy.0),
+                Party::Node(_) => None,
+            },
         }),
         Message::CatchUpRequest { from, from_slot } => {
             Kind::CatchUpRequest(internal::CatchUpRequest {
@@ -558,11 +568,17 @@ pub(crate) fn message_from_proto(
             next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
-            reply_to: NodeId(message.reply_to),
+            reply_to: match message.reply_to_proxy {
+                Some(proxy) => Party::Proxy(ProxyId(proxy)),
+                None => Party::Node(NodeId(message.reply_to)),
+            },
+            // A delegated round always names its leader explicitly; a
+            // colocated one may leave it to the reply address.
             leader: NodeId(message.leader.unwrap_or(message.reply_to)),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             command: command_from_proto(message.command)?,
+            config: config_from_proto(message.config)?,
         }),
         Kind::Accepted(message) => Ok(Message::Accepted {
             from: NodeId(message.from),
@@ -576,7 +592,10 @@ pub(crate) fn message_from_proto(
             slot: Slot(message.slot),
         }),
         Kind::Commit(message) => Ok(Message::Commit {
-            from: NodeId(message.from),
+            from: match message.from_proxy {
+                Some(proxy) => Party::Proxy(ProxyId(proxy)),
+                None => Party::Node(NodeId(message.from)),
+            },
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             command: command_from_proto(message.command)?,

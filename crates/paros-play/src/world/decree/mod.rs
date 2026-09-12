@@ -978,11 +978,12 @@ impl DecreeWorld {
                 proposer,
                 to,
                 Message::Accept {
-                    reply_to: proposer,
+                    reply_to: paros_core::Party::Node(proposer),
                     leader: proposer,
                     ballot,
                     slot: DECREE,
                     command: candidate.clone(),
+                    config: None,
                 },
             );
         }
@@ -1036,7 +1037,7 @@ impl DecreeWorld {
                 to,
                 *member,
                 Message::Commit {
-                    from: to,
+                    from: paros_core::Party::Node(to),
                     ballot: at,
                     slot: DECREE,
                     command: command.clone(),

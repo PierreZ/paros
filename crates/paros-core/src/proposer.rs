@@ -44,11 +44,11 @@ mod rounds;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use self::authority::ReadRound;
+pub use self::authority::{Authority, ReadRound};
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
-pub use self::rounds::{PendingAccept, Round, Rounds};
+pub use self::rounds::{Custody, PendingAccept, Round, Rounds};
 use crate::acceptor::PROMISE_BATCH;
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
@@ -323,16 +323,11 @@ pub struct Proposer<Id, V> {
     /// from a Phase-1 tally, and a node that holds no leadership still
     /// refuses to let a replayed handoff rewind it.
     next_slot: Slot,
-    /// The fresh-leader read fence (see [`Proposer::read_floor`]).
-    read_floor: Option<Slot>,
-    /// In-flight read-index rounds, in creation order.
-    read_rounds: Vec<ReadRound<Id>>,
-    /// `CheckQuorum` (#95): the distinct acceptors (incl. self) whose
-    /// ballot-matching `HeartbeatAck` or `Accepted` arrived inside the
-    /// current window.
-    quorum_acked_by: BTreeSet<Id>,
-    /// `CheckQuorum`: ticks since the window last closed with a quorum.
-    quorum_elapsed: u64,
+    /// The leadership's standing authority — the read fence, the pending
+    /// read-index rounds and the `CheckQuorum` window — a standalone
+    /// [`Authority`] this role embeds and delegates to, as it embeds its
+    /// [`Rounds`].
+    authority: Authority<Id>,
 }
 
 impl<Id, V> Default for Proposer<Id, V> {
@@ -343,10 +338,7 @@ impl<Id, V> Default for Proposer<Id, V> {
             rounds: Rounds::default(),
             recovery: None,
             next_slot: Slot(0),
-            read_floor: None,
-            read_rounds: Vec::new(),
-            quorum_acked_by: BTreeSet::new(),
-            quorum_elapsed: 0,
+            authority: Authority::default(),
         }
     }
 }
@@ -384,8 +376,9 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Drop every open tally: the campaign, the probe, the rounds, the
-    /// recovery, the re-send cursor, the read fence with its pending rounds
-    /// and the `CheckQuorum` window. Leadership state dies whole.
+    /// recovery, the re-send cursor, and the standing authority (the read
+    /// fence with its pending rounds and the `CheckQuorum` window).
+    /// Leadership state dies whole.
     ///
     /// The allocator frontier is the deliberate exception: it is not a
     /// Phase-1 tally but a fact about the log this node holds, and a node
@@ -396,10 +389,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         self.probe = None;
         self.rounds.clear();
         self.recovery = None;
-        self.read_floor = None;
-        self.read_rounds.clear();
-        self.quorum_acked_by.clear();
-        self.quorum_elapsed = 0;
+        self.authority.clear();
     }
 }
 
