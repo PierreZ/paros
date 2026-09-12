@@ -7,7 +7,9 @@ doctrine; this file is the map.
 
 ## Map
 
-- `acceptor.rs` `Acceptor` · `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
+- `acceptor.rs` `Acceptor` + `acceptor/retention.rs` (the two floor-moving ops, `truncate` and
+  `install`: a module, not a role, because the role that moves the floor emits the write) ·
+  `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
   `Proposer` (its Phase-2 tally is the standalone `proposer::Rounds` it embeds and delegates
   to — the one tally a proxy leader runs without the rest of the role, #142; a round's
   `Custody` is `Colocated` or `Delegated` to a `ProxyId`; its standing authority — the read
