@@ -137,7 +137,6 @@ impl ColocatedNode {
             self.compact(up_to);
         }
         self.pump_app_repair();
-        self.try_confirm_reads();
-        self.serve_quorum_reads();
+        self.serve_reads();
     }
 }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use super::{
     ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_ROUND_TTL_TICKS,
+    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_TTL_TICKS,
     ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{

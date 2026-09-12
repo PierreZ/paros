@@ -37,7 +37,9 @@ doctrine; this file is the map.
   `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`) + `node/*.rs` named
   by **concern** (`election`, `replication`, `authority` — `CheckQuorum` — `phase2` — open, fan out or delegate, fold,
   decide, take back — `learn` — a chosen value reaching the record and the prefix —
-  `handoff`, `gc`, `matchmaking`, `reconfigure`, `reads`, `quorum_reads`,
+  `handoff`, `gc`, `matchmaking`, `reconfigure`, `reads` — the read-index wiring and the back
+  half both read tallies share: `READ_TTL_TICKS`, `serve_reads`, `tick_reads`, the one seam
+  into `Ready::read_states` — `quorum_reads`,
   `catch_up_snapshot`, `boot`, `acceptor`, `helpers`, `invariants`). Wiring only; no
   protocol tally lives here.
 - `message.rs` `Message` + `Audience` + `Party` (a node or a proxy: the reply party of an

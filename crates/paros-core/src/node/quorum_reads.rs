@@ -3,8 +3,10 @@
 //! how a `PreReadAck` reaches the [`QuorumReads`] tally, and how a completed
 //! read waits on the [`Replica`]'s "applied at or past this index" before it
 //! surfaces through the same [`Ready::read_states`] the leader's read-index
-//! path uses. The components decide; this module builds the messages and
-//! keeps the reads consistent with the configuration the node believes in.
+//! path uses (that shared back half — the window, the serving, the
+//! surfacing — is `node/reads.rs`). The components decide; this module
+//! builds the messages and keeps the reads consistent with the
+//! configuration the node believes in.
 //!
 //! Every node runs it — leader, follower, spare — and no path here touches
 //! the leader's authority, its beats or its acks: the read-index path is
@@ -16,26 +18,16 @@
 //! [`Ready::read_states`]: crate::Ready::read_states
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
-use super::{Audience, ColocatedNode, Message, NodeId, READ_ROUND_TTL_TICKS, ReadState, Slot};
+use super::{Audience, ColocatedNode, Message, NodeId, Slot};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
-
-/// Ticks a quorum read may wait — for its row to answer whole, then for the
-/// replica to cover the index it settled on — before the node
-/// garbage-collects it. The same window as a read-index round
-/// ([`READ_ROUND_TTL_TICKS`]) and dropped the same way, silently: the read
-/// carries no durable obligation and the driver owns the client reply (its
-/// retry sweep answers first, well inside this window). A watermark raised
-/// by an accept that never decided needs the next leader's gap fill to be
-/// covered, which is why the window is not shorter than an election.
-pub(super) const QUORUM_READ_TTL_TICKS: u64 = READ_ROUND_TTL_TICKS;
 
 impl ColocatedNode {
     /// **Leaderless read** entry point, on any node (#143, Compartmentalized
     /// Paxos §3.4): ask the row [`AcceptorConfig::row_of`] derives for `ctx`
     /// — under the configuration this node believes in force — for their
     /// vote watermarks, settle on the maximum once the row answered whole,
-    /// and surface a [`ReadState`] carrying `ctx` through
+    /// and surface a [`ReadState`](super::ReadState) carrying `ctx` through
     /// [`Ready::read_states`] once this node's chosen prefix covers it
     /// ([`Replica::covers`]). The driver's "wait until applied, then serve"
     /// path is then exactly the read-index one.
@@ -47,8 +39,9 @@ impl ColocatedNode {
     /// past it. A read that cannot complete — a row that never answers
     /// whole, a watermark the replica never reaches, a configuration that
     /// moves underneath it — surfaces nothing and is dropped after
-    /// `QUORUM_READ_TTL_TICKS` (the read-index window); the driver owns the client-facing timeout,
-    /// and the client records it *ambiguous*, never aborted.
+    /// `READ_TTL_TICKS` (the window both read tallies share, `node/reads.rs`);
+    /// the driver owns the client-facing timeout, and the client records it
+    /// *ambiguous*, never aborted.
     ///
     /// # Panics
     ///
@@ -146,29 +139,6 @@ impl ColocatedNode {
             PreReadFold::Ignored | PreReadFold::Superseded => {}
             PreReadFold::Counted => self.serve_quorum_reads(),
         }
-    }
-
-    /// Hand the tally the replica's answer and queue every read it serves:
-    /// a read confirmed at `index` surfaces once the chosen prefix covers
-    /// it. Called wherever the answer can change — an answer folded, the
-    /// prefix advanced, a tick.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
-    pub(super) fn serve_quorum_reads(&mut self) {
-        let replica = &self.replica;
-        let served = self.quorum_reads.serve(|index| replica.covers(index));
-        self.pending_read_states.extend(
-            served
-                .into_iter()
-                .map(|(ctx, index)| ReadState { ctx, index }),
-        );
-    }
-
-    /// Per-tick upkeep: drop the reads that outlived their window, then
-    /// serve what the prefix may have covered since.
-    pub(super) fn tick_quorum_reads(&mut self) {
-        self.quorum_reads
-            .expire(self.tick_count, QUORUM_READ_TTL_TICKS);
-        self.serve_quorum_reads();
     }
 
     /// The configuration ballot a `PreReadAck` carries: what this node

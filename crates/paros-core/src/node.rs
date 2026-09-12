@@ -18,13 +18,15 @@ mod reads;
 mod reconfigure;
 mod replication;
 
+#[cfg(test)]
+use self::reads::READ_TTL_TICKS;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use self::handoff::{
     HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, Handoff, HandoffCounters, LeadershipOrigin,
 };
 pub use self::matchmaking::MatchStep;
-use self::reads::READ_ROUND_TTL_TICKS;
 pub use self::reconfigure::{ReconfigureRefusal, ReconfigureResult};
 pub use self::replication::HEARTBEAT_TICKS;
 use crate::acceptor::Acceptor;
@@ -821,12 +823,6 @@ impl ColocatedNode {
             // makes on the same cadence — see [`ColocatedNode::resend_pending`].
             self.broadcast_heartbeat();
             self.assert_invariants();
-            // GC read rounds that outlived their TTL (lost acks, an unreachable
-            // quorum). No re-broadcast logic is needed for the live ones: every
-            // leader tick already broadcasts a fresh, higher-seq beat whose acks
-            // confirm all older pending rounds.
-            let now = self.tick_count;
-            self.proposer.expire_reads(now, READ_ROUND_TTL_TICKS);
             self.tick_check_quorum();
             // A leader its own reconfiguration removed from the acceptor set
             // (#122): it drives the change to completion — its inherited
@@ -886,7 +882,8 @@ impl ColocatedNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
-        self.tick_quorum_reads();
+        // Both read tallies: expire what outlived the window, serve the rest.
+        self.tick_reads();
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();

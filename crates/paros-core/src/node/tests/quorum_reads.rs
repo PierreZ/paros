@@ -218,7 +218,7 @@ fn a_quorum_read_survives_a_role_change_and_expires_by_ttl() {
         1,
         "stepping down abandons no quorum read"
     );
-    for _ in 0..READ_ROUND_TTL_TICKS {
+    for _ in 0..READ_TTL_TICKS {
         nodes[0].tick();
     }
     assert_eq!(nodes[0].quorum_reads().pending().len(), 1);
