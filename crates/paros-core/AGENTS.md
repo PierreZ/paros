@@ -10,7 +10,9 @@ doctrine; this file is the map.
 - `acceptor.rs` `Acceptor` · `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
   `Proposer` (its Phase-2 tally is the standalone `proposer::Rounds` it embeds and delegates
   to — the one tally a proxy leader runs without the rest of the role, #142; a round's
-  `Custody` is `Colocated` or `Delegated` to a `ProxyId`) · `proxy_leader.rs` `ProxyLeader` +
+  `Custody` is `Colocated` or `Delegated` to a `ProxyId`; its standing authority — the read
+  fence, the read-index rounds, the `CheckQuorum` window — is the standalone
+  `proposer::Authority` it embeds the same way) · `proxy_leader.rs` `ProxyLeader` +
   `ProxyReady` (the **second deployment**, #142: a `Rounds` plus routing on a process that is
   neither an acceptor nor a replica; it fans a delegated `Accept` out, folds the `Accepted`s,
   emits the `Commit`, relays a `Nack`, re-fans-out on its beat, and works for the highest
