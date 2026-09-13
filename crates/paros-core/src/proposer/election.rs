@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Campaign, Phase1Outcome, PromiseFold, PromiseTally, Proposer, RepairProbe, merge_report,
-    slot_decidable,
+    Campaign, Phase1Outcome, PromiseFold, PromiseTally, Proposer, RepairProbe, member_union,
+    merge_report, slot_decidable,
 };
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
@@ -87,16 +87,10 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// addressed (a candidate that is an acceptor is its own first one).
     #[must_use]
     pub fn targets(&self, me: Option<Id>) -> Vec<Id> {
-        let mut targets: Vec<Id> = self
-            .prior
-            .iter()
-            .chain(std::iter::once(&self.config))
-            .flat_map(|c| c.members().iter().copied())
+        member_union(self.prior.iter().chain(std::iter::once(&self.config)))
+            .into_iter()
             .filter(|p| Some(*p) != me)
-            .collect();
-        targets.sort_unstable();
-        targets.dedup();
-        targets
+            .collect()
     }
 
     /// The addressees whose complete suffix answer is still missing — what a

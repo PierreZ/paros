@@ -108,6 +108,16 @@ fn main() {
         "{} seeds: {} ok, {} failed",
         report.iterations, report.successful_runs, report.failed_runs,
     );
+    // The assertion-slot budget (AGENTS.md, *Assertion doctrine*): 512
+    // slots per campaign process, shared with moonpool's own internals.
+    // Printed on every hunt so "count before adding" has a number to read,
+    // and an overflow — evaluations dropped for want of a slot — is never
+    // silent.
+    println!(
+        "assertion slots: {} used, {} evaluations dropped for want of a slot",
+        report.assertion_results.len(),
+        report.dropped_assertion_allocations,
+    );
     // A hunt's deliverable is failing seeds, so coverage never decides its exit
     // status — but a gate that never fired across the whole hunt is exactly what
     // a starved `sometimes` looks like in the CI sweep, and finding it here is

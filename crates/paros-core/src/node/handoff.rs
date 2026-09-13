@@ -285,9 +285,7 @@ impl ColocatedNode {
             && self.acceptors.members().len() > 1
             && self.proposer.election().is_none()
             && self.matchmaking.is_none()
-            && self.proposer.recovery().is_none()
-            && self.proposer.probe().is_none()
-            && self.replica.app_repair().is_none()
+            && self.leadership_settled()
             && self.acceptor.faulty().is_empty()
             && self.ballot >= self.acceptor.promised()
             && self
@@ -413,10 +411,7 @@ impl ColocatedNode {
         };
         // The authority's Phase-2 membership travels with it (a matchmaker
         // deployment); the plain path carries nothing, as ever.
-        let config = self
-            .config
-            .has_matchmakers()
-            .then(|| self.acceptors.clone());
+        let config = self.wire_config();
         self.pending_messages.push((
             Audience::Node(target),
             Message::Relinquish {

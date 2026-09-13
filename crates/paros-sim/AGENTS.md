@@ -10,21 +10,27 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 
 - `roles.rs` the per-seed **deployment/role map** read off moonpool process
   groups: `ACCEPTOR_GROUP = "paros-node"`, `MATCHMAKER_GROUP = "paros-matchmaker"`,
-  `Deployment`, `Role`.
+  `PROXY_GROUP = "paros-proxy"` (#142), `Deployment`, `Role`.
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
   (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
-  `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the run's `QuorumPolicy`
+  `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
+  `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
+  the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
   per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
-- `process.rs` `NodeProcess::{chaotic, scripted, scripted_with_bootstrap,
-  scripted_with_seam_crash}`, `MatchmakerProcess`, `IdleProcess`,
+- `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
+  fixed bootstrap subset, one scripted seam crash), `MatchmakerProcess`, `ProxyProcess` (runs
+  `paros::run_proxy`; nothing durable, a kill reboots it empty), `IdleProcess`,
   `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
   `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
   consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
   corpus's one targeted seam crash, fired once per run, no draw.
+- `client.rs` `ClientSet` (the per-server gRPC client bundle a workload
+  talks through; the corpus builds on it) · `state.rs` `published` (the
+  get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
   `buggify_knob!`; the operation-id table `PROPOSE=0 … RETIRE=13`,
@@ -43,7 +49,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 ## Campaign constants (`lib.rs`)
 
 `PROCESS_POOL_RANGE = 3..=6`, `MATCHMAKER_POOL_RANGE = 0..=5` (zero means the
-plain Multi-Paxos deployment), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
+plain Multi-Paxos deployment), `PROXY_POOL_RANGE = 0..=3` (zero means every
+Phase 2 colocated), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
 `CHAOS_DURATION_MS = 4_000`, `SMOKE_ITERATIONS = 50`, `COVERAGE_ITERATIONS = 1024`,
 `CORPUS_CI_ITERATIONS = 64`, `CHUNK_CORPUS_CI_ITERATIONS = 32`,
 `EXPLORATION_TIMELINES_PER_SEED = 8`. `chaos_surfaces()` is `Network(Swarm)`,

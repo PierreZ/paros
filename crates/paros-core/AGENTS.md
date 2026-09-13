@@ -17,8 +17,9 @@ doctrine; this file is the map.
   `proposer::Authority` it embeds the same way) · `proxy_leader.rs` `ProxyLeader` +
   `ProxyReady` (the **second deployment**, #142: a `Rounds` plus routing on a process that is
   neither an acceptor nor a replica; it fans a delegated `Accept` out, folds the `Accepted`s,
-  emits the `Commit`, relays a `Nack`, re-fans-out on its beat, and works for the highest
-  ballot it was handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
+  emits the `Commit`, relays a `Nack`, re-fans-out on its beat, evicts a round nobody answers
+  on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
+  handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
   `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
   `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,

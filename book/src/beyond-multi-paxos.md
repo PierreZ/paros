@@ -170,6 +170,28 @@ re-delegations it **takes the round back** and runs it itself. The fallback is
 always the classic Phase 2, and safety never rests on it, because two fan-outs of
 one `(slot, ballot, command)` are idempotent at every acceptor.
 
+The proxy's side of the same bargain is **bounded retention**. It re-fans-out
+its open rounds on every beat, and a round the acceptors answer closes on their
+`Accepted` or their `Nack`. One class of round is never answered: a slot every
+acceptor has already compacted past, whose `Accept` is ignored without a reply
+because refusing a chosen slot would depose a leader for nothing. A delegation
+delayed on the wire until after the leader took the round back and the cluster
+truncated the slot would be re-fanned-out for the rest of the process's life. So
+after a budget of unanswered re-fan-outs the proxy **evicts** the round. An
+eviction is not a decision: nothing is emitted, the slot is not remembered as
+done, and a leader that still needs the round re-delegates it on its next beat
+and, failing that, takes it back. The budget is the driver's, born buggified.
+
+The proxy runs on a process of its own, driven by the third driver beside the
+node's and the matchmaker's. It has nothing to persist: no promise, no log, no
+format marker, so a crash reboots it empty and the leader's next re-delegation
+rebuilds every round it still needs. In the simulation the proxies are their
+own process group, drawn per seed like the matchmakers, killed and revived by
+their own attrition regime, and judged by one claim the node's own `Commit`
+already answers to: every `Commit` a proxy emits must be backed by a Phase-2
+quorum of durable accepts at one ballot, as the audit folded them from the
+acceptors' own reports, never from the proxy's tally.
+
 The model checker that proves this found one rule the core was missing. A
 delegated round left no record at the leader, so a handoff successor that
 crashed rebooted with its allocator rewound, and a duplicated `Relinquish`
@@ -177,14 +199,17 @@ re-installed the authority at the old frontier. Two commands then ran at one
 `(slot, ballot)`. A grid leader proposing outside its own column had the same
 hole. The rule that closes both is in the next section.
 
-**In the code.** `ProxyLeader`, `ProxyReady` (`proxy_leader.rs`); `Custody`,
-`Rounds::open_delegated`, `Rounds::take_back` (`proposer/rounds.rs`);
+**In the code.** `ProxyLeader`, `ProxyReady`, `ProxyLeader::expire_stale`
+(`proxy_leader.rs`); `Custody`, `Rounds::open_delegated`, `Rounds::take_back`,
+`Rounds::stalled` (`proposer/rounds.rs`);
 `Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
 `Config::proxy_count` (`state.rs`); the model checker `proxy_model.rs`; the
-example `paros-core/examples/proxy_leader.rs`. Paper: Whittaker et al.,
-*Compartmentalized Paxos* §3.1. No level yet: the proxy's driver and process
-group are the second half of the work.
+example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
+(`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
+(`paros-sim/src/process.rs`, `roles.rs`), the audit's
+`observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
+al., *Compartmentalized Paxos* §3.1. No level yet.
 
 ## Cooperative leader handoff
 

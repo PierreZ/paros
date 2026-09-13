@@ -5,14 +5,17 @@
 //! string literals at their emit sites, for humans only: nothing reads the
 //! trace back (correctness lives in the audit).
 
-use paros_core::{Ballot, Command, Control, Message, Party, Registration, Slot};
+use paros_core::{
+    Ballot, Command, Control, Message, Party, ReconfigureRefusal, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, Registration, Slot,
+};
 
 use crate::grpc::internal;
 
 /// A stable `u64` digest of a value's bytes (FNV-1a), emitted on observability
 /// events so an observer can compare chosen values by equality without
 /// carrying the raw payload through the trace.
-fn value_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
         h ^= u64::from(b);
@@ -73,6 +76,55 @@ where
         bytes.push(0xff);
     }
     value_hash(&bytes)
+}
+
+/// The trace label of one matchmaker-set reconfiguration request (#125).
+#[must_use]
+pub(crate) fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
+    match request {
+        ReconfigureRequest::Stop { .. } => "stop",
+        ReconfigureRequest::Bootstrap { .. } => "bootstrap",
+        ReconfigureRequest::DecreePrepare { .. } => "decree_prepare",
+        ReconfigureRequest::DecreeAccept { .. } => "decree_accept",
+        ReconfigureRequest::Chosen { .. } => "chosen",
+    }
+}
+
+/// The trace label of one matchmaker-set reconfiguration reply (#125).
+#[must_use]
+pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
+    match reply {
+        ReconfigureReply::Stopped { .. } => "stopped",
+        ReconfigureReply::Bootstrapped { .. } => "bootstrapped",
+        ReconfigureReply::Promised { .. } => "promised",
+        ReconfigureReply::Accepted { .. } => "accepted",
+        ReconfigureReply::Nacked { .. } => "nacked",
+        ReconfigureReply::Learned { .. } => "learned",
+        ReconfigureReply::Refused { .. } => "refused",
+    }
+}
+
+/// What an acceptor-set reconfiguration request (#122) answers the client
+/// with: `(accepted, the stable refusal label — empty when accepted, the
+/// round the reconfiguration campaigns at)`.
+#[must_use]
+pub(crate) fn reconfigure_outcome(result: ReconfigureResult) -> (bool, &'static str, Option<u64>) {
+    match result {
+        ReconfigureResult::Started(ballot) => (true, "", Some(ballot.round)),
+        ReconfigureResult::NotLeader(_) => (false, "not_leader", None),
+        ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => {
+            (false, "no_matchmakers", None)
+        }
+        ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
+        ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => {
+            (false, "unknown_member", None)
+        }
+        ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
+        ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
+        ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => {
+            (false, "round_exhausted", None)
+        }
+    }
 }
 
 /// A short, stable label for a [`Message`] variant, for observability: the `kind`

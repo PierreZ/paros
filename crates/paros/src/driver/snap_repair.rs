@@ -5,14 +5,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{ColocatedNode, Message, NodeId, Slot, Value};
+use paros_core::{ColocatedNode, Message, NodeId, Party, Slot, Value};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::NodeStorage;
 
 use super::config::RunError;
-use super::ready::storage_fault_crash;
+use super::ready::{crash_if, storage_fault_crash};
 use super::transport::{Outbound, send_messages};
 
 /// The driver's **snapshot-point repair layer** (#101, CTRL §3.5). Volatile
@@ -67,7 +67,7 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let me = NodeId(out.self_id);
+    let me = out.self_node();
     match storage.latest_snap_point() {
         Some(point) if point == at => {
             let mut served: Vec<(u32, Value)> = Vec::with_capacity(chunks.len());
@@ -92,7 +92,7 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                     hooks,
                     audit,
                     vec![(
-                        to,
+                        Party::Node(to),
                         Message::SnapChunkResponse {
                             from: me,
                             at_index: at,
@@ -119,13 +119,13 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                 .get(&ci)
                 .map_or(node.hard_state().max_promised_ballot, |(b, _)| *b);
             audit.snap_advanced_fallback(me, to);
-            tracing::info!(node = out.self_id, to = to.0, "snap_advanced_fallback");
+            tracing::info!(node = me.0, to = to.0, "snap_advanced_fallback");
             send_messages(
                 out,
                 hooks,
                 audit,
                 vec![(
-                    to,
+                    Party::Node(to),
                     Message::InstallSnapshot {
                         from: me,
                         ballot,
@@ -196,11 +196,7 @@ where
     // only durable-write pipeline outside `drain_ready`'s seam machinery. A
     // crash here loses the staged installs whole; the reboot's scan still
     // reports the chunks faulty and the per-tick pull re-runs the repair.
-    if hooks.crash_at(Seam::BeforeChunkSync) {
-        audit.crashed(NodeId(self_id), Seam::BeforeChunkSync);
-        tracing::info!(node = self_id, seam = "before_chunk_sync", "crashed");
-        return Err(RunError::SeamCrash(Seam::BeforeChunkSync));
-    }
+    crash_if(true, hooks, audit, NodeId(self_id), Seam::BeforeChunkSync)?;
     // Flush the chunk installs durably before reporting them (and before the
     // restore below stages the recovered application state).
     storage
@@ -260,15 +256,13 @@ where
         // already durable) but its fsync has not happened. A crash here loses
         // the staged restore only; the reboot lands below the floor with a
         // clean point and recovers through a peer's `InstallSnapshot` instead.
-        if hooks.crash_at(Seam::AfterChunkRestoreBeforeSync) {
-            audit.crashed(NodeId(self_id), Seam::AfterChunkRestoreBeforeSync);
-            tracing::info!(
-                node = self_id,
-                seam = "after_chunk_restore_before_sync",
-                "crashed"
-            );
-            return Err(RunError::SeamCrash(Seam::AfterChunkRestoreBeforeSync));
-        }
+        crash_if(
+            true,
+            hooks,
+            audit,
+            NodeId(self_id),
+            Seam::AfterChunkRestoreBeforeSync,
+        )?;
         storage
             .sync(paros_core::MustSync::Sync)
             .await
@@ -301,7 +295,7 @@ pub(crate) fn snap_repair_tick<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let me = NodeId(out.self_id);
+    let me = out.self_node();
     let latest = storage.latest_snap_point();
     // A point the compaction floor already passed can license no further
     // truncation, so it is no longer a witness worth keeping.
@@ -333,14 +327,14 @@ pub(crate) fn snap_repair_tick<S, H, A>(
             // skipping has an observable effect (a lost beat of the leader's
             // custody tally, re-sent next tick).
             if hooks.skip_snap_advertisement() {
-                tracing::info!(node = out.self_id, "snap_advertisement_skipped");
+                tracing::info!(node = me.0, "snap_advertisement_skipped");
             } else {
                 send_messages(
                     out,
                     hooks,
                     audit,
                     vec![(
-                        leader,
+                        Party::Node(leader),
                         Message::SnapAck {
                             from: me,
                             at_index: point,
@@ -359,19 +353,19 @@ pub(crate) fn snap_repair_tick<S, H, A>(
         // The pull is due: consult the pacing hook only now (skipping delays
         // the repair one beat; the pull re-issues every tick it is due).
         if hooks.skip_chunk_pull() {
-            tracing::info!(node = out.self_id, "chunk_pull_skipped");
+            tracing::info!(node = me.0, "chunk_pull_skipped");
             return;
         }
         let wanted: Vec<u32> = chunks.iter().copied().collect();
         // Every pooled node is a replica that may hold the point.
-        let requests: Vec<(NodeId, Message)> = node
+        let requests: Vec<(Party, Message)> = node
             .config()
             .pool()
             .iter()
             .filter(|peer| **peer != me)
             .map(|peer| {
                 (
-                    *peer,
+                    Party::Node(*peer),
                     Message::SnapChunkRequest {
                         from: me,
                         at_index: Slot(at),

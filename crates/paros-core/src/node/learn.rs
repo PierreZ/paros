@@ -27,12 +27,7 @@ impl ColocatedNode {
         // `mark_chosen` asserted that a decision at the open round's ballot
         // carries the round's command, so closing it here never drops a
         // round whose command differs from what was chosen.
-        if self
-            .proposer
-            .rounds()
-            .get(&slot)
-            .is_some_and(|round| round.ballot() == ballot)
-        {
+        if self.proposer.is_round_open_at(slot, ballot) {
             self.proposer.close_round(slot);
         }
     }

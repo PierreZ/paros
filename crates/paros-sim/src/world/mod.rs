@@ -27,16 +27,10 @@ use paros::{
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
 const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 
-/// Get-or-create the singleton [`StorageWorld`] for this iteration. Get-then-
-/// publish is race-free: the sim executor is single-threaded and this runs
-/// synchronously (no `.await` between the get and the publish).
+/// Get-or-create the singleton [`StorageWorld`] for this iteration
+/// (`crate::state::published`).
 pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
-    if let Some(world) = state.get::<Arc<Mutex<StorageWorld>>>(STORAGE_WORLD_KEY) {
-        return world;
-    }
-    let world = Arc::new(Mutex::new(StorageWorld::default()));
-    state.publish(STORAGE_WORLD_KEY, world.clone());
-    world
+    crate::state::published(state, STORAGE_WORLD_KEY, StorageWorld::default)
 }
 
 /// Semantic health of one durable record — the world stores **records, not
@@ -264,6 +258,33 @@ pub(super) struct Stage7Flags {
 /// window closes the world refuses **new** injections but never heals the
 /// consequences of old ones (a mark clears only when the node genuinely
 /// re-writes the record through a clean flush) — recovery stays genuine.
+/// Why an identity is down for good (see [`StorageWorld::park_reason`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParkReason {
+    /// Terminally crashed by a **detected persistent fault** (detect ⇒
+    /// crash; restarting cannot help a store whose record genuinely rotted,
+    /// so the process never boots it again). Bounded by
+    /// [`StorageWorld::dead_budget`] so a live quorum survives.
+    Corruption,
+    /// Its disk was **wiped** at a restart (#124): every record gone, the
+    /// format marker with them, and the copy budget counts the identity
+    /// exactly like a corruption park (it *is* parked, for the budget and
+    /// for the composer). Whether it boots again is **not** the world's
+    /// call any more (#147): the process reboots it as an existing member
+    /// on the empty disk, and the library refuses the amnesiac store
+    /// (`RunError::Refused(BootRefusal::Amnesia)`) — an empty disk under an
+    /// old identity would answer a Phase 1 with "nothing accepted here" for
+    /// slots it once voted on. A wiped identity is replaced by
+    /// reconfiguration, never rejoined.
+    Wiped,
+    /// **Retired** by the operator (#123): named retirable by a leader's
+    /// garbage collection, shut down for good by the workload. Budgeted
+    /// like a parked node — the world is protocol-blind and stays
+    /// conservative — but outside the dead-node budget (see
+    /// [`StorageWorld::retire_budget`]).
+    Retired,
+}
+
 #[derive(Default)]
 pub(crate) struct StorageWorld {
     disks: BTreeMap<String, NodeDisk>,
@@ -294,23 +315,14 @@ pub(crate) struct StorageWorld {
     marks: BTreeMap<String, BTreeSet<u64>>,
     /// Ground truth of every Stage-7 corruption injection, in order.
     corruptions: Vec<CorruptionInjection>,
-    /// Nodes terminally crashed by a detected persistent fault (detect ⇒
-    /// crash; restarting cannot help a store whose record genuinely rotted).
-    /// Bounded by [`StorageWorld::dead_budget`] so a live quorum survives.
-    parked: BTreeSet<String>,
+    /// Nodes down for good, each with the reason it was parked (see
+    /// [`ParkReason`]): the copy budget counts every one of them as a lost
+    /// copy of every record it held, and the composer never names one. The
+    /// first reason wins — a corruption park on an identity already wiped
+    /// or retired changes nothing.
+    parked: BTreeMap<String, ParkReason>,
     /// The same set by numeric node id, for correlating the injection ledger.
     parked_ids: BTreeSet<u64>,
-    /// Nodes whose disk was **wiped** at a restart (#124): every record
-    /// gone, the format marker with them, and the copy budget counts the
-    /// identity exactly like a parked node (it *is* parked, for the budget
-    /// and for the composer). Whether it boots again is **not** the
-    /// world's call any more (#147): the process reboots it as an existing
-    /// member on the empty disk, and the library refuses the amnesiac store
-    /// (`RunError::Refused(BootRefusal::Amnesia)`) — an empty disk under an
-    /// old identity would answer a Phase 1 with "nothing accepted here" for
-    /// slots it once voted on. A wiped identity is replaced by
-    /// reconfiguration, never rejoined.
-    wiped: BTreeSet<String>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -319,10 +331,6 @@ pub(crate) struct StorageWorld {
     /// exactly when the marker lands durably, so a first boot whose format
     /// sync was lost is a first boot again.
     provisioned: BTreeSet<String>,
-    /// Nodes the operator **retired** (#123): named retirable by a leader's
-    /// garbage collection, shut down for good by the workload. Budgeted like
-    /// a parked node — the world is protocol-blind and stays conservative.
-    retired: BTreeSet<String>,
     /// Matchmakers whose durable state was lost for good (#125): the
     /// registry stays down, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
@@ -345,34 +353,31 @@ pub(crate) struct StorageWorld {
 }
 
 impl StorageWorld {
-    /// Whether `ip` was terminally parked (see `crate::process`).
+    /// Whether `ip` is down for good, whatever the reason (see
+    /// `crate::process`).
     pub(crate) fn is_parked(&self, ip: &str) -> bool {
-        self.parked.contains(ip)
+        self.parked.contains_key(ip)
+    }
+
+    /// Why `ip` is down for good, or `None` while it may still boot. The
+    /// process reads one exit off it: a corruption park is the one it
+    /// honors before touching the store (the boot scan would re-detect the
+    /// same rotted record forever), a retirement has its own exit, and a
+    /// wiped identity is parked for the budget but boots (#147): the
+    /// library, not the harness, refuses its empty store.
+    pub(crate) fn park_reason(&self, ip: &str) -> Option<ParkReason> {
+        self.parked.get(ip).copied()
     }
 
     /// Whether `ip`'s disk was wiped (a wiped node is also parked).
     pub(crate) fn is_wiped(&self, ip: &str) -> bool {
-        self.wiped.contains(ip)
-    }
-
-    /// Whether `ip` was parked by a **detected corruption** — the one park
-    /// the process honors before touching its store (the boot scan would
-    /// re-detect the same rotted record forever). A wiped identity is parked
-    /// for the budget but boots (#147): the library, not the harness,
-    /// refuses its empty store; a retired one has its own exit.
-    pub(crate) fn is_corruption_parked(&self, ip: &str) -> bool {
-        self.parked.contains(ip) && !self.wiped.contains(ip) && !self.retired.contains(ip)
+        self.park_reason(ip) == Some(ParkReason::Wiped)
     }
 
     /// Whether the operator has ever provisioned `ip` (#147): the claim the
     /// harness hands the driver as `BootKind`.
     pub(crate) fn provisioned(&self, ip: &str) -> bool {
         self.provisioned.contains(ip)
-    }
-
-    /// Whether `ip` was retired by the operator.
-    pub(crate) fn is_retired(&self, ip: &str) -> bool {
-        self.retired.contains(ip)
     }
 
     /// Whether `ip`'s registry was lost for good.
@@ -387,17 +392,15 @@ impl StorageWorld {
     /// clean quorum of every record and a live quorum of every configuration
     /// the run may put in force. The park is accounting only: the process
     /// boots the identity on its empty disk and the library refuses it
-    /// (#147, [`StorageWorld::is_corruption_parked`]). Returns whether it
-    /// fired.
+    /// (#147, [`StorageWorld::park_reason`]). Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     pub(crate) fn wipe(&mut self, key: &str, node: u64) -> bool {
-        if self.parked.contains(key) || self.retired.contains(key) || !self.may_park(key) {
+        if self.parked.contains_key(key) || !self.may_park(key) {
             return false;
         }
         self.disks.remove(key);
         self.marks.remove(key);
-        self.park(key, node);
-        self.wiped.insert(key.to_string());
+        self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true
     }
@@ -419,14 +422,13 @@ impl StorageWorld {
             "gc: a retired identity is never a member of the configuration in force",
             { "node" => node, "members" => in_force.len() }
         );
-        if member || self.parked.contains(key) || self.retired.contains(key) {
+        if member || self.parked.contains_key(key) {
             return false;
         }
-        if self.retired.len() + 1 > self.retire_budget() || !self.may_park_for_copies(key) {
+        if self.retired_count() + 1 > self.retire_budget() || !self.may_park_for_copies(key) {
             return false;
         }
-        self.park(key, node);
-        self.retired.insert(key.to_string());
+        self.park_as(key, node, ParkReason::Retired);
         tracing::info!(node, "node_retired");
         true
     }
@@ -440,7 +442,7 @@ impl StorageWorld {
     /// already shut down. Returns whether the key was actually held.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     pub(crate) fn release_retirement(&mut self, key: &str, node: u64) -> bool {
-        if !self.retired.remove(key) {
+        if self.park_reason(key) != Some(ParkReason::Retired) {
             return false;
         }
         self.parked.remove(key);
@@ -493,7 +495,7 @@ impl StorageWorld {
     /// node reports to the audit.
     pub(crate) fn parked_count_excluding(&self, ip: &str) -> usize {
         self.parked
-            .iter()
+            .keys()
             .filter(|parked| parked.as_str() != ip)
             .count()
     }
@@ -598,7 +600,7 @@ impl StorageWorld {
                 unclean.insert(node);
             }
         }
-        for node in &self.parked {
+        for node in self.parked.keys() {
             unclean.insert(node);
         }
         self.cluster_size.saturating_sub(unclean.len())
@@ -615,8 +617,16 @@ impl StorageWorld {
     /// them (see [`StorageWorld::retire_budget`]).
     fn detected_parks(&self) -> usize {
         self.parked
-            .iter()
-            .filter(|key| !self.retired.contains(*key))
+            .values()
+            .filter(|reason| **reason != ParkReason::Retired)
+            .count()
+    }
+
+    /// Identities the operator retired (the losses [`StorageWorld::retire_budget`] bounds).
+    fn retired_count(&self) -> usize {
+        self.parked
+            .values()
+            .filter(|reason| **reason == ParkReason::Retired)
             .count()
     }
 
@@ -641,7 +651,7 @@ impl StorageWorld {
         if self.cluster_size == 0 {
             return false;
         }
-        if self.parked.contains(node_key) {
+        if self.parked.contains_key(node_key) {
             return true;
         }
         if self.detected_parks() + 1 > self.dead_budget() {
@@ -659,7 +669,7 @@ impl StorageWorld {
         if self.cluster_size == 0 {
             return false;
         }
-        if self.parked.contains(node_key) {
+        if self.parked.contains_key(node_key) {
             return true;
         }
         let quorum = self.quorum();
@@ -688,7 +698,7 @@ impl StorageWorld {
                 .iter()
                 .filter(|(_, marks)| marks.contains(slot))
                 .map(|(node, _)| node.as_str())
-                .chain(self.parked.iter().map(String::as_str))
+                .chain(self.parked.keys().map(String::as_str))
                 .collect();
             unclean.insert(node_key);
             if self.cluster_size.saturating_sub(unclean.len()) < quorum {
@@ -698,10 +708,17 @@ impl StorageWorld {
         true
     }
 
-    /// Terminally park a node: detect ⇒ crash, and it stays down.
+    /// Terminally park a node by a detected corruption: detect ⇒ crash, and
+    /// it stays down.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
     fn park(&mut self, key: &str, node: u64) {
-        self.parked.insert(key.to_string());
+        self.park_as(key, node, ParkReason::Corruption);
+    }
+
+    /// Park `key` for `reason`, unless it is already down (the first reason
+    /// wins).
+    fn park_as(&mut self, key: &str, node: u64, reason: ParkReason) {
+        self.parked.entry(key.to_string()).or_insert(reason);
         self.parked_ids.insert(node);
     }
 
@@ -735,7 +752,7 @@ impl StorageWorld {
     /// corpus.
     fn slot_unrecoverable(&self, slot: u64) -> bool {
         for (key, disk) in &self.disks {
-            if self.parked.contains(key) {
+            if self.parked.contains_key(key) {
                 continue;
             }
             if disk.first_slot.0 > slot && disk.snapshot_health == RecordHealth::Clean {
@@ -753,7 +770,7 @@ impl StorageWorld {
         let points: BTreeSet<u64> = self
             .disks
             .iter()
-            .filter(|(key, _)| !self.parked.contains(*key))
+            .filter(|(key, _)| !self.parked.contains_key(*key))
             .filter_map(|(_, disk)| disk.snap_point.map(|(at, _)| at))
             .filter(|at| *at >= slot)
             .collect();
@@ -769,7 +786,7 @@ impl StorageWorld {
                 .unwrap_or(0);
             let assemblable = (0..chunk_count).all(|chunk| {
                 self.disks.iter().any(|(key, disk)| {
-                    !self.parked.contains(key)
+                    !self.parked.contains_key(key)
                         && disk.snap_point.is_some_and(|(point, _)| point == at)
                         && disk
                             .snap_chunk_health
@@ -1026,14 +1043,15 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
             .iter()
             .filter(|(_, marks)| marks.contains(&slot))
             .map(|(node, _)| node)
-            .chain(guard.parked.iter())
+            .chain(guard.parked.keys())
             .collect();
         if guard.cluster_size.saturating_sub(unclean.len()) < quorum {
             // Red-path diagnostic: name the slot and the unclean set, so an
             // availability violation is attributable without a re-run.
+            let parked: BTreeSet<&String> = guard.parked.keys().collect();
             eprintln!(
-                "clean-quorum lost: slot={slot} unclean={unclean:?} parked={:?} marks={:?}",
-                guard.parked, guard.marks
+                "clean-quorum lost: slot={slot} unclean={unclean:?} parked={parked:?} marks={:?}",
+                guard.marks
             );
             stats.clean_quorum_everywhere = false;
         }
@@ -1057,12 +1075,7 @@ pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
 pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .parked
-        .iter()
-        .chain(guard.retired.iter())
-        .cloned()
-        .collect()
+    guard.parked.keys().cloned().collect()
 }
 
 /// The IPs of matchmakers whose registry was lost for good.

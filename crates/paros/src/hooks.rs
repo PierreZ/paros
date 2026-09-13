@@ -19,7 +19,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, ReconfigurerPhase, Slot};
+use paros_core::{Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +73,23 @@ pub enum Seam {
     /// then fsync) a crash here lets a `Registered` reply escape for a ballot
     /// the restarted matchmaker no longer holds — the registry's un-promise.
     MatchAfterSyncBeforeReply,
+}
+
+impl Seam {
+    /// The stable `seam` field a crash at this seam is traced with.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Seam::BeforeSync => "before_sync",
+            Seam::AfterSyncBeforeSend => "after_sync_before_send",
+            Seam::AfterApplyBeforeSync => "after_apply_before_sync",
+            Seam::BeforeChunkSync => "before_chunk_sync",
+            Seam::AfterChunkRestoreBeforeSync => "after_chunk_restore_before_sync",
+            Seam::AfterBootReplayBeforeSync => "after_boot_replay_before_sync",
+            Seam::MatchBeforeSync => "match_before_sync",
+            Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
+        }
+    }
 }
 
 /// What a cooperative leader handoff would transfer right now, handed to
@@ -138,6 +155,28 @@ pub enum Reply {
     /// A `RetireAck`. Dropping it after the node accepted its retirement
     /// leaves the operator to re-ask a node that is already gone.
     Retire,
+}
+
+impl Reply {
+    /// The stable `reply` field a dropped or duplicated reply of this kind is
+    /// traced with.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Reply::Propose => "propose",
+            Reply::ProposeDedup => "propose_dedup",
+            Reply::Read => "read",
+            Reply::ProposeRedirect => "propose_redirect",
+            Reply::ReadRedirect => "read_redirect",
+            Reply::Compact => "compact",
+            Reply::Reconfigure => "reconfigure",
+            Reply::Match => "match",
+            Reply::GcAck => "gc_ack",
+            Reply::MatchmakerReconfigure => "matchmaker_reconfigure",
+            Reply::ReconfigureMatchmakers => "reconfigure_matchmakers",
+            Reply::Retire => "retire",
+        }
+    }
 }
 
 /// Optional driver-level fault and policy hooks.
@@ -272,7 +311,7 @@ pub trait DriverHooks {
     /// connection-level faults, this reaches *per-message* loss — e.g. one
     /// isolated `Accept` for an earlier slot vanishing while later slots land,
     /// the interleaving behind a stranded chosen-gap wedge.
-    fn drop_outgoing(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn drop_outgoing(&self, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -282,7 +321,7 @@ pub trait DriverHooks {
     /// harmless — this location exists to keep it that way (a quorum counter
     /// "optimized" into an integer would let a duplicated `Accepted` fabricate
     /// a quorum from a sub-quorum). Moonpool has no message-duplication fault.
-    fn duplicate_outgoing(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn duplicate_outgoing(&self, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -294,7 +333,7 @@ pub trait DriverHooks {
     /// a node enqueued in, so within one peer stream this interleaving is
     /// otherwise unreachable. Consulted only when the mailbox is non-empty
     /// (overtaking an empty queue changes nothing).
-    fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn overtake_in_mailbox(&self, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -307,7 +346,7 @@ pub trait DriverHooks {
     /// on overflow, so a `true` always evicts something the default would have
     /// kept — the occasional cross-kind pressure the liveness argument has to
     /// survive.
-    fn evict_across_kinds(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn evict_across_kinds(&self, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -326,7 +365,7 @@ pub trait DriverHooks {
     /// what makes the next batch worth holding. The split is a determinism
     /// requirement rather than a convenience: see `PeerMailbox` in
     /// `paros::driver`.
-    fn hold_peer_delivery(&self, _to: NodeId) -> bool {
+    fn hold_peer_delivery(&self, _to: Party) -> bool {
         false
     }
 
@@ -341,7 +380,7 @@ pub trait DriverHooks {
     /// Consulted at **enqueue** time, once this message makes a reorderable
     /// (two-message) batch possible, and applied by the delivery task only
     /// when the batch it drains really does hold more than one message.
-    fn reverse_delivery_batch(&self, _to: NodeId) -> bool {
+    fn reverse_delivery_batch(&self, _to: Party) -> bool {
         false
     }
 
@@ -352,7 +391,7 @@ pub trait DriverHooks {
     /// whose application prefix has fallen behind is dropped, never sent wrong)
     /// taken spuriously, so the recovery path that must tolerate an unserved
     /// beat is exercised without needing an application repair to be open.
-    fn skip_snapshot_offer(&self, _to: NodeId) -> bool {
+    fn skip_snapshot_offer(&self, _to: Party) -> bool {
         false
     }
 
@@ -423,6 +462,49 @@ pub trait DriverHooks {
     /// the one its first fan-out used.
     fn phase2_column(&self, _slot: Slot, _cols: usize) -> Option<usize> {
         None
+    }
+
+    /// Which **proxy leader** this proposal's Phase 2 should be delegated to
+    /// (#142), instead of the core's own `ProxyId(slot % proxy_count)`
+    /// ([`paros_core::ProxyId::of`]): `None` (the default) keeps the core's
+    /// choice. Consulted only where it can have an effect — on a leader of a
+    /// deployment with proxies, from the node loop, right before the
+    /// proposal opens its round — and handed to the core as
+    /// [`paros_core::Delegation::To`]. A returned proxy at or past
+    /// `proxy_count` is ignored.
+    ///
+    /// Always safe: a proxy contributes nothing to the decision and two
+    /// fan-outs of one `(slot, ballot, command)` are P2b-idempotent, so
+    /// which proxy carries a slot is a load-spreading choice, never a
+    /// safety one. What the override reaches is the mix the modulus alone
+    /// never produces — two consecutive slots on one proxy, and a slot whose
+    /// handoff successor re-delegates it (the successor derives `slot %
+    /// proxy_count` afresh) to a different proxy than the one that already
+    /// holds it, so two proxies fan out the same round.
+    fn proxy_for(&self, _slot: Slot, _proxy_count: usize) -> Option<ProxyId> {
+        None
+    }
+
+    /// Whether to run this proposal's Phase 2 **colocated** on the leader
+    /// although the deployment has proxies (#142,
+    /// [`paros_core::Delegation::Colocated`]). Consulted only where it can
+    /// have an effect (a leader of a deployment with proxies), before
+    /// [`DriverHooks::proxy_for`], which is then not asked. Always safe: the
+    /// colocated Phase 2 is the plain deployment's, and the fallback every
+    /// take-back runs anyway — this makes a proxied deployment's log a mix
+    /// of proxied and colocated slots rather than all of one kind.
+    fn skip_delegation(&self) -> bool {
+        false
+    }
+
+    /// Whether a **proxy leader** should skip this beat's re-fan-out of its
+    /// open rounds ([`paros_core::ProxyLeader::resend_pending`]). Consulted
+    /// only while the proxy holds open rounds, so a `true` always costs a
+    /// beat. Always safe: the re-send is a pure optimization, the acceptors
+    /// re-accept idempotently, and a round the proxy never closes is taken
+    /// back by its leader ([`paros_core::ColocatedNode::take_back_delegated`]).
+    fn skip_proxy_resend(&self) -> bool {
+        false
     }
 
     /// Whether to answer a parked read with a retry redirect **now**, before

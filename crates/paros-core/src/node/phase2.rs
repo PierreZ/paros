@@ -41,16 +41,13 @@ impl ColocatedNode {
         // is not in"), and under a grid an acceptor outside the round's
         // column — one a duplicate or a misroute reached — may well have
         // accepted, but its vote is not the column's and does not count.
-        // No open round at the slot: nothing to count toward.
-        let Some(column) = self.proposer.round_column(slot) else {
-            return;
-        };
-        if !self.acceptors.is_phase2_addressee(from, column) {
-            return;
-        }
-        // A delegated round's votes are the proxy's: the fold refuses them
-        // here, so nothing below runs for one (`Rounds::fold_accepted`).
-        if !self.proposer.fold_accepted(from, ballot, slot, vhash) {
+        // No open round at the slot: nothing to count toward. And a
+        // delegated round's votes are the proxy's: the fold refuses them
+        // here, so nothing below runs for one (`Rounds::fold_accepted_in`).
+        if !self
+            .proposer
+            .fold_accepted_in(&self.acceptors, from, ballot, slot, vhash)
+        {
             return;
         }
         // CheckQuorum: an `Accepted` at our current ballot is leader contact,
@@ -93,7 +90,7 @@ impl ColocatedNode {
     /// the rounds a proxy runs are never the ones a fresh leadership's
     /// recovery depends on.
     pub(super) fn may_delegate(&self) -> bool {
-        self.proposer.recovery().is_none() && self.proposer.probe().is_none()
+        !self.phase1_work_open()
     }
 
     /// Self-accept (if our promise allows) and broadcast `Accept` for `slot`,
@@ -258,9 +255,7 @@ impl ColocatedNode {
             Some(proxy) => (
                 Audience::Proxy(proxy),
                 Party::Proxy(proxy),
-                self.config
-                    .has_matchmakers()
-                    .then(|| self.acceptors.clone()),
+                self.wire_config(),
             ),
             None => (
                 Audience::AcceptorsOf {

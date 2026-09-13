@@ -140,10 +140,7 @@ impl ColocatedNode {
         let Some(gc) = self.gc.as_ref() else {
             return false;
         };
-        if self.proposer.recovery().is_some()
-            || self.proposer.probe().is_some()
-            || self.replica.app_repair().is_some()
-        {
+        if !self.leadership_settled() {
             return false;
         }
         let own = self

@@ -1,14 +1,11 @@
 //! Driver configuration and the wiring both drivers share: the per-node
 //! tunables, the transport constants they default to, the gRPC keep-alive /
-//! channel shapes, the accepted-connection server, the scope guard, the
-//! address parser, and the driver's typed exit ([`RunError`]).
+//! channel shapes, the address parser, and the driver's typed exit ([`RunError`]).
 
-use std::fmt::Display;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
+use moonpool_core::{SimulationError, SimulationResult};
 use moonpool_hyper::{ChannelConfig, KeepAlive};
 
 use crate::hooks::Seam;
@@ -144,6 +141,35 @@ pub struct DriverTunables {
     /// knob rather than a multiple of `election_timeout_base`, so a seed can
     /// push the election clock and the decree's symmetry break independently.
     pub reconfigure_backoff_max_ticks: u64,
+    /// How many times a delegated round may be re-delegated (once per beat,
+    /// by `resend_pending`) without the proxy's `Commit` arriving before the
+    /// leader **takes it back** and runs it colocated
+    /// (`ColocatedNode::take_back_delegated`, #142). Driver policy, never a
+    /// constant of the state machine: liveness under a dead proxy is the
+    /// leader's, and this is its whole budget. Floor 1 — taking a round back
+    /// after a single re-delegation is always safe (two fan-outs of one
+    /// `(slot, ballot, command)` are P2b-idempotent), it merely runs more of
+    /// the log colocated; the ceiling is unbounded and still winnable, a
+    /// round a dead proxy holds forever being recovered by the next
+    /// leadership's Phase 1. Meaningless on a deployment without proxies.
+    pub proxy_take_back_resends: u64,
+    /// How many times a proxy leader may re-fan-out an open round (once per
+    /// beat, by `ProxyLeader::resend_pending`) without an answer before it
+    /// **evicts** it (`ProxyLeader::expire_stale`, #142) — the proxy's
+    /// bounded retention. A round nobody answers is a real state, not a
+    /// slow one: an `Accept` for a slot every acceptor compacted past is
+    /// ignored without `Accepted` or `Nack`, so a delegation delayed until
+    /// after the leader took the round back and the cluster truncated the
+    /// slot would otherwise be re-fanned-out for the rest of the process's
+    /// life. Eviction is never a decision — the leader's re-delegation
+    /// reopens a round it still needs and its take-back
+    /// (`proxy_take_back_resends`) stays the liveness — so the floor is 1
+    /// and the ceiling is unbounded and still winnable. The default is twice
+    /// the take-back budget, so in the default configuration the leader has
+    /// taken a stalled round back before its proxy evicts it and the
+    /// eviction reclaims only rounds the leader is done with. Meaningless
+    /// on a proxy-less deployment, and read only by `run_proxy`.
+    pub proxy_round_resends: u64,
 }
 
 impl Default for DriverTunables {
@@ -166,27 +192,8 @@ impl Default for DriverTunables {
             reconfigurer_resend_ticks: ELECTION_TIMEOUT_BASE,
             reconfigure_timeout_elections: RECONFIGURE_TIMEOUT_ELECTIONS,
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
-        }
-    }
-}
-
-/// Run one synchronous cleanup action on every exit path from its scope.
-pub(crate) struct OnDrop<F: FnOnce()> {
-    action: Option<F>,
-}
-
-impl<F: FnOnce()> OnDrop<F> {
-    pub(crate) fn new(action: F) -> Self {
-        Self {
-            action: Some(action),
-        }
-    }
-}
-
-impl<F: FnOnce()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        if let Some(action) = self.action.take() {
-            action();
+            proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
+            proxy_round_resends: PROXY_ROUND_RESENDS,
         }
     }
 }
@@ -207,31 +214,6 @@ pub(crate) fn grpc_channel_config(tunables: &DriverTunables) -> ChannelConfig {
     }
 }
 
-/// Serve one accepted gRPC connection on its own detached task, ending when
-/// the incarnation does. Shared by both drivers in this crate — the node loop
-/// and the matchmaker loop differ only in the task's name and the `role` their
-/// connection errors carry.
-pub(crate) fn accept_and_serve<P, F, E>(
-    providers: &P,
-    task: &'static str,
-    role: &'static str,
-    addr: impl Display + Send + 'static,
-    connection: F,
-) where
-    P: Providers,
-    F: Future<Output = Result<(), E>> + Send + 'static,
-    E: Display + Send + 'static,
-{
-    providers
-        .task()
-        .spawn_task(task, async move {
-            if let Err(error) = connection.await {
-                tracing::warn!(%addr, %error, role, "gRPC connection ended");
-            }
-        })
-        .detach();
-}
-
 /// Ticks a parked read reply may wait for its read-index confirmation before
 /// the driver answers a retry redirect (500 ms — well inside the sim client's
 /// 1000 ms deadline, and inside the core's own round TTL, so a late core
@@ -244,6 +226,23 @@ const READ_RETRY_TICKS: u64 = 10;
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// Default take-back budget for a delegated round (#142), in re-delegations
+/// — one per beat, so two election-timeout bases of ticks: long enough for a
+/// proxy's fan-out, fold and `Commit` to complete over a slow link, short
+/// enough that a dead proxy costs a slot a fraction of a second rather than
+/// an election. Driver policy (the core only counts), and a
+/// [`DriverTunables`] field so the harness can push it to its floor.
+const PROXY_TAKE_BACK_RESENDS: u64 = ELECTION_TIMEOUT_BASE * 2;
+
+/// Default retention budget of a proxy leader's open round (#142), in
+/// unanswered re-fan-outs — one per beat: twice the take-back budget, so the
+/// leader reclaims a stalled round first and the proxy's eviction is the
+/// backstop for rounds nobody will ever answer (a compacted slot, a round
+/// the leader already decided colocated). Driver policy (the core only
+/// counts), and a [`DriverTunables`] field so the harness can push it to
+/// its floor.
+const PROXY_ROUND_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS * 2;
 
 /// Default stall budget for a matchmaker-set handover, in election timeouts:
 /// long enough for a slow matchmaker to answer a re-sent request, short enough

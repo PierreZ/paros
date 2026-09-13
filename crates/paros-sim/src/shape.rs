@@ -213,6 +213,24 @@ impl NodeShape {
             // each other — a liveness cost the stall budget ends, never a
             // safety one.
             reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The delegated round's take-back budget (#142), in
+            // re-delegations (one per beat). Floor 1: a round taken back
+            // after a single re-delegation runs colocated while its proxy
+            // may still decide it, and the two verdicts must agree
+            // (P2b-idempotent fan-outs) — the whole point of pushing it.
+            // The ceiling stretches a dead proxy's cost per slot; the
+            // recovery tail still outlasts it.
+            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The proxy's retention budget (#142), in unanswered re-fan-outs
+            // (one per beat), drawn independently of the take-back so a
+            // seed can evict before the leader takes back or long after.
+            // Floor 1: a round evicted after one unanswered beat decides
+            // nothing and is reopened by the leader's next re-delegation,
+            // so the cost is traffic, never safety or liveness (the
+            // take-back is the liveness). The ceiling stretches how long a
+            // round for a compacted slot is re-fanned-out; the tail
+            // outlasts it.
+            proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
         };
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
@@ -424,12 +442,7 @@ struct Registry {
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
-    if let Some(registry) = state.get::<Arc<Mutex<Registry>>>(SHAPE_KEY) {
-        return registry;
-    }
-    let registry = Arc::new(Mutex::new(Registry::default()));
-    state.publish(SHAPE_KEY, registry.clone());
-    registry
+    crate::state::published(state, SHAPE_KEY, Registry::default)
 }
 
 /// Boot `ip` once more: hand back the shape its first incarnation drew, drawing

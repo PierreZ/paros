@@ -215,17 +215,13 @@ impl ColocatedNode {
         };
         let matchmakers = self.deployment_matchmakers();
         let generation = matchmakers.generation;
-        let request = match m.kind() {
-            RegistrationKind::Reconfiguration => MatchRequest::reconfigure(
-                self.config.id,
-                m.ballot(),
-                m.config().clone(),
-                generation,
-            ),
-            RegistrationKind::Belief => {
-                MatchRequest::new(self.config.id, m.ballot(), m.config().clone(), generation)
-            }
-        };
+        let request = MatchRequest::for_kind(
+            m.kind(),
+            self.config.id,
+            m.ballot(),
+            m.config().clone(),
+            generation,
+        );
         let unanswered = m.unanswered(matchmakers);
         for (matchmaker, cursor) in unanswered {
             // A matchmaker mid-answer is re-asked from where its last page
@@ -367,14 +363,7 @@ impl ColocatedNode {
             let config = m.config().clone();
             let kind = m.kind();
             let generation = matchmakers.generation;
-            let request = match kind {
-                RegistrationKind::Reconfiguration => {
-                    MatchRequest::reconfigure(self.config.id, ballot, config, generation)
-                }
-                RegistrationKind::Belief => {
-                    MatchRequest::new(self.config.id, ballot, config, generation)
-                }
-            };
+            let request = MatchRequest::for_kind(kind, self.config.id, ballot, config, generation);
             self.pending_match_requests
                 .push((matchmaker, request.from_page(next)));
             return MatchStep::Paged { next };

@@ -46,9 +46,10 @@ use paros::{
     AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
     GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
     MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, PendingBootstrap, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam,
-    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash, message_kind,
+    PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
+    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    message_kind,
 };
 
 use self::state::AuditState;
@@ -663,18 +664,20 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// Persist-before-send, observed at the send seam: the two replies whose
     /// meaning is a durable fact must find that fact already folded — an
     /// `Accepted` its sender's durable accept, a `Commit` a quorum decision
-    /// on the tally (see [`AuditWorld::check_final_convergence`]).
-    fn observe_durable_send(&self, node: NodeId, msg: &Message) {
+    /// on the tally (see [`AuditWorld::check_final_convergence`]). `from` is
+    /// a node, or the proxy leader that decided the `Commit` (#142); only a
+    /// node ever sends an `Accepted`.
+    fn observe_durable_send(&self, from: Party, msg: &Message) {
         if let Message::Accepted { ballot, slot, .. } = msg {
             let st = self.state();
             let holds = st
                 .accept_sets
                 .get(&(slot.0, ballot.round, ballot.node.0))
-                .is_some_and(|holders| holders.contains(&node.0));
+                .is_some_and(|holders| from.node().is_some_and(|n| holders.contains(&n.0)));
             assert_always!(
                 holds,
                 "an outgoing Accepted names a durably accepted record",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
         }
         if let Message::Commit {
@@ -688,19 +691,57 @@ impl<T: TimeProvider> NodeAudit<T> {
             // core's decision on a quorum of `Accepted`s, each preceded (above)
             // by its durable accept, so the tally has already decided the slot
             // — and with this value, at this or a lower ballot (P2: a later
-            // ballot re-decides only the same value).
+            // ballot re-decides only the same value). Below the cluster-wide
+            // compaction floor the per-slot tally is pruned, and the witness
+            // there is the decided vhash the pruning kept
+            // (`AuditState::decided_vhash`) — the consensus decision, never
+            // the apply-fed `chosen` map, whose entry for a #94 re-chosen
+            // identity is the `Noop` it applied as while its `Commit`
+            // honestly carries the decided user command. A proxy leader has
+            // no floor and never learns a slot chosen, so its `Commit` for a
+            // round whose votes arrived late can trail the whole cluster's
+            // truncation (seed 17112434982126988317: slot 34 committed by a
+            // proxy at a cluster floor of 38 — harmless, every learner
+            // ignores it).
             let st = self.state();
-            let decided = st.decided.get(&slot.0).copied();
+            let vhash = command_hash(command);
+            let min_floor = st.cluster_min_floor();
+            let decided = st.decided_vhash(slot.0);
             assert_always!(
                 decided.is_some(),
                 "an outgoing Commit names a slot a durable accept quorum already decided",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                {
+                    "from" => from.to_string(),
+                    "slot" => slot.0,
+                    "round" => ballot.round,
+                    "min_floor" => min_floor
+                }
             );
             assert_always!(
-                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == command_hash(command)),
+                decided.is_none_or(|decided_vhash| decided_vhash == vhash),
                 "an outgoing Commit carries the quorum-decided value",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
+        }
+    }
+
+    /// A `Commit` on the wire, whoever sends it: it names a decided slot,
+    /// and where the durable-accept tally already knows the decision it
+    /// carries that value. Checked against `decided`, never the apply-fed
+    /// `chosen` map: a #94 re-chosen identity applies as a `Noop` everywhere
+    /// while its commit honestly carries the decided user command.
+    fn observe_commit_send(&self, from: Party, msg: &Message) {
+        self.observe_durable_send(from, msg);
+        if let Message::Commit { slot, command, .. } = msg {
+            let vhash = command_hash(command);
+            let st = self.state();
+            if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
+                assert_always!(
+                    vhash == decided_vhash,
+                    "a commit carries the chosen value",
+                    { "from" => from.to_string(), "slot" => slot.0 }
+                );
+            }
         }
     }
 }
@@ -810,12 +851,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
         // Below the *cluster-wide* minimum floor every node has truncated, so
         // the per-slot safety tallies can never be consulted again: reclaim
-        // them (an O(log n) split, on the rare truncation path).
-        let min_floor = st.cluster_min_floor();
-        if min_floor > 0 {
-            st.decided = st.decided.split_off(&min_floor);
-            st.accept_sets = st.accept_sets.split_off(&(min_floor, 0, 0));
-        }
+        // them, keeping the decided vhash per pruned slot as the witness a
+        // late `Commit` there is judged against.
+        st.prune_below_floor();
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, chosen_index = chosen_index.0))]
@@ -926,7 +964,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
-        reach_once!(st.any_chosen, "a value is chosen");
+        st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
     }
 
@@ -987,32 +1025,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
         // and reported before the send; a re-answer names an older record
-        // that was folded when it was first written or re-read at boot).
-        self.observe_durable_send(node, msg);
-        // A `Commit` names a decided slot; where the durable-accept tally
-        // already knows the decision, the commit must carry that value.
-        // Checked against `decided`, never the apply-fed `chosen` map: a #94
-        // re-chosen identity applies as a `Noop` everywhere while its commit
-        // honestly carries the decided user command.
-        if let Message::Commit { slot, command, .. } = msg {
-            let vhash = command_hash(command);
-            let st = self.state();
-            if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
-                assert_always!(
-                    vhash == decided_vhash,
-                    "a commit carries the chosen value",
-                    { "node" => node.0, "slot" => slot.0 }
-                );
-            }
-        }
-        // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
-        // own proposer, so exactly one node ever sends `Accept`s at it, and
-        // two different commands under one `(ballot, slot)` mean the
-        // proposer allocated a slot it already had in flight. Reading the
-        // send rather than the receive is deliberate — it indicts the
-        // proposer, not the network — and it is the only place the anomaly
-        // is visible: an accept quorum may reject it, leaving no durable
-        // trace at all.
+        // that was folded when it was first written or re-read at boot). A
+        // `Commit` names a decided slot and carries the decided value.
+        self.observe_commit_send(Party::Node(node), msg);
+        // The Phase-2 half of P2b, checked *on the wire*, and the two claims
+        // around it: *who* may propose under this ballot (authority
+        // uniqueness — checked first, since a violation of it explains a
+        // violation of the rest), *whom* it addresses and *on what Phase-1
+        // licence* (#121, #122), then *what* was proposed.
         if let Message::Accept {
             ballot,
             slot,
@@ -1022,26 +1042,120 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         {
             let vhash = command_hash(command);
             let mut st = self.state();
-            // Authority uniqueness first: *who* may propose under this ballot,
-            // checked before *what* they proposed. A violation of the first
-            // explains a violation of the second, so ordering them this way
-            // makes the root cause the one that fires.
             st.observe_authority_use(node.0, *ballot);
-            // Then *whom* it addresses and *on what Phase-1 licence* (#121,
-            // #122): the ballot's own acceptors, once every prior
-            // configuration promised a quorum.
-            st.observe_accept_send(node.0, to.0, *ballot);
-            st.any_proposal_checked = true;
-            if let Some(prev) = st
-                .proposed
-                .insert((ballot.round, ballot.node.0, slot.0), vhash)
-            {
-                assert_always!(
-                    prev == vhash,
-                    "one ballot proposes at most one command for a slot"
-                );
-            }
+            st.observe_accept_send(Party::Node(node), to.0, *ballot);
+            st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
         }
+    }
+
+    fn sent_to_proxy(&self, node: NodeId, proxy: ProxyId, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
+        // Persist-before-send at the accept seam, whoever the vote goes to:
+        // an acceptor's `Accepted` to a proxy claims "I hold this durably"
+        // exactly as one to a leader does, so the check `sent` runs is run
+        // here on the same message (a node never sends a `Commit` to a
+        // proxy; the call is the shared seam). Routing Phase 2 through a
+        // proxy removes no check — the proxy's later quorum check judges
+        // the decision, not the order of each vote and its fsync.
+        self.observe_commit_send(Party::Node(node), msg);
+        // A delegation is the leader exercising its Phase-2 authority for
+        // the slot — the same two claims a colocated `Accept` makes about
+        // *who* and *what*; *whom* it addresses is a proxy, which is judged
+        // at the proxy's own fan-out.
+        if let Message::Accept {
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        {
+            let vhash = command_hash(command);
+            let mut st = self.state();
+            st.observe_authority_use(node.0, *ballot);
+            st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
+        }
+        let _ = proxy;
+    }
+
+    fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
+        let from = Party::Proxy(proxy);
+        match msg {
+            // The fan-out carries the leader's command to the ballot's own
+            // acceptors: *whom* and *what* are judged exactly as the leader's
+            // colocated `Accept` is; *who* is the leader the hint names, whose
+            // authority the delegation already exercised.
+            Message::Accept {
+                ballot,
+                slot,
+                command,
+                ..
+            } => {
+                let vhash = command_hash(command);
+                let mut st = self.state();
+                st.observe_accept_send(from, to.0, *ballot);
+                st.observe_proposal(from, *ballot, slot.0, vhash);
+            }
+            Message::Commit { .. } => self.observe_commit_send(from, msg),
+            _ => {}
+        }
+    }
+
+    fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {
+        self.state().delegation_taken_back = true;
+    }
+
+    // The proxy's own paths — a reboot, a re-fan-out, an ignored or
+    // superseded delegation, a relayed `Nack` — are reported through the
+    // port but not gated here: the model checker proves each in-core, and
+    // the slot budget (512 per campaign process) is spent on outcomes.
+
+    fn proxy_fanned_out(
+        &self,
+        _proxy: ProxyId,
+        leader: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        _vhash: u64,
+        _column: Option<usize>,
+        _addressees: usize,
+    ) {
+        // Every leader hint a round's fan-outs ever named: a second one is
+        // a handoff successor's re-delegation refreshing it.
+        self.state()
+            .fanout_leaders
+            .entry((slot.0, ballot.round, ballot.node.0))
+            .or_default()
+            .insert(leader.0);
+    }
+
+    fn proxy_decided(&self, proxy: ProxyId, slot: Slot, ballot: Ballot, vhash: u64) {
+        self.state()
+            .observe_proxy_decision(proxy.0, slot.0, ballot, vhash);
+    }
+
+    fn proxy_resend_skipped(&self, _proxy: ProxyId) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_resend_skipped,
+            "proxy: a proxy skips a re-fan-out beat"
+        );
+    }
+
+    fn proxy_round_expired(&self, _proxy: ProxyId, _slot: Slot) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_round_expired,
+            "proxy: a proxy evicts a round nobody answers"
+        );
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, round = won.round))]
@@ -1124,12 +1238,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.leader_promise_checked = true;
         st.any_leader = true;
         st.leader_rounds.insert(won.round);
-        if st.leader_rounds.len() >= 2 {
-            reach_once!(
-                st.leadership_turnover,
-                "leadership turns over (re-election)"
-            );
-        }
         match st.first_leader_round {
             None => st.first_leader_round = Some(won.round),
             Some(r) if r != won.round && st.leader_change_ms.is_none() => {
@@ -1646,7 +1754,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn dropped_at_send(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+    fn dropped_at_send(&self, _from: Party, _to: Party, msg: &Message) {
         let mut st = self.state();
         match msg {
             Message::Accept { .. } => {
@@ -1691,24 +1799,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver drops a catch-up request at the send seam"
                 );
             }
-            Message::SnapAck { .. } => {
-                reach_once!(
-                    st.dropped_snap_ack,
-                    "the driver drops a snap custody ack at the send seam"
-                );
-            }
-            Message::SnapChunkRequest { .. } => {
-                reach_once!(
-                    st.dropped_snap_chunk_request,
-                    "the driver drops a snap chunk request at the send seam"
-                );
-            }
-            Message::SnapChunkResponse { .. } => {
-                reach_once!(
-                    st.dropped_snap_chunk_response,
-                    "the driver drops a snap chunk response at the send seam"
-                );
-            }
+            // The snap-repair plane's losses (custody ack, chunk request,
+            // chunk response) carry no gate of their own: the repair is
+            // re-asked every beat and its outcome gates are the storage
+            // ones ("a rotted snapshot chunk is repaired from a peer").
             // The whole cooperative handoff, lost in one message: the outgoing
             // leader has already stepped down and the successor never starts,
             // so this must cost availability only — an ordinary Phase 1 is the
@@ -1723,7 +1817,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn duplicated_at_send(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+    fn duplicated_at_send(&self, _from: Party, _to: Party, msg: &Message) {
         let mut st = self.state();
         reach_once!(
             st.duplicated_any,
@@ -1740,70 +1834,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "the driver duplicates a quorum-counting message at the send seam"
             );
         }
-        match msg {
-            Message::Commit { .. } => {
-                reach_once!(
-                    st.duplicated_commit,
-                    "the driver duplicates a commit at the send seam"
-                );
-            }
-            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
-                reach_once!(
-                    st.duplicated_repair,
-                    "the driver duplicates a repair message at the send seam"
-                );
-            }
-            Message::CatchUpRequest { .. } => {
-                reach_once!(
-                    st.duplicated_catchup_request,
-                    "the driver duplicates a catch-up request at the send seam"
-                );
-            }
-            // The snap plane's idempotency witnesses: a duplicated custody ack
-            // meets the leader's set-based tally; a duplicated chunk response
-            // finds its chunks no longer pending.
-            Message::SnapAck { .. } => {
-                reach_once!(
-                    st.duplicated_snap_ack,
-                    "the driver duplicates a snap custody ack at the send seam"
-                );
-            }
-            Message::SnapChunkRequest { .. } => {
-                reach_once!(
-                    st.duplicated_snap_chunk_request,
-                    "the driver duplicates a snap chunk request at the send seam"
-                );
-            }
-            Message::SnapChunkResponse { .. } => {
-                reach_once!(
-                    st.duplicated_snap_chunk_response,
-                    "the driver duplicates a snap chunk response at the send seam"
-                );
-            }
-            // A re-delivered handoff must be a no-op at its addressee — never
-            // an allocator rewind — and refused everywhere else. The uniqueness
-            // oracle above is what keeps that honest.
-            Message::Relinquish { .. } => {
-                reach_once!(
-                    st.duplicated_relinquish,
-                    "the driver duplicates a relinquishment at the send seam"
-                );
-            }
-            _ => {}
+        // The other kinds (a commit, the repair and snap-repair planes, a
+        // catch-up request) share the family gate above: every one of them
+        // is an idempotency claim the `always` checks judge, and the hook
+        // keeps one location per kind regardless. A re-delivered handoff
+        // keeps its own — it must be a no-op at its addressee, never an
+        // allocator rewind, and refused everywhere else; the uniqueness
+        // oracle above is what keeps that honest.
+        if matches!(msg, Message::Relinquish { .. }) {
+            reach_once!(
+                st.duplicated_relinquish,
+                "the driver duplicates a relinquishment at the send seam"
+            );
         }
     }
 
     fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
         let mut st = self.state();
-        if matches!(reply, paros::Reply::Compact) {
-            // The compaction client's re-ask loop is its own recovery path
-            // (a lost ack must not double-seed a snapshot point), so the
-            // kind keeps a gate beside the redirect family's.
-            reach_once!(
-                st.compact_reply_dropped,
-                "a compaction reply is dropped at the reply seam"
-            );
-        }
         if matches!(
             reply,
             paros::Reply::ProposeRedirect
@@ -1846,10 +1893,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn compact_acked(&self, _node: NodeId, accepted: bool) {
         let mut st = self.state();
         if accepted {
-            reach_once!(
-                st.compact_ack_accepted,
-                "a compact request is acked as accepted"
-            );
+            // Feeds the "chain: compact takes effect" outcome gate.
+            st.compact_ack_accepted = true;
         } else {
             reach_once!(
                 st.compact_ack_refused,
@@ -1858,7 +1903,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn dropped_at_mailbox(&self, _node: NodeId, _to: NodeId, _kind: &'static str) {
+    fn dropped_at_mailbox(&self, _from: Party, _to: Party, _kind: &'static str) {
         let mut st = self.state();
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
     }
@@ -1916,7 +1961,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn delivery_failed(&self, _node: NodeId, _to: NodeId) {
+    fn delivery_failed(&self, _from: Party, _to: Party) {
         let mut st = self.state();
         st.delivery_failures += 1;
         reach_once!(st.delivery_failed, "a peer delivery RPC fails or times out");
@@ -1949,7 +1994,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn edge_rejected(&self, _node: NodeId, _kind: EdgeRejection) {
+    fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
         let mut st = self.state();
         st.edge_rejections += 1;
         reach_once!(
@@ -1968,6 +2013,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {
         self.state().election_timeouts.insert(node.0, ticks);
+    }
+
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, _seq: u64) {
+        self.state().observe_ack_received(node.0, from.0, ballot);
     }
 
     fn ticked(&self, node: NodeId) {
@@ -2593,5 +2642,123 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         decision: StorageFaultDecision,
     ) {
         self.state().matchmaker.storage_fault(matchmaker, decision);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Mechanism pins for two oracle rules a review of #142 part B found
+    //! missing (their scenarios — a proxy's delayed `Commit` for a compacted
+    //! slot, an `Accepted` replied to a proxy — are the campaign's to reach;
+    //! these pin the checks themselves, on the state and on the real
+    //! node-to-proxy route).
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use moonpool_sim::{TimeError, TimeProvider, has_always_violations, reset_always_violations};
+    use paros::{Ballot, Message, NodeId, ProxyId, Slot};
+
+    use super::state::{AuditState, Floor};
+    use super::{Audit, AuditWorld, NodeAudit};
+
+    /// A clock that never moves: the audit reads it only to stamp floors.
+    #[derive(Clone)]
+    struct FrozenClock;
+
+    impl TimeProvider for FrozenClock {
+        async fn sleep(&self, _duration: Duration) -> Result<(), TimeError> {
+            Ok(())
+        }
+
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        async fn timeout<F, T>(&self, _duration: Duration, future: F) -> Result<T, TimeError>
+        where
+            F: std::future::Future<Output = T> + Send,
+            T: Send,
+        {
+            Ok(future.await)
+        }
+    }
+
+    fn ballot(round: u64, node: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(node),
+        }
+    }
+
+    /// Below the cluster-wide floor a `Commit` is judged against the
+    /// command consensus decided, kept when the tally was pruned — never
+    /// against the applied command, which a #94 re-chosen identity turns
+    /// into a `Noop` while its `Commit` honestly carries the user command.
+    #[test]
+    fn a_below_floor_commit_is_judged_against_the_decided_command_not_the_applied_one() {
+        let user = 11;
+        let noop = 22;
+        let b = ballot(3, 0);
+        let mut st = AuditState::default();
+        st.decided.insert(5, (b.round, b.node.0, user));
+        // The slot applied as a `Noop` everywhere (the at-most-once
+        // suppression), then every node truncated past it.
+        st.chosen.insert(5, noop);
+        st.booted.insert(0);
+        st.floor.insert(
+            0,
+            Floor {
+                now: 8,
+                ..Floor::default()
+            },
+        );
+        st.prune_below_floor();
+        assert!(!st.decided.contains_key(&5), "the tally is reclaimed");
+        assert_eq!(st.decided_below_floor.get(&5), Some(&user));
+        assert_eq!(st.decided_vhash(5), Some(user));
+
+        reset_always_violations();
+        st.observe_proxy_decision(0, 5, b, user);
+        assert!(
+            !has_always_violations(),
+            "the delayed Commit carries the decided user command and is valid"
+        );
+        st.observe_proxy_decision(0, 5, b, noop);
+        assert!(
+            has_always_violations(),
+            "a Commit carrying anything but the decided command is red"
+        );
+        reset_always_violations();
+    }
+
+    /// The persist-before-send check on an `Accepted` runs on the real
+    /// node-to-proxy route: a vote replied to a proxy before its durable
+    /// accept was reported is red exactly as one replied to a leader is.
+    #[test]
+    fn an_accepted_replied_to_a_proxy_needs_its_durable_accept_first() {
+        let world = Arc::new(AuditWorld::default());
+        let audit = NodeAudit::new(FrozenClock, world);
+        let b = ballot(3, 0);
+        let vote = Message::Accepted {
+            from: NodeId(1),
+            ballot: b,
+            slot: Slot(4),
+            vhash: 9,
+        };
+        reset_always_violations();
+        audit.sent_to_proxy(NodeId(1), ProxyId(0), &vote);
+        assert!(
+            has_always_violations(),
+            "an Accepted to a proxy without its durable accept is red"
+        );
+        reset_always_violations();
+        audit.promised(NodeId(1), b);
+        audit.accepted(NodeId(1), Slot(4), b, b, 9);
+        audit.sent_to_proxy(NodeId(1), ProxyId(0), &vote);
+        assert!(
+            !has_always_violations(),
+            "once the durable accept is folded the same vote is clean"
+        );
     }
 }

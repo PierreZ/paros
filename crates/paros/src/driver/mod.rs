@@ -16,7 +16,9 @@
 //! The submodules, one concern each:
 //!
 //! - [`config`] — the per-node tunables, the constants they default to, the
-//!   shared gRPC shapes, the scope guard, the address parser, and [`RunError`].
+//!   shared gRPC shapes, the address parser, and [`RunError`].
+//! - [`edge`] — the inbound gRPC edge every driver serves from: the
+//!   listener, the h2 server and the persistent accept.
 //! - [`events`] — the pure helpers that turn a domain value into the stable
 //!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
@@ -24,6 +26,8 @@
 //! - [`snap_repair`] — the snapshot-point custody tally and chunk-repair pull.
 //! - [`ready`] — the `Ready` handshake's durability pipeline and the held
 //!   client replies it answers.
+//! - [`reply`] — the one client-reply seam (the drop and duplicate hooks,
+//!   each consulted exactly once per reply) every driver answers through.
 //! - [`matchmaking`] — the matchmaker links, the requests a drained batch hands
 //!   the loop, and the reports of what each answer did.
 //! - [`handover`] — the driver-side policy around the matchmaker-set handover.
@@ -33,37 +37,37 @@
 //! `mod.rs` itself holds only [`run_node`], the select loop that wires them.
 
 mod boot;
-mod config;
-mod events;
+pub(crate) mod config;
+pub(crate) mod edge;
+pub(crate) mod events;
 mod handover;
 mod matchmaking;
-mod ready;
+pub(crate) mod ready;
+pub(crate) mod reply;
 mod report;
 mod snap_repair;
-mod transport;
+pub(crate) mod transport;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
-pub(crate) use config::{accept_and_serve, grpc_keep_alive};
 pub use events::{command_hash, message_kind, registration_history_hash};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use moonpool_core::{
-    Detach, NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult,
-    TaskProvider, TcpListenerTrait, TimeProvider,
-};
-use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
+use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
     MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
-    NodeRole, ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal,
+    Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
+use moonpool_core::SimulationResult;
+
 use crate::grpc::{
     CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
     ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck,
@@ -73,18 +77,19 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
 
 use boot::replay_boot_state;
-use config::{OnDrop, grpc_channel_config};
+use edge::GrpcEdge;
 use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
     MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
 };
 use ready::{ClientWaiters, drain_ready, storage_fault_crash};
+use reply::{answer, maybe_duplicate};
 use report::{Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{
     SnapRepair, handle_snap_chunk_request, handle_snap_chunk_response, snap_repair_tick,
 };
-use transport::{Outbound, PeerMailbox, PeerQueues, run_peer_delivery};
+use transport::{Channels, LaneOpener, Outbound, PeerQueues};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -135,6 +140,27 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     }
 }
 
+/// The driver's delegation choice for the proposal about to open (#142):
+/// consulted only where it can have an effect — this node leads a
+/// deployment with proxies — and from the node loop, never a task. First
+/// "run it colocated?" ([`DriverHooks::skip_delegation`]), then "which
+/// proxy?" ([`DriverHooks::proxy_for`], a proxy the deployment does not have
+/// is ignored); [`Delegation::Auto`] otherwise, which is the core's own rule
+/// and the whole answer under `NoHooks`.
+fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegation {
+    let count = node.config().proxy_count;
+    if count == 0 || !node.is_leader() {
+        return Delegation::Auto;
+    }
+    if hooks.skip_delegation() {
+        return Delegation::Colocated;
+    }
+    match hooks.proxy_for(node.proposer().next_slot(), count) {
+        Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
+        _ => Delegation::Auto,
+    }
+}
+
 /// Drive a paros node to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
@@ -153,6 +179,13 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// `matchmakers` is the matchmaker set (`MatchmakerId` → address), empty on
 /// plain Multi-Paxos; it must agree with the `Config`'s matchmaker set. The
 /// driver speaks the matchmaker contract only when it is non-empty.
+///
+/// `proxies` is the deployment map's proxy leaders (`ProxyId` → address,
+/// #142), empty on a deployment without proxies; its length must agree with
+/// the `Config`'s `proxy_count`. A leader delegates a settled round's Phase 2
+/// to the proxy the core names (or the one [`DriverHooks::proxy_for`] names),
+/// and takes it back after `tunables.proxy_take_back_resends` re-delegations
+/// without a `Commit`.
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
 /// first boot formats the store (the marker, durably) before the core reads
@@ -183,12 +216,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// identity stays down); [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
-#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len()))]
+#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring (providers,
 // storage, addressing, tunables, lifecycle, hooks, audit) — a bundle would
-// only rename the same eight things.
+// only rename the same nine things.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_node<P, S, H, A>(
     providers: P,
@@ -196,6 +229,7 @@ pub async fn run_node<P, S, H, A>(
     local_addr: String,
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
+    proxies: Vec<(ProxyId, String)>,
     boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -276,26 +310,16 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let listener = providers
-        .network()
-        .bind(&local_addr)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("node gRPC listener: {e}")))?;
-
-    // The sans-IO core, bootstrapped from durable storage.
-    let mut node = ColocatedNode::new(&storage);
-    let self_id = node.config().id.0;
-
-    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
-
     // Tonic handlers run as h2 request tasks and forward into these typed
     // queues. The loop remains the sole owner of ColocatedNode. The edge's
     // integrity rejections are reported through the audit like every other
     // externally meaningful transition (observation only: the closure
-    // returns nothing and the edge's answer does not depend on it).
+    // returns nothing and the edge's answer does not depend on it). Pure
+    // construction, built before the bind so the edge takes its routes whole.
+    let self_id = boot_id;
     let on_reject: crate::grpc::OnReject = {
         let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(NodeId(self_id), kind))
+        Arc::new(move |kind| audit.edge_rejected(Party::Node(NodeId(self_id)), kind))
     };
     let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
         tunables.client_inbox_capacity,
@@ -305,68 +329,82 @@ where
     let grpc_service = tonic::service::Routes::new(ParosServer::new(rpc_service.clone()))
         .add_service(ParosInternalServer::new(rpc_service))
         .prepare();
-    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(grpc_keep_alive(&tunables)),
-        vectored_writes: true,
-    });
+    let mut edge = GrpcEdge::bind(
+        &providers,
+        &local_addr,
+        "paros-grpc-server",
+        "node",
+        &tunables,
+        grpc_service,
+        incarnation_shutdown.clone(),
+    )
+    .await?;
 
-    // Validate every origin before starting reconnecting-channel tasks. Once
-    // channels exist, there are no fallible setup steps before their drop guard
-    // is installed.
-    let peers = members
+    // The sans-IO core, bootstrapped from durable storage (the same
+    // `initial_state` the identity above was read from).
+    let mut node = ColocatedNode::new(&storage);
+
+    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
+
+    // Every reconnecting channel this incarnation opens, closed when the
+    // bundle drops; a bad origin fails the connect and the bundle closes
+    // whatever was opened before it.
+    let me = Party::Node(NodeId(self_id));
+    let mut channels = Channels::with_capacity(members.len() + proxies.len() + matchmakers.len());
+    let lanes = LaneOpener {
+        providers: &providers,
+        tunables,
+        shutdown: incarnation_shutdown.clone(),
+        audit,
+        from: me,
+    };
+    let peer_queues = members
         .into_iter()
         .map(|(id, addr)| {
-            let origin = http::Uri::try_from(format!("http://{addr}"))
-                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-            Ok((id, addr, origin))
+            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
+                ParosInternalClient::with_origin(channel, origin)
+            })?;
+            let to = Party::Node(id);
+            let regular = lanes.open(
+                "paros-grpc-peer-delivery",
+                client.clone(),
+                to,
+                tunables.peer_queue_capacity,
+            );
+            let snapshot = lanes.open(
+                "paros-grpc-snapshot-delivery",
+                client,
+                to,
+                tunables.snapshot_queue_capacity,
+            );
+            Ok((
+                id,
+                PeerQueues {
+                    regular,
+                    snapshot: Some(snapshot),
+                },
+            ))
         })
-        .collect::<SimulationResult<Vec<_>>>()?;
-
-    let mut peer_channels = Vec::with_capacity(peers.len());
-    let peer_queues = peers
+        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    // The proxy leaders (#142): one lane each, on the same lossy keep-newest
+    // contract as a peer's. A delegation lost here is re-delegated on the
+    // next beat, exactly as a lost `Accept` is re-sent. Empty on a
+    // deployment without proxies, whose transport is byte-for-byte today's.
+    let proxy_queues = proxies
         .into_iter()
-        .map(|(id, addr, origin)| {
-            let channel =
-                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
-            peer_channels.push(channel.clone());
-            let client = ParosInternalClient::with_origin(channel, origin);
-            let regular = PeerMailbox::new(tunables.peer_queue_capacity);
-            let snapshot = PeerMailbox::new(tunables.snapshot_queue_capacity);
-            providers
-                .task()
-                .spawn_task(
-                    "paros-grpc-peer-delivery",
-                    run_peer_delivery(
-                        client.clone(),
-                        providers.time().clone(),
-                        incarnation_shutdown.clone(),
-                        regular.clone(),
-                        tunables,
-                        audit.clone(),
-                        self_id,
-                        id,
-                    ),
-                )
-                .detach();
-            providers
-                .task()
-                .spawn_task(
-                    "paros-grpc-snapshot-delivery",
-                    run_peer_delivery(
-                        client,
-                        providers.time().clone(),
-                        incarnation_shutdown.clone(),
-                        snapshot.clone(),
-                        tunables,
-                        audit.clone(),
-                        self_id,
-                        id,
-                    ),
-                )
-                .detach();
-            (id, PeerQueues { regular, snapshot })
+        .map(|(id, addr)| {
+            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
+                ParosInternalClient::with_origin(channel, origin)
+            })?;
+            let lane = lanes.open(
+                "paros-grpc-proxy-delivery",
+                client,
+                Party::Proxy(id),
+                tunables.peer_queue_capacity,
+            );
+            Ok((id, lane))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
 
     // The matchmaker links (#120): one reconnecting channel per matchmaker,
     // and the inbox their answers come back through. Empty on plain
@@ -376,12 +414,10 @@ where
     let matchmaker_clients = matchmakers
         .into_iter()
         .map(|(id, addr)| {
-            let origin = http::Uri::try_from(format!("http://{addr}"))
-                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-            let channel =
-                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
-            peer_channels.push(channel.clone());
-            Ok((id, ParosMatchmakerClient::with_origin(channel, origin)))
+            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
+                ParosMatchmakerClient::with_origin(channel, origin)
+            })?;
+            Ok((id, client))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     let (gc_ack_tx, mut gc_acks) = mpsc::channel::<GcAck>(tunables.peer_inbox_capacity);
@@ -403,20 +439,18 @@ where
     // after the ack had a beat to leave.
     let mut retiring = false;
 
-    // `close` is terminal and shared by every clone held by tonic clients. It
-    // cancels connect/backoff/keepalive work immediately when this incarnation
-    // exits, including simulated durability crashes that return via `?`.
-    let _peer_channel_guard = OnDrop::new(move || {
-        for channel in peer_channels {
-            channel.close();
-        }
-    });
+    // The channel bundle closes every channel when it drops. Moved into this
+    // slot of the scope so the close happens exactly here on every exit path
+    // — after the loop's state, before the incarnation guard — including
+    // simulated durability crashes that return via `?`.
+    let _channels = channels;
 
     // One reconnecting h2 channel per peer; cloned generated clients multiplex
     // concurrent RPCs over that shared connection.
     let out = Outbound {
         peer_queues,
-        self_id,
+        proxy_queues,
+        sender: me,
     };
     let loop_ctx = NodeLoop {
         providers: &providers,
@@ -482,37 +516,10 @@ where
     // With an absolute deadline the sleep is zero-length once the deadline
     // passes and fires regardless of load.
     let mut next_tick = time.now() + tunables.tick_interval;
-    // The accept future is PERSISTENT across select passes, for the same
-    // reason the tick deadline above is absolute: `select!` drops and
-    // re-creates its futures every pass, and a dropped accept forfeits its
-    // progress. moonpool charges the accept latency per `accept()` call and
-    // returns the reserved connection to the listener's queue when the future
-    // is dropped, so under a client storm arriving faster than that latency
-    // (a retry loop with a zero backoff pinned to one node, ~3 ms apart
-    // against a 1–10 ms accept) no peer connection is ever accepted: the node
-    // answers every client, hears no `Prepare` or `Heartbeat`, and on a
-    // flexible seed whose Phase 1 needs every acceptor the cluster never
-    // elects (seed 17898267817771645730 on 3484b13: 14,497 accepts cancelled
-    // at one listener in 60 s, none completed after the chaos window; green
-    // with this future). A kernel finishes the handshake whether or not an
-    // `accept()` is pending, so production never saw it; polling one future
-    // until it completes keeps the reservation and its delay in the sim too,
-    // and only a completed accept creates the next one.
-    let mut accept = Box::pin(listener.accept());
-
     loop {
         moonpool_core::select! {
-            accepted = &mut accept => {
-                accept = Box::pin(listener.accept());
-                let (stream, addr) = accepted
-                    .map_err(|e| SimulationError::InvalidState(format!("gRPC accept: {e}")))?;
-                let connection = grpc_server.serve_connection_with_shutdown(
-                    stream,
-                    grpc_service.clone(),
-                    incarnation_shutdown.clone().cancelled_owned(),
-                );
-                accept_and_serve(&providers, "paros-grpc-server", "node", addr, connection);
-            }
+            // The accept is persistent across passes: see `GrpcEdge`.
+            accepted = edge.serve_next(&providers) => accepted?,
             Some((req, reply)) = rpc.propose.recv() => {
                 // A client value → the leader (deduplicated by (client, seq)). The
                 // reply is held until the slot commits (ack-on-commit); a non-leader
@@ -533,16 +540,24 @@ where
                         .filter(|c| *c < cols),
                     _ => None,
                 };
-                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, Delegation::Auto) {
+                // The delegation override (#142), under the same gate: only
+                // a leader of a deployment with proxies is asked, first
+                // whether to run this round colocated, then which proxy to
+                // hand it to; `Delegation::Auto` — the core's `slot %
+                // proxy_count` — stands under `NoHooks`.
+                let delegation = delegation_choice(&node, hooks);
+                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, delegation) {
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.
-                        if hooks.drop_client_reply(Reply::ProposeRedirect) {
-                            audit.client_reply_dropped(NodeId(self_id), Reply::ProposeRedirect);
-                            tracing::info!(node = self_id, reply = "propose_redirect", "client_reply_dropped");
-                        } else {
-                            let _ = reply.send(ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None });
-                        }
+                        answer(
+                            hooks,
+                            audit,
+                            NodeId(self_id),
+                            Reply::ProposeRedirect,
+                            reply,
+                            ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None },
+                        );
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
                         waiters.pending.entry(slot).or_default().push((client, seq, reply));
@@ -556,12 +571,14 @@ where
                         // claim against the applied prefix.
                         audit.client_acked(NodeId(self_id), client, seq, slot, storage.applied_slot(), true);
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
-                        if hooks.drop_client_reply(Reply::ProposeDedup) {
-                            audit.client_reply_dropped(NodeId(self_id), Reply::ProposeDedup);
-                            tracing::info!(node = self_id, reply = "propose_dedup", "client_reply_dropped");
-                        } else {
-                            let _ = reply.send(ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) });
-                        }
+                        answer(
+                            hooks,
+                            audit,
+                            NodeId(self_id),
+                            Reply::ProposeDedup,
+                            reply,
+                            ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) },
+                        );
                     }
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
@@ -576,12 +593,14 @@ where
                 let seq = req.seq;
                 match node.read_index(next_read_ctx) {
                     ReadIndexResult::NotLeader(hint) => {
-                        if hooks.drop_client_reply(Reply::ReadRedirect) {
-                            audit.client_reply_dropped(NodeId(self_id), Reply::ReadRedirect);
-                            tracing::info!(node = self_id, reply = "read_redirect", "client_reply_dropped");
-                        } else {
-                            let _ = reply.send(ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None });
-                        }
+                        answer(
+                            hooks,
+                            audit,
+                            NodeId(self_id),
+                            Reply::ReadRedirect,
+                            reply,
+                            ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None },
+                        );
                     }
                     ReadIndexResult::Pending => {
                         waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
@@ -618,6 +637,12 @@ where
                         "msg_received"
                     ),
                     None => tracing::info!(node = self_id, kind, "msg_received"),
+                }
+                // An ack at the inbox, whatever the core makes of it: what
+                // refills a leader's `CheckQuorum` window, and what the
+                // deposed-leader oracle measures its clock from.
+                if let Message::HeartbeatAck { from, ballot, seq, .. } = &msg {
+                    audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot, *seq);
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it
@@ -694,18 +719,11 @@ where
                 // fold it into the open matchmaking phase; a quorum closes the
                 // phase and opens Phase 1 in the same step.
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
-                // The duplicate seam (`duplicate_client_reply`, the mirror of
-                // the matchmaker driver's `drop_client_reply`): re-queue the
-                // answer so the node loop folds it a second time, through the
-                // identical arm, interleaved with whatever else arrives. What
-                // it tests is the idempotency the registration path claims —
-                // a matchmaker already counted never re-opens the quorum.
-                // Decided on the loop, per the hooks rule; the bounded
-                // channel caps the copies whatever the coin says.
-                if hooks.duplicate_client_reply(Reply::Match) && links.replies.try_send(reply.clone()).is_ok() {
-                    audit.client_reply_duplicated(NodeId(self_id), Reply::Match);
-                    tracing::info!(node = self_id, reply = "match", "client_reply_duplicated");
-                }
+                // The duplicate seam (the mirror of the matchmaker driver's
+                // `drop_client_reply`): what it tests is the idempotency the
+                // registration path claims — a matchmaker already counted
+                // never re-opens the quorum.
+                maybe_duplicate(hooks, audit, NodeId(self_id), Reply::Match, &links.replies, &reply);
                 tracing::info!(
                     node = self_id,
                     matchmaker = matchmaker.0,
@@ -777,10 +795,7 @@ where
                 // A matchmaker's answer to this leader's GC request (#123):
                 // fold it; a quorum makes the floor effective and names the
                 // retirable acceptors (reported in the step).
-                if hooks.duplicate_client_reply(Reply::GcAck) && links.gc_acks.try_send(ack.clone()).is_ok() {
-                    audit.client_reply_duplicated(NodeId(self_id), Reply::GcAck);
-                    tracing::info!(node = self_id, reply = "gc_ack", "client_reply_duplicated");
-                }
+                maybe_duplicate(hooks, audit, NodeId(self_id), Reply::GcAck, &links.gc_acks, &ack);
                 let step = node.on_gc_ack(&ack);
                 audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
                 tracing::info!(
@@ -797,18 +812,20 @@ where
             Some(reply) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step (#125).
                 let matchmaker = reply.matchmaker();
-                if hooks.duplicate_client_reply(Reply::MatchmakerReconfigure)
-                    && links.reconfigure_replies.try_send(reply.clone()).is_ok()
-                {
-                    audit.client_reply_duplicated(NodeId(self_id), Reply::MatchmakerReconfigure);
-                    tracing::info!(node = self_id, reply = "matchmaker_reconfigure", "client_reply_duplicated");
-                }
+                maybe_duplicate(
+                    hooks,
+                    audit,
+                    NodeId(self_id),
+                    Reply::MatchmakerReconfigure,
+                    &links.reconfigure_replies,
+                    &reply,
+                );
                 let step = handover.on_reply(reply.clone());
                 audit.reconfigurer_step(NodeId(self_id), matchmaker, &reply, &step);
                 tracing::info!(
                     node = self_id,
                     matchmaker = matchmaker.0,
-                    reply = crate::matchmaker::reconfigure_reply_kind(&reply),
+                    reply = events::reconfigure_reply_kind(&reply),
                     step = ?step,
                     "reconfigurer_step"
                 );
@@ -864,16 +881,18 @@ where
                 }
                 audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
                 tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
-                if hooks.drop_client_reply(Reply::ReconfigureMatchmakers) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::ReconfigureMatchmakers);
-                    tracing::info!(node = self_id, reply = "reconfigure_matchmakers", "client_reply_dropped");
-                } else {
-                    let _ = reply.send(ReconfigureMatchmakersAck {
+                answer(
+                    hooks,
+                    audit,
+                    NodeId(self_id),
+                    Reply::ReconfigureMatchmakers,
+                    reply,
+                    ReconfigureMatchmakersAck {
                         accepted: refusal.is_empty(),
                         refusal: refusal.to_string(),
                         generation: refusal.is_empty().then_some(generation),
-                    });
-                }
+                    },
+                );
             }
             Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
@@ -904,15 +923,17 @@ where
                 if accepted {
                     retiring = true;
                 }
-                if hooks.drop_client_reply(Reply::Retire) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::Retire);
-                    tracing::info!(node = self_id, reply = "retire", "client_reply_dropped");
-                } else {
-                    let _ = reply.send(RetireAck {
+                answer(
+                    hooks,
+                    audit,
+                    NodeId(self_id),
+                    Reply::Retire,
+                    reply,
+                    RetireAck {
                         accepted,
                         refusal: refusal.to_string(),
-                    });
-                }
+                    },
+                );
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An online reconfiguration (#122): the leader moves to a fresh
@@ -926,13 +947,7 @@ where
                 // membership does not admit is *refused* here — the one
                 // place it is validated — where `AcceptorConfig::new` would
                 // panic on it.
-                let quorum_system = crate::grpc::quorum_system_from_proto(&WireQuorumSystem {
-                    quorum_system: req.quorum_system,
-                    phase1_quorum: req.phase1_quorum,
-                    phase2_quorum: req.phase2_quorum,
-                    rows: req.rows,
-                    cols: req.cols,
-                });
+                let quorum_system = crate::grpc::quorum_system_from_proto(&WireQuorumSystem::from(&req));
                 let distinct = members.iter().collect::<std::collections::BTreeSet<_>>().len();
                 let result = match quorum_system {
                     _ if members.is_empty() => {
@@ -944,16 +959,7 @@ where
                     _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
                 };
                 audit.reconfigure_acked(NodeId(self_id), &members, result);
-                let (accepted, refusal, round) = match result {
-                    ReconfigureResult::Started(ballot) => (true, "", Some(ballot.round)),
-                    ReconfigureResult::NotLeader(_) => (false, "not_leader", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers) => (false, "no_matchmakers", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::Unchanged) => (false, "unchanged", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember) => (false, "unknown_member", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::Malformed) => (false, "malformed", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::Unsettled) => (false, "unsettled", None),
-                    ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted) => (false, "round_exhausted", None),
-                };
+                let (accepted, refusal, round) = events::reconfigure_outcome(result);
                 let leader = match result {
                     ReconfigureResult::NotLeader(hint) => hint.map(|n| n.0),
                     _ => Some(self_id),
@@ -970,12 +976,14 @@ where
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
-                if hooks.drop_client_reply(Reply::Reconfigure) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::Reconfigure);
-                    tracing::info!(node = self_id, reply = "reconfigure", "client_reply_dropped");
-                } else {
-                    let _ = reply.send(ReconfigureAck { leader, accepted, refusal: refusal.to_string(), round });
-                }
+                answer(
+                    hooks,
+                    audit,
+                    NodeId(self_id),
+                    Reply::Reconfigure,
+                    reply,
+                    ReconfigureAck { leader, accepted, refusal: refusal.to_string(), round },
+                );
             }
             Some((req, reply)) = rpc.compact.recv() => {
                 // The application permits dropping the log prefix up to `up_to`.
@@ -1058,12 +1066,7 @@ where
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
-                if hooks.drop_client_reply(Reply::Compact) {
-                    audit.client_reply_dropped(NodeId(self_id), Reply::Compact);
-                    tracing::info!(node = self_id, reply = "compact", "client_reply_dropped");
-                } else {
-                    let _ = reply.send(ack);
-                }
+                answer(hooks, audit, NodeId(self_id), Reply::Compact, reply, ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core and the
@@ -1076,17 +1079,18 @@ where
                         retired.iter().map(|n| n.0).collect(),
                     )
                 });
-                let quorum_system = crate::grpc::quorum_system_to_proto(node.acceptors().quorum_system());
+                let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+                    crate::grpc::quorum_system_to_proto(node.acceptors().quorum_system()).into_parts();
                 let _ = reply.send(InspectReply {
                     chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
                     first_slot: node.acceptor().first_slot().0,
                     snapshot: storage.snapshot().await,
                     members: node.acceptors().members().iter().map(|n| n.0).collect(),
-                    quorum_system: quorum_system.quorum_system,
-                    phase1_quorum: quorum_system.phase1_quorum,
-                    phase2_quorum: quorum_system.phase2_quorum,
-                    rows: quorum_system.rows,
-                    cols: quorum_system.cols,
+                    quorum_system,
+                    phase1_quorum,
+                    phase2_quorum,
+                    rows,
+                    cols,
                     config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
                     leader: node.is_leader(),
                     matchmaker_generation: matchmakers.map_or(0, |set| set.generation.0),
@@ -1121,6 +1125,16 @@ where
                         tracing::info!(node = self_id, "accept_resend_skipped");
                     } else {
                         node.resend_pending();
+                    }
+                    // Liveness under a dead proxy (#142): a delegated round
+                    // re-delegated the budget's worth of beats without its
+                    // `Commit` is taken back and run colocated. The budget
+                    // is driver policy (`proxy_take_back_resends`, born
+                    // buggified); the core only counts. A no-op on a
+                    // deployment without proxies.
+                    for (slot, proxy) in node.take_back_delegated(tunables.proxy_take_back_resends) {
+                        audit.delegation_taken_back(NodeId(self_id), slot, proxy);
+                        tracing::info!(node = self_id, slot = slot.0, proxy = proxy.0, "delegation_taken_back");
                     }
                 }
                 // The open matchmaking request's re-send (#120): paced by
@@ -1287,12 +1301,14 @@ where
                 for (ctx, early) in overdue {
                     if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
                         audit.read_expired(NodeId(self_id), early);
-                        if hooks.drop_client_reply(Reply::ReadRedirect) {
-                            audit.client_reply_dropped(NodeId(self_id), Reply::ReadRedirect);
-                            tracing::info!(node = self_id, reply = "read_redirect", "client_reply_dropped");
-                        } else {
-                            let _ = waiter.send(ReadAck { seq, leader: Some(self_id), committed: false, read_index: None });
-                        }
+                        answer(
+                            hooks,
+                            audit,
+                            NodeId(self_id),
+                            Reply::ReadRedirect,
+                            waiter,
+                            ReadAck { seq, leader: Some(self_id), committed: false, read_index: None },
+                        );
                     }
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;

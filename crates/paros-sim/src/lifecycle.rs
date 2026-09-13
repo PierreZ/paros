@@ -36,12 +36,7 @@ struct Queue {
 }
 
 fn queue(state: &StateHandle) -> Arc<Mutex<Queue>> {
-    if let Some(queue) = state.get::<Arc<Mutex<Queue>>>(LIFECYCLE_KEY) {
-        return queue;
-    }
-    let queue = Arc::new(Mutex::new(Queue::default()));
-    state.publish(LIFECYCLE_KEY, queue.clone());
-    queue
+    crate::state::published(state, LIFECYCLE_KEY, Queue::default)
 }
 
 /// Enqueue `op` and wait until the injector has executed it (the kill or

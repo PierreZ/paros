@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, QuorumSystem, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Party, QuorumSystem, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -172,6 +172,17 @@ pub(super) struct AuditState {
     /// is recorded even if no node ever applies the slot, which is exactly
     /// the blind spot the apply-fed `chosen` map has.
     pub(super) decided: BTreeMap<u64, (u64, u64, u64)>,
+    /// Per slot pruned from `decided` below the cluster-wide floor: the
+    /// vhash the durable-accept quorum decided — the **consensus witness** a
+    /// late `Commit` for a compacted slot is judged against. Never the
+    /// apply-fed `chosen` map: a #94 re-chosen identity legitimately
+    /// applies as a `Noop` everywhere while the command consensus decided,
+    /// and therefore the command its `Commit` honestly carries, is the
+    /// original user command — the two are distinct facts, and a proxy's
+    /// `Commit` for delayed votes trailing the whole cluster's truncation
+    /// carries the decided one. One `u64` per pruned slot (`decided`'s
+    /// tally, `accept_sets`, is what pruning reclaims).
+    pub(super) decided_below_floor: BTreeMap<u64, u64>,
     /// The highest slot ever quorum-decided — a monotone scalar the
     /// below-floor pruning of `decided` never lowers, so the cross-restart
     /// frontier check stays sound after the whole prefix compacts away.
@@ -287,9 +298,6 @@ pub(super) struct AuditState {
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
     pub(super) waiter_superseded: bool,
-    pub(super) multi_slot_applied: bool,
-    pub(super) several_slots_applied: bool,
-    pub(super) leadership_turnover: bool,
     pub(super) crashed_before_sync: bool,
     pub(super) crashed_after_sync: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
@@ -373,7 +381,6 @@ pub(super) struct AuditState {
     /// A compaction ack lost at the reply seam (its own gate beside the
     /// redirect family: the compaction client's re-ask loop is a different
     /// recovery path from a blind retry after a lost redirect).
-    pub(super) compact_reply_dropped: bool,
     /// Cooperative-handoff coverage: one sticky bit per distinct fact.
     pub(super) handoff_relinquished: bool,
     pub(super) handoff_installed: bool,
@@ -411,9 +418,6 @@ pub(super) struct AuditState {
     pub(super) dropped_heartbeat: bool,
     pub(super) dropped_repair: bool,
     pub(super) dropped_catchup_request: bool,
-    pub(super) dropped_snap_ack: bool,
-    pub(super) dropped_snap_chunk_request: bool,
-    pub(super) dropped_snap_chunk_response: bool,
     pub(super) crashed_after_apply: bool,
     pub(super) crashed_before_chunk_sync: bool,
     pub(super) crashed_after_chunk_restore: bool,
@@ -443,12 +447,6 @@ pub(super) struct AuditState {
     pub(super) redirect_dropped: bool,
     pub(super) duplicated_any: bool,
     pub(super) duplicated_quorum_kind: bool,
-    pub(super) duplicated_commit: bool,
-    pub(super) duplicated_repair: bool,
-    pub(super) duplicated_catchup_request: bool,
-    pub(super) duplicated_snap_ack: bool,
-    pub(super) duplicated_snap_chunk_request: bool,
-    pub(super) duplicated_snap_chunk_response: bool,
     pub(super) reply_dropped: bool,
     pub(super) propose_reply_dropped: bool,
     pub(super) read_reply_dropped: bool,
@@ -484,6 +482,21 @@ pub(super) struct AuditState {
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
     pub(super) cross_config_phase1_checked: bool,
+
+    // --- proxy leaders (#142) ---------------------------------------------
+    /// Per delegated round `(slot, ballot round, ballot node)`: every leader
+    /// a proxy's fan-out named as the hint — more than one means a handoff
+    /// successor re-delegated the round and the proxy refreshed the hint.
+    pub(super) fanout_leaders: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
+    /// The two outcomes the campaign must reach: a slot decided by a proxy's
+    /// `Commit`, and a delegated round taken back by its leader.
+    pub(super) decided_through_proxy: bool,
+    pub(super) delegation_taken_back: bool,
+    /// The causes, recorded when they fire: a proxied round outliving a
+    /// handoff, a skipped re-fan-out beat, an unanswered round evicted.
+    pub(super) proxied_round_survived_handoff: bool,
+    pub(super) proxy_resend_skipped: bool,
+    pub(super) proxy_round_expired: bool,
 }
 
 impl AuditState {
@@ -562,22 +575,48 @@ impl AuditState {
         }
     }
 
-    /// Fold one `Accept` leaving `node` for `to` at `ballot` (#121, #122),
-    /// judged on the wire. Two claims: Phase 2 addresses only the ballot's
-    /// own acceptors (a removed member is never asked to vote at a ballot it
-    /// is not in), and it opens only once **every** prior configuration has
-    /// a promise quorum for the ballot — counted per configuration over the
-    /// promises that actually left the wire plus the owner's own vote, never
-    /// over their union. The union rule would count here and be wrong: it is
+    /// The Phase-2 half of P2b, checked **on the wire** whoever sends: a
+    /// ballot names its own proposer, so exactly one leadership ever
+    /// proposes at it, and two different commands under one `(ballot,
+    /// slot)` mean the proposer allocated a slot it already had in flight.
+    /// Fed by the leader's colocated `Accept`s, its delegations to a proxy
+    /// (#142) and the proxy's fan-outs alike — a proxy carries the leader's
+    /// command verbatim, so its fan-out is judged against the very same
+    /// record. Reading the send rather than the receive is deliberate — it
+    /// indicts the proposer, not the network — and it is the only place the
+    /// anomaly is visible: an accept quorum may reject it, leaving no durable
+    /// trace at all.
+    pub(super) fn observe_proposal(&mut self, from: Party, ballot: Ballot, slot: u64, vhash: u64) {
+        self.any_proposal_checked = true;
+        if let Some(prev) = self
+            .proposed
+            .insert((ballot.round, ballot.node.0, slot), vhash)
+        {
+            assert_always!(
+                prev == vhash,
+                "one ballot proposes at most one command for a slot",
+                { "from" => from.to_string(), "slot" => slot, "round" => ballot.round }
+            );
+        }
+    }
+
+    /// Fold one `Accept` leaving `from` (a leader, or a proxy fanning a
+    /// leader's round out) for `to` at `ballot` (#121, #122), judged on the
+    /// wire. Two claims: Phase 2 addresses only the ballot's own acceptors
+    /// (a removed member is never asked to vote at a ballot it is not in),
+    /// and it opens only once **every** prior configuration has a promise
+    /// quorum for the ballot — counted per configuration over the promises
+    /// that actually left the wire plus the owner's own vote, never over
+    /// their union. The union rule would count here and be wrong: it is
     /// exactly what the negative core test refuses.
-    pub(super) fn observe_accept_send(&mut self, node: u64, to: u64, ballot: Ballot) {
+    pub(super) fn observe_accept_send(&mut self, from: Party, to: u64, ballot: Ballot) {
         let Some(config) = self.config_of(ballot).cloned() else {
             return;
         };
         assert_always!(
             config.contains(paros::NodeId(to)),
             "reconfiguration: an Accept reaches only the ballot's own acceptors",
-            { "node" => node, "to" => to, "round" => ballot.round }
+            { "from" => from.to_string(), "to" => to, "round" => ballot.round }
         );
         if self
             .bootstrap
@@ -612,7 +651,7 @@ impl AuditState {
             uncovered == 0,
             "reconfiguration: no Accept leaves before every prior configuration promised a quorum",
             {
-                "node" => node,
+                "from" => from.to_string(),
                 "round" => ballot.round,
                 "prior" => prior.len(),
                 "uncovered" => uncovered
@@ -671,19 +710,26 @@ impl AuditState {
         if self.decided_off_column {
             assert_reachable!("grid: a slot is decided on a column other than its own");
         }
+        // The proxy outcomes (#142): a seed with proxies delegates every
+        // settled proposal, so a sweep decides through a proxy; and the
+        // take-back — the leader's liveness under a dead or slow proxy —
+        // fires wherever a proxy's `Commit` is late by the budget, which a
+        // killed proxy, a lost delegation or the budget's own floor
+        // produces.
+        assert_sometimes!(
+            self.decided_through_proxy,
+            "proxy: a slot is decided through a proxy leader"
+        );
+        assert_sometimes!(
+            self.delegation_taken_back,
+            "proxy: a leader takes a delegated round back"
+        );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
             self.leader_promise_checked,
             "a fresh leader's promise is checked against the ballot it won"
         );
-        // The n>=5 shape, whose accept quorums can avoid a two-node pin, is
-        // actually visited. Every node boots at start, so the booted set is
-        // the drawn topology.
-        let n = self.booted.len();
-        if n >= 5 {
-            assert_reachable!("a run drives a five-node cluster");
-        }
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
         // The #101 coupling's other half: compaction implies a decided
@@ -917,6 +963,36 @@ impl AuditState {
             .unwrap_or(0)
     }
 
+    /// Reclaim the per-slot safety tallies below the cluster-wide floor
+    /// (an O(log n) split, on the rare truncation path), keeping one
+    /// scalar per pruned slot — the decided vhash — as the consensus
+    /// witness a late `Commit` there is judged against
+    /// (`decided_below_floor`).
+    pub(super) fn prune_below_floor(&mut self) {
+        let min_floor = self.cluster_min_floor();
+        if min_floor == 0 {
+            return;
+        }
+        let kept = self.decided.split_off(&min_floor);
+        let pruned = std::mem::replace(&mut self.decided, kept);
+        self.decided_below_floor.extend(
+            pruned
+                .into_iter()
+                .map(|(slot, (_, _, vhash))| (slot, vhash)),
+        );
+        self.accept_sets = self.accept_sets.split_off(&(min_floor, 0, 0));
+    }
+
+    /// The vhash the durable-accept quorum decided for `slot`, wherever the
+    /// slot stands against the floor: from the live tally, or from the
+    /// witness kept when the tally was pruned.
+    pub(super) fn decided_vhash(&self, slot: u64) -> Option<u64> {
+        self.decided
+            .get(&slot)
+            .map(|&(_, _, vhash)| vhash)
+            .or_else(|| self.decided_below_floor.get(&slot).copied())
+    }
+
     /// Fold one broadcast leader beat (#95). A leader beating at a ballot that
     /// a **promise-majority** has durably promised strictly past is deposed for
     /// good: an acceptor only acks a beat at or above its promise, so at most a
@@ -972,8 +1048,35 @@ impl AuditState {
         }
     }
 
+    /// One `HeartbeatAck` reaching `node` at `ballot`: whatever the core
+    /// makes of it, an ack at the leader's ballot from a member of its
+    /// configuration refills the `CheckQuorum` window, so the deposed
+    /// streak's clock restarts here. The ack is legitimate even after the
+    /// promise-majority formed: it was sent while the sender's promise still
+    /// sat at or below the ballot and merely arrived late — the network's
+    /// delay is not bounded by an election window (seed 4279021087318167556:
+    /// two acks sent before either promise moved arrived 350–430 ms later
+    /// and carried a deposed leader to 13 ticks against a 12-tick budget,
+    /// with the protocol behaving exactly as specified).
+    pub(super) fn observe_ack_received(&mut self, node: u64, from: u64, ballot: Ballot) {
+        let in_config = self
+            .config_of(ballot)
+            .is_some_and(|c| c.contains(paros::NodeId(from)));
+        if !in_config {
+            return;
+        }
+        if let Some(entry) = self.deposed_streaks.get_mut(&node)
+            && entry.round == ballot.round
+            && entry.node == ballot.node.0
+        {
+            entry.ticks = 0;
+        }
+    }
+
     /// One logical tick at `node`: a deposed leader's clock runs, and it must
-    /// step down within two `CheckQuorum` windows (see [`Self::observe_beat`]).
+    /// step down within two `CheckQuorum` windows of the later of its
+    /// deposal and the last ack it received at that ballot (see
+    /// [`Self::observe_beat`], [`Self::observe_ack_received`]).
     pub(super) fn observe_tick(&mut self, node: u64) {
         let Some(entry) = self.deposed_streaks.get_mut(&node) else {
             return;
@@ -1043,6 +1146,76 @@ impl AuditState {
         entry.holder = None;
     }
 
+    /// A proxy leader's decision (#142), judged against the disks: the
+    /// `Commit` it is about to emit for `slot` at `ballot` must be backed by
+    /// a Phase-2 quorum of the ballot's configuration holding a durable
+    /// accept of exactly `vhash` **at that ballot** — the tally the proxy
+    /// folded is never trusted, only the accepts the acceptors reported
+    /// durable before their `Accepted`s left (the proxy model checker's
+    /// claim 2, on the real transport). And the value is the one the ballot
+    /// proposed for the slot: a proxy carries a command, it never picks one.
+    /// Below the cluster-wide compaction floor the per-slot tally is pruned,
+    /// so the witness there is the decided vhash the pruning kept
+    /// (`decided_below_floor`) — the consensus decision, never the applied
+    /// command, which a #94 re-chosen identity turns into a `Noop`.
+    pub(super) fn observe_proxy_decision(
+        &mut self,
+        proxy: u64,
+        slot: u64,
+        ballot: Ballot,
+        vhash: u64,
+    ) {
+        let key = (slot, ballot.round, ballot.node.0);
+        if slot >= self.cluster_min_floor() {
+            let voters: BTreeSet<paros::NodeId> = self
+                .accept_sets
+                .get(&key)
+                .map(|holders| holders.iter().map(|n| paros::NodeId(*n)).collect())
+                .unwrap_or_default();
+            let backed = self
+                .config_of(ballot)
+                .is_some_and(|c| c.has_phase2_quorum(&voters));
+            assert_always!(
+                backed,
+                "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
+                {
+                    "proxy" => proxy,
+                    "slot" => slot,
+                    "round" => ballot.round,
+                    "bnode" => ballot.node.0,
+                    "voters" => voters.len()
+                }
+            );
+        } else {
+            let decided = self.decided_below_floor.get(&slot).copied();
+            assert_always!(
+                decided == Some(vhash),
+                "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
+                { "proxy" => proxy, "slot" => slot, "round" => ballot.round, "below_floor" => true }
+            );
+        }
+        let proposed = self
+            .proposed
+            .get(&(ballot.round, ballot.node.0, slot))
+            .copied();
+        assert_always!(
+            proposed.is_none_or(|p| p == vhash),
+            "proxy: a proxy decides the command it was delegated",
+            { "proxy" => proxy, "slot" => slot, "round" => ballot.round }
+        );
+        self.decided_through_proxy = true;
+        if self
+            .fanout_leaders
+            .get(&key)
+            .is_some_and(|leaders| leaders.len() > 1)
+        {
+            reach_once!(
+                self.proxied_round_survived_handoff,
+                "proxy: a delegated round survives a leader handoff"
+            );
+        }
+    }
+
     /// Fold one observed exercise of a logical authority: `node` put an
     /// `Accept` at `ballot` on the wire.
     ///
@@ -1094,18 +1267,6 @@ impl AuditState {
     /// the cluster high-water mark.
     pub(super) fn observe_applied_index(&mut self, node: u64, idx: u64) {
         self.check_no_gaps(node, idx);
-        if idx >= 2 {
-            reach_once!(
-                self.multi_slot_applied,
-                "a multi-slot log prefix is applied"
-            );
-        }
-        if idx >= 3 {
-            reach_once!(
-                self.several_slots_applied,
-                "the chosen prefix advances under a stable leader"
-            );
-        }
         if self.cluster_applied_max.is_none_or(|m| idx > m) {
             self.cluster_applied_max = Some(idx);
         }
@@ -1197,6 +1358,6 @@ impl AuditState {
         for &client in &committed_clients {
             check_sequential_client(client, h);
         }
-        h.check_coverage_gates(&committed_clients, self.leader_change_ms);
+        h.check_coverage_gates(self.leader_change_ms);
     }
 }

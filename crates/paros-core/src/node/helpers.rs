@@ -23,10 +23,44 @@ impl ColocatedNode {
         self.config.pool().binary_search(&node).is_ok()
     }
 
+    // ---- the wire-configuration coin ----------------------------------------
+    //
+    // **A plain deployment carries no configuration on the wire.** Every
+    // message that can carry one (`Prepare`, `Accept`, `Heartbeat`,
+    // `Relinquish`, the `config_since` of a `PreReadAck`) carries it only on
+    // a matchmaker deployment, where a peer must learn the configuration in
+    // force off the wire; plain Multi-Paxos exchanges byte-for-byte today's
+    // messages and never moves its static membership. The three helpers
+    // below are that one coin, minted once.
+
+    /// `config` on the wire: itself on a matchmaker deployment, nothing on
+    /// plain Multi-Paxos (see the note above).
+    pub(super) fn wire_config_of(&self, config: &AcceptorConfig) -> Option<AcceptorConfig> {
+        self.config.has_matchmakers().then(|| config.clone())
+    }
+
+    /// The configuration in force on the wire — what a beat, a colocated
+    /// leader's delegated `Accept` and a handoff carry
+    /// ([`ColocatedNode::wire_config_of`] over `acceptors`).
+    pub(super) fn wire_config(&self) -> Option<AcceptorConfig> {
+        self.wire_config_of(&self.acceptors)
+    }
+
+    /// The ballot the configuration in force is bound to, on the wire: what
+    /// a `PreReadAck` carries on a matchmaker deployment, nothing on plain
+    /// Multi-Paxos (see the note above).
+    pub(super) fn wire_config_since(&self) -> Option<Ballot> {
+        self.config
+            .has_matchmakers()
+            .then_some(self.acceptors_since)
+    }
+
     /// The configuration a `Prepare` at this node's ballot carries: the
     /// registered `C_b` on a matchmaker deployment (so every acceptor it
     /// reaches learns it), nothing on plain Multi-Paxos (whose `Prepare` is
-    /// byte-for-byte today's).
+    /// byte-for-byte today's). Differs from [`ColocatedNode::wire_config`]
+    /// in what it carries — the open election's `C_b` when there is one —
+    /// not in when.
     pub(super) fn phase1_wire_config(&self) -> Option<AcceptorConfig> {
         if !self.config.has_matchmakers() {
             return None;
@@ -142,5 +176,38 @@ impl ColocatedNode {
     /// First slot not in the contiguous chosen prefix.
     pub(super) fn first_unchosen(&self) -> Slot {
         self.replica.first_unchosen()
+    }
+
+    // ---- settledness --------------------------------------------------------
+    //
+    // Two predicates over the Phase-1-shaped work a leadership may still
+    // hold open, and the difference between them is deliberate.
+    //
+    // `phase1_work_open` is the *proposer's* half alone — an election
+    // recovery or a CTRL repair probe, the two tallies that were reported by
+    // a Phase-1 quorum and re-propose or decide on its strength. It is what
+    // delegation asks (`may_delegate`: a proxy never runs the rounds a fresh
+    // leadership's recovery depends on) and what the non-member step-down in
+    // `tick` asks (a removed leader resigns once its recovery and repair
+    // closed and its rounds decided; an application repair does not hold
+    // it, since a resigned node keeps repairing as a replica).
+    //
+    // `leadership_settled` adds the replica's *application repair*: the
+    // three things that must be closed before the leadership is moved or
+    // built on — a GC floor (`gc_covered`), a reconfiguration
+    // (`reconfigure`) and a handoff (`can_relinquish`, which further
+    // requires no local `faulty` record, a condition of its own).
+
+    /// Whether Phase-1-shaped work is open on the proposer: an election
+    /// recovery or a repair probe (see the note above).
+    pub(super) fn phase1_work_open(&self) -> bool {
+        self.proposer.recovery().is_some() || self.proposer.probe().is_some()
+    }
+
+    /// Whether the leadership is **settled**: no Phase-1-shaped work open
+    /// on the proposer ([`ColocatedNode::phase1_work_open`]) and no
+    /// application repair open on the replica (see the note above).
+    pub(super) fn leadership_settled(&self) -> bool {
+        !self.phase1_work_open() && self.replica.app_repair().is_none()
     }
 }

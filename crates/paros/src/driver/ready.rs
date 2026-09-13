@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use moonpool_core::SimulationError;
 use paros_core::{
     AcceptorWrite, Ballot, ColocatedNode, Command, Control, GcRequest, MatchRequest, MatchmakerId,
-    Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
+    Message, NodeId, NodeRole, Party, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -18,6 +18,7 @@ use crate::storage::{NodeStorage, StorageError};
 
 use super::config::RunError;
 use super::events::command_hash;
+use super::reply::answer;
 use super::transport::{Outbound, send_messages};
 
 /// The client replies this node is holding open: proposals wait on their
@@ -47,7 +48,8 @@ async fn send_snapshot_offers<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let mut offers: Vec<(NodeId, Message)> = Vec::with_capacity(snapshot_offers.len());
+    let me = out.self_node();
+    let mut offers: Vec<(Party, Message)> = Vec::with_capacity(snapshot_offers.len());
     for &(to, offered_index, ballot) in snapshot_offers {
         // The mismatch skip below, taken spuriously: the requester re-asks
         // every tick and any other custodian may answer, so an unserved beat
@@ -60,9 +62,9 @@ async fn send_snapshot_offers<S, H, A>(
         // satisfy it trivially. The hook's own BUGGIFY pairing proves this
         // location fires; the trace field says which of the two skips a reader
         // is looking at.
-        if hooks.skip_snapshot_offer(to) {
+        if hooks.skip_snapshot_offer(Party::Node(to)) {
             tracing::info!(
-                node = out.self_id,
+                node = me.0,
                 offered = offered_index.0,
                 reason = "hook",
                 "snapshot_offer_skipped"
@@ -79,9 +81,9 @@ async fn send_snapshot_offers<S, H, A>(
             // serves it. The core already withholds offers while its own
             // repair is open; this driver-side guard covers any other
             // application lag the core cannot see.
-            audit.snapshot_offer_skipped(NodeId(out.self_id), offered_index);
+            audit.snapshot_offer_skipped(me, offered_index);
             tracing::info!(
-                node = out.self_id,
+                node = me.0,
                 offered = offered_index.0,
                 reason = "mismatch",
                 "snapshot_offer_skipped"
@@ -89,9 +91,9 @@ async fn send_snapshot_offers<S, H, A>(
             continue;
         }
         offers.push((
-            to,
+            Party::Node(to),
             Message::InstallSnapshot {
-                from: NodeId(out.self_id),
+                from: me,
                 ballot,
                 chosen_index: offered_index,
                 snapshot: Value(storage.snapshot().await),
@@ -184,17 +186,19 @@ fn ack_committed_waiters<S, H, A>(
                 storage.applied_slot(),
                 false,
             );
-            if hooks.drop_client_reply(Reply::Propose) {
-                audit.client_reply_dropped(NodeId(self_id), Reply::Propose);
-                tracing::info!(node = self_id, reply = "propose", "client_reply_dropped");
-                continue;
-            }
-            let _ = waiter.send(ProposeAck {
-                seq,
-                leader: Some(self_id),
-                committed: true,
-                slot: Some(slot.0),
-            });
+            answer(
+                hooks,
+                audit,
+                NodeId(self_id),
+                Reply::Propose,
+                waiter,
+                ProposeAck {
+                    seq,
+                    leader: Some(self_id),
+                    committed: true,
+                    slot: Some(slot.0),
+                },
+            );
         }
     }
 }
@@ -220,7 +224,7 @@ where
     H: DriverHooks,
     A: Audit,
 {
-    let self_id = out.self_id;
+    let self_id = out.self_node().0;
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
     let pool: Vec<NodeId> = node.config().pool().to_vec();
@@ -249,16 +253,22 @@ where
         paros_core::MustSync::Relaxed
     };
     // The deployment map, applied: the core hands out audiences (one entry
-    // per fan-out), the driver turns each into the node ids its own pool
-    // names, in order, and sends. The bytes and their order are exactly what
-    // an enumerated batch carried.
-    let messages: Vec<(NodeId, Message)> = ready
+    // per fan-out), the driver turns each into the parties its own map
+    // names — the node ids of the pool, or the one proxy leader a
+    // delegation is for (#142) — in order, and sends. The bytes and their
+    // order are exactly what an enumerated batch carried.
+    let messages: Vec<(Party, Message)> = ready
         .messages()
         .iter()
         .flat_map(|(audience, msg)| {
-            audience
+            let proxy = audience.proxy().map(Party::Proxy);
+            let nodes = audience
                 .resolve(&pool, NodeId(self_id))
                 .into_iter()
+                .map(Party::Node);
+            proxy
+                .into_iter()
+                .chain(nodes)
                 .map(move |to| (to, msg.clone()))
         })
         .collect();
@@ -332,7 +342,7 @@ where
         audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
         tracing::info!(
             node = self_id,
-            seam = "after_sync_before_send",
+            seam = Seam::AfterSyncBeforeSend.label(),
             snapshot_offers = snapshot_offer_count as u64,
             "crashed"
         );
@@ -405,11 +415,13 @@ where
         // transitions are staged, but their fsync has not happened. A crash
         // here is the only way to land "consensus ahead of application" on
         // disk — the state the boot replay's idempotent re-apply heals.
-        if hooks.crash_at(Seam::AfterApplyBeforeSync) {
-            audit.crashed(NodeId(self_id), Seam::AfterApplyBeforeSync);
-            tracing::info!(node = self_id, seam = "after_apply_before_sync", "crashed");
-            return Err(RunError::SeamCrash(Seam::AfterApplyBeforeSync));
-        }
+        crash_if(
+            true,
+            hooks,
+            audit,
+            NodeId(self_id),
+            Seam::AfterApplyBeforeSync,
+        )?;
         storage
             .sync(paros_core::MustSync::Sync)
             .await
@@ -456,17 +468,19 @@ where
         if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
             let read_index = node.hard_state().chosen_index;
             audit.read_confirmed(NodeId(self_id), read_index);
-            if hooks.drop_client_reply(Reply::Read) {
-                audit.client_reply_dropped(NodeId(self_id), Reply::Read);
-                tracing::info!(node = self_id, reply = "read", "client_reply_dropped");
-                continue;
-            }
-            let _ = waiter.send(ReadAck {
-                seq,
-                leader: Some(self_id),
-                committed: true,
-                read_index: read_index.map(|s| s.0),
-            });
+            answer(
+                hooks,
+                audit,
+                NodeId(self_id),
+                Reply::Read,
+                waiter,
+                ReadAck {
+                    seq,
+                    leader: Some(self_id),
+                    committed: true,
+                    read_index: read_index.map(|s| s.0),
+                },
+            );
         }
     }
 
@@ -553,11 +567,13 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     // whole un-synced batch (and no message has been sent), so surface nothing but
     // the crash marker itself. Only meaningful when the batch actually staged
     // something.
-    if !writes.is_empty() && hooks.crash_at(Seam::BeforeSync) {
-        audit.crashed(NodeId(self_id), Seam::BeforeSync);
-        tracing::info!(node = self_id, seam = "before_sync", "crashed");
-        return Err(RunError::SeamCrash(Seam::BeforeSync));
-    }
+    crash_if(
+        !writes.is_empty(),
+        hooks,
+        audit,
+        NodeId(self_id),
+        Seam::BeforeSync,
+    )?;
 
     if !writes.is_empty() {
         storage
@@ -656,6 +672,54 @@ fn surface_persisted<A: Audit>(
             WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) => {}
         }
     }
+}
+
+/// The crash seam: when `armed` (the seam has something to lose — an
+/// unarmed site never consults the hook, so it spends no draw) and the hook
+/// fires, report the crash where it happens and unwind the incarnation with
+/// [`RunError::SeamCrash`].
+///
+/// # Errors
+///
+/// [`RunError::SeamCrash`] when the hook fires.
+pub(crate) fn crash_if<H: DriverHooks, A: Audit>(
+    armed: bool,
+    hooks: &H,
+    audit: &A,
+    node: NodeId,
+    seam: Seam,
+) -> Result<(), RunError> {
+    if armed && hooks.crash_at(seam) {
+        audit.crashed(node, seam);
+        tracing::info!(node = node.0, seam = seam.label(), "crashed");
+        return Err(RunError::SeamCrash(seam));
+    }
+    Ok(())
+}
+
+/// The matchmaker driver's twin of [`crash_if`], reported through
+/// [`Audit::matchmaker_crashed`].
+///
+/// # Errors
+///
+/// [`RunError::SeamCrash`] when the hook fires.
+pub(crate) fn match_crash_if<H: DriverHooks, A: Audit>(
+    armed: bool,
+    hooks: &H,
+    audit: &A,
+    matchmaker: MatchmakerId,
+    seam: Seam,
+) -> Result<(), RunError> {
+    if armed && hooks.crash_at(seam) {
+        audit.matchmaker_crashed(matchmaker, seam);
+        tracing::info!(
+            matchmaker = matchmaker.0,
+            seam = seam.label(),
+            "matchmaker_crashed"
+        );
+        return Err(RunError::SeamCrash(seam));
+    }
+    Ok(())
 }
 
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a

@@ -14,6 +14,12 @@
 //! per-ballot configuration registry of Matchmaker Paxos), driven over
 //! [`MatchmakerStorage`]. It is opt-in: a deployment without matchmakers never
 //! runs it, and [`run_node`] does not know it exists.
+//!
+//! [`run_proxy`] is the same shape again for the **proxy leader** role (#142,
+//! Compartmentalized Paxos §3.1): the leader's Phase-2 fan-out and fold on a
+//! process of its own, with nothing to persist. Opt-in the same way: a
+//! deployment whose `Config::proxy_count` is zero runs no proxy and exchanges
+//! exactly the plain deployment's messages.
 
 mod audit;
 mod corruption;
@@ -21,9 +27,10 @@ mod driver;
 mod grpc;
 mod hooks;
 mod matchmaker;
+mod proxy;
 mod storage;
 
-pub use audit::{Audit, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
+pub use audit::{Audit, DelegationOutcome, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
 pub use corruption::{
     CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
@@ -41,6 +48,7 @@ pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };
+pub use proxy::{ProxyConfig, run_proxy};
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
