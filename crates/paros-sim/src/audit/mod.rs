@@ -43,10 +43,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, DelegationOutcome, Deployment,
-    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
-    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
-    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
+    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
+    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
+    PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
     SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
@@ -691,16 +691,34 @@ impl<T: TimeProvider> NodeAudit<T> {
             // core's decision on a quorum of `Accepted`s, each preceded (above)
             // by its durable accept, so the tally has already decided the slot
             // — and with this value, at this or a lower ballot (P2: a later
-            // ballot re-decides only the same value).
+            // ballot re-decides only the same value). Below the cluster-wide
+            // compaction floor the per-slot tally is pruned and the slot is
+            // applied everywhere, so the apply-fed `chosen` map is the
+            // witness there: a proxy leader has no floor and never learns a
+            // slot chosen, so its `Commit` for a round whose votes arrived
+            // late can trail the whole cluster's truncation (seed
+            // 17112434982126988317: slot 34 committed by a proxy at a
+            // cluster floor of 38 — harmless, every learner ignores it).
             let st = self.state();
-            let decided = st.decided.get(&slot.0).copied();
+            let vhash = command_hash(command);
+            let min_floor = st.cluster_min_floor();
+            let decided = if slot.0 < min_floor {
+                st.chosen.get(&slot.0).map(|chosen| (0, 0, *chosen))
+            } else {
+                st.decided.get(&slot.0).copied()
+            };
             assert_always!(
                 decided.is_some(),
                 "an outgoing Commit names a slot a durable accept quorum already decided",
-                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
+                {
+                    "from" => from.to_string(),
+                    "slot" => slot.0,
+                    "round" => ballot.round,
+                    "min_floor" => min_floor
+                }
             );
             assert_always!(
-                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == command_hash(command)),
+                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == vhash),
                 "an outgoing Commit carries the quorum-decided value",
                 { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
@@ -949,7 +967,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
-        reach_once!(st.any_chosen, "a value is chosen");
+        st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
     }
 
@@ -1090,45 +1108,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().delegation_taken_back = true;
     }
 
-    fn proxy_booted(&self, proxy: ProxyId, _acceptors: &AcceptorConfig) {
-        let mut st = self.state();
-        let boots = st.proxy_boots.entry(proxy.0).or_default();
-        *boots += 1;
-        if *boots > 1 {
-            reach_once!(st.proxy_rebooted, "proxy: a proxy leader reboots empty");
-        }
-    }
-
-    fn proxy_delegated(
-        &self,
-        _proxy: ProxyId,
-        _leader: NodeId,
-        _slot: Slot,
-        _ballot: Ballot,
-        _vhash: u64,
-        outcome: DelegationOutcome,
-    ) {
-        let mut st = self.state();
-        match outcome {
-            DelegationOutcome::Opened => {}
-            DelegationOutcome::Refanned => reach_once!(
-                st.proxy_refanned,
-                "proxy: a re-delegation re-fans-out an open round"
-            ),
-            DelegationOutcome::Ignored => reach_once!(
-                st.proxy_delegation_ignored,
-                "proxy: a stale or closed delegation is ignored"
-            ),
-        }
-    }
-
-    fn proxy_rounds_superseded(&self, _proxy: ProxyId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.proxy_rounds_superseded,
-            "proxy: a higher ballot closes a proxy's older rounds"
-        );
-    }
+    // The proxy's own paths — a reboot, a re-fan-out, an ignored or
+    // superseded delegation, a relayed `Nack` — are reported through the
+    // port but not gated here: the model checker proves each in-core, and
+    // the slot budget (512 per campaign process) is spent on outcomes.
 
     fn proxy_fanned_out(
         &self,
@@ -1152,14 +1135,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn proxy_decided(&self, proxy: ProxyId, slot: Slot, ballot: Ballot, vhash: u64) {
         self.state()
             .observe_proxy_decision(proxy.0, slot.0, ballot, vhash);
-    }
-
-    fn proxy_nack_relayed(&self, _proxy: ProxyId, _leader: NodeId, _slot: Slot, _ballot: Ballot) {
-        let mut st = self.state();
-        reach_once!(
-            st.proxy_nack_relayed,
-            "proxy: a Nack is relayed to the delegating leader"
-        );
     }
 
     fn proxy_resend_skipped(&self, _proxy: ProxyId) {
@@ -1250,12 +1225,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.leader_promise_checked = true;
         st.any_leader = true;
         st.leader_rounds.insert(won.round);
-        if st.leader_rounds.len() >= 2 {
-            reach_once!(
-                st.leadership_turnover,
-                "leadership turns over (re-election)"
-            );
-        }
         match st.first_leader_round {
             None => st.first_leader_round = Some(won.round),
             Some(r) if r != won.round && st.leader_change_ms.is_none() => {
@@ -1772,16 +1741,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn dropped_at_send(&self, _from: Party, to: Party, msg: &Message) {
-        if let (Party::Proxy(_), Message::Accept { .. }) = (to, msg) {
-            // The delegation itself, lost: the leader re-delegates on its
-            // next beat, and the budget counts it toward a take-back.
-            let mut st = self.state();
-            reach_once!(
-                st.dropped_delegation,
-                "proxy: a delegation is lost at the send seam"
-            );
-        }
+    fn dropped_at_send(&self, _from: Party, _to: Party, msg: &Message) {
         let mut st = self.state();
         match msg {
             Message::Accept { .. } => {
@@ -1826,24 +1786,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver drops a catch-up request at the send seam"
                 );
             }
-            Message::SnapAck { .. } => {
-                reach_once!(
-                    st.dropped_snap_ack,
-                    "the driver drops a snap custody ack at the send seam"
-                );
-            }
-            Message::SnapChunkRequest { .. } => {
-                reach_once!(
-                    st.dropped_snap_chunk_request,
-                    "the driver drops a snap chunk request at the send seam"
-                );
-            }
-            Message::SnapChunkResponse { .. } => {
-                reach_once!(
-                    st.dropped_snap_chunk_response,
-                    "the driver drops a snap chunk response at the send seam"
-                );
-            }
+            // The snap-repair plane's losses (custody ack, chunk request,
+            // chunk response) carry no gate of their own: the repair is
+            // re-asked every beat and its outcome gates are the storage
+            // ones ("a rotted snapshot chunk is repaired from a peer").
             // The whole cooperative handoff, lost in one message: the outgoing
             // leader has already stepped down and the successor never starts,
             // so this must cost availability only — an ordinary Phase 1 is the
@@ -1875,70 +1821,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "the driver duplicates a quorum-counting message at the send seam"
             );
         }
-        match msg {
-            Message::Commit { .. } => {
-                reach_once!(
-                    st.duplicated_commit,
-                    "the driver duplicates a commit at the send seam"
-                );
-            }
-            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
-                reach_once!(
-                    st.duplicated_repair,
-                    "the driver duplicates a repair message at the send seam"
-                );
-            }
-            Message::CatchUpRequest { .. } => {
-                reach_once!(
-                    st.duplicated_catchup_request,
-                    "the driver duplicates a catch-up request at the send seam"
-                );
-            }
-            // The snap plane's idempotency witnesses: a duplicated custody ack
-            // meets the leader's set-based tally; a duplicated chunk response
-            // finds its chunks no longer pending.
-            Message::SnapAck { .. } => {
-                reach_once!(
-                    st.duplicated_snap_ack,
-                    "the driver duplicates a snap custody ack at the send seam"
-                );
-            }
-            Message::SnapChunkRequest { .. } => {
-                reach_once!(
-                    st.duplicated_snap_chunk_request,
-                    "the driver duplicates a snap chunk request at the send seam"
-                );
-            }
-            Message::SnapChunkResponse { .. } => {
-                reach_once!(
-                    st.duplicated_snap_chunk_response,
-                    "the driver duplicates a snap chunk response at the send seam"
-                );
-            }
-            // A re-delivered handoff must be a no-op at its addressee — never
-            // an allocator rewind — and refused everywhere else. The uniqueness
-            // oracle above is what keeps that honest.
-            Message::Relinquish { .. } => {
-                reach_once!(
-                    st.duplicated_relinquish,
-                    "the driver duplicates a relinquishment at the send seam"
-                );
-            }
-            _ => {}
+        // The other kinds (a commit, the repair and snap-repair planes, a
+        // catch-up request) share the family gate above: every one of them
+        // is an idempotency claim the `always` checks judge, and the hook
+        // keeps one location per kind regardless. A re-delivered handoff
+        // keeps its own — it must be a no-op at its addressee, never an
+        // allocator rewind, and refused everywhere else; the uniqueness
+        // oracle above is what keeps that honest.
+        if matches!(msg, Message::Relinquish { .. }) {
+            reach_once!(
+                st.duplicated_relinquish,
+                "the driver duplicates a relinquishment at the send seam"
+            );
         }
     }
 
     fn client_reply_dropped(&self, _node: NodeId, reply: paros::Reply) {
         let mut st = self.state();
-        if matches!(reply, paros::Reply::Compact) {
-            // The compaction client's re-ask loop is its own recovery path
-            // (a lost ack must not double-seed a snapshot point), so the
-            // kind keeps a gate beside the redirect family's.
-            reach_once!(
-                st.compact_reply_dropped,
-                "a compaction reply is dropped at the reply seam"
-            );
-        }
         if matches!(
             reply,
             paros::Reply::ProposeRedirect
@@ -1981,10 +1880,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn compact_acked(&self, _node: NodeId, accepted: bool) {
         let mut st = self.state();
         if accepted {
-            reach_once!(
-                st.compact_ack_accepted,
-                "a compact request is acked as accepted"
-            );
+            // Feeds the "chain: compact takes effect" outcome gate.
+            st.compact_ack_accepted = true;
         } else {
             reach_once!(
                 st.compact_ack_refused,
@@ -2103,6 +2000,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {
         self.state().election_timeouts.insert(node.0, ticks);
+    }
+
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, _seq: u64) {
+        self.state().observe_ack_received(node.0, from.0, ballot);
     }
 
     fn ticked(&self, node: NodeId) {

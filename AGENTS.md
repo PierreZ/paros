@@ -186,7 +186,10 @@ own**. The roles:
   fan-out, `Commit` and relayed `Nack` (`proxy_sent`, `proxy_fanned_out`, `proxy_decided`,
   `proxy_nack_relayed`) apart from a node's sends; the sim audit judges every proxy `Commit`
   against the durable accepts it folded from the acceptors (`observe_proxy_decision`), and its
-  `sometimes` gates are a slot decided through a proxy and a leader taking a round back. Proven by the sans-IO model
+  `sometimes` gates are a slot decided through a proxy and a leader taking a round back (the
+  proxy's own paths — a reboot, a re-fan-out, an ignored delegation, a relayed `Nack` — are
+  reported, not gated: the model checker proves them and the 512-slot budget is spent on
+  outcomes; `sim-paros-hunt` prints the slots a campaign uses). Proven by the sans-IO model
   checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
   reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
   per slot, every proxy `Commit` backed by a durable Phase-2 quorum at one ballot, and the

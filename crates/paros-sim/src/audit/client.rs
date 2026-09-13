@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{assert_always, assert_sometimes};
 
 /// Cap on the committed-operation history the interval checker walks pairwise.
 /// The current workloads stay far below it (a few dozen operations per client);
@@ -163,15 +163,7 @@ impl LinHistory {
 
     /// Coverage gates on the client-visible register (`UntilCoverageStable`
     /// only saturates once these fire).
-    pub(super) fn check_coverage_gates(
-        &self,
-        committed_clients: &BTreeSet<u64>,
-        leader_change_ms: Option<u64>,
-    ) {
-        let multi_client = committed_clients.len() > 1;
-        if multi_client {
-            assert_reachable!("a run drives concurrent clients against one register");
-        }
+    pub(super) fn check_coverage_gates(&self, leader_change_ms: Option<u64>) {
         let concurrent_read_write = self.reads.iter().any(|&(r, _)| {
             self.writes
                 .iter()

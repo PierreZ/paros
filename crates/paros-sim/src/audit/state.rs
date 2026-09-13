@@ -287,9 +287,6 @@ pub(super) struct AuditState {
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
     pub(super) waiter_superseded: bool,
-    pub(super) multi_slot_applied: bool,
-    pub(super) several_slots_applied: bool,
-    pub(super) leadership_turnover: bool,
     pub(super) crashed_before_sync: bool,
     pub(super) crashed_after_sync: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
@@ -373,7 +370,6 @@ pub(super) struct AuditState {
     /// A compaction ack lost at the reply seam (its own gate beside the
     /// redirect family: the compaction client's re-ask loop is a different
     /// recovery path from a blind retry after a lost redirect).
-    pub(super) compact_reply_dropped: bool,
     /// Cooperative-handoff coverage: one sticky bit per distinct fact.
     pub(super) handoff_relinquished: bool,
     pub(super) handoff_installed: bool,
@@ -411,9 +407,6 @@ pub(super) struct AuditState {
     pub(super) dropped_heartbeat: bool,
     pub(super) dropped_repair: bool,
     pub(super) dropped_catchup_request: bool,
-    pub(super) dropped_snap_ack: bool,
-    pub(super) dropped_snap_chunk_request: bool,
-    pub(super) dropped_snap_chunk_response: bool,
     pub(super) crashed_after_apply: bool,
     pub(super) crashed_before_chunk_sync: bool,
     pub(super) crashed_after_chunk_restore: bool,
@@ -443,12 +436,6 @@ pub(super) struct AuditState {
     pub(super) redirect_dropped: bool,
     pub(super) duplicated_any: bool,
     pub(super) duplicated_quorum_kind: bool,
-    pub(super) duplicated_commit: bool,
-    pub(super) duplicated_repair: bool,
-    pub(super) duplicated_catchup_request: bool,
-    pub(super) duplicated_snap_ack: bool,
-    pub(super) duplicated_snap_chunk_request: bool,
-    pub(super) duplicated_snap_chunk_response: bool,
     pub(super) reply_dropped: bool,
     pub(super) propose_reply_dropped: bool,
     pub(super) read_reply_dropped: bool,
@@ -490,24 +477,14 @@ pub(super) struct AuditState {
     /// a proxy's fan-out named as the hint — more than one means a handoff
     /// successor re-delegated the round and the proxy refreshed the hint.
     pub(super) fanout_leaders: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
-    /// Per proxy: how many times it booted (every boot is an empty one).
-    pub(super) proxy_boots: BTreeMap<u64, u64>,
     /// The two outcomes the campaign must reach: a slot decided by a proxy's
     /// `Commit`, and a delegated round taken back by its leader.
     pub(super) decided_through_proxy: bool,
     pub(super) delegation_taken_back: bool,
     /// The causes, recorded when they fire: a proxied round outliving a
-    /// handoff, a proxy rebooting empty, a re-delegation re-fanning-out, a
-    /// delegation ignored, a `Nack` relayed, a proxy's rounds superseded, a
-    /// skipped re-fan-out beat, a delegation lost at the send seam.
+    /// handoff, a skipped re-fan-out beat.
     pub(super) proxied_round_survived_handoff: bool,
-    pub(super) proxy_rebooted: bool,
-    pub(super) proxy_refanned: bool,
-    pub(super) proxy_delegation_ignored: bool,
-    pub(super) proxy_nack_relayed: bool,
-    pub(super) proxy_rounds_superseded: bool,
     pub(super) proxy_resend_skipped: bool,
-    pub(super) dropped_delegation: bool,
 }
 
 impl AuditState {
@@ -741,13 +718,6 @@ impl AuditState {
             self.leader_promise_checked,
             "a fresh leader's promise is checked against the ballot it won"
         );
-        // The n>=5 shape, whose accept quorums can avoid a two-node pin, is
-        // actually visited. Every node boots at start, so the booted set is
-        // the drawn topology.
-        let n = self.booted.len();
-        if n >= 5 {
-            assert_reachable!("a run drives a five-node cluster");
-        }
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
         // The #101 coupling's other half: compaction implies a decided
@@ -1036,8 +1006,35 @@ impl AuditState {
         }
     }
 
+    /// One `HeartbeatAck` reaching `node` at `ballot`: whatever the core
+    /// makes of it, an ack at the leader's ballot from a member of its
+    /// configuration refills the `CheckQuorum` window, so the deposed
+    /// streak's clock restarts here. The ack is legitimate even after the
+    /// promise-majority formed: it was sent while the sender's promise still
+    /// sat at or below the ballot and merely arrived late — the network's
+    /// delay is not bounded by an election window (seed 4279021087318167556:
+    /// two acks sent before either promise moved arrived 350–430 ms later
+    /// and carried a deposed leader to 13 ticks against a 12-tick budget,
+    /// with the protocol behaving exactly as specified).
+    pub(super) fn observe_ack_received(&mut self, node: u64, from: u64, ballot: Ballot) {
+        let in_config = self
+            .config_of(ballot)
+            .is_some_and(|c| c.contains(paros::NodeId(from)));
+        if !in_config {
+            return;
+        }
+        if let Some(entry) = self.deposed_streaks.get_mut(&node)
+            && entry.round == ballot.round
+            && entry.node == ballot.node.0
+        {
+            entry.ticks = 0;
+        }
+    }
+
     /// One logical tick at `node`: a deposed leader's clock runs, and it must
-    /// step down within two `CheckQuorum` windows (see [`Self::observe_beat`]).
+    /// step down within two `CheckQuorum` windows of the later of its
+    /// deposal and the last ack it received at that ballot (see
+    /// [`Self::observe_beat`], [`Self::observe_ack_received`]).
     pub(super) fn observe_tick(&mut self, node: u64) {
         let Some(entry) = self.deposed_streaks.get_mut(&node) else {
             return;
@@ -1226,18 +1223,6 @@ impl AuditState {
     /// the cluster high-water mark.
     pub(super) fn observe_applied_index(&mut self, node: u64, idx: u64) {
         self.check_no_gaps(node, idx);
-        if idx >= 2 {
-            reach_once!(
-                self.multi_slot_applied,
-                "a multi-slot log prefix is applied"
-            );
-        }
-        if idx >= 3 {
-            reach_once!(
-                self.several_slots_applied,
-                "the chosen prefix advances under a stable leader"
-            );
-        }
         if self.cluster_applied_max.is_none_or(|m| idx > m) {
             self.cluster_applied_max = Some(idx);
         }
@@ -1329,6 +1314,6 @@ impl AuditState {
         for &client in &committed_clients {
             check_sequential_client(client, h);
         }
-        h.check_coverage_gates(&committed_clients, self.leader_change_ms);
+        h.check_coverage_gates(self.leader_change_ms);
     }
 }

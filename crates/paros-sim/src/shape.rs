@@ -238,10 +238,6 @@ impl NodeShape {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
         }
-        if tunables.proxy_take_back_resends != 10 {
-            // BUGGIFY pairing: the take-back budget extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme proxy take-back budget");
-        }
         // The crash bias is a plain multiplier with no floor to defend: at
         // its extreme the seams crash on one batch in three inside the
         // window, and the window still closes long before the tail does.

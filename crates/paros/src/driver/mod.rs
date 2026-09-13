@@ -679,6 +679,12 @@ where
                     ),
                     None => tracing::info!(node = self_id, kind, "msg_received"),
                 }
+                // An ack at the inbox, whatever the core makes of it: what
+                // refills a leader's `CheckQuorum` window, and what the
+                // deposed-leader oracle measures its clock from.
+                if let Message::HeartbeatAck { from, ballot, seq, .. } = &msg {
+                    audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot, *seq);
+                }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it
                 // so the sweep can assert the interleaving stays reachable once the

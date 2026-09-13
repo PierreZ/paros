@@ -316,6 +316,14 @@ pub trait Audit {
     /// tick. The unit every core timeout is counted in.
     fn ticked(&self, node: NodeId) {}
 
+    /// This node received a `HeartbeatAck` from `from` echoing `(ballot,
+    /// seq)`, reported at the inbox before the core folds it — whether or
+    /// not the core counts it (a stale ballot's ack moves nothing). An ack
+    /// that reaches a leader refills its `CheckQuorum` window, and an ack in
+    /// flight can be older than a window: the deposed-leader oracle measures
+    /// from the last ack received, never from the promise-majority alone.
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, seq: u64) {}
+
     /// This node received a `Prepare` below its own compaction floor — the
     /// "campaign against a truncated acceptor" interleaving.
     fn prepare_below_floor(&self, node: NodeId, from_slot: Slot, floor: Slot) {}

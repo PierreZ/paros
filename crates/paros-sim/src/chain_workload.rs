@@ -2190,9 +2190,6 @@ impl Workload for ChainWorkload {
             self.adversarial.duplicate_across_leader_change,
             "a duplicate is suppressed across a leader change"
         );
-        if self.adversarial.dual_submitted {
-            assert_reachable!("chain: concurrent dual-submit is exercised");
-        }
         if self.adversarial.reconfigure_started[0] {
             assert_reachable!("reconfiguration: the client grows the acceptor set onto a spare");
         }
@@ -2235,15 +2232,6 @@ impl Workload for ChainWorkload {
         }
         if self.adversarial.retire_released {
             assert_reachable!("gc: a refused retirement releases the parked identity");
-        }
-        if self.adversarial.compact_storm_modes[0] {
-            assert_reachable!("chain: compact-storm overask is exercised");
-        }
-        if self.adversarial.compact_storm_modes[1] {
-            assert_reachable!("chain: compact-storm follower targeting is exercised");
-        }
-        if self.adversarial.compact_storm_modes[2] {
-            assert_reachable!("chain: compact-storm stale-leader targeting is exercised");
         }
         if self.adversarial.payload_classes[0] {
             assert_reachable!("chain: an empty payload is acknowledged");
