@@ -313,6 +313,19 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
         .run()
 }
 
+/// Replay one **explored timeline** of the main campaign: the root `seed`
+/// with the recipe's RNG breakpoints installed (`(rng_call_count, seed)`
+/// pairs, exactly as the sweep prints a `bug recipe`), so a failure the
+/// explorer found on a forked continuation is reproduced without the
+/// explorer. The recipe is a draw schedule like any seed (AGENTS.md,
+/// *Pinned seeds are not a regression mechanism*): it names the build it was
+/// found on, never a scenario.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn replay_chain_recipe(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
+    chain_builder(None).replay_timeline(seed, recipe).run()
+}
+
 /// Run one seed and return the audit's end-of-run digest: a fold of the chosen
 /// log, every node's applied prefix, and the leadership history. Two runs of the
 /// same seed must return the same digest — the determinism proof.
