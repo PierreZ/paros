@@ -21,17 +21,19 @@
 
 mod storage;
 
-use moonpool_core::{NetworkProvider, Providers, SimulationError, TcpListenerTrait};
-use moonpool_hyper::{H2Server, H2ServerConfig};
+use moonpool_core::Providers;
 use paros_core::{
     AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
     MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
-    ReconfigureRequest,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
-use crate::driver::{DriverTunables, RunError, accept_and_serve, grpc_keep_alive};
+use crate::driver::edge::GrpcEdge;
+use crate::driver::events::{reconfigure_kind, reconfigure_reply_kind, value_hash};
+use crate::driver::ready::match_crash_if;
+use crate::driver::reply::match_answer;
+use crate::driver::{DriverTunables, RunError};
 use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::StorageError;
@@ -45,31 +47,27 @@ pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_co
 /// replies, an observer hashes what it sees on the wire.
 #[must_use]
 pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut fold = |bytes: &[u8]| {
-        for &b in bytes {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    fold(&(config.members().len() as u64).to_le_bytes());
+    // The same byte sequence, tag for tag, the digest has always folded:
+    // the membership length, each member, the quorum-system tag, its sizes.
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&(config.members().len() as u64).to_le_bytes());
     for member in config.members() {
-        fold(&member.0.to_le_bytes());
+        bytes.extend_from_slice(&member.0.to_le_bytes());
     }
     match config.quorum_system() {
-        paros_core::QuorumSystem::Majority => fold(&[0_u8]),
+        paros_core::QuorumSystem::Majority => bytes.push(0_u8),
         paros_core::QuorumSystem::Flexible { q1, q2 } => {
-            fold(&[1_u8]);
-            fold(&(q1 as u64).to_le_bytes());
-            fold(&(q2 as u64).to_le_bytes());
+            bytes.push(1_u8);
+            bytes.extend_from_slice(&(q1 as u64).to_le_bytes());
+            bytes.extend_from_slice(&(q2 as u64).to_le_bytes());
         }
         paros_core::QuorumSystem::Grid { rows, cols } => {
-            fold(&[2_u8]);
-            fold(&(rows as u64).to_le_bytes());
-            fold(&(cols as u64).to_le_bytes());
+            bytes.push(2_u8);
+            bytes.extend_from_slice(&(rows as u64).to_le_bytes());
+            bytes.extend_from_slice(&(cols as u64).to_le_bytes());
         }
     }
-    h
+    value_hash(&bytes)
 }
 
 /// Map a [`StorageError`] into the driver's deliberate crash decision, typed on
@@ -106,7 +104,6 @@ struct Drained {
 /// ordering covers the generation writes of #125: a `StopAck` leaves only
 /// once the freeze is durable, a bootstrap ack only once the pending record
 /// is, a decree promise or vote only once the decree record is.
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.id().0))]
 async fn drain<S, H, A>(
     matchmaker: &mut Matchmaker,
@@ -156,102 +153,100 @@ where
     if !writes.is_empty() {
         // Crash seam: staged but not flushed — the batch dies whole, and no
         // reply has been handed out yet.
-        if hooks.crash_at(Seam::MatchBeforeSync) {
-            audit.matchmaker_crashed(id, Seam::MatchBeforeSync);
-            tracing::info!(
-                matchmaker = id.0,
-                seam = "match_before_sync",
-                "matchmaker_crashed"
-            );
-            return Err(RunError::SeamCrash(Seam::MatchBeforeSync));
-        }
+        match_crash_if(true, hooks, audit, id, Seam::MatchBeforeSync)?;
         storage
             .sync()
             .await
             .map_err(|e| storage_fault_crash(audit, id, e))?;
-        // Durable now — report the truthful persisted state.
-        for op in &writes {
-            match op {
-                MatchmakerWriteOp::Register {
-                    ballot,
-                    registration,
-                } => {
-                    audit.match_registered(id, *ballot, registration);
-                    tracing::info!(
-                        matchmaker = id.0,
-                        round = ballot.round,
-                        bnode = ballot.node.0,
-                        members = registration.config.members().len() as u64,
-                        reconfiguration = registration.kind.is_reconfiguration(),
-                        config = config_hash(&registration.config),
-                        "match_registered"
-                    );
-                }
-                MatchmakerWriteOp::SetGcWatermark(watermark) => {
-                    audit.gc_watermark_raised(id, *watermark);
-                    tracing::info!(
-                        matchmaker = id.0,
-                        round = watermark.round,
-                        bnode = watermark.node.0,
-                        "gc_watermark_raised"
-                    );
-                }
-                MatchmakerWriteOp::SetScalars(scalars) => {
-                    audit.matchmaker_scalars_persisted(id, scalars);
-                    tracing::info!(
-                        matchmaker = id.0,
-                        generation = scalars.generation.0,
-                        phase = ?scalars.phase,
-                        successor = scalars.successor.as_ref().map_or(0, |s| s.generation.0),
-                        pending = scalars.pending.len() as u64,
-                        "matchmaker_scalars_persisted"
-                    );
-                }
-                MatchmakerWriteOp::InstallRegistry {
-                    scalars,
-                    registrations,
-                } => {
-                    // The set the *op* installs, not whatever the live
-                    // handle happens to hold: the two agree today, and a
-                    // report that reads the handle would quietly start
-                    // describing a later generation the moment they do not.
-                    let set = MatchmakerSet::new(scalars.generation, scalars.members.clone());
-                    audit.matchmaker_activated(
-                        id,
-                        &set,
-                        scalars.gc_watermark,
-                        scalars.effective.as_ref(),
-                        registrations,
-                    );
-                    tracing::info!(
-                        matchmaker = id.0,
-                        generation = set.generation.0,
-                        members = set.members().len() as u64,
-                        watermark_round = scalars.gc_watermark.round,
-                        registrations = registrations.len() as u64,
-                        "matchmaker_activated"
-                    );
-                }
-            }
-        }
+        surface_registry_writes(&writes, id, audit);
     }
     // 2. Crash seam: durable, but the reply never leaves. Only meaningful when
     //    there is a reply to lose.
-    if (!replies.is_empty() || !reconfigure_replies.is_empty())
-        && hooks.crash_at(Seam::MatchAfterSyncBeforeReply)
-    {
-        audit.matchmaker_crashed(id, Seam::MatchAfterSyncBeforeReply);
-        tracing::info!(
-            matchmaker = id.0,
-            seam = "match_after_sync_before_reply",
-            "matchmaker_crashed"
-        );
-        return Err(RunError::SeamCrash(Seam::MatchAfterSyncBeforeReply));
-    }
+    match_crash_if(
+        !replies.is_empty() || !reconfigure_replies.is_empty(),
+        hooks,
+        audit,
+        id,
+        Seam::MatchAfterSyncBeforeReply,
+    )?;
     Ok(Drained {
         replies,
         reconfigure_replies,
     })
+}
+
+/// Report a flushed batch's durable registry state — one audit callback and
+/// one tracing event per op. Split out of [`drain`] exactly as the node
+/// driver splits `persist_writes` / `surface_persisted`: the staging half and
+/// the reporting half each stay readable, both walk `writes` in order, and
+/// the reports come strictly after the fsync so they never claim a write the
+/// `MatchBeforeSync` seam then discards.
+#[tracing::instrument(level = "trace", skip_all, fields(matchmaker = id.0))]
+fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: MatchmakerId, audit: &A) {
+    for op in writes {
+        match op {
+            MatchmakerWriteOp::Register {
+                ballot,
+                registration,
+            } => {
+                audit.match_registered(id, *ballot, registration);
+                tracing::info!(
+                    matchmaker = id.0,
+                    round = ballot.round,
+                    bnode = ballot.node.0,
+                    members = registration.config.members().len() as u64,
+                    reconfiguration = registration.kind.is_reconfiguration(),
+                    config = config_hash(&registration.config),
+                    "match_registered"
+                );
+            }
+            MatchmakerWriteOp::SetGcWatermark(watermark) => {
+                audit.gc_watermark_raised(id, *watermark);
+                tracing::info!(
+                    matchmaker = id.0,
+                    round = watermark.round,
+                    bnode = watermark.node.0,
+                    "gc_watermark_raised"
+                );
+            }
+            MatchmakerWriteOp::SetScalars(scalars) => {
+                audit.matchmaker_scalars_persisted(id, scalars);
+                tracing::info!(
+                    matchmaker = id.0,
+                    generation = scalars.generation.0,
+                    phase = ?scalars.phase,
+                    successor = scalars.successor.as_ref().map_or(0, |s| s.generation.0),
+                    pending = scalars.pending.len() as u64,
+                    "matchmaker_scalars_persisted"
+                );
+            }
+            MatchmakerWriteOp::InstallRegistry {
+                scalars,
+                registrations,
+            } => {
+                // The set the *op* installs, not whatever the live
+                // handle happens to hold: the two agree today, and a
+                // report that reads the handle would quietly start
+                // describing a later generation the moment they do not.
+                let set = MatchmakerSet::new(scalars.generation, scalars.members.clone());
+                audit.matchmaker_activated(
+                    id,
+                    &set,
+                    scalars.gc_watermark,
+                    scalars.effective.as_ref(),
+                    registrations,
+                );
+                tracing::info!(
+                    matchmaker = id.0,
+                    generation = set.generation.0,
+                    members = set.members().len() as u64,
+                    watermark_round = scalars.gc_watermark.round,
+                    registrations = registrations.len() as u64,
+                    "matchmaker_activated"
+                );
+            }
+        }
+    }
 }
 
 /// Report one reply at the instant it leaves.
@@ -362,11 +357,19 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let listener = providers
-        .network()
-        .bind(&local_addr)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("matchmaker gRPC listener: {e}")))?;
+    let (service, mut inbox): (_, MatchmakerInbox) =
+        matchmaker_channel(tunables.client_inbox_capacity);
+    let grpc_service = tonic::service::Routes::new(ParosMatchmakerServer::new(service)).prepare();
+    let mut edge = GrpcEdge::bind(
+        &providers,
+        &local_addr,
+        "paros-matchmaker-grpc-server",
+        "matchmaker",
+        &tunables,
+        grpc_service,
+        incarnation_shutdown.clone(),
+    )
+    .await?;
 
     // The sans-IO core, bootstrapped from durable storage through the
     // read-only port (scalars once, then record by record); re-report the
@@ -390,32 +393,9 @@ where
         "matchmaker_booted"
     );
 
-    let (service, mut inbox): (_, MatchmakerInbox) =
-        matchmaker_channel(tunables.client_inbox_capacity);
-    let grpc_service = tonic::service::Routes::new(ParosMatchmakerServer::new(service)).prepare();
-    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(grpc_keep_alive(&tunables)),
-        vectored_writes: true,
-    });
-
-    // One persistent accept future, re-created only once it completes: see
-    // the node driver (`run_node`) for why a `select!`-embedded
-    // `listener.accept()` starves under a request storm in the sim.
-    let mut accept = Box::pin(listener.accept());
-
     loop {
         moonpool_core::select! {
-            accepted = &mut accept => {
-                accept = Box::pin(listener.accept());
-                let (stream, addr) = accepted
-                    .map_err(|e| SimulationError::InvalidState(format!("matchmaker gRPC accept: {e}")))?;
-                let connection = grpc_server.serve_connection_with_shutdown(
-                    stream,
-                    grpc_service.clone(),
-                    incarnation_shutdown.clone().cancelled_owned(),
-                );
-                accept_and_serve(&providers, "paros-matchmaker-grpc-server", "matchmaker", addr, connection);
-            }
+            accepted = edge.serve_next(&providers) => accepted?,
             Some((request, reply)) = inbox.requests.recv() => {
                 // One request, one batch, one reply: the core answers every
                 // request it is stepped, and the drain hands the reply out
@@ -432,12 +412,7 @@ where
                     // A lost reply is a legal outcome: the registration stands
                     // and the requester's retry is the same request again,
                     // answered from the retained history.
-                    if hooks.drop_client_reply(Reply::Match) {
-                        audit.match_reply_dropped(id, Reply::Match);
-                        tracing::info!(matchmaker = id.0, reply = "match", "match_reply_dropped");
-                    } else {
-                        let _ = reply.send(answer);
-                    }
+                    match_answer(hooks, audit, id, Reply::Match, reply, answer);
                 }
             }
             Some((request, reply)) = inbox.collects.recv() => {
@@ -468,12 +443,7 @@ where
                     watermark: matchmaker.hard_state().gc_watermark,
                 };
                 audit.matchmaker_gc_replied(id, &ack);
-                if hooks.drop_client_reply(Reply::GcAck) {
-                    audit.match_reply_dropped(id, Reply::GcAck);
-                    tracing::info!(matchmaker = id.0, reply = "gc_ack", "match_reply_dropped");
-                } else {
-                    let _ = reply.send(ack);
-                }
+                match_answer(hooks, audit, id, Reply::GcAck, reply, ack);
             }
             Some((request, reply)) = inbox.reconfigures.recv() => {
                 // One step of a matchmaker-set handover (#125): the core
@@ -503,42 +473,11 @@ where
                         phase = ?matchmaker.phase(),
                         "reconfigure_replied"
                     );
-                    if hooks.drop_client_reply(Reply::MatchmakerReconfigure) {
-                        audit.match_reply_dropped(id, Reply::MatchmakerReconfigure);
-                        tracing::info!(matchmaker = id.0, reply = "reconfigure", "match_reply_dropped");
-                    } else {
-                        let _ = reply.send(answer);
-                    }
+                    match_answer(hooks, audit, id, Reply::MatchmakerReconfigure, reply, answer);
                 }
             }
             () = shutdown.cancelled() => return Ok(()),
         }
-    }
-}
-
-/// The trace label of one reconfiguration request.
-#[must_use]
-pub(crate) fn reconfigure_kind(request: &ReconfigureRequest) -> &'static str {
-    match request {
-        ReconfigureRequest::Stop { .. } => "stop",
-        ReconfigureRequest::Bootstrap { .. } => "bootstrap",
-        ReconfigureRequest::DecreePrepare { .. } => "decree_prepare",
-        ReconfigureRequest::DecreeAccept { .. } => "decree_accept",
-        ReconfigureRequest::Chosen { .. } => "chosen",
-    }
-}
-
-/// The trace label of one reconfiguration reply.
-#[must_use]
-pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
-    match reply {
-        ReconfigureReply::Stopped { .. } => "stopped",
-        ReconfigureReply::Bootstrapped { .. } => "bootstrapped",
-        ReconfigureReply::Promised { .. } => "promised",
-        ReconfigureReply::Accepted { .. } => "accepted",
-        ReconfigureReply::Nacked { .. } => "nacked",
-        ReconfigureReply::Learned { .. } => "learned",
-        ReconfigureReply::Refused { .. } => "refused",
     }
 }
 

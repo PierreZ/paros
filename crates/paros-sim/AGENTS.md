@@ -19,14 +19,17 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
   per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
-- `process.rs` `NodeProcess::{chaotic, scripted, scripted_with_bootstrap,
-  scripted_with_seam_crash}`, `MatchmakerProcess`, `ProxyProcess` (runs
+- `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
+  fixed bootstrap subset, one scripted seam crash), `MatchmakerProcess`, `ProxyProcess` (runs
   `paros::run_proxy`; nothing durable, a kill reboots it empty), `IdleProcess`,
   `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
   `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
   consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
   corpus's one targeted seam crash, fired once per run, no draw.
+- `client.rs` `ClientSet` (the per-server gRPC client bundle a workload
+  talks through; the corpus builds on it) · `state.rs` `published` (the
+  get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
   `buggify_knob!`; the operation-id table `PROPOSE=0 … RETIRE=13`,

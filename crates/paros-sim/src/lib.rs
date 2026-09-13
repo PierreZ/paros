@@ -25,12 +25,14 @@
 mod audit;
 mod chain;
 mod chain_workload;
+mod client;
 mod corpus;
 mod hooks;
 mod lifecycle;
 mod process;
 mod roles;
 mod shape;
+mod state;
 mod world;
 
 pub use corpus::ChunkLiveCase;
@@ -47,7 +49,7 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
-use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess};
+use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess, ScriptedOptions};
 use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP};
 
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
@@ -192,7 +194,9 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// at the end of that tail. **Never buggified**: it is the clock the verdict is
 /// measured against, not a shape the run takes.
 pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
-const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
+/// [`CHAOS_DURATION_MS`] as a `Duration`: the cutoff every role's hooks and
+/// fault coins share (`crate::process`).
+pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
 /// The corpus keeps its "chaos window" open for the whole scripted run: its
 /// only fault injector is the scripted lifecycle, which must be able to crash
 /// and restart nodes at every phase of the script.
@@ -403,36 +407,22 @@ pub fn run_storage_contract_suite() -> SimulationReport {
 // --- the CTRL evaluation corpus ----------------------------------------------
 
 /// The scripted corpus cluster, the one shape every corpus case is built
-/// from: `nodes` scripted-lifecycle nodes bootstrapped on `bootstrap` of them
-/// (`None` — the usual case — bootstraps on all), `matchmakers` scripted
-/// matchmakers (zero on every case but the departed straggler, which needs a
-/// prior configuration), and no swarm chaos at all — every fault is a
-/// targeted injection from the workload. The caller adds its
-/// `workload_factory`, iterations and seeds. See `crate::corpus`.
+/// from: `nodes` scripted-lifecycle nodes choreographed by `options` (a
+/// fixed bootstrap subset that leaves spares, one scripted durability-seam
+/// crash, #146 — the default is the plain case: bootstrapped on all, every
+/// site dark), `matchmakers` scripted matchmakers (zero on every case but
+/// the departed straggler, which needs a prior configuration), and no swarm
+/// chaos at all — every fault is a targeted injection from the workload.
+/// The caller adds its `workload_factory`, iterations and seeds. See
+/// `crate::corpus`.
 fn scripted_builder(
     nodes: usize,
-    bootstrap: Option<usize>,
     matchmakers: usize,
-) -> SimulationBuilder {
-    scripted_builder_with(nodes, bootstrap, matchmakers, None)
-}
-
-/// [`scripted_builder`] with one scripted durability-seam crash (#146): the
-/// first node to reach `seam_crash` crashes there, once per run. Every
-/// other site stays dark.
-fn scripted_builder_with(
-    nodes: usize,
-    bootstrap: Option<usize>,
-    matchmakers: usize,
-    seam_crash: Option<paros::Seam>,
+    options: ScriptedOptions,
 ) -> SimulationBuilder {
     let mut builder = SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(nodes, move || match (bootstrap, seam_crash) {
-            (Some(ranks), _) => Box::new(NodeProcess::scripted_with_bootstrap(ranks)),
-            (None, Some(seam)) => Box::new(NodeProcess::scripted_with_seam_crash(seam)),
-            (None, None) => Box::new(NodeProcess::scripted()),
-        });
+        .processes(nodes, move || Box::new(NodeProcess::scripted_with(options)));
     if matchmakers > 0 {
         builder = builder.processes(matchmakers, || Box::new(MatchmakerProcess::scripted()));
     }
@@ -448,9 +438,9 @@ fn corpus_builder(
     source: corpus::MaskSource,
     non_vacuous: Option<NonVacuousSink>,
 ) -> SimulationBuilder {
-    scripted_builder(corpus::CORPUS_NODES, None, 0).workload_factory(move || {
-        Box::new(corpus::E1MaskWorkload::new(source, non_vacuous.clone()))
-    })
+    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default()).workload_factory(
+        move || Box::new(corpus::E1MaskWorkload::new(source, non_vacuous.clone())),
+    )
 }
 
 /// The canonical E1 mask cases the nextest corpus runner enumerates: the
@@ -540,7 +530,7 @@ pub fn run_corpus_seed(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
-    scripted_builder(corpus::CORPUS_NODES, None, 0)
+    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default())
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -573,7 +563,11 @@ pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
 pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
     let sink: NonVacuousSink = Arc::new(Mutex::new(false));
     let workload_sink = sink.clone();
-    let report = scripted_builder(corpus::DEPARTED_POOL, Some(corpus::DEPARTED_BOOTSTRAP), 1)
+    let options = ScriptedOptions {
+        bootstrap: Some(corpus::DEPARTED_BOOTSTRAP),
+        ..ScriptedOptions::default()
+    };
+    let report = scripted_builder(corpus::DEPARTED_POOL, 1, options)
         .workload_factory(move || {
             Box::new(corpus::DepartedStragglerWorkload::new(Some(
                 workload_sink.clone(),
@@ -592,7 +586,7 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
-    scripted_builder(corpus::CORPUS_NODES, None, 0)
+    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default())
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -607,7 +601,11 @@ fn chunk_corpus_builder(source: corpus::ChunkMaskSource, live: ChunkLiveCase) ->
         ChunkLiveCase::Intact | ChunkLiveCase::Lost => None,
         ChunkLiveCase::LostThenRestoreCrash => Some(paros::Seam::AfterChunkRestoreBeforeSync),
     };
-    scripted_builder_with(corpus::CORPUS_NODES, None, 0, seam_crash)
+    let options = ScriptedOptions {
+        seam_crash,
+        ..ScriptedOptions::default()
+    };
+    scripted_builder(corpus::CORPUS_NODES, 0, options)
         .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, live)))
 }
 

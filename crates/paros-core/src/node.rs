@@ -585,12 +585,35 @@ impl ColocatedNode {
         if let Some(slot) = self.replica.inflight_at(client, seq) {
             return ProposeResult::Duplicate(slot);
         }
+        self.open_proposal(column, delegation, |replica, slot| {
+            replica.track_inflight(client, seq, slot);
+            Command::User(Entry { client, seq, value })
+        })
+    }
+
+    /// The tail every proposal entry point shares: allocate the next slot,
+    /// build the command for it with `command` (handed the replica so a
+    /// client entry is tracked in flight *before* its round can decide —
+    /// on a singleton the round decides and applies inside the call), open
+    /// its Phase-2 round in `column` (the configuration's own for the slot
+    /// when `None`) under `delegation` narrowed to a settled leadership, and
+    /// answer `Accepted`. The caller has already checked the role and, for
+    /// a client entry, the deduplication ledgers.
+    fn open_proposal(
+        &mut self,
+        column: Option<usize>,
+        delegation: Delegation,
+        command: impl FnOnce(&mut Replica, Slot) -> Command,
+    ) -> ProposeResult {
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader opens a proposal"
+        );
         let slot = self.proposer.allocate();
-        let entry = Entry { client, seq, value };
-        self.replica.track_inflight(client, seq, slot);
+        let command = command(&mut self.replica, slot);
         let column = column.or_else(|| self.acceptors.column_of(slot));
         let delegation = self.settled_delegation(delegation);
-        self.start_accept_round_in(slot, Command::User(entry), column, delegation);
+        self.start_accept_round_in(slot, command, column, delegation);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -645,11 +668,7 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        let slot = self.proposer.allocate();
-        let delegation = self.settled_delegation(delegation);
-        self.start_accept_round(slot, Command::Control(control), delegation);
-        self.assert_invariants();
-        ProposeResult::Accepted(slot)
+        self.open_proposal(None, delegation, |_, _| Command::Control(control))
     }
 
     /// Leader entry point for a **decided snapshot point** (#101, CTRL §3.5):
@@ -667,15 +686,9 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        let slot = self.proposer.allocate();
-        let delegation = self.settled_delegation(Delegation::Auto);
-        self.start_accept_round(
-            slot,
-            Command::Control(Control::Snap { at_index: slot }),
-            delegation,
-        );
-        self.assert_invariants();
-        ProposeResult::Accepted(slot)
+        self.open_proposal(None, Delegation::Auto, |_, slot| {
+            Command::Control(Control::Snap { at_index: slot })
+        })
     }
 
     /// Leader entry point for a **linearizable read**: capture the current
@@ -831,8 +844,7 @@ impl ColocatedNode {
             // new configuration (a node campaigns only as a member).
             if self.role == NodeRole::Leader
                 && !self.is_acceptor()
-                && self.proposer.recovery().is_none()
-                && self.proposer.probe().is_none()
+                && !self.phase1_work_open()
                 && self.proposer.rounds().is_empty()
             {
                 self.counters.non_member_step_downs =

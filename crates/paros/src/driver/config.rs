@@ -1,14 +1,11 @@
 //! Driver configuration and the wiring both drivers share: the per-node
 //! tunables, the transport constants they default to, the gRPC keep-alive /
-//! channel shapes, the accepted-connection server, the scope guard, the
-//! address parser, and the driver's typed exit ([`RunError`]).
+//! channel shapes, the address parser, and the driver's typed exit ([`RunError`]).
 
-use std::fmt::Display;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskProvider};
+use moonpool_core::{SimulationError, SimulationResult};
 use moonpool_hyper::{ChannelConfig, KeepAlive};
 
 use crate::hooks::Seam;
@@ -183,27 +180,6 @@ impl Default for DriverTunables {
     }
 }
 
-/// Run one synchronous cleanup action on every exit path from its scope.
-pub(crate) struct OnDrop<F: FnOnce()> {
-    action: Option<F>,
-}
-
-impl<F: FnOnce()> OnDrop<F> {
-    pub(crate) fn new(action: F) -> Self {
-        Self {
-            action: Some(action),
-        }
-    }
-}
-
-impl<F: FnOnce()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        if let Some(action) = self.action.take() {
-            action();
-        }
-    }
-}
-
 pub(crate) fn grpc_keep_alive(tunables: &DriverTunables) -> KeepAlive {
     KeepAlive {
         interval: tunables.keep_alive_interval,
@@ -218,31 +194,6 @@ pub(crate) fn grpc_channel_config(tunables: &DriverTunables) -> ChannelConfig {
         keep_alive: Some(grpc_keep_alive(tunables)),
         ..ChannelConfig::default()
     }
-}
-
-/// Serve one accepted gRPC connection on its own detached task, ending when
-/// the incarnation does. Shared by both drivers in this crate — the node loop
-/// and the matchmaker loop differ only in the task's name and the `role` their
-/// connection errors carry.
-pub(crate) fn accept_and_serve<P, F, E>(
-    providers: &P,
-    task: &'static str,
-    role: &'static str,
-    addr: impl Display + Send + 'static,
-    connection: F,
-) where
-    P: Providers,
-    F: Future<Output = Result<(), E>> + Send + 'static,
-    E: Display + Send + 'static,
-{
-    providers
-        .task()
-        .spawn_task(task, async move {
-            if let Err(error) = connection.await {
-                tracing::warn!(%addr, %error, role, "gRPC connection ended");
-            }
-        })
-        .detach();
 }
 
 /// Ticks a parked read reply may wait for its read-index confirmation before

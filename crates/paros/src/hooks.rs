@@ -75,6 +75,23 @@ pub enum Seam {
     MatchAfterSyncBeforeReply,
 }
 
+impl Seam {
+    /// The stable `seam` field a crash at this seam is traced with.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Seam::BeforeSync => "before_sync",
+            Seam::AfterSyncBeforeSend => "after_sync_before_send",
+            Seam::AfterApplyBeforeSync => "after_apply_before_sync",
+            Seam::BeforeChunkSync => "before_chunk_sync",
+            Seam::AfterChunkRestoreBeforeSync => "after_chunk_restore_before_sync",
+            Seam::AfterBootReplayBeforeSync => "after_boot_replay_before_sync",
+            Seam::MatchBeforeSync => "match_before_sync",
+            Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
+        }
+    }
+}
+
 /// What a cooperative leader handoff would transfer right now, handed to
 /// [`DriverHooks::initiate_handoff`] so a simulation can bias the decision
 /// toward the states that are actually interesting to explore rather than
@@ -138,6 +155,28 @@ pub enum Reply {
     /// A `RetireAck`. Dropping it after the node accepted its retirement
     /// leaves the operator to re-ask a node that is already gone.
     Retire,
+}
+
+impl Reply {
+    /// The stable `reply` field a dropped or duplicated reply of this kind is
+    /// traced with.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Reply::Propose => "propose",
+            Reply::ProposeDedup => "propose_dedup",
+            Reply::Read => "read",
+            Reply::ProposeRedirect => "propose_redirect",
+            Reply::ReadRedirect => "read_redirect",
+            Reply::Compact => "compact",
+            Reply::Reconfigure => "reconfigure",
+            Reply::Match => "match",
+            Reply::GcAck => "gc_ack",
+            Reply::MatchmakerReconfigure => "matchmaker_reconfigure",
+            Reply::ReconfigureMatchmakers => "reconfigure_matchmakers",
+            Reply::Retire => "retire",
+        }
+    }
 }
 
 /// Optional driver-level fault and policy hooks.

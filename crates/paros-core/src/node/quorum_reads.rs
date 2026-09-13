@@ -91,7 +91,7 @@ impl ColocatedNode {
             return;
         }
         let writes_at_entry = self.pending_writes.len();
-        let config_since = self.config_since_for_wire();
+        let config_since = self.wire_config_since();
         self.pending_messages.push((
             Audience::Node(reply_to),
             Message::PreReadAck {
@@ -139,14 +139,5 @@ impl ColocatedNode {
             PreReadFold::Ignored | PreReadFold::Superseded => {}
             PreReadFold::Counted => self.serve_quorum_reads(),
         }
-    }
-
-    /// The configuration ballot a `PreReadAck` carries: what this node
-    /// believes in force on a matchmaker deployment, nothing on plain
-    /// Multi-Paxos (whose configuration never moves).
-    fn config_since_for_wire(&self) -> Option<Ballot> {
-        self.config
-            .has_matchmakers()
-            .then_some(self.acceptors_since)
     }
 }

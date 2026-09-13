@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
+use moonpool_core::{
+    Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
+};
 use moonpool_hyper::ReconnectingChannel;
 use paros_core::{Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
@@ -17,7 +19,9 @@ use crate::audit::Audit;
 use crate::grpc::{ParosInternalClient, internal, message_to_proto};
 use crate::hooks::DriverHooks;
 
-use super::config::{DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES};
+use super::config::{
+    DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES, grpc_channel_config,
+};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
 /// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
@@ -356,41 +360,97 @@ impl Outbound {
     }
 }
 
-/// Open one outbound lane toward `to`: a bounded keep-newest mailbox of
-/// `capacity`, drained by a detached delivery task over `client`'s
-/// reconnecting channel until `shutdown` fires. Shared by the node driver
-/// (two lanes per peer, one per proxy) and the proxy driver (one per
+/// One reconnecting h2 channel per remote party, as a driver opens them:
+/// every channel this bundle connected is **closed when the bundle drops**.
+/// `close` is terminal and shared by every clone held by tonic clients, so
+/// it cancels connect/backoff/keepalive work immediately when the incarnation
+/// exits, including simulated durability crashes that return via `?`.
+pub(crate) struct Channels<P: Providers> {
+    channels: Vec<ReconnectingChannel<P, tonic::body::Body>>,
+}
+
+impl<P: Providers> Channels<P> {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            channels: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Open one reconnecting channel toward `addr` and hand it, with the
+    /// origin its requests carry, to `make` — the generated client
+    /// constructor (`with_origin`). The channel stays registered here for the
+    /// close on drop.
+    ///
+    /// # Errors
+    ///
+    /// A malformed address (not a valid `http://` origin).
+    pub(crate) fn connect<C>(
+        &mut self,
+        providers: &P,
+        tunables: &DriverTunables,
+        addr: String,
+        make: impl FnOnce(ReconnectingChannel<P, tonic::body::Body>, http::Uri) -> C,
+    ) -> SimulationResult<C> {
+        let origin = http::Uri::try_from(format!("http://{addr}"))
+            .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+        let channel = ReconnectingChannel::new(providers, addr, grpc_channel_config(tunables));
+        self.channels.push(channel.clone());
+        Ok(make(channel, origin))
+    }
+}
+
+impl<P: Providers> Drop for Channels<P> {
+    fn drop(&mut self) {
+        for channel in &self.channels {
+            channel.close();
+        }
+    }
+}
+
+/// What every outbound lane a driver opens shares: the providers it spawns
+/// on, the tunables that shape it, the incarnation's shutdown, the audit the
+/// delivery task reports drops to, and who is sending. Shared by the node
+/// driver (two lanes per peer, one per proxy) and the proxy driver (one per
 /// acceptor): the lane is the same whoever sends through it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn open_lane<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
-    providers: &P,
-    task: &'static str,
-    client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
-    tunables: DriverTunables,
-    shutdown: CancellationToken,
-    audit: &A,
-    from: Party,
-    to: Party,
-    capacity: usize,
-) -> PeerMailbox {
-    let mailbox = PeerMailbox::new(capacity);
-    providers
-        .task()
-        .spawn_task(
-            task,
-            run_peer_delivery(
-                client,
-                providers.time().clone(),
-                shutdown,
-                mailbox.clone(),
-                tunables,
-                audit.clone(),
-                from,
-                to,
-            ),
-        )
-        .detach();
-    mailbox
+pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
+    pub(crate) providers: &'a P,
+    pub(crate) tunables: DriverTunables,
+    pub(crate) shutdown: CancellationToken,
+    pub(crate) audit: &'a A,
+    pub(crate) from: Party,
+}
+
+impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
+    /// Open one outbound lane toward `to`: a bounded keep-newest mailbox of
+    /// `capacity`, drained by a detached delivery task (named `task`) over
+    /// `client`'s reconnecting channel until the incarnation's shutdown
+    /// fires.
+    pub(crate) fn open(
+        &self,
+        task: &'static str,
+        client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
+        to: Party,
+        capacity: usize,
+    ) -> PeerMailbox {
+        let mailbox = PeerMailbox::new(capacity);
+        self.providers
+            .task()
+            .spawn_task(
+                task,
+                run_peer_delivery(
+                    client,
+                    self.providers.time().clone(),
+                    self.shutdown.clone(),
+                    mailbox.clone(),
+                    self.tunables,
+                    self.audit.clone(),
+                    self.from,
+                    to,
+                ),
+            )
+            .detach();
+        mailbox
+    }
 }
 
 /// Feed bounded unary batches over one reconnecting h2 channel per peer. While

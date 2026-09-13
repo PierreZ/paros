@@ -432,12 +432,7 @@ struct Registry {
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
-    if let Some(registry) = state.get::<Arc<Mutex<Registry>>>(SHAPE_KEY) {
-        return registry;
-    }
-    let registry = Arc::new(Mutex::new(Registry::default()));
-    state.publish(SHAPE_KEY, registry.clone());
-    registry
+    crate::state::published(state, SHAPE_KEY, Registry::default)
 }
 
 /// Boot `ip` once more: hand back the shape its first incarnation drew, drawing

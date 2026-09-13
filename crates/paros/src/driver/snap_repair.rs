@@ -12,7 +12,7 @@ use crate::hooks::{DriverHooks, Seam};
 use crate::storage::NodeStorage;
 
 use super::config::RunError;
-use super::ready::storage_fault_crash;
+use super::ready::{crash_if, storage_fault_crash};
 use super::transport::{Outbound, send_messages};
 
 /// The driver's **snapshot-point repair layer** (#101, CTRL §3.5). Volatile
@@ -196,11 +196,7 @@ where
     // only durable-write pipeline outside `drain_ready`'s seam machinery. A
     // crash here loses the staged installs whole; the reboot's scan still
     // reports the chunks faulty and the per-tick pull re-runs the repair.
-    if hooks.crash_at(Seam::BeforeChunkSync) {
-        audit.crashed(NodeId(self_id), Seam::BeforeChunkSync);
-        tracing::info!(node = self_id, seam = "before_chunk_sync", "crashed");
-        return Err(RunError::SeamCrash(Seam::BeforeChunkSync));
-    }
+    crash_if(true, hooks, audit, NodeId(self_id), Seam::BeforeChunkSync)?;
     // Flush the chunk installs durably before reporting them (and before the
     // restore below stages the recovered application state).
     storage
@@ -260,15 +256,13 @@ where
         // already durable) but its fsync has not happened. A crash here loses
         // the staged restore only; the reboot lands below the floor with a
         // clean point and recovers through a peer's `InstallSnapshot` instead.
-        if hooks.crash_at(Seam::AfterChunkRestoreBeforeSync) {
-            audit.crashed(NodeId(self_id), Seam::AfterChunkRestoreBeforeSync);
-            tracing::info!(
-                node = self_id,
-                seam = "after_chunk_restore_before_sync",
-                "crashed"
-            );
-            return Err(RunError::SeamCrash(Seam::AfterChunkRestoreBeforeSync));
-        }
+        crash_if(
+            true,
+            hooks,
+            audit,
+            NodeId(self_id),
+            Seam::AfterChunkRestoreBeforeSync,
+        )?;
         storage
             .sync(paros_core::MustSync::Sync)
             .await

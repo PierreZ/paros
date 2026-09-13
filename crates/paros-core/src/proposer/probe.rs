@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{ProbeDecision, PromiseFold, PromiseTally, Proposer, merge_report, slot_decidable};
+use super::{
+    ProbeDecision, PromiseFold, PromiseTally, Proposer, member_union, merge_report, slot_decidable,
+};
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
 
@@ -69,15 +71,10 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     /// answered their full suffix. `me` is never a straggler.
     #[must_use]
     pub fn stragglers(&self, me: Id) -> Vec<Id> {
-        let mut unanswered: Vec<Id> = self
-            .prior
-            .iter()
-            .flat_map(|c| c.members().iter().copied())
+        member_union(&self.prior)
+            .into_iter()
             .filter(|p| *p != me && !self.promises.answered.contains(p))
-            .collect();
-        unanswered.sort_unstable();
-        unanswered.dedup();
-        unanswered
+            .collect()
     }
 }
 

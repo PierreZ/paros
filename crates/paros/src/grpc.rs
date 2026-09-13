@@ -76,6 +76,25 @@ fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static 
     })
 }
 
+/// The wire form of a [`Party`] (#142): the node field, zero for a proxy, and
+/// the optional proxy field — absent for a node, so a colocated round's
+/// `Accept` and `Commit` are byte-for-byte the plain deployment's.
+fn party_to_proto(party: Party) -> (u64, Option<u64>) {
+    match party {
+        Party::Node(node) => (node.0, None),
+        Party::Proxy(proxy) => (0, Some(proxy.0)),
+    }
+}
+
+/// Decode a [`Party`] from its two wire fields: the proxy field names a proxy
+/// leader when set, else the node field names a node.
+fn party_from_proto(node: u64, proxy: Option<u64>) -> Party {
+    match proxy {
+        Some(proxy) => Party::Proxy(ProxyId(proxy)),
+        None => Party::Node(NodeId(node)),
+    }
+}
+
 /// The wire form of a quorum system: the discriminant plus the scalars its
 /// variant carries — `(phase1_quorum, phase2_quorum)` for a flexible split,
 /// `(rows, cols)` for a grid, all zero under a majority so a plain
@@ -97,6 +116,58 @@ pub struct WireQuorumSystem {
     pub rows: u64,
     /// The grid's columns, else zero.
     pub cols: u64,
+}
+
+impl WireQuorumSystem {
+    /// The five wire fields in declaration order — `(quorum_system,
+    /// phase1_quorum, phase2_quorum, rows, cols)` — for spreading into a
+    /// message that carries them inline.
+    #[must_use]
+    pub fn into_parts(self) -> (i32, u64, u64, u64, u64) {
+        (
+            self.quorum_system,
+            self.phase1_quorum,
+            self.phase2_quorum,
+            self.rows,
+            self.cols,
+        )
+    }
+}
+
+impl From<&common::AcceptorConfig> for WireQuorumSystem {
+    fn from(config: &common::AcceptorConfig) -> Self {
+        Self {
+            quorum_system: config.quorum_system,
+            phase1_quorum: config.phase1_quorum,
+            phase2_quorum: config.phase2_quorum,
+            rows: config.rows,
+            cols: config.cols,
+        }
+    }
+}
+
+impl From<&Reconfigure> for WireQuorumSystem {
+    fn from(request: &Reconfigure) -> Self {
+        Self {
+            quorum_system: request.quorum_system,
+            phase1_quorum: request.phase1_quorum,
+            phase2_quorum: request.phase2_quorum,
+            rows: request.rows,
+            cols: request.cols,
+        }
+    }
+}
+
+impl From<&InspectReply> for WireQuorumSystem {
+    fn from(reply: &InspectReply) -> Self {
+        Self {
+            quorum_system: reply.quorum_system,
+            phase1_quorum: reply.phase1_quorum,
+            phase2_quorum: reply.phase2_quorum,
+            rows: reply.rows,
+            cols: reply.cols,
+        }
+    }
 }
 
 /// Encode a quorum system for the wire.
@@ -144,14 +215,15 @@ pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem,
 }
 
 fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
-    let wire = quorum_system_to_proto(config.quorum_system());
+    let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+        quorum_system_to_proto(config.quorum_system()).into_parts();
     common::AcceptorConfig {
         members: config.members().iter().map(|n| n.0).collect(),
-        quorum_system: wire.quorum_system,
-        phase1_quorum: wire.phase1_quorum,
-        phase2_quorum: wire.phase2_quorum,
-        rows: wire.rows,
-        cols: wire.cols,
+        quorum_system,
+        phase1_quorum,
+        phase2_quorum,
+        rows,
+        cols,
     }
 }
 
@@ -167,13 +239,7 @@ fn config_from_proto(
     let Some(config) = config else {
         return Ok(None);
     };
-    let quorum_system = quorum_system_from_proto(&WireQuorumSystem {
-        quorum_system: config.quorum_system,
-        phase1_quorum: config.phase1_quorum,
-        phase2_quorum: config.phase2_quorum,
-        rows: config.rows,
-        cols: config.cols,
-    })?;
+    let quorum_system = quorum_system_from_proto(&WireQuorumSystem::from(&config))?;
     if config.members.is_empty() {
         return Err("empty acceptor configuration");
     }
@@ -388,20 +454,20 @@ pub(crate) fn message_to_proto(
             slot,
             command,
             config,
-        } => Kind::Accept(internal::Accept {
-            reply_to: reply_to.node().map_or(0, |n| n.0),
-            // Absent when it would merely repeat the reply address, which is
-            // every colocated round: the plain wire is unchanged.
-            leader: (*reply_to != Party::Node(*leader)).then_some(leader.0),
-            ballot: Some(ballot_to_proto(*ballot)),
-            slot: slot.0,
-            command: Some(command_to_proto(command)),
-            reply_to_proxy: match reply_to {
-                Party::Proxy(proxy) => Some(proxy.0),
-                Party::Node(_) => None,
-            },
-            config: config.as_ref().map(config_to_proto),
-        }),
+        } => {
+            let (reply_to_node, reply_to_proxy) = party_to_proto(*reply_to);
+            Kind::Accept(internal::Accept {
+                reply_to: reply_to_node,
+                // Absent when it would merely repeat the reply address, which
+                // is every colocated round: the plain wire is unchanged.
+                leader: (*reply_to != Party::Node(*leader)).then_some(leader.0),
+                ballot: Some(ballot_to_proto(*ballot)),
+                slot: slot.0,
+                command: Some(command_to_proto(command)),
+                reply_to_proxy,
+                config: config.as_ref().map(config_to_proto),
+            })
+        }
         Message::Accepted {
             from,
             ballot,
@@ -423,16 +489,16 @@ pub(crate) fn message_to_proto(
             ballot,
             slot,
             command,
-        } => Kind::Commit(internal::Commit {
-            from: from.node().map_or(0, |n| n.0),
-            ballot: Some(ballot_to_proto(*ballot)),
-            slot: slot.0,
-            command: Some(command_to_proto(command)),
-            from_proxy: match from {
-                Party::Proxy(proxy) => Some(proxy.0),
-                Party::Node(_) => None,
-            },
-        }),
+        } => {
+            let (from_node, from_proxy) = party_to_proto(*from);
+            Kind::Commit(internal::Commit {
+                from: from_node,
+                ballot: Some(ballot_to_proto(*ballot)),
+                slot: slot.0,
+                command: Some(command_to_proto(command)),
+                from_proxy,
+            })
+        }
         Message::CatchUpRequest { from, from_slot } => {
             Kind::CatchUpRequest(internal::CatchUpRequest {
                 from: from.0,
@@ -568,10 +634,7 @@ pub(crate) fn message_from_proto(
             next_from_slot: message.next_from_slot.map(Slot),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
-            reply_to: match message.reply_to_proxy {
-                Some(proxy) => Party::Proxy(ProxyId(proxy)),
-                None => Party::Node(NodeId(message.reply_to)),
-            },
+            reply_to: party_from_proto(message.reply_to, message.reply_to_proxy),
             // A delegated round always names its leader explicitly; a
             // colocated one may leave it to the reply address.
             leader: NodeId(message.leader.unwrap_or(message.reply_to)),
@@ -592,10 +655,7 @@ pub(crate) fn message_from_proto(
             slot: Slot(message.slot),
         }),
         Kind::Commit(message) => Ok(Message::Commit {
-            from: match message.from_proxy {
-                Some(proxy) => Party::Proxy(ProxyId(proxy)),
-                None => Party::Node(NodeId(message.from)),
-            },
+            from: party_from_proto(message.from, message.from_proxy),
             ballot: ballot_from_proto(message.ballot)?,
             slot: Slot(message.slot),
             command: command_from_proto(message.command)?,

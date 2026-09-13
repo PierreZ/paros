@@ -19,13 +19,14 @@
 //!
 //! [`StorageWorld`]: crate::world::StorageWorld
 
+use std::future::Future;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationError, SimulationResult, TimeProvider, assert_always,
-    assert_reachable, buggify_knob,
+    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, TimeProvider,
+    assert_always, assert_reachable, buggify_knob,
 };
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
@@ -33,7 +34,7 @@ use crate::hooks::{BuggifyHooks, ScriptedCrash};
 use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, Role};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
-use crate::world::storage_world;
+use crate::world::{ParkReason, storage_world};
 use paros::{
     AcceptorConfig, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId,
     ProxyConfig, ProxyId, RunError, Seam, parse_addr, run_matchmaker, run_node, run_proxy,
@@ -69,15 +70,134 @@ fn bootstrap_config(
     AcceptorConfig::new(bootstrap.clone(), policy.system(bootstrap.len()))
 }
 
+/// One role incarnation's harness rig, armed the same way for every role:
+/// the incarnation and its shape (`crate::shape::boot` — the rig's **only**
+/// draw, so a caller keeps it exactly where its own registry draws expect
+/// it), the driver hooks over the chaos window at the shape's crash bias,
+/// and the per-iteration audit — the shared checker every role folds into,
+/// and this incarnation's port. The disk's fault layer is not here: a proxy
+/// has no disk (see [`storage_faults`]).
+struct RoleRig {
+    incarnation: crate::shape::Incarnation,
+    hooks: BuggifyHooks<SimTimeProvider>,
+    checker: Arc<AuditWorld>,
+    audit: NodeAudit<SimTimeProvider>,
+}
+
+/// Arm `my_ip`'s rig for this incarnation. The shape is what makes a
+/// re-entry from a fresh factory instance a *restart* of the same node
+/// rather than a new node with new knobs (see `crate::shape`); durable
+/// state is the world's business, never the shape's. The audit is pure
+/// observation, published beside the storage world so every node folds its
+/// transitions into one incremental checker — it never influences the
+/// driver; that is the hooks' job.
+fn arm_role(ctx: &SimContext, my_ip: &str, perturb: bool) -> RoleRig {
+    let incarnation = crate::shape::boot(ctx.state(), my_ip, perturb);
+    let hooks = BuggifyHooks::new(
+        ctx.time().clone(),
+        crate::CHAOS_DURATION,
+        perturb,
+        incarnation.shape.seam_crash_bias,
+    );
+    let checker = audit_world(ctx.state());
+    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
+    RoleRig {
+        incarnation,
+        hooks,
+        checker,
+        audit,
+    }
+}
+
+/// The budgeted write-path fault layer of a role with a disk (issue #19
+/// B/C), sharing the driver hooks' chaos window: after the cutoff the world
+/// stops injecting **new** faults but never heals the consequences of old
+/// ones — recovery through the tail must be genuine.
+fn storage_faults(
+    ctx: &SimContext,
+    perturb: bool,
+    rates: WritePathRates,
+) -> StorageFaults<SimTimeProvider> {
+    StorageFaults::new(ctx.time().clone(), crate::CHAOS_DURATION, perturb, rates)
+}
+
+/// Why an incarnation exits for good instead of booting (see the recovery
+/// loops below): told to the audit, so convergence excuses exactly these
+/// identities, and traced.
+#[derive(Clone, Copy)]
+enum Down {
+    /// A node terminally parked by a detected persistent corruption.
+    StorageParked(u64),
+    /// A node the operator retired (#123).
+    Retired(u64),
+    /// A matchmaker whose registry was lost for good (#125).
+    MatchmakerLost(u64),
+}
+
+fn stay_down(checker: &AuditWorld, down: Down) {
+    match down {
+        Down::StorageParked(node) => {
+            checker.note_storage_dead(node);
+            tracing::info!(node, "storage_parked");
+        }
+        Down::Retired(node) => {
+            checker.note_retired_boot(node);
+            tracing::info!(node, "retired_stays_down");
+        }
+        Down::MatchmakerLost(matchmaker) => {
+            checker.note_matchmaker_lost();
+            tracing::info!(matchmaker, "matchmaker_stays_down");
+        }
+    }
+}
+
+/// One restart-delay BUGGIFY site: the delay a crashed role waits before its
+/// next incarnation boots, workload-buggified config (prong 2) that
+/// stretches the durability-seam crash window process-level attrition
+/// cannot reach — a node held down while the cluster keeps committing and
+/// truncating returns below the compaction floor and independently
+/// exercises snapshot recovery. Drawn per *crash*, deliberately not per node
+/// (it is not part of the node's shape): the delay describes one event, and
+/// two crashes of the same node should be free to look different. The floor
+/// is structural: a held-down node is a recovery the tail must absorb, never
+/// a cluster that stalls.
+///
+/// A macro, never a fn: moonpool keys a BUGGIFY location by the `file:line` of
+/// the outermost macro invocation, so every invocation below stays its own
+/// independently selectable location with its own fired gate (`$fired`,
+/// the reachable that proves the knob fired there).
+macro_rules! restart_delay {
+    ($ctx:expr, $fired:literal) => {{
+        let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
+        if delay_ms > 0 {
+            // BUGGIFY pairing: this site's restart-delay knob fired.
+            assert_reachable!($fired);
+            $ctx.time()
+                .sleep(Duration::from_millis(delay_ms))
+                .await
+                .ok();
+        }
+    }};
+}
+
 /// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess {
     mode: NodeMode,
-    /// A scripted case's fixed bootstrap size (`Some(n)`: ranks `0..n` are
-    /// the bootstrap acceptors, the rest spares); `None` draws per the mode.
-    bootstrap: Option<usize>,
-    /// A scripted case's one targeted seam crash (`crate::hooks::ScriptedCrash`,
-    /// #146): the first node to reach `seam` crashes there, once per run.
-    seam_crash: Option<Seam>,
+    /// A scripted case's choreography (empty on the main campaign).
+    options: ScriptedOptions,
+}
+
+/// What a scripted corpus case fixes about its nodes beyond the dark swarm
+/// sites: every field `None` is the plain three-node case.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ScriptedOptions {
+    /// A fixed bootstrap size (`Some(n)`: ranks `0..n` are the bootstrap
+    /// acceptors, the rest spares — a case that needs a spare); `None`
+    /// bootstraps on the whole pool.
+    pub(crate) bootstrap: Option<usize>,
+    /// One targeted seam crash (`crate::hooks::ScriptedCrash`, #146): the
+    /// first node to reach the seam crashes there, once per run.
+    pub(crate) seam_crash: Option<Seam>,
 }
 
 /// How a process is perturbed.
@@ -97,37 +217,16 @@ impl NodeProcess {
     pub(crate) fn chaotic() -> Self {
         Self {
             mode: NodeMode::Chaotic,
-            bootstrap: None,
-            seam_crash: None,
+            options: ScriptedOptions::default(),
         }
     }
 
-    pub(crate) fn scripted() -> Self {
+    /// A scripted corpus node: every swarm site dark, choreographed by
+    /// `options`.
+    pub(crate) fn scripted_with(options: ScriptedOptions) -> Self {
         Self {
             mode: NodeMode::Scripted,
-            bootstrap: None,
-            seam_crash: None,
-        }
-    }
-
-    /// A scripted node whose bootstrap configuration is the first
-    /// `bootstrap` ranks of the pool — a corpus case that needs a spare.
-    pub(crate) fn scripted_with_bootstrap(bootstrap: usize) -> Self {
-        Self {
-            mode: NodeMode::Scripted,
-            bootstrap: Some(bootstrap),
-            seam_crash: None,
-        }
-    }
-
-    /// A scripted node whose hooks crash at `seam` the first time any node
-    /// reaches it in the run — the corpus's one targeted durability-seam
-    /// injection (#146); every other site stays dark.
-    pub(crate) fn scripted_with_seam_crash(seam: Seam) -> Self {
-        Self {
-            mode: NodeMode::Scripted,
-            bootstrap: None,
-            seam_crash: Some(seam),
+            options,
         }
     }
 }
@@ -183,6 +282,39 @@ impl Process for IdleProcess {
     }
 }
 
+/// Run one process as the role the deployment map gives its IP. The map is
+/// read off the topology's process groups, so every process derives the
+/// *same* map without coordination; `id` picks this group's role out of it
+/// (its identity), and `run` runs it. A process whose IP the map puts in
+/// another group is a harness bug: recorded under `unmapped` (the group's
+/// always-assertion) and refused as not `what` of the deployment.
+async fn dispatch<I, Fut>(
+    ctx: &SimContext,
+    unmapped: &'static str,
+    what: &'static str,
+    id: fn(Role) -> Option<I>,
+    run: impl FnOnce(Deployment, I, String) -> Fut,
+) -> SimulationResult<()>
+where
+    Fut: Future<Output = SimulationResult<()>> + Send,
+{
+    let my_ip = ctx.my_ip().to_string();
+    let deployment = crate::roles::deployment(ctx.topology());
+    let role = deployment.role_of(&my_ip);
+    if let Some(id) = role.and_then(id) {
+        run(deployment, id, my_ip).await
+    } else {
+        assert_always!(
+            false,
+            unmapped,
+            { "ip" => my_ip.as_str(), "role" => format!("{role:?}") }
+        );
+        Err(SimulationError::InvalidState(format!(
+            "{my_ip} is not {what} of the deployment"
+        )))
+    }
+}
+
 #[async_trait]
 impl Process for NodeProcess {
     fn name(&self) -> &'static str {
@@ -191,35 +323,21 @@ impl Process for NodeProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // The deployment map is read off the topology's process groups, so
-        // every process derives the *same* map without coordination.
-        let my_ip = ctx.my_ip().to_string();
-        let deployment = crate::roles::deployment(ctx.topology());
         let perturb = self.mode == NodeMode::Chaotic;
-        match deployment.role_of(&my_ip) {
-            Some(Role::Acceptor(self_rank)) => {
-                run_acceptor(
-                    ctx,
-                    &deployment,
-                    self_rank,
-                    &my_ip,
-                    perturb,
-                    self.bootstrap,
-                    self.seam_crash,
-                )
-                .await
-            }
-            other => {
-                assert_always!(
-                    false,
-                    "every node process is mapped to the acceptor role",
-                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
-                );
-                Err(SimulationError::InvalidState(format!(
-                    "{my_ip} is not an acceptor of the deployment"
-                )))
-            }
-        }
+        let options = self.options;
+        dispatch(
+            ctx,
+            "every node process is mapped to the acceptor role",
+            "an acceptor",
+            |role| match role {
+                Role::Acceptor(rank) => Some(rank),
+                _ => None,
+            },
+            |deployment, self_rank, my_ip| async move {
+                run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb, options).await
+            },
+        )
+        .await
     }
 }
 
@@ -231,21 +349,18 @@ impl Process for MatchmakerProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let my_ip = ctx.my_ip().to_string();
-        let deployment = crate::roles::deployment(ctx.topology());
-        match deployment.role_of(&my_ip) {
-            Some(Role::Matchmaker(id)) => run_matchmaker_role(ctx, id, &my_ip, self.perturb).await,
-            other => {
-                assert_always!(
-                    false,
-                    "every matchmaker process is mapped to the matchmaker role",
-                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
-                );
-                Err(SimulationError::InvalidState(format!(
-                    "{my_ip} is not a matchmaker of the deployment"
-                )))
-            }
-        }
+        let perturb = self.perturb;
+        dispatch(
+            ctx,
+            "every matchmaker process is mapped to the matchmaker role",
+            "a matchmaker",
+            |role| match role {
+                Role::Matchmaker(id) => Some(id),
+                _ => None,
+            },
+            |_, id, my_ip| async move { run_matchmaker_role(ctx, id, &my_ip, perturb).await },
+        )
+        .await
     }
 }
 
@@ -257,23 +372,20 @@ impl Process for ProxyProcess {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let my_ip = ctx.my_ip().to_string();
-        let deployment = crate::roles::deployment(ctx.topology());
-        match deployment.role_of(&my_ip) {
-            Some(Role::Proxy(id)) => {
-                run_proxy_role(ctx, &deployment, id, &my_ip, self.perturb).await
-            }
-            other => {
-                assert_always!(
-                    false,
-                    "every proxy process is mapped to the proxy role",
-                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
-                );
-                Err(SimulationError::InvalidState(format!(
-                    "{my_ip} is not a proxy leader of the deployment"
-                )))
-            }
-        }
+        let perturb = self.perturb;
+        dispatch(
+            ctx,
+            "every proxy process is mapped to the proxy role",
+            "a proxy leader",
+            |role| match role {
+                Role::Proxy(id) => Some(id),
+                _ => None,
+            },
+            |deployment, id, my_ip| async move {
+                run_proxy_role(ctx, &deployment, id, &my_ip, perturb).await
+            },
+        )
+        .await
     }
 }
 
@@ -289,8 +401,7 @@ async fn run_acceptor(
     self_rank: NodeId,
     my_ip: &str,
     perturb: bool,
-    fixed_bootstrap: Option<usize>,
-    seam_crash: Option<Seam>,
+    options: ScriptedOptions,
 ) -> SimulationResult<()> {
     // The node pool is the map's acceptor list, in `NodeId` order — never
     // "every process in the topology". The matchmaker set is the map's
@@ -305,7 +416,7 @@ async fn run_acceptor(
     // deployment whose every Phase 2 stays colocated.
     let proxies = ranked(deployment.proxies(), ProxyId)?;
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
-    let bootstrap: Vec<NodeId> = match fixed_bootstrap {
+    let bootstrap: Vec<NodeId> = match options.bootstrap {
         Some(n) => crate::shape::fixed_bootstrap_ranks(ctx.state(), n),
         None => {
             crate::shape::bootstrap_ranks(ctx.state(), pool.len(), !matchmakers.is_empty(), perturb)
@@ -343,15 +454,17 @@ async fn run_acceptor(
     // but stable across a process's reboots). Each node reaches it through a
     // `Weak` handle upgraded per op.
     let world = storage_world(ctx.state());
-    // This node's shape: every knob the swarm draws *for the node* (the
-    // driver tunables, the write-window crash bias, the disk's fault
-    // rates), drawn by its first incarnation of the seed and handed back
-    // unchanged to every later one — an attrition restart re-enters this
-    // function from a fresh factory instance, and the shape is what makes
-    // that re-entry a *restart* of the same node rather than a new node
-    // with new knobs (see `crate::shape`). Durable Paxos state is the
-    // world's business, never the shape's.
-    let incarnation = crate::shape::boot(ctx.state(), my_ip, perturb);
+    // This node's rig: every knob the swarm draws *for the node* (the driver
+    // tunables, the write-window crash bias, the disk's fault rates), drawn
+    // by its first incarnation of the seed and handed back unchanged to
+    // every later one. Armed here, after the registry draws above, so the
+    // seed's draw schedule keeps its order.
+    let RoleRig {
+        incarnation,
+        mut hooks,
+        checker,
+        audit,
+    } = arm_role(ctx, my_ip, perturb);
     let shape = incarnation.shape;
     {
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -372,30 +485,10 @@ async fn run_acceptor(
         }
         guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
     }
-    let mut hooks = BuggifyHooks::new(
-        ctx.time().clone(),
-        Duration::from_millis(crate::CHAOS_DURATION_MS),
-        perturb,
-        shape.seam_crash_bias,
-    );
-    if let Some(seam) = seam_crash {
+    if let Some(seam) = options.seam_crash {
         hooks = hooks.with_scripted_crash(ScriptedCrash::arm(ctx.state(), seam));
     }
-    // The budgeted storage-fault layer (issue #19 B/C) shares the driver
-    // hooks' chaos window: after the cutoff the world stops injecting
-    // **new** faults but never heals the consequences of old ones —
-    // recovery through the tail must be genuine.
-    let faults = StorageFaults::new(
-        ctx.time().clone(),
-        Duration::from_millis(crate::CHAOS_DURATION_MS),
-        perturb,
-        shape.write_rates,
-    );
-    // The per-iteration shared audit: pure observation, published beside the
-    // storage world so every node folds its transitions into one incremental
-    // checker. It never influences the driver — that is `hooks`' job.
-    let checker = audit_world(ctx.state());
-    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
+    let faults = storage_faults(ctx, perturb, shape.write_rates);
     let tunables = shape.tunables;
     if incarnation.is_restart() {
         // A process-level revival (attrition on the main campaign, the
@@ -429,7 +522,7 @@ async fn run_acceptor(
         // seed; the world's dead-node budget bounds it either way.
         let wipe = perturb
             && config.has_matchmakers()
-            && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
+            && ctx.time().now() < crate::CHAOS_DURATION
             && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
         if wipe
             && world
@@ -457,11 +550,10 @@ async fn run_acceptor(
         // correlation). Exit before touching the store. A **wiped** identity
         // (#124) is deliberately not on this list any more: it boots, and
         // the library refuses it (#147, below).
-        let (corruption_parked, retired, boot) = {
+        let (parked, boot) = {
             let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
             (
-                guard.is_corruption_parked(my_ip),
-                guard.is_retired(my_ip),
+                guard.park_reason(my_ip),
                 // The operator's claim (#147): an identity the world's
                 // provisioning ledger knows is an existing member — a wiped
                 // one included, which is the whole point — and any other is
@@ -473,15 +565,16 @@ async fn run_acceptor(
                 },
             )
         };
-        if retired {
-            checker.note_retired_boot(self_rank.0);
-            tracing::info!(node = self_rank.0, "retired_stays_down");
-            return Ok(());
-        }
-        if corruption_parked {
-            checker.note_storage_dead(self_rank.0);
-            tracing::info!(node = self_rank.0, "storage_parked");
-            return Ok(());
+        match parked {
+            Some(ParkReason::Retired) => {
+                stay_down(&checker, Down::Retired(self_rank.0));
+                return Ok(());
+            }
+            Some(ParkReason::Corruption) => {
+                stay_down(&checker, Down::StorageParked(self_rank.0));
+                return Ok(());
+            }
+            Some(ParkReason::Wiped) | None => {}
         }
         let storage = DurableStorage::restore(
             config.clone(),
@@ -507,23 +600,10 @@ async fn run_acceptor(
         .await
         {
             // Simulated crash at a durability seam: fall through to recover
-            // and re-run (rebuilding volatile state from the durable world).
-            // The restart delay is workload-buggified config (prong 2): it
-            // stretches the durability-seam crash window that process-level
-            // attrition cannot reach. A node held down while the cluster
-            // keeps committing and truncating returns below the compaction
-            // floor and independently exercises snapshot recovery. Drawn
-            // per *crash*, deliberately not per node (it is not part of
-            // the node's shape): the delay describes one event, and two
-            // crashes of the same node should be free to look different.
+            // and re-run (rebuilding volatile state from the durable world),
+            // after this crash's own restart delay (`restart_delay!`).
             Err(RunError::SeamCrash(_)) => {
-                let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
-                if delay_ms > 0 {
-                    // BUGGIFY pairing: the restart-delay knob fired — the
-                    // held-down-past-the-floor generator is genuinely live.
-                    assert_reachable!("a seam-crashed node restarts after a buggified delay");
-                    ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
-                }
+                restart_delay!(ctx, "a seam-crashed node restarts after a buggified delay");
             }
             // An injected storage fault surfaced as the driver's typed
             // crash decision (issue #19 A): fail-stop, so the node re-enters
@@ -547,18 +627,14 @@ async fn run_acceptor(
                     .is_parked(my_ip);
                 if parked {
                     assert_reachable!("storage: a corruption-crashed node stays down");
-                    checker.note_storage_dead(self_rank.0);
-                    tracing::info!(node = self_rank.0, "storage_parked");
+                    stay_down(&checker, Down::StorageParked(self_rank.0));
                     return Ok(());
                 }
                 assert_reachable!("a storage-fault crash recovers through the restart path");
-                let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
-                if delay_ms > 0 {
-                    // BUGGIFY pairing: the storage-crash restart-delay knob
-                    // fired (the seam-crash twin above has its own gate).
-                    assert_reachable!("a storage-fault crash restarts after a buggified delay");
-                    ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
-                }
+                restart_delay!(
+                    ctx,
+                    "a storage-fault crash restarts after a buggified delay"
+                );
             }
             // The library refused the store (#147). Amnesia is the wipe
             // coin's outcome and the one the rule exists for: the identity
@@ -630,27 +706,19 @@ async fn run_matchmaker_role(
     };
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
-    let incarnation = crate::shape::boot(ctx.state(), my_ip, perturb);
+    let RoleRig {
+        incarnation,
+        hooks,
+        checker,
+        audit,
+    } = arm_role(ctx, my_ip, perturb);
     let shape = incarnation.shape;
-    let hooks = BuggifyHooks::new(
-        ctx.time().clone(),
-        Duration::from_millis(crate::CHAOS_DURATION_MS),
-        perturb,
-        shape.seam_crash_bias,
-    );
-    let checker = audit_world(ctx.state());
-    let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
     // The registry's own write path rides the seed's node-disk profile and
     // the same chaos window (see `world::matchmaker`): the only fault it
     // draws is the whole-batch fsync failure, budgeted by the world.
-    let registry_faults = StorageFaults::new(
-        ctx.time().clone(),
-        Duration::from_millis(crate::CHAOS_DURATION_MS),
-        perturb,
-        shape.write_rates,
-    );
+    let registry_faults = storage_faults(ctx, perturb, shape.write_rates);
     if incarnation.is_restart()
-        && ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
+        && ctx.time().now() < crate::CHAOS_DURATION
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
         && world
             .lock()
@@ -672,8 +740,7 @@ async fn run_matchmaker_role(
             .unwrap_or_else(PoisonError::into_inner)
             .is_matchmaker_parked(my_ip)
         {
-            checker.note_matchmaker_lost();
-            tracing::info!(matchmaker = id.0, "matchmaker_stays_down");
+            stay_down(&checker, Down::MatchmakerLost(id.0));
             return Ok(());
         }
         let storage = DurableMatchmakerStorage::restore(
@@ -702,12 +769,10 @@ async fn run_matchmaker_role(
             // Its floor is structural: a matchmaker held down is a
             // matchmaking phase that waits, never a cluster that stalls.
             Err(RunError::SeamCrash(_) | RunError::Storage(_)) => {
-                let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
-                if delay_ms > 0 {
-                    // BUGGIFY pairing: the matchmaker restart-delay knob fired.
-                    assert_reachable!("a seam-crashed matchmaker restarts after a buggified delay");
-                    ctx.time().sleep(Duration::from_millis(delay_ms)).await.ok();
-                }
+                restart_delay!(
+                    ctx,
+                    "a seam-crashed matchmaker restarts after a buggified delay"
+                );
             }
             // The matchmaker driver judges no boot claim (#147 is the
             // node's marker; the registry has none yet), so it never
@@ -753,20 +818,18 @@ async fn run_proxy_role(
     };
     // A proxy has a shape too — its tick cadence and transport tunables —
     // drawn once per seed like a node's and kept across its reboots.
-    let shape = crate::shape::boot(ctx.state(), my_ip, perturb).shape;
-    let hooks = BuggifyHooks::new(
-        ctx.time().clone(),
-        Duration::from_millis(crate::CHAOS_DURATION_MS),
-        perturb,
-        shape.seam_crash_bias,
-    );
-    let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
+    let RoleRig {
+        incarnation,
+        hooks,
+        audit,
+        ..
+    } = arm_role(ctx, my_ip, perturb);
     run_proxy(
         ctx.providers().clone(),
         parse_addr(my_ip)?,
         config,
         members,
-        shape.tunables,
+        incarnation.shape.tunables,
         ctx.shutdown().clone(),
         &hooks,
         &audit,

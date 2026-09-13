@@ -363,7 +363,7 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 .disks
                 .iter()
                 .filter(|(peer, d)| {
-                    !world.parked.contains(*peer)
+                    !world.parked.contains_key(*peer)
                         && d.snap_point.is_some_and(|(peer_at, _)| peer_at == at)
                         && d.snap_chunk_health
                             .get(usize::try_from(chunk).unwrap_or(0))

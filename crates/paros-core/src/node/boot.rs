@@ -38,13 +38,6 @@ impl ColocatedNode {
         let matchmakers = config
             .has_matchmakers()
             .then(|| MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone()));
-        assert!(
-            config
-                .matchmakers
-                .iter()
-                .all(|m| config.matchmaker_pool().binary_search(m).is_ok()),
-            "the bootstrap matchmaker set is drawn from the matchmaker pool"
-        );
         let ballot = hard_state.max_promised_ballot;
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);

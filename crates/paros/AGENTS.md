@@ -12,10 +12,14 @@ the driver, never in a sim-only path.
   `driver/{boot,ready,report,transport,snap_repair,matchmaking,handover,events}.rs`
   by stage: boot replay, the `Ready` handshake's I/O side in
   persist-before-send order, post-batch upkeep, the bounded keep-newest
-  `PeerMailbox`, the chunk-repair plane (`SnapAck`/`SnapChunkRequest`/
-  `SnapChunkResponse` never enter `ColocatedNode`), the matchmaker wire, the
-  matchmaker-set handover · `driver/config.rs` `DriverTunables` and its
-  production defaults.
+  `PeerMailbox` (with `Channels` and `LaneOpener`, the connect-and-lane
+  wiring every driver opens its peers through), the chunk-repair plane
+  (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never enter
+  `ColocatedNode`), the matchmaker wire, the matchmaker-set handover ·
+  `driver/edge.rs` `GrpcEdge` (the inbound edge all three drivers serve
+  from: listener, h2 server, the persistent accept) · `driver/reply.rs`
+  the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·
+  `driver/config.rs` `DriverTunables` and its production defaults.
 - `hooks.rs` `DriverHooks` (the BUGGIFY prong-1 surface, every method
   defaulting to inert, `NoHooks` for production), `Seam` (eight durability
   seams), `HandoffContext`, `Reply`. The `H: DriverHooks` bound on `run_node`

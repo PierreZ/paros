@@ -54,6 +54,18 @@ pub enum Custody<Id> {
     },
 }
 
+impl<Id: Ord> Custody<Id> {
+    /// Colocated custody seeded with `own_vote` as its first accept, when
+    /// the opener's own record counts (it is an addressee of the round's
+    /// column and its promise allowed the self-accept).
+    #[must_use]
+    pub fn colocated(own_vote: Option<Id>) -> Self {
+        Self::Colocated {
+            accepted_by: own_vote.into_iter().collect(),
+        }
+    }
+}
+
 /// Volatile state of one in-flight per-slot Phase-2 (`Accept`) round.
 #[derive(Clone, Debug)]
 pub struct Round<Id, V> {
@@ -227,6 +239,30 @@ impl<Id, V> Rounds<Id, V> {
             .map(|(s, _)| *s)
             .collect()
     }
+
+    /// Whether every open round runs at `ballot` — what a tally that works
+    /// for exactly one leadership at a time (the proxy leader) asserts.
+    #[must_use]
+    pub fn all_at(&self, ballot: Ballot) -> bool {
+        self.by_slot.values().all(|r| r.ballot == ballot)
+    }
+
+    /// Close every round below `ballot` — a superseded leadership's, which
+    /// no decision will ever close — and report the slots closed, so a
+    /// caller keeping per-round bookkeeping beside the tally (a proxy's
+    /// delegators) can drop it in step.
+    pub fn close_below(&mut self, ballot: Ballot) -> Vec<Slot> {
+        let stale: Vec<Slot> = self
+            .by_slot
+            .iter()
+            .filter(|(_, r)| r.ballot < ballot)
+            .map(|(s, _)| *s)
+            .collect();
+        for slot in &stale {
+            self.by_slot.remove(slot);
+        }
+        stale
+    }
 }
 
 impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
@@ -257,16 +293,12 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             !self.by_slot.contains_key(&slot),
             "a slot has at most one open Phase-2 round"
         );
-        let mut accepted_by = BTreeSet::new();
-        if let Some(me) = own_vote {
-            accepted_by.insert(me);
-        }
         self.by_slot.insert(
             slot,
             Round {
                 ballot,
                 command,
-                custody: Custody::Colocated { accepted_by },
+                custody: Custody::colocated(own_vote),
                 column,
             },
         );
@@ -321,11 +353,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         if !matches!(round.custody, Custody::Delegated { .. }) {
             return false;
         }
-        let mut accepted_by = BTreeSet::new();
-        if let Some(me) = own_vote {
-            accepted_by.insert(me);
-        }
-        round.custody = Custody::Colocated { accepted_by };
+        round.custody = Custody::colocated(own_vote);
         true
     }
 
@@ -350,6 +378,30 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             }
             Custody::Delegated { .. } => false,
         }
+    }
+
+    /// [`Rounds::fold_accepted`] behind the **addressee guard** every
+    /// folder draws: no round open at `slot`, or `from` outside the round's
+    /// column of `config` (an acceptor a duplicate or a misroute reached,
+    /// one outside the ballot's registered configuration — wire hygiene,
+    /// and #122's "a joining acceptor never inflates a quorum it is not
+    /// in"), and the vote is not the column's and does not count. Whether
+    /// it counted.
+    pub fn fold_accepted_in(
+        &mut self,
+        config: &AcceptorConfig<Id>,
+        from: Id,
+        ballot: Ballot,
+        slot: Slot,
+        vhash: u64,
+    ) -> bool {
+        let Some(column) = self.column(slot) else {
+            return false;
+        };
+        if !config.is_phase2_addressee(from, column) {
+            return false;
+        }
+        self.fold_accepted(from, ballot, slot, vhash)
     }
 
     /// Whether the round at `slot` holds a Phase-2 quorum of `config` **in
@@ -529,6 +581,21 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
         self.rounds.fold_accepted(from, ballot, slot, vhash)
     }
 
+    /// Fold an `Accepted` from `from` into the round at `slot` behind the
+    /// column-addressee guard of `config` ([`Rounds::fold_accepted_in`]).
+    /// Whether it counted.
+    pub fn fold_accepted_in(
+        &mut self,
+        config: &AcceptorConfig<Id>,
+        from: Id,
+        ballot: Ballot,
+        slot: Slot,
+        vhash: u64,
+    ) -> bool {
+        self.rounds
+            .fold_accepted_in(config, from, ballot, slot, vhash)
+    }
+
     /// Whether the round at `slot` holds a Phase-2 quorum of `config` in the
     /// round's column: then its `(ballot, command)` is chosen
     /// ([`Rounds::decided`]).
@@ -556,6 +623,13 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     /// ([`Rounds::resend_page`]).
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
         self.rounds.resend_page()
+    }
+
+    /// Whether a round is open at `slot` at `ballot`
+    /// ([`Rounds::is_open_at`]).
+    #[must_use]
+    pub fn is_round_open_at(&self, slot: Slot, ballot: Ballot) -> bool {
+        self.rounds.is_open_at(slot, ballot)
     }
 
     /// Whether a `Nack` for `ballot` at `slot` supersedes work this proposer

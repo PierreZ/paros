@@ -27,19 +27,16 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_core::{
-    NetworkProvider, Providers, SimulationError, SimulationResult, TcpListenerTrait, TimeProvider,
-};
-use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
+use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{AcceptorConfig, Audience, Message, NodeId, Party, ProxyId, ProxyLeader};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, DelegationOutcome};
-use crate::driver::config::{OnDrop, grpc_channel_config};
+use crate::driver::edge::GrpcEdge;
 use crate::driver::events::{command_hash, message_kind, message_route};
-use crate::driver::transport::{Outbound, PeerQueues, open_lane, send_messages};
-use crate::driver::{DriverTunables, RunError, accept_and_serve, grpc_keep_alive};
+use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
+use crate::driver::{DriverTunables, RunError};
 use crate::grpc::{ParosInternalClient, ParosInternalServer, proxy_channel};
 use crate::hooks::DriverHooks;
 
@@ -248,11 +245,22 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let listener = providers
-        .network()
-        .bind(&local_addr)
-        .await
-        .map_err(|e| SimulationError::InvalidState(format!("proxy gRPC listener: {e}")))?;
+    let on_reject: crate::grpc::OnReject = {
+        let audit = audit.clone();
+        Arc::new(move |kind| audit.edge_rejected(me, kind))
+    };
+    let (service, mut inbox) = proxy_channel(tunables.peer_inbox_capacity, on_reject);
+    let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
+    let mut edge = GrpcEdge::bind(
+        &providers,
+        &local_addr,
+        "paros-proxy-grpc-server",
+        "proxy",
+        &tunables,
+        grpc_service,
+        incarnation_shutdown.clone(),
+    )
+    .await?;
 
     // The sans-IO core: empty, over the bootstrap configuration. Every boot
     // is a first boot — there is nothing to recover — and it is reported so
@@ -265,38 +273,26 @@ where
         "proxy_booted"
     );
 
-    let on_reject: crate::grpc::OnReject = {
-        let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(me, kind))
-    };
-    let (service, mut inbox) = proxy_channel(tunables.peer_inbox_capacity, on_reject);
-    let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
-    let grpc_server = H2Server::new(&providers).with_config(H2ServerConfig {
-        keep_alive: Some(grpc_keep_alive(&tunables)),
-        vectored_writes: true,
-    });
-
     // One lane per node of the pool: the acceptors the fan-outs reach and
     // the learners the `Commit`s reach are the same list.
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
-    let mut peer_channels = Vec::with_capacity(members.len());
+    let mut channels = Channels::with_capacity(members.len());
+    let lanes = LaneOpener {
+        providers: &providers,
+        tunables,
+        shutdown: incarnation_shutdown.clone(),
+        audit,
+        from: me,
+    };
     let peer_queues = members
         .into_iter()
         .map(|(node, addr)| {
-            let origin = http::Uri::try_from(format!("http://{addr}"))
-                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-            let channel =
-                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
-            peer_channels.push(channel.clone());
-            let client = ParosInternalClient::with_origin(channel, origin);
-            let regular = open_lane(
-                &providers,
+            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
+                ParosInternalClient::with_origin(channel, origin)
+            })?;
+            let regular = lanes.open(
                 "paros-grpc-proxy-fanout",
                 client,
-                tunables,
-                incarnation_shutdown.clone(),
-                audit,
-                me,
                 Party::Node(node),
                 tunables.peer_queue_capacity,
             );
@@ -309,11 +305,9 @@ where
             ))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
-    let _peer_channel_guard = OnDrop::new(move || {
-        for channel in peer_channels {
-            channel.close();
-        }
-    });
+    // Closed when the bundle drops; moved here so that happens at this point
+    // of the scope on every exit path, as the guard it replaces did.
+    let _channels = channels;
     let out = Outbound {
         peer_queues,
         proxy_queues: BTreeMap::new(),
@@ -321,24 +315,13 @@ where
     };
 
     let time = providers.time().clone();
-    // An absolute tick deadline and a persistent accept future, for the
-    // reasons `run_node` gives at its own loop.
+    // An absolute tick deadline, for the reason `run_node` gives at its own
+    // loop; the persistent accept lives in the edge.
     let mut next_tick = time.now() + tunables.tick_interval;
-    let mut accept = Box::pin(listener.accept());
 
     loop {
         moonpool_core::select! {
-            accepted = &mut accept => {
-                accept = Box::pin(listener.accept());
-                let (stream, addr) = accepted
-                    .map_err(|e| SimulationError::InvalidState(format!("proxy gRPC accept: {e}")))?;
-                let connection = grpc_server.serve_connection_with_shutdown(
-                    stream,
-                    grpc_service.clone(),
-                    incarnation_shutdown.clone().cancelled_owned(),
-                );
-                accept_and_serve(&providers, "paros-proxy-grpc-server", "proxy", addr, connection);
-            }
+            accepted = edge.serve_next(&providers) => accepted?,
             Some(msg) = inbox.recv() => {
                 // A delegated `Accept`, an `Accepted`, a `Nack` → the core's
                 // single input router; anything else is not a proxy's to

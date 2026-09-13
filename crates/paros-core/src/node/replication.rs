@@ -31,10 +31,7 @@ impl ColocatedNode {
         // spare or a removed member is still a replica that learns the chosen
         // prefix through the commit watermark and catch-up. Only members' acks
         // count (`on_heartbeat_ack`).
-        let config = self
-            .config
-            .has_matchmakers()
-            .then(|| self.acceptors.clone());
+        let config = self.wire_config();
         self.broadcast(&Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,

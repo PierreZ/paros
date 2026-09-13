@@ -121,12 +121,7 @@ impl ScriptedCrash {
 }
 
 fn scripted_crash_flag(state: &StateHandle) -> Arc<Mutex<bool>> {
-    if let Some(flag) = state.get::<Arc<Mutex<bool>>>(SCRIPTED_CRASH_KEY) {
-        return flag;
-    }
-    let flag = Arc::new(Mutex::new(true));
-    state.publish(SCRIPTED_CRASH_KEY, flag.clone());
-    flag
+    crate::state::published(state, SCRIPTED_CRASH_KEY, || true)
 }
 
 /// Whether this run's scripted seam crash has fired — a corpus case's
@@ -135,6 +130,24 @@ pub(crate) fn scripted_crash_fired(state: &StateHandle) -> bool {
     state
         .get::<Arc<Mutex<bool>>>(SCRIPTED_CRASH_KEY)
         .is_some_and(|flag| !*flag.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
+/// behind the chaos window (`active`, so nothing fires in the recovery
+/// tail) and its paired fired gate (`$fired`, the reachable proving the site
+/// genuinely fires on some seed). A macro, never a fn: moonpool keys a
+/// BUGGIFY location by the `file:line` of the outermost macro invocation, so
+/// every invocation below stays its own independently selectable location —
+/// a fn would collapse every hook into one.
+macro_rules! fire_gate {
+    ($hooks:expr, $prob:expr, $fired:literal) => {{
+        let fired = $hooks.active() && buggify_with_prob!($prob);
+        if fired {
+            // BUGGIFY pairing: this site genuinely fired.
+            assert_reachable!($fired);
+        }
+        fired
+    }};
 }
 
 /// The driver's `DriverHooks` under simulation (see the module doc).
@@ -286,12 +299,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn overtake_in_mailbox(&self, _to: Party, _msg: &Message) -> bool {
         // Per message on a non-empty mailbox; a per-peer stream is otherwise
         // delivered in enqueue order, so this is the only in-stream reorder.
-        let fired = self.active() && buggify_with_prob!(0.02);
-        if fired {
-            // BUGGIFY pairing: the overtake genuinely fires.
-            assert_reachable!("mailbox: a message overtakes its peer queue");
-        }
-        fired
+        fire_gate!(self, 0.02, "mailbox: a message overtakes its peer queue")
     }
 
     fn hold_peer_delivery(&self, _to: Party) -> bool {
@@ -307,12 +315,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // tick per hold is the bound, so the backlog one hold builds is
         // exactly one tick's traffic: enough to cross the shed threshold,
         // never enough to wedge a link.
-        let fired = self.active() && buggify_with_prob!(0.01);
-        if fired {
-            // BUGGIFY pairing: a drain genuinely parked for a tick.
-            assert_reachable!("mailbox: a peer drain is held for a tick");
-        }
-        fired
+        fire_gate!(self, 0.01, "mailbox: a peer drain is held for a tick")
     }
 
     fn reverse_delivery_batch(&self, _to: Party) -> bool {
@@ -324,12 +327,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // the per-peer stream systematically backwards instead of occasionally
         // so — a fixed reordering the protocol could be tuned around rather
         // than the sporadic one it has to tolerate.
-        let fired = self.active() && buggify_with_prob!(0.01);
-        if fired {
-            // BUGGIFY pairing: a delivery batch genuinely arrives reversed.
-            assert_reachable!("mailbox: a delivery batch is reversed");
-        }
-        fired
+        fire_gate!(self, 0.01, "mailbox: a delivery batch is reversed")
     }
 
     fn skip_snapshot_offer(&self, _to: Party) -> bool {
@@ -345,12 +343,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // "nobody served me this round", and a below-floor node needs a
         // snapshot offer rarely enough that a shy rate would never build a
         // streak of unserved beats.
-        let fired = self.active() && buggify_with_prob!(0.25);
-        if fired {
-            // BUGGIFY pairing: a snapshot offer is genuinely withheld.
-            assert_reachable!("the driver skips a snapshot offer beat");
-        }
-        fired
+        fire_gate!(self, 0.25, "the driver skips a snapshot offer beat")
     }
 
     fn stretch_tick_interval(&self) -> bool {
@@ -363,12 +356,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // clocks (the shape moonpool's clock skew reaches only for the *wall*
         // clock) without any node falling permanently behind. Off after the
         // cutoff, so the recovery tail runs at the honest cadence.
-        let fired = self.active() && buggify_with_prob!(0.05);
-        if fired {
-            // BUGGIFY pairing: a node genuinely ticked at the stretched cadence.
-            assert_reachable!("a node stretches its tick interval");
-        }
-        fired
+        fire_gate!(self, 0.05, "a node stretches its tick interval")
     }
 
     fn evict_across_kinds(&self, _to: Party, _msg: &Message) -> bool {
@@ -377,12 +365,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // to prevent (a class crowded out on every round trip), and the point
         // here is to prove the liveness argument survives sporadic pressure,
         // not to reinstate the bug as a fault model.
-        let fired = self.active() && buggify_with_prob!(0.10);
-        if fired {
-            // BUGGIFY pairing: a full mailbox genuinely evicted across kinds.
-            assert_reachable!("mailbox: overflow evicts across kinds");
-        }
-        fired
+        fire_gate!(self, 0.10, "mailbox: overflow evicts across kinds")
     }
 
     fn resign_leadership(&self) -> bool {
@@ -470,36 +453,27 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn longest_election_timeout(&self) -> bool {
         // Only consulted when the shortest hook stayed quiet, so the two
         // jitter extremes are independent locations that never both apply.
-        let fired = self.active() && buggify_with_prob!(0.5);
-        if fired {
-            // BUGGIFY pairing: the high jitter extreme genuinely fires (the
-            // audit's `election_timeout_extreme` reach gate belongs to the
-            // shortest extreme).
-            assert_reachable!("the driver selects the longest valid election timeout");
-        }
-        fired
+        fire_gate!(
+            self,
+            0.5,
+            "the driver selects the longest valid election timeout"
+        )
     }
 
     fn skip_snap_advertisement(&self) -> bool {
         // Consulted only when an advertisement is due; skipping loses one
         // custody beat toward the leader's truncation-coupling tally.
-        let fired = self.active() && buggify_with_prob!(0.5);
-        if fired {
-            // BUGGIFY pairing: the advertisement-pacing location fires.
-            assert_reachable!("the driver skips a snapshot custody advertisement");
-        }
-        fired
+        fire_gate!(
+            self,
+            0.5,
+            "the driver skips a snapshot custody advertisement"
+        )
     }
 
     fn skip_chunk_pull(&self) -> bool {
         // Consulted only when rotted chunks are pending; skipping delays the
         // repair one beat and stretches the faulty window.
-        let fired = self.active() && buggify_with_prob!(0.5);
-        if fired {
-            // BUGGIFY pairing: the chunk-pull pacing location fires.
-            assert_reachable!("the driver skips a chunk-repair pull beat");
-        }
-        fired
+        fire_gate!(self, 0.5, "the driver skips a chunk-repair pull beat")
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -713,12 +687,11 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // instead, so a proxied deployment's log is a mix of proxied and
         // colocated slots and the two Phase-2 paths interleave in one
         // leadership. Shy, so most slots still go through a proxy.
-        let fired = self.active() && buggify_with_prob!(0.10);
-        if fired {
-            // BUGGIFY pairing: a round genuinely ran colocated by override.
-            assert_reachable!("proxy: the driver runs a round colocated on a proxied deployment");
-        }
-        fired
+        fire_gate!(
+            self,
+            0.10,
+            "proxy: the driver runs a round colocated on a proxied deployment"
+        )
     }
 
     fn skip_proxy_resend(&self) -> bool {

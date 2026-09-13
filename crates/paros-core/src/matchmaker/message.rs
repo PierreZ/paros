@@ -83,6 +83,27 @@ impl MatchRequest {
         }
     }
 
+    /// The request that registers `config` under `ballot` at `generation`
+    /// as `kind` says: [`MatchRequest::new`] for a belief,
+    /// [`MatchRequest::reconfigure`] for a reconfiguration — the one place
+    /// the node's wiring turns a campaign's [`RegistrationKind`] into its
+    /// wire request, whether opening the campaign or re-asking a page.
+    #[must_use]
+    pub fn for_kind(
+        kind: RegistrationKind,
+        from: NodeId,
+        ballot: Ballot,
+        config: AcceptorConfig,
+        generation: MatchmakerGeneration,
+    ) -> Self {
+        match kind {
+            RegistrationKind::Belief => Self::new(from, ballot, config, generation),
+            RegistrationKind::Reconfiguration => {
+                Self::reconfigure(from, ballot, config, generation)
+            }
+        }
+    }
+
     /// The same request, asking for the page that starts at `from`: what a
     /// candidate re-asks with while a matchmaker's answer is still paged.
     #[must_use]

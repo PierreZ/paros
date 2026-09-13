@@ -98,12 +98,7 @@ impl ColocatedNode {
             let generation = matchmakers.generation;
             let members = matchmakers.members().to_vec();
             self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
-            let request = match kind {
-                RegistrationKind::Reconfiguration => {
-                    MatchRequest::reconfigure(me, self.ballot, config, generation)
-                }
-                RegistrationKind::Belief => MatchRequest::new(me, self.ballot, config, generation),
-            };
+            let request = MatchRequest::for_kind(kind, me, self.ballot, config, generation);
             for matchmaker in members {
                 self.pending_match_requests
                     .push((matchmaker, request.clone()));
@@ -162,7 +157,7 @@ impl ColocatedNode {
             .map_or(self.first_unchosen(), |first_faulty| {
                 first_faulty.min(self.first_unchosen())
             });
-        let wire_config = self.config.has_matchmakers().then(|| config.clone());
+        let wire_config = self.wire_config_of(&config);
         // The candidate is its own first acceptor: its records seed the P2c
         // tally, its faulty entries the tri-state tally, and its promise
         // counts toward every prior configuration that contains it (and

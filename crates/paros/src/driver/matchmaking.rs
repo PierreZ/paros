@@ -17,13 +17,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::driver::events::registration_history_hash;
+use crate::driver::events::{reconfigure_kind, registration_history_hash};
 use crate::grpc::{
     ParosMatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,
     wire_reconfigure_request,
 };
-use crate::matchmaker::reconfigure_kind;
 
 use super::ready::Outbox;
 

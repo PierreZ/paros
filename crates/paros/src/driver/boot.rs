@@ -11,7 +11,7 @@ use crate::storage::NodeStorage;
 
 use super::config::RunError;
 use super::events::command_hash;
-use super::ready::storage_fault_crash;
+use super::ready::{crash_if, storage_fault_crash};
 
 /// On (re)boot the core rebuilt its volatile state from durable storage. Re-emit
 /// that recovered state so the oracles see this node's post-restart belief: the
@@ -188,15 +188,13 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         // state, so this is the idempotence of the boot replay itself under
         // test — the one seam a crash *between* batches can never reach,
         // because it sits before the first batch.
-        if hooks.crash_at(Seam::AfterBootReplayBeforeSync) {
-            audit.crashed(NodeId(self_id), Seam::AfterBootReplayBeforeSync);
-            tracing::info!(
-                node = self_id,
-                seam = "after_boot_replay_before_sync",
-                "crashed"
-            );
-            return Err(RunError::SeamCrash(Seam::AfterBootReplayBeforeSync));
-        }
+        crash_if(
+            true,
+            hooks,
+            audit,
+            NodeId(self_id),
+            Seam::AfterBootReplayBeforeSync,
+        )?;
         storage
             .sync(paros_core::MustSync::Sync)
             .await

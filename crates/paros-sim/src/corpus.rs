@@ -39,22 +39,23 @@
 //!   slot through the prior configuration once it returns.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::PoisonError;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
     assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, Propose, Reconfigure, Slot, Value, parse_addr, snap_chunk_count,
+    Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient, Propose,
+    Reconfigure, Slot, Value, snap_chunk_count,
 };
 
 use crate::audit::audit_world;
 use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
+use crate::client::{ClientSet, SimChannel};
 use crate::lifecycle;
 use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
@@ -221,46 +222,70 @@ fn user_command(client: u64, seq: u64, bytes: Vec<u8>) -> Command {
 
 /// The corpus's client bundle: one public + one internal gRPC client per node.
 struct CorpusClients {
-    public: Vec<ParosClient<ReconnectingChannel<moonpool_sim::SimProviders, tonic::body::Body>>>,
-    internal: Vec<
-        ParosInternalClient<ReconnectingChannel<moonpool_sim::SimProviders, tonic::body::Body>>,
-    >,
-    channels: Vec<ReconnectingChannel<moonpool_sim::SimProviders, tonic::body::Body>>,
+    clients: ClientSet,
 }
 
-impl Drop for CorpusClients {
-    /// Closing is idempotent and shared by every clone: the channels' connect,
-    /// backoff, and keep-alive tasks stop on every exit path from a workload.
-    fn drop(&mut self) {
-        for channel in &self.channels {
-            channel.close();
-        }
-    }
+/// What one ask came back with, as [`CorpusClients::until_accepted`] reads
+/// an ack: honored, with what the caller wanted from it, or refused with
+/// the ack's leader hint.
+enum Verdict<T> {
+    Accepted(T),
+    Refused { leader: Option<u64> },
 }
 
 impl CorpusClients {
     fn connect(ctx: &SimContext, servers: &[String]) -> SimulationResult<Self> {
-        let mut public = Vec::with_capacity(servers.len());
-        let mut internal = Vec::with_capacity(servers.len());
-        let mut channels = Vec::with_capacity(servers.len());
-        for ip in servers {
-            let addr = parse_addr(ip)?;
-            let origin = http::Uri::try_from(format!("http://{addr}"))
-                .map_err(|e| invalid(format!("bad gRPC origin: {e}")))?;
-            let channel = ReconnectingChannel::new(
-                ctx.providers(),
-                addr,
-                crate::default_client_channel_config(),
-            );
-            public.push(ParosClient::with_origin(channel.clone(), origin.clone()));
-            internal.push(ParosInternalClient::with_origin(channel.clone(), origin));
-            channels.push(channel);
-        }
         Ok(Self {
-            public,
-            internal,
-            channels,
+            clients: ClientSet::connect(ctx, servers, &crate::default_client_channel_config())?,
         })
+    }
+
+    /// One ask, retried until a node honors it: `call` issues the RPC on the
+    /// client it is handed and reads the ack as a [`Verdict`] (`None` for an
+    /// RPC error). Targets rotate from `first`, skipping `exclude`; a
+    /// refusal's leader hint is followed (never onto `exclude`), a timeout
+    /// or a hint-less refusal moves to the next node; each attempt is raced
+    /// against `RPC_TIMEOUT` and spaced by `POLL_INTERVAL`. Returns the
+    /// accepted payload, or `None` at `deadline` or shutdown.
+    async fn until_accepted<T, Fut>(
+        &self,
+        ctx: &SimContext,
+        first: usize,
+        exclude: Option<usize>,
+        deadline: Duration,
+        mut call: impl FnMut(ParosClient<SimChannel>) -> Fut,
+    ) -> Option<T>
+    where
+        Fut: Future<Output = Option<Verdict<T>>> + Send,
+    {
+        let time = ctx.time();
+        let count = self.clients.public.len();
+        let mut target = first % count;
+        loop {
+            if time.now() >= deadline || ctx.shutdown().is_cancelled() {
+                return None;
+            }
+            if Some(target) == exclude {
+                target = (target + 1) % count;
+                continue;
+            }
+            let client = self.clients.public[target].clone();
+            let response = moonpool_sim::select! {
+                verdict = call(client) => verdict,
+                _ = time.sleep(RPC_TIMEOUT) => None,
+            };
+            match response {
+                Some(Verdict::Accepted(result)) => return Some(result),
+                Some(Verdict::Refused { leader }) => {
+                    target = leader
+                        .and_then(|node| usize::try_from(node).ok())
+                        .filter(|node| *node < count && Some(*node) != exclude)
+                        .unwrap_or((target + 1) % count);
+                }
+                None => target = (target + 1) % count,
+            }
+            time.sleep(POLL_INTERVAL).await.ok();
+        }
     }
 
     /// Propose `(seq, bytes)` until some node commits it, rotating targets and
@@ -276,39 +301,25 @@ impl CorpusClients {
         exclude: Option<usize>,
         deadline: Duration,
     ) -> Option<u64> {
-        let time = ctx.time();
-        let count = self.public.len();
-        let mut target = (usize::try_from(seq).unwrap_or(0)) % count;
-        loop {
-            if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                return None;
-            }
-            if Some(target) == exclude {
-                target = (target + 1) % count;
-                continue;
-            }
-            let mut client = self.public[target].clone();
-            let response = moonpool_sim::select! {
-                response = client.propose(Propose {
+        let first = usize::try_from(seq).unwrap_or(0);
+        self.until_accepted(ctx, first, exclude, deadline, |mut client| async move {
+            let ack = client
+                .propose(Propose {
                     client: client_id,
                     seq,
                     command: bytes.to_vec(),
-                }) => response.ok().map(tonic::Response::into_inner),
-                _ = time.sleep(RPC_TIMEOUT) => None,
-            };
-            match response {
-                Some(ack) if ack.committed => return ack.slot,
-                Some(ack) => {
-                    target = ack
-                        .leader
-                        .and_then(|node| usize::try_from(node).ok())
-                        .filter(|node| *node < count && Some(*node) != exclude)
-                        .unwrap_or((target + 1) % count);
-                }
-                None => target = (target + 1) % count,
-            }
-            time.sleep(POLL_INTERVAL).await.ok();
-        }
+                })
+                .await
+                .ok()?
+                .into_inner();
+            Some(if ack.committed {
+                Verdict::Accepted(ack.slot)
+            } else {
+                Verdict::Refused { leader: ack.leader }
+            })
+        })
+        .await
+        .flatten()
     }
 
     /// Ask for a decided `Truncate{up_to}` until a leader accepts it.
@@ -326,37 +337,16 @@ impl CorpusClients {
             up_to,
             "chain_control_submitted"
         );
-        let time = ctx.time();
-        let count = self.public.len();
-        let mut target = 0_usize;
-        loop {
-            if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                return false;
-            }
-            if Some(target) == exclude {
-                target = (target + 1) % count;
-                continue;
-            }
-            let mut client = self.public[target].clone();
-            let response = moonpool_sim::select! {
-                response = client.compact(Compact { up_to }) => {
-                    response.ok().map(tonic::Response::into_inner)
-                }
-                _ = time.sleep(RPC_TIMEOUT) => None,
-            };
-            match response {
-                Some(ack) if ack.accepted => return true,
-                Some(ack) => {
-                    target = ack
-                        .leader
-                        .and_then(|node| usize::try_from(node).ok())
-                        .filter(|node| *node < count && Some(*node) != exclude)
-                        .unwrap_or((target + 1) % count);
-                }
-                None => target = (target + 1) % count,
-            }
-            time.sleep(POLL_INTERVAL).await.ok();
-        }
+        self.until_accepted(ctx, 0, exclude, deadline, |mut client| async move {
+            let ack = client.compact(Compact { up_to }).await.ok()?.into_inner();
+            Some(if ack.accepted {
+                Verdict::Accepted(())
+            } else {
+                Verdict::Refused { leader: ack.leader }
+            })
+        })
+        .await
+        .is_some()
     }
 
     /// Ask the leader for the acceptor configuration `members` until one
@@ -369,40 +359,30 @@ impl CorpusClients {
         members: &[u64],
         deadline: Duration,
     ) -> bool {
-        let time = ctx.time();
-        let count = self.public.len();
-        let mut target = 0_usize;
-        loop {
-            if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                return false;
-            }
-            let mut client = self.public[target].clone();
-            let response = moonpool_sim::select! {
-                response = client.reconfigure(Reconfigure { members: members.to_vec(), ..Reconfigure::default() }) => {
-                    response.ok().map(tonic::Response::into_inner)
-                }
-                _ = time.sleep(RPC_TIMEOUT) => None,
-            };
-            match response {
-                Some(ack) if ack.accepted => return true,
-                Some(ack) => {
-                    target = ack
-                        .leader
-                        .and_then(|node| usize::try_from(node).ok())
-                        .filter(|node| *node < count)
-                        .unwrap_or((target + 1) % count);
-                }
-                None => target = (target + 1) % count,
-            }
-            time.sleep(POLL_INTERVAL).await.ok();
-        }
+        self.until_accepted(ctx, 0, None, deadline, |mut client| async move {
+            let ack = client
+                .reconfigure(Reconfigure {
+                    members: members.to_vec(),
+                    ..Reconfigure::default()
+                })
+                .await
+                .ok()?
+                .into_inner();
+            Some(if ack.accepted {
+                Verdict::Accepted(())
+            } else {
+                Verdict::Refused { leader: ack.leader }
+            })
+        })
+        .await
+        .is_some()
     }
 
     /// One live inspect of node `i`, whole (`None` on timeout).
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
     async fn inspect_reply(&self, ctx: &SimContext, i: usize) -> Option<InspectReply> {
         let time = ctx.time();
-        let mut client = self.internal[i].clone();
+        let mut client = self.clients.internal[i].clone();
         moonpool_sim::select! {
             response = client.inspect(InspectRequest {}) => response
                 .ok()
@@ -423,7 +403,7 @@ impl CorpusClients {
     /// the deadline passes (`false`).
     #[tracing::instrument(level = "debug", skip_all)]
     async fn wait_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
-        let all: Vec<usize> = (0..self.internal.len()).collect();
+        let all: Vec<usize> = (0..self.clients.internal.len()).collect();
         self.wait_nodes_at(ctx, &all, want, deadline).await
     }
 
@@ -469,7 +449,7 @@ impl CorpusClients {
         let time = ctx.time();
         let until = time.now() + hold;
         while time.now() < until && !ctx.shutdown().is_cancelled() {
-            for i in 0..self.internal.len() {
+            for i in 0..self.clients.internal.len() {
                 if let Some(state) = self.inspect(ctx, i).await
                     && state != *want
                 {
@@ -586,6 +566,50 @@ async fn prime_prefix(
     Ok(commands)
 }
 
+/// What [`primed_cluster`] hands a case: the acceptors, the client bundle,
+/// this client's identity, the primed user commands (seqs and slots
+/// `0..count`) and the analytic states along them (`states[i]` after the
+/// first `i` commands).
+struct Primed {
+    servers: Vec<String>,
+    clients: CorpusClients,
+    client_id: u64,
+    commands: Vec<Command>,
+    states: Vec<ChainState>,
+}
+
+/// The prologue every three-node corpus case shares: the deployment's
+/// acceptors, the client bundle, and `count` user commands primed, decided
+/// at their expected slots, then replicated and applied everywhere within
+/// `PRIME_BUDGET`. `case` names the workload in the error a failed priming
+/// returns (its always-assertion has already recorded the violation).
+#[tracing::instrument(level = "debug", skip_all, fields(count))]
+async fn primed_cluster(ctx: &SimContext, count: u64, case: &str) -> SimulationResult<Primed> {
+    let servers = corpus_servers(ctx)?;
+    let clients = CorpusClients::connect(ctx, &servers)?;
+    let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+    let commands = prime_prefix(ctx, &clients, client_id, count, None, 0, 0).await?;
+    let states = expected_states(&commands);
+    let full = states[commands.len()];
+    let slots: BTreeSet<u64> = (0..count).collect();
+    let deadline = ctx.time().now() + PRIME_BUDGET;
+    let replicated = wait_replicated(ctx, &servers, &slots, &full, deadline).await;
+    assert_always!(
+        replicated,
+        "corpus: priming replicates and applies the full prefix everywhere"
+    );
+    if !replicated {
+        return Err(invalid(format!("{case} priming did not replicate")));
+    }
+    Ok(Primed {
+        servers,
+        clients,
+        client_id,
+        commands,
+        states,
+    })
+}
+
 // --- the E1 mask workload -----------------------------------------------------
 
 /// E1-style per-slot × per-node corruption masks over a fully replicated
@@ -623,25 +647,16 @@ impl Workload for E1MaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case: prime → inject → derive → judge
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = corpus_servers(ctx)?;
-        let clients = CorpusClients::connect(ctx, &servers)?;
-        let time = ctx.time().clone();
-        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-
         // Phase 1: prime and fully replicate the decided prefix.
-        let commands = prime_prefix(ctx, &clients, client_id, CORPUS_SLOTS, None, 0, 0).await?;
-        let expected = expected_states(&commands);
+        let Primed {
+            servers,
+            clients,
+            commands,
+            states: expected,
+            ..
+        } = primed_cluster(ctx, CORPUS_SLOTS, "corpus").await?;
+        let time = ctx.time().clone();
         let full = expected[commands.len()];
-        let slots: BTreeSet<u64> = (0..CORPUS_SLOTS).collect();
-        let replicated =
-            wait_replicated(ctx, &servers, &slots, &full, time.now() + PRIME_BUDGET).await;
-        assert_always!(
-            replicated,
-            "corpus: priming replicates and applies the full prefix everywhere"
-        );
-        if !replicated {
-            return Err(invalid("corpus priming did not replicate"));
-        }
 
         // Phase 2: derive the mask and inject it — atomically with the
         // restarts (no await between them), so no flush can heal a mark first.
@@ -843,31 +858,17 @@ impl Workload for BareQuorumWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = corpus_servers(ctx)?;
-        let clients = CorpusClients::connect(ctx, &servers)?;
-        let time = ctx.time().clone();
-        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-        let absent = CORPUS_NODES - 1;
-
         // Phase 1: two fully replicated slots.
-        let mut commands = prime_prefix(ctx, &clients, client_id, 2, None, 0, 0).await?;
-        let expected2 = expected_states(&commands)[2];
-        let replicated = wait_replicated(
-            ctx,
-            &servers,
-            &(0..2).collect(),
-            &expected2,
-            time.now() + PRIME_BUDGET,
-        )
-        .await;
-        assert_always!(
-            replicated,
-            "corpus: priming replicates and applies the full prefix everywhere"
-        );
-        if !replicated {
-            drop(clients);
-            return Err(invalid("bare-quorum priming did not replicate"));
-        }
+        let Primed {
+            servers,
+            clients,
+            client_id,
+            mut commands,
+            states,
+        } = primed_cluster(ctx, 2, "bare-quorum").await?;
+        let time = ctx.time().clone();
+        let absent = CORPUS_NODES - 1;
+        let expected2 = states[2];
 
         // Phase 2: crash the third node and hold it down; decide slot 2 on
         // the bare quorum.
@@ -1292,31 +1293,17 @@ impl Workload for SnapshotLifecycleWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted compound scenario
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = corpus_servers(ctx)?;
-        let clients = CorpusClients::connect(ctx, &servers)?;
-        let time = ctx.time().clone();
-        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-        let state = ctx.state();
-
         // Phase A: five decided, fully replicated slots.
-        let mut commands = prime_prefix(ctx, &clients, client_id, 5, None, 0, 0).await?;
-        let state5 = expected_states(&commands)[5];
-        let replicated = wait_replicated(
-            ctx,
-            &servers,
-            &(0..5).collect(),
-            &state5,
-            time.now() + PRIME_BUDGET,
-        )
-        .await;
-        assert_always!(
-            replicated,
-            "corpus: priming replicates and applies the full prefix everywhere"
-        );
-        if !replicated {
-            drop(clients);
-            return Err(invalid("lifecycle priming did not replicate"));
-        }
+        let Primed {
+            servers,
+            clients,
+            client_id,
+            mut commands,
+            states,
+        } = primed_cluster(ctx, 5, "lifecycle").await?;
+        let time = ctx.time().clone();
+        let state = ctx.state();
+        let state5 = states[5];
 
         // Phase B — path 1, local re-replay at floor 0: rot one node's
         // snapshot (making it log-only) and restart it; the boot scan resets
@@ -1571,37 +1558,21 @@ impl Workload for ChunkMaskWorkload {
     #[allow(clippy::too_many_lines)] // one linear scripted case
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let servers = corpus_servers(ctx)?;
-        let clients = CorpusClients::connect(ctx, &servers)?;
-        let time = ctx.time().clone();
-        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-        let state = ctx.state();
-
         // Phase 1: six decided slots, then compaction through the coupling —
         // the Snap marker at slot 6, the Truncate at slot 7, floor 6, and the
-        // byte-identical decided point retained on every node.
-        let commands = prime_prefix(ctx, &clients, client_id, 6, None, 0, 0).await?;
-        // Full replication before compaction: every node must hold and apply
-        // the whole prefix, so no node is below the floor when the coupling's
+        // byte-identical decided point retained on every node. Full
+        // replication before compaction: every node must hold and apply the
+        // whole prefix, so no node is below the floor when the coupling's
         // Snap + Truncate decide — all three then record the identical point
         // themselves (the mask assumes three holders).
-        let primed = expected_states(&commands)[6];
-        let replicated = wait_replicated(
-            ctx,
-            &servers,
-            &(0..6).collect(),
-            &primed,
-            time.now() + PRIME_BUDGET,
-        )
-        .await;
-        assert_always!(
-            replicated,
-            "corpus: priming replicates and applies the full prefix everywhere"
-        );
-        if !replicated {
-            drop(clients);
-            return Err(invalid("chunk corpus priming did not replicate"));
-        }
+        let Primed {
+            servers,
+            clients,
+            commands,
+            ..
+        } = primed_cluster(ctx, 6, "chunk corpus").await?;
+        let time = ctx.time().clone();
+        let state = ctx.state();
         let compacted = {
             // An `accepted: true` compact is a *proposal*, not a decision: the
             // proposing leader can die before the Truncate's accepts leave it,

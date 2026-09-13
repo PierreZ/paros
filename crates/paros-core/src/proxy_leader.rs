@@ -339,15 +339,7 @@ impl ProxyLeader {
     /// Close every round below `ballot`: a superseded leadership's, which
     /// no `Commit` will ever close here.
     fn close_below(&mut self, ballot: Ballot) {
-        let stale: Vec<Slot> = self
-            .rounds
-            .by_slot()
-            .iter()
-            .filter(|(_, r)| r.ballot() < ballot)
-            .map(|(s, _)| *s)
-            .collect();
-        for slot in stale {
-            self.rounds.close(slot);
+        for slot in self.rounds.close_below(ballot) {
             self.delegators.remove(&slot);
             self.counters.superseded += 1;
         }
@@ -360,13 +352,10 @@ impl ProxyLeader {
         // The same guard the leader's own `on_accepted` draws: no open
         // round, or a sender outside the round's column, and the vote is not
         // the column's.
-        let Some(column) = self.rounds.column(slot) else {
-            return;
-        };
-        if !self.acceptors.is_phase2_addressee(from, column) {
-            return;
-        }
-        if !self.rounds.fold_accepted(from, ballot, slot, vhash) {
+        if !self
+            .rounds
+            .fold_accepted_in(&self.acceptors, from, ballot, slot, vhash)
+        {
             return;
         }
         let Some((ballot, command)) = self.rounds.decided(slot, &self.acceptors) else {
@@ -491,10 +480,7 @@ impl ProxyLeader {
             "a proxy folds its own rounds"
         );
         assert!(
-            self.rounds
-                .by_slot()
-                .values()
-                .all(|r| r.ballot() == self.ballot),
+            self.rounds.all_at(self.ballot),
             "every open proxy round runs at the ballot the proxy works for"
         );
         assert!(

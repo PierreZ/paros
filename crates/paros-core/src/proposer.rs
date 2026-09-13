@@ -220,6 +220,22 @@ fn qualifying_answers<Id: Copy + Ord>(
         .collect()
 }
 
+/// The members of `configs`, unioned: sorted and deduplicated, so the
+/// Phase-1 addressee list ([`Election::targets`]) and the probe's straggler
+/// list ([`RepairProbe::stragglers`]) — both unions over the prior
+/// configurations — derive it one way.
+fn member_union<'a, Id: Copy + Ord + 'a>(
+    configs: impl IntoIterator<Item = &'a AcceptorConfig<Id>>,
+) -> Vec<Id> {
+    let mut members: Vec<Id> = configs
+        .into_iter()
+        .flat_map(|c| c.members().iter().copied())
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    members
+}
+
 /// Whether a faulty-reported slot is decidable: a full Q1 of qualifying
 /// answers holds in **every** prior configuration, so quorum intersection
 /// rules out a hidden chosen value in each of them. Then the best `have` is

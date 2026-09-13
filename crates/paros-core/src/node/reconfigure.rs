@@ -135,11 +135,7 @@ impl ColocatedNode {
         // application repair) is tied to the quorum that reported it, and a
         // leadership a higher `Prepare` already passed holds nothing worth
         // moving. The same narrowness as `can_relinquish`.
-        if self.proposer.recovery().is_some()
-            || self.proposer.probe().is_some()
-            || self.replica.app_repair().is_some()
-            || self.ballot < self.acceptor.promised()
-        {
+        if !self.leadership_settled() || self.ballot < self.acceptor.promised() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unsettled);
         }
         let base_round = self
