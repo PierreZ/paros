@@ -41,6 +41,8 @@
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | `phase2_column` | inline | "grid: a slot is decided on a column other than its own" |
+//! | `proxy_for` / `skip_delegation` | inline, one each | "proxy: a slot is decided through a proxy leader" |
+//! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
 //!
@@ -77,7 +79,9 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_reachable, buggify_with_prob};
 
-use paros::{DriverHooks, HandoffContext, Message, NodeId, ReconfigurerPhase, Seam, Slot};
+use paros::{
+    DriverHooks, HandoffContext, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Seam, Slot,
+};
 
 const SCRIPTED_CRASH_KEY: &str = "paros-scripted-seam-crash";
 
@@ -279,7 +283,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
-    fn overtake_in_mailbox(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn overtake_in_mailbox(&self, _to: Party, _msg: &Message) -> bool {
         // Per message on a non-empty mailbox; a per-peer stream is otherwise
         // delivered in enqueue order, so this is the only in-stream reorder.
         let fired = self.active() && buggify_with_prob!(0.02);
@@ -290,7 +294,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
-    fn hold_peer_delivery(&self, _to: NodeId) -> bool {
+    fn hold_peer_delivery(&self, _to: Party) -> bool {
         // Per enqueue onto a non-empty mailbox, arming the next drain — and
         // the arm is a *latch*, so this rate does not compose the way a
         // per-drain rate would: a leader that enqueues a dozen messages in one
@@ -311,7 +315,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
-    fn reverse_delivery_batch(&self, _to: NodeId) -> bool {
+    fn reverse_delivery_batch(&self, _to: Party) -> bool {
         // Per enqueue that makes a reorderable batch possible — the drain-side
         // twin of `overtake_in_mailbox`. Same latch composition as
         // `hold_peer_delivery`, and the ceiling matters more here: the arm
@@ -328,7 +332,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
-    fn skip_snapshot_offer(&self, _to: NodeId) -> bool {
+    fn skip_snapshot_offer(&self, _to: Party) -> bool {
         // A corpus case with a scripted seam crash still owed: no whole-blob
         // offer leaves any node until the seam fired, so the below-floor
         // node heals through the repair plane that reaches it (module doc).
@@ -367,7 +371,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fired
     }
 
-    fn evict_across_kinds(&self, _to: NodeId, _msg: &Message) -> bool {
+    fn evict_across_kinds(&self, _to: Party, _msg: &Message) -> bool {
         // Per overflow. Kept occasional on purpose: a *systematic* cross-kind
         // eviction is the starvation `PeerMailbox`'s per-kind default exists
         // to prevent (a class crowded out on every round trip), and the point
@@ -499,7 +503,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn drop_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
+    fn drop_outgoing(&self, _to: Party, msg: &Message) -> bool {
         if !self.active() {
             return false;
         }
@@ -553,7 +557,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn duplicate_outgoing(&self, _to: NodeId, msg: &Message) -> bool {
+    fn duplicate_outgoing(&self, _to: Party, msg: &Message) -> bool {
         if !self.active() {
             return false;
         }
@@ -683,6 +687,47 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         assert_reachable!("grid: the driver overrides a round's column");
         let cols_u64 = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
         usize::try_from((slot.0.wrapping_add(1)) % cols_u64).ok()
+    }
+
+    fn proxy_for(&self, slot: Slot, proxy_count: usize) -> Option<ProxyId> {
+        // Per proposal on a leader with proxies. The override picks the
+        // *next* proxy the modulus would not — `(slot + 1) % proxy_count` —
+        // so consecutive slots land on one proxy and a slot's re-delegation
+        // by a handoff successor (which derives `slot % proxy_count` afresh)
+        // lands on a different proxy than its first delegation did: two
+        // proxies then fan out the same round, which is exactly the
+        // P2b-idempotency the delegation rests on. Every proxy is equally
+        // valid; the fired gate is inline, the outcome — a slot decided
+        // through a proxy — is the audit's.
+        if !self.active() || proxy_count < 2 || !buggify_with_prob!(0.10) {
+            return None;
+        }
+        // BUGGIFY pairing: the override genuinely fires.
+        assert_reachable!("proxy: the driver overrides a round's proxy");
+        let count = u64::try_from(proxy_count).unwrap_or(u64::MAX).max(1);
+        Some(ProxyId(slot.0.wrapping_add(1) % count))
+    }
+
+    fn skip_delegation(&self) -> bool {
+        // Per proposal on a leader with proxies: the round runs colocated
+        // instead, so a proxied deployment's log is a mix of proxied and
+        // colocated slots and the two Phase-2 paths interleave in one
+        // leadership. Shy, so most slots still go through a proxy.
+        let fired = self.active() && buggify_with_prob!(0.10);
+        if fired {
+            // BUGGIFY pairing: a round genuinely ran colocated by override.
+            assert_reachable!("proxy: the driver runs a round colocated on a proxied deployment");
+        }
+        fired
+    }
+
+    fn skip_proxy_resend(&self) -> bool {
+        // Consulted only while the proxy holds open rounds; gated in the
+        // audit (`proxy_resend_skipped`). Generous: a skipped beat only
+        // stretches a round whose fan-out lost a vote, and the state worth
+        // reaching is the leader taking that round back while the proxy
+        // still holds it — the two verdicts must agree.
+        self.active() && buggify_with_prob!(0.5)
     }
 
     fn expire_parked_read_early(&self) -> bool {

@@ -39,7 +39,9 @@ oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
 **The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-six process pool of `NodeProcess::chaotic()` plus zero to three `MatchmakerProcess`es
+three-to-six process pool of `NodeProcess::chaotic()` plus zero to five `MatchmakerProcess`es
+plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
+IP order — the count is every node's `Config::proxy_count`, zero the plain deployment)
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
@@ -49,7 +51,8 @@ the one four-node, one-matchmaker case that needs a spare and a prior configurat
 process plays which role is the **deployment/role map** (`paros_sim::roles`), read off moonpool's
 **process groups** (moonpool #197: one `.processes()` registration per role, each with its own
 per-seed count and IP range — `paros-node` is the acceptor pool, `paros-matchmaker` the
-matchmakers — and attrition scoped per group with `AttritionVictims::group`), so every process
+matchmakers, `paros-proxy` the proxy leaders — and attrition scoped per group with
+`AttritionVictims::group`), so every process
 and every client derives the same map without coordination. Membership is never "every process
 in the topology": the pool is the map's acceptor list, and the **bootstrap configuration** is
 protocol data drawn once per seed (`paros_sim::shape::bootstrap_ranks`) — the whole pool by
@@ -170,8 +173,20 @@ own**. The roles:
   `propose_control_in`), only a *settled* leadership delegates and never its election recovery
   or gap fills, a handoff successor re-delegates what it inherited with `leader = self`, and a
   round re-delegated `take_back_delegated(after)` times without a decision is **taken back**
-  and run colocated (driver policy, a knob born buggified) — liveness under a dead proxy is the
-  leader's and the fallback is always today's colocated Phase 2. Proven by the sans-IO model
+  and run colocated (driver policy, `DriverTunables::proxy_take_back_resends`, a knob born
+  buggified) — liveness under a dead proxy is the leader's and the fallback is always today's
+  colocated Phase 2. The driver half (#142 part B): `paros::run_proxy` is the third
+  provider-generic driver — the node contract's Phase-2 subset over the same lossy per-peer
+  mailboxes, no storage seam and no crash seam, a beat that re-fans-out
+  (`DriverHooks::skip_proxy_resend`) — and `run_node` takes the deployment map's proxies beside
+  its peers, resolves `Audience::Proxy` through them, and asks two hooks before a proposal opens
+  (`DriverHooks::skip_delegation`, then `DriverHooks::proxy_for`, each its own BUGGIFY location,
+  consulted only on a leader of a deployment with proxies). Every send names a `Party` sender
+  and destination, and the audit hears a node's delegation (`delegation_sent`) and a proxy's
+  fan-out, `Commit` and relayed `Nack` (`proxy_sent`, `proxy_fanned_out`, `proxy_decided`,
+  `proxy_nack_relayed`) apart from a node's sends; the sim audit judges every proxy `Commit`
+  against the durable accepts it folded from the acceptors (`observe_proxy_decision`), and its
+  `sometimes` gates are a slot decided through a proxy and a leader taking a round back. Proven by the sans-IO model
   checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
   reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
   per slot, every proxy `Commit` backed by a durable Phase-2 quorum at one ballot, and the
@@ -249,11 +264,12 @@ is no second Paxos kernel in the crate); flexible quorums are deployment data
 (`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
 changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, cols }`, #141
 — set-membership predicates and column addressing, still zero tally lines); the proxy leader is
-the first second deployment (`proxy_leader.rs`, #142 part A — the embedded `Rounds` on another
-process, a count in `Config`, zero tally lines). Still to come: the proxy driver and process
-group (#142 part B), and a replica tier the same way.
+the first second deployment (`proxy_leader.rs`, #142 — the embedded `Rounds` on another
+process, a count in `Config`, zero tally lines; its driver `paros::run_proxy` and its process
+group `paros-proxy` are the harness's third role). Still to come: a replica tier the same way.
 
-The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O.
+The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O;
+`paros::run_matchmaker` and `paros::run_proxy` are the same shape for the two other roles.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
 code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool

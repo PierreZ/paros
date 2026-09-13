@@ -6,10 +6,13 @@
 //! each with its own per-seed count draw and its own IP range (moonpool #197):
 //! the [`ACCEPTOR_GROUP`] holds the paros nodes (`NodeId(rank)` among them, in
 //! IP order) and the [`MATCHMAKER_GROUP`] holds the matchmakers
-//! (`MatchmakerId(rank)`, a process that is *not* an acceptor). The acceptor
-//! list is the pool every node derives its `Config` from and every client
-//! proposes to; the matchmaker list is what a campaigning leader registers
-//! with.
+//! (`MatchmakerId(rank)`, a process that is *not* an acceptor), and the
+//! [`PROXY_GROUP`] holds the proxy leaders (`ProxyId(rank)`, #142 — neither
+//! an acceptor nor a replica). The acceptor list is the pool every node
+//! derives its `Config` from and every client proposes to; the matchmaker
+//! list is what a campaigning leader registers with; the proxy list is what
+//! a settled leader delegates Phase 2 to, and its length is the `Config`'s
+//! `proxy_count`.
 //!
 //! The map is a pure function of the seed's topology, so every process and
 //! every workload derives the *same* map without coordination, a recipe
@@ -18,21 +21,25 @@
 //! **The default is the plain Multi-Paxos deployment** (AGENTS.md, *Plain
 //! Multi-Paxos is first-class*): a seed whose matchmaker group drew zero
 //! members deploys no matchmakers, and every campaign goes straight to
-//! `Prepare`. The main campaign draws the matchmaker count per seed
-//! ([`crate::MATCHMAKER_POOL_RANGE`]); the scripted corpus registers the
-//! [`ACCEPTOR_GROUP`] and no matchmaker group, which reads here **exactly**
-//! like a main-campaign seed whose matchmaker group drew zero members —
-//! byte-identical, one code path, no corpus special case.
+//! `Prepare`; a seed whose proxy group drew zero members delegates nothing
+//! and runs every Phase 2 colocated. The main campaign draws both counts per
+//! seed ([`crate::MATCHMAKER_POOL_RANGE`], [`crate::PROXY_POOL_RANGE`]); the
+//! scripted corpus registers the [`ACCEPTOR_GROUP`] and neither other group,
+//! which reads here **exactly** like a main-campaign seed whose other groups
+//! drew zero members — byte-identical, one code path, no corpus special
+//! case.
 
 use std::net::IpAddr;
 
 use moonpool_sim::{WorkloadTopology, assert_always};
-use paros::{MatchmakerId, NodeId};
+use paros::{MatchmakerId, NodeId, ProxyId};
 
 /// The process group of the paros nodes (`NodeProcess::name`).
 pub(crate) const ACCEPTOR_GROUP: &str = "paros-node";
 /// The process group of the matchmakers (`MatchmakerProcess::name`).
 pub(crate) const MATCHMAKER_GROUP: &str = "paros-matchmaker";
+/// The process group of the proxy leaders (`ProxyProcess::name`, #142).
+pub(crate) const PROXY_GROUP: &str = "paros-proxy";
 
 /// One process's role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,24 +48,35 @@ pub(crate) enum Role {
     Acceptor(NodeId),
     /// A matchmaker, ranked among the matchmakers — not an acceptor.
     Matchmaker(MatchmakerId),
+    /// A proxy leader, ranked among the proxies — neither an acceptor nor a
+    /// replica (#142).
+    Proxy(ProxyId),
 }
 
-/// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`)
-/// and sorted matchmaker IPs (`MatchmakerId(i)` ↔ `matchmakers[i]`).
+/// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`),
+/// sorted matchmaker IPs (`MatchmakerId(i)` ↔ `matchmakers[i]`) and sorted
+/// proxy IPs (`ProxyId(i)` ↔ `proxies[i]`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Deployment {
     acceptors: Vec<String>,
     matchmakers: Vec<String>,
+    proxies: Vec<String>,
 }
 
 impl Deployment {
-    /// Build the map from two IP lists (any order, duplicates allowed).
-    fn from_groups(mut acceptors: Vec<String>, mut matchmakers: Vec<String>) -> Self {
+    /// Build the map from three IP lists (any order, duplicates allowed).
+    fn from_groups(
+        mut acceptors: Vec<String>,
+        mut matchmakers: Vec<String>,
+        mut proxies: Vec<String>,
+    ) -> Self {
         sort_ips(&mut acceptors);
         sort_ips(&mut matchmakers);
+        sort_ips(&mut proxies);
         Self {
             acceptors,
             matchmakers,
+            proxies,
         }
     }
 
@@ -67,10 +85,13 @@ impl Deployment {
         if let Some(rank) = self.acceptors.iter().position(|a| a == ip) {
             return Some(Role::Acceptor(NodeId(rank as u64)));
         }
-        self.matchmakers
+        if let Some(rank) = self.matchmakers.iter().position(|m| m == ip) {
+            return Some(Role::Matchmaker(MatchmakerId(rank as u64)));
+        }
+        self.proxies
             .iter()
-            .position(|m| m == ip)
-            .map(|rank| Role::Matchmaker(MatchmakerId(rank as u64)))
+            .position(|p| p == ip)
+            .map(|rank| Role::Proxy(ProxyId(rank as u64)))
     }
 
     /// The acceptor pool, in `NodeId` order.
@@ -81,6 +102,12 @@ impl Deployment {
     /// The matchmaker set, in `MatchmakerId` order (empty on a plain seed).
     pub(crate) fn matchmakers(&self) -> &[String] {
         &self.matchmakers
+    }
+
+    /// The proxy leaders, in `ProxyId` order (empty on a seed without
+    /// proxies, whose every Phase 2 is colocated).
+    pub(crate) fn proxies(&self) -> &[String] {
+        &self.proxies
     }
 }
 
@@ -98,11 +125,12 @@ fn sort_ips(ips: &mut Vec<String>) {
 pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
     let acceptors = topology.ips_in_group(ACCEPTOR_GROUP);
     let matchmakers = topology.ips_in_group(MATCHMAKER_GROUP);
-    let map = Deployment::from_groups(acceptors, matchmakers);
+    let proxies = topology.ips_in_group(PROXY_GROUP);
+    let map = Deployment::from_groups(acceptors, matchmakers, proxies);
     assert_always!(
         !map.acceptors.is_empty(),
         "a deployment names at least one acceptor",
-        { "matchmakers" => map.matchmakers.len() }
+        { "matchmakers" => map.matchmakers.len(), "proxies" => map.proxies.len() }
     );
     map
 }
@@ -124,22 +152,27 @@ mod tests {
         let map = Deployment::from_groups(
             shuffled,
             vec!["10.0.2.2".to_string(), "10.0.2.1".to_string()],
+            vec!["10.0.3.2".to_string(), "10.0.3.1".to_string()],
         );
         assert_eq!(map.acceptors(), pool(4).as_slice());
         assert_eq!(map.matchmakers().len(), 2);
+        assert_eq!(map.proxies().len(), 2);
         assert_eq!(map.role_of("10.0.1.3"), Some(Role::Acceptor(NodeId(2))));
         assert_eq!(
             map.role_of("10.0.2.2"),
             Some(Role::Matchmaker(MatchmakerId(1)))
         );
+        assert_eq!(map.role_of("10.0.3.1"), Some(Role::Proxy(ProxyId(0))));
         assert_eq!(map.role_of("10.9.9.9"), None);
     }
 
-    /// A seed whose matchmaker group drew nothing is the plain deployment.
+    /// A seed whose matchmaker and proxy groups drew nothing is the plain
+    /// deployment.
     #[test]
     fn an_empty_matchmaker_group_is_the_plain_deployment() {
-        let map = Deployment::from_groups(pool(3), Vec::new());
+        let map = Deployment::from_groups(pool(3), Vec::new(), Vec::new());
         assert!(map.matchmakers().is_empty());
+        assert!(map.proxies().is_empty());
         assert_eq!(map.acceptors().len(), 3);
     }
 }

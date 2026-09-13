@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{ColocatedNode, Message, NodeId, Slot, Value};
+use paros_core::{ColocatedNode, Message, NodeId, Party, Slot, Value};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Seam};
@@ -67,7 +67,7 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let me = NodeId(out.self_id);
+    let me = out.self_node();
     match storage.latest_snap_point() {
         Some(point) if point == at => {
             let mut served: Vec<(u32, Value)> = Vec::with_capacity(chunks.len());
@@ -92,7 +92,7 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                     hooks,
                     audit,
                     vec![(
-                        to,
+                        Party::Node(to),
                         Message::SnapChunkResponse {
                             from: me,
                             at_index: at,
@@ -119,13 +119,13 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
                 .get(&ci)
                 .map_or(node.hard_state().max_promised_ballot, |(b, _)| *b);
             audit.snap_advanced_fallback(me, to);
-            tracing::info!(node = out.self_id, to = to.0, "snap_advanced_fallback");
+            tracing::info!(node = me.0, to = to.0, "snap_advanced_fallback");
             send_messages(
                 out,
                 hooks,
                 audit,
                 vec![(
-                    to,
+                    Party::Node(to),
                     Message::InstallSnapshot {
                         from: me,
                         ballot,
@@ -301,7 +301,7 @@ pub(crate) fn snap_repair_tick<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let me = NodeId(out.self_id);
+    let me = out.self_node();
     let latest = storage.latest_snap_point();
     // A point the compaction floor already passed can license no further
     // truncation, so it is no longer a witness worth keeping.
@@ -333,14 +333,14 @@ pub(crate) fn snap_repair_tick<S, H, A>(
             // skipping has an observable effect (a lost beat of the leader's
             // custody tally, re-sent next tick).
             if hooks.skip_snap_advertisement() {
-                tracing::info!(node = out.self_id, "snap_advertisement_skipped");
+                tracing::info!(node = me.0, "snap_advertisement_skipped");
             } else {
                 send_messages(
                     out,
                     hooks,
                     audit,
                     vec![(
-                        leader,
+                        Party::Node(leader),
                         Message::SnapAck {
                             from: me,
                             at_index: point,
@@ -359,19 +359,19 @@ pub(crate) fn snap_repair_tick<S, H, A>(
         // The pull is due: consult the pacing hook only now (skipping delays
         // the repair one beat; the pull re-issues every tick it is due).
         if hooks.skip_chunk_pull() {
-            tracing::info!(node = out.self_id, "chunk_pull_skipped");
+            tracing::info!(node = me.0, "chunk_pull_skipped");
             return;
         }
         let wanted: Vec<u32> = chunks.iter().copied().collect();
         // Every pooled node is a replica that may hold the point.
-        let requests: Vec<(NodeId, Message)> = node
+        let requests: Vec<(Party, Message)> = node
             .config()
             .pool()
             .iter()
             .filter(|peer| **peer != me)
             .map(|peer| {
                 (
-                    *peer,
+                    Party::Node(*peer),
                     Message::SnapChunkRequest {
                         from: me,
                         at_index: Slot(at),

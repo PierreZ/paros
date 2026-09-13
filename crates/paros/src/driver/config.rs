@@ -144,6 +144,18 @@ pub struct DriverTunables {
     /// knob rather than a multiple of `election_timeout_base`, so a seed can
     /// push the election clock and the decree's symmetry break independently.
     pub reconfigure_backoff_max_ticks: u64,
+    /// How many times a delegated round may be re-delegated (once per beat,
+    /// by `resend_pending`) without the proxy's `Commit` arriving before the
+    /// leader **takes it back** and runs it colocated
+    /// (`ColocatedNode::take_back_delegated`, #142). Driver policy, never a
+    /// constant of the state machine: liveness under a dead proxy is the
+    /// leader's, and this is its whole budget. Floor 1 — taking a round back
+    /// after a single re-delegation is always safe (two fan-outs of one
+    /// `(slot, ballot, command)` are P2b-idempotent), it merely runs more of
+    /// the log colocated; the ceiling is unbounded and still winnable, a
+    /// round a dead proxy holds forever being recovered by the next
+    /// leadership's Phase 1. Meaningless on a deployment without proxies.
+    pub proxy_take_back_resends: u64,
 }
 
 impl Default for DriverTunables {
@@ -166,6 +178,7 @@ impl Default for DriverTunables {
             reconfigurer_resend_ticks: ELECTION_TIMEOUT_BASE,
             reconfigure_timeout_elections: RECONFIGURE_TIMEOUT_ELECTIONS,
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
+            proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
         }
     }
 }
@@ -244,6 +257,14 @@ const READ_RETRY_TICKS: u64 = 10;
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// Default take-back budget for a delegated round (#142), in re-delegations
+/// — one per beat, so two election-timeout bases of ticks: long enough for a
+/// proxy's fan-out, fold and `Commit` to complete over a slow link, short
+/// enough that a dead proxy costs a slot a fraction of a second rather than
+/// an election. Driver policy (the core only counts), and a
+/// [`DriverTunables`] field so the harness can push it to its floor.
+const PROXY_TAKE_BACK_RESENDS: u64 = ELECTION_TIMEOUT_BASE * 2;
 
 /// Default stall budget for a matchmaker-set handover, in election timeouts:
 /// long enough for a slow matchmaker to answer a re-sent request, short enough

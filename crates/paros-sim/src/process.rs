@@ -7,8 +7,10 @@
 //! — an **acceptor** — wires the node to a per-node handle on the shared
 //! [`StorageWorld`] (the sim's stand-in for durable disk) and runs the same
 //! `run_node` a production `tokio::main` would; a [`MatchmakerProcess`] runs
-//! `run_matchmaker` over its own slice of the same world. Both sit inside a
-//! recovery loop that turns a `buggify`-injected seam crash into a real
+//! `run_matchmaker` over its own slice of the same world; a [`ProxyProcess`]
+//! runs `run_proxy` (#142) with no slice at all — a proxy leader holds
+//! nothing durable, so a kill simply reboots it empty. The first two sit
+//! inside a recovery loop that turns a `buggify`-injected seam crash into a real
 //! crash+restart: the driver unwinds, the volatile core is dropped, and the
 //! next iteration rebuilds it from the durable [`StorageWorld`]. A process kill
 //! — moonpool attrition on the main campaign, the scripted lifecycle on the
@@ -28,14 +30,44 @@ use moonpool_sim::{
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::hooks::{BuggifyHooks, ScriptedCrash};
-use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, Role};
+use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, Role};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::storage_world;
 use paros::{
-    BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId, RunError, Seam,
-    parse_addr, run_matchmaker, run_node,
+    AcceptorConfig, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId,
+    ProxyConfig, ProxyId, RunError, Seam, parse_addr, run_matchmaker, run_node, run_proxy,
 };
+
+/// One role's address book: the group's IPs in rank order, each paired with
+/// the identity its rank names — `NodeId`, `MatchmakerId` or `ProxyId`.
+fn ranked<I>(ips: &[String], id: fn(u64) -> I) -> SimulationResult<Vec<(I, String)>> {
+    ips.iter()
+        .enumerate()
+        .map(|(rank, ip)| {
+            parse_addr(ip).map(|addr| (id(u64::try_from(rank).expect("rank fits u64")), addr))
+        })
+        .collect()
+}
+
+/// The **bootstrap acceptor configuration** of a seed, as every node and every
+/// proxy leader derives it: the bootstrap ranks (`crate::shape::bootstrap_ranks`)
+/// under the run's quorum-system policy at their own size. Protocol data drawn
+/// once per seed, so every process reads the same one.
+fn bootstrap_config(
+    ctx: &SimContext,
+    pool: usize,
+    has_matchmakers: bool,
+    perturb: bool,
+) -> AcceptorConfig {
+    let bootstrap: Vec<NodeId> =
+        crate::shape::bootstrap_ranks(ctx.state(), pool, has_matchmakers, perturb)
+            .into_iter()
+            .map(NodeId)
+            .collect();
+    let policy = crate::shape::quorum_policy(ctx.state(), pool, perturb);
+    AcceptorConfig::new(bootstrap.clone(), policy.system(bootstrap.len()))
+}
 
 /// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess {
@@ -116,6 +148,21 @@ impl MatchmakerProcess {
 
     pub(crate) fn scripted() -> Self {
         Self { perturb: false }
+    }
+}
+
+/// A proxy leader in the simulation (#142): its own process group, so a seed
+/// draws how many it deploys independently of the other pools and attrition
+/// can be scoped to it. Nothing durable: a kill reboots it empty.
+pub(crate) struct ProxyProcess {
+    /// Whether the driver hooks and the shape knobs are live (the main
+    /// campaign) or dark (a scripted case — none registers proxies today).
+    perturb: bool,
+}
+
+impl ProxyProcess {
+    pub(crate) fn chaotic() -> Self {
+        Self { perturb: true }
     }
 }
 
@@ -202,6 +249,34 @@ impl Process for MatchmakerProcess {
     }
 }
 
+#[async_trait]
+impl Process for ProxyProcess {
+    fn name(&self) -> &'static str {
+        PROXY_GROUP
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let my_ip = ctx.my_ip().to_string();
+        let deployment = crate::roles::deployment(ctx.topology());
+        match deployment.role_of(&my_ip) {
+            Some(Role::Proxy(id)) => {
+                run_proxy_role(ctx, &deployment, id, &my_ip, self.perturb).await
+            }
+            other => {
+                assert_always!(
+                    false,
+                    "every proxy process is mapped to the proxy role",
+                    { "ip" => my_ip.as_str(), "role" => format!("{other:?}") }
+                );
+                Err(SimulationError::InvalidState(format!(
+                    "{my_ip} is not a proxy leader of the deployment"
+                )))
+            }
+        }
+    }
+}
+
 /// An acceptor: the provider-generic node driver inside the crash/recovery
 /// loop (see the module doc).
 // One recovery loop with per-exit-kind handling; splitting the arms would
@@ -223,28 +298,12 @@ async fn run_acceptor(
     // protocol data drawn once per seed (`crate::shape::bootstrap_ranks`):
     // the whole pool by default, and on a matchmaker seed possibly a subset
     // that leaves spares for a reconfiguration to pull in.
-    let members = deployment
-        .acceptors()
-        .iter()
-        .enumerate()
-        .map(|(i, ip)| {
-            parse_addr(ip)
-                .map(|addr| (NodeId(u64::try_from(i).expect("node index fits u64")), addr))
-        })
-        .collect::<SimulationResult<Vec<_>>>()?;
-    let matchmakers = deployment
-        .matchmakers()
-        .iter()
-        .enumerate()
-        .map(|(i, ip)| {
-            parse_addr(ip).map(|addr| {
-                (
-                    MatchmakerId(u64::try_from(i).expect("matchmaker index fits u64")),
-                    addr,
-                )
-            })
-        })
-        .collect::<SimulationResult<Vec<_>>>()?;
+    let members = ranked(deployment.acceptors(), NodeId)?;
+    let matchmakers = ranked(deployment.matchmakers(), MatchmakerId)?;
+    // The proxy leaders (#142): the map's proxy list, whose length is the
+    // `Config`'s `proxy_count` — zero on a seed without proxies, the plain
+    // deployment whose every Phase 2 stays colocated.
+    let proxies = ranked(deployment.proxies(), ProxyId)?;
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
     let bootstrap: Vec<NodeId> = match fixed_bootstrap {
         Some(n) => crate::shape::fixed_bootstrap_ranks(ctx.state(), n),
@@ -276,7 +335,7 @@ async fn run_acceptor(
         nodes: pool,
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
-        proxy_count: 0,
+        proxy_count: proxies.len(),
     };
 
     // The per-iteration durable-storage world, shared by every node and
@@ -438,6 +497,7 @@ async fn run_acceptor(
             parse_addr(my_ip)?,
             members.clone(),
             matchmakers.clone(),
+            proxies.clone(),
             boot,
             tunables,
             ctx.shutdown().clone(),
@@ -667,6 +727,57 @@ async fn run_matchmaker_role(
             Ok(()) => return Ok(()),
         }
     }
+}
+
+/// A proxy leader (#142): the provider-generic proxy driver, with no disk and
+/// no recovery loop — the only exit it has is an infrastructure failure or the
+/// shutdown, and a process kill (attrition on its own group) reboots it empty
+/// through a fresh factory instance, exactly as production would restart the
+/// process.
+#[tracing::instrument(level = "debug", skip_all, fields(proxy = id.0))]
+async fn run_proxy_role(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    id: ProxyId,
+    my_ip: &str,
+    perturb: bool,
+) -> SimulationResult<()> {
+    // The same address book every node sends through: the fan-out reaches
+    // the column's acceptors and the `Commit` every learner, all of them
+    // nodes of the pool.
+    let members = ranked(deployment.acceptors(), NodeId)?;
+    let has_matchmakers = !deployment.matchmakers().is_empty();
+    let config = ProxyConfig {
+        id,
+        acceptors: bootstrap_config(ctx, members.len(), has_matchmakers, perturb),
+    };
+    // A proxy has a shape too — its tick cadence and transport tunables —
+    // drawn once per seed like a node's and kept across its reboots.
+    let shape = crate::shape::boot(ctx.state(), my_ip, perturb).shape;
+    let hooks = BuggifyHooks::new(
+        ctx.time().clone(),
+        Duration::from_millis(crate::CHAOS_DURATION_MS),
+        perturb,
+        shape.seam_crash_bias,
+    );
+    let audit = NodeAudit::new(ctx.time().clone(), audit_world(ctx.state()));
+    run_proxy(
+        ctx.providers().clone(),
+        parse_addr(my_ip)?,
+        config,
+        members,
+        shape.tunables,
+        ctx.shutdown().clone(),
+        &hooks,
+        &audit,
+    )
+    .await
+    .map_err(|e| match e {
+        RunError::Infra(e) => e,
+        // A proxy has no storage and no seam: the driver's other exits are
+        // unreachable here, and one showing up is a driver bug.
+        other => SimulationError::InvalidState(format!("proxy {} exited with {other}", id.0)),
+    })
 }
 
 /// The **contract-suite workload** (issue #21 item F): runs the shared

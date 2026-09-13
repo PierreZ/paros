@@ -11,8 +11,9 @@
 //! Two axes, one check:
 //!
 //! - the **main campaign** ([`explore`], [`chain_smoke`], [`run_chain_seed`]):
-//!   a 3–6 node acceptor pool plus a 0–3 matchmaker pool, each its own
-//!   moonpool process group with its own per-seed count, under swarm network
+//!   a 3–6 node acceptor pool plus a 0–5 matchmaker pool plus a 0–3 proxy
+//!   leader pool, each its own moonpool process group with its own per-seed
+//!   count, under swarm network
 //!   turbulence, crash/restart attrition scoped per group, buggified provider
 //!   knobs, the driver's BUGGIFY hooks and the disk's fault sites, driven by
 //!   the Chain-of-Blocks workload;
@@ -46,8 +47,8 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
-use crate::process::{MatchmakerProcess, NodeProcess};
-use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP};
+use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess};
+use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP};
 
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
@@ -128,6 +129,18 @@ pub(crate) const PROCESS_POOL_RANGE: std::ops::RangeInclusive<usize> = 3..=6;
 /// `ReconfigureMatchmakers` to pull in; four and five leave room for a
 /// replacement after a matchmaker's registry is lost for good.
 pub(crate) const MATCHMAKER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=5;
+/// Per-seed **proxy leader pool** draw (inclusive, #142): the proxy process
+/// group (`crate::roles::PROXY_GROUP`), drawn independently of the other two
+/// pools. Zero is the plain deployment — `Config::proxy_count = 0`, every
+/// Phase 2 colocated on the leader, the wire byte-for-byte today's. One proxy
+/// is the deployment where a single dead proxy stalls every delegated slot
+/// until the leader takes them back (the take-back's whole reason); two and
+/// three spread `slot % proxy_count` so consecutive slots run on different
+/// proxies and a handoff successor's re-delegation can land on a proxy other
+/// than the one holding the round. The count is protocol data every node's
+/// `Config` carries; which process answers to a `ProxyId` is the deployment
+/// map's.
+pub(crate) const PROXY_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=3;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -192,11 +205,15 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// Moonpool re-samples each attrition base per seed under `ChaosMode::Swarm`
 /// (about half the seeds run a regime with no attrition, and the restart
 /// window is rescaled to 50–200% of the range below), so the values here are
-/// a base, not a fixed shape. The two regimes are independent: the acceptor
-/// pool's `max_dead` budget is spent only by dead acceptors and the
-/// matchmakers' only by dead matchmakers, so a killed matchmaker never keeps
-/// the cluster's own quorum whole by proxy, and both roles can be down at
-/// once. `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
+/// a base, not a fixed shape. The three regimes are independent: the acceptor
+/// pool's `max_dead` budget is spent only by dead acceptors, the
+/// matchmakers' only by dead matchmakers and the proxies' only by dead
+/// proxies, so a killed matchmaker or proxy never keeps the cluster's own
+/// quorum whole by proxy, and every role can be down at once. A killed proxy
+/// leader (#142) is the fault the leader's take-back exists for: every slot
+/// delegated to it stalls until the leader runs it colocated, and a proxy
+/// killed at the chaos cutoff stays down for the whole recovery tail.
+/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
 /// wipes its own storage provider, which paros does not use (the fake disk is
 /// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
 /// a restart in `crate::process` (#124) and answered by replacement through
@@ -204,7 +221,7 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
-fn chaos_surfaces() -> [Chaos; 4] {
+fn chaos_surfaces() -> [Chaos; 5] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -223,6 +240,10 @@ fn chaos_surfaces() -> [Chaos; 4] {
         },
         Chaos::Attrition {
             config: regime(AttritionVictims::group(MATCHMAKER_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::Attrition {
+            config: regime(AttritionVictims::group(PROXY_GROUP)),
             mode: ChaosMode::Swarm,
         },
         Chaos::BuggifyKnobs,
@@ -246,6 +267,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .processes(MATCHMAKER_POOL_RANGE, || {
             Box::new(MatchmakerProcess::chaotic())
         })
+        .processes(PROXY_POOL_RANGE, || Box::new(ProxyProcess::chaotic()))
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))

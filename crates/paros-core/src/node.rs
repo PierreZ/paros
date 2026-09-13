@@ -36,7 +36,7 @@ use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::matchmaking::Matchmaking;
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
 use crate::message::{Audience, Message, Party};
-use crate::proposer::Proposer;
+use crate::proposer::{Proposer, Round};
 use crate::quorum_read::QuorumReads;
 use crate::ready::Ready;
 use crate::replica::Replica;
@@ -1036,19 +1036,28 @@ impl ColocatedNode {
     /// one `(slot, ballot, command)` are P2b-idempotent, so the two
     /// verdicts can only agree.
     ///
+    /// Returns the rounds it took back, each with the proxy it was
+    /// delegated to — what a driver reports and an oracle counts; empty
+    /// whenever the call was a no-op.
+    ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, after_resends)))]
-    pub fn take_back_delegated(&mut self, after_resends: u64) {
+    pub fn take_back_delegated(&mut self, after_resends: u64) -> Vec<(Slot, ProxyId)> {
         if self.role != NodeRole::Leader {
-            return;
+            return Vec::new();
         }
+        let mut taken = Vec::new();
         for slot in self.proposer.stalled_delegations(after_resends) {
-            self.take_back(slot);
+            if let Some(proxy) = self.proposer.rounds().get(&slot).and_then(Round::proxy) {
+                self.take_back(slot);
+                taken.push((slot, proxy));
+            }
         }
         self.assert_invariants();
+        taken
     }
 
     /// The slots this leader currently holds **delegated** to a proxy, with

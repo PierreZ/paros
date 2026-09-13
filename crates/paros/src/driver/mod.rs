@@ -33,14 +33,14 @@
 //! `mod.rs` itself holds only [`run_node`], the select loop that wires them.
 
 mod boot;
-mod config;
-mod events;
+pub(crate) mod config;
+pub(crate) mod events;
 mod handover;
 mod matchmaking;
 mod ready;
 mod report;
 mod snap_repair;
-mod transport;
+pub(crate) mod transport;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub(crate) use config::{accept_and_serve, grpc_keep_alive};
@@ -50,15 +50,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moonpool_core::{
-    Detach, NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult,
-    TaskProvider, TcpListenerTrait, TimeProvider,
+    NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult,
+    TcpListenerTrait, TimeProvider,
 };
 use moonpool_hyper::{H2Server, H2ServerConfig, ReconnectingChannel};
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
     MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
-    NodeRole, ProposeResult, QuorumSystem, ReadIndexResult, ReconfigureRefusal, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal, Value,
+    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureRefusal,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal,
+    Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -84,7 +85,7 @@ use report::{Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{
     SnapRepair, handle_snap_chunk_request, handle_snap_chunk_response, snap_repair_tick,
 };
-use transport::{Outbound, PeerMailbox, PeerQueues, run_peer_delivery};
+use transport::{Outbound, PeerQueues, open_lane};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -135,6 +136,27 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     }
 }
 
+/// The driver's delegation choice for the proposal about to open (#142):
+/// consulted only where it can have an effect — this node leads a
+/// deployment with proxies — and from the node loop, never a task. First
+/// "run it colocated?" ([`DriverHooks::skip_delegation`]), then "which
+/// proxy?" ([`DriverHooks::proxy_for`], a proxy the deployment does not have
+/// is ignored); [`Delegation::Auto`] otherwise, which is the core's own rule
+/// and the whole answer under `NoHooks`.
+fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegation {
+    let count = node.config().proxy_count;
+    if count == 0 || !node.is_leader() {
+        return Delegation::Auto;
+    }
+    if hooks.skip_delegation() {
+        return Delegation::Colocated;
+    }
+    match hooks.proxy_for(node.proposer().next_slot(), count) {
+        Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
+        _ => Delegation::Auto,
+    }
+}
+
 /// Drive a paros node to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
@@ -153,6 +175,13 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// `matchmakers` is the matchmaker set (`MatchmakerId` → address), empty on
 /// plain Multi-Paxos; it must agree with the `Config`'s matchmaker set. The
 /// driver speaks the matchmaker contract only when it is non-empty.
+///
+/// `proxies` is the deployment map's proxy leaders (`ProxyId` → address,
+/// #142), empty on a deployment without proxies; its length must agree with
+/// the `Config`'s `proxy_count`. A leader delegates a settled round's Phase 2
+/// to the proxy the core names (or the one [`DriverHooks::proxy_for`] names),
+/// and takes it back after `tunables.proxy_take_back_resends` re-delegations
+/// without a `Commit`.
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
 /// first boot formats the store (the marker, durably) before the core reads
@@ -183,12 +212,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 /// identity stays down); [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
-#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len()))]
+#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring (providers,
 // storage, addressing, tunables, lifecycle, hooks, audit) — a bundle would
-// only rename the same eight things.
+// only rename the same nine things.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_node<P, S, H, A>(
     providers: P,
@@ -196,6 +225,7 @@ pub async fn run_node<P, S, H, A>(
     local_addr: String,
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
+    proxies: Vec<(ProxyId, String)>,
     boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -295,7 +325,7 @@ where
     // returns nothing and the edge's answer does not depend on it).
     let on_reject: crate::grpc::OnReject = {
         let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(NodeId(self_id), kind))
+        Arc::new(move |kind| audit.edge_rejected(Party::Node(NodeId(self_id)), kind))
     };
     let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
         tunables.client_inbox_capacity,
@@ -322,7 +352,8 @@ where
         })
         .collect::<SimulationResult<Vec<_>>>()?;
 
-    let mut peer_channels = Vec::with_capacity(peers.len());
+    let me = Party::Node(NodeId(self_id));
+    let mut peer_channels = Vec::with_capacity(peers.len() + proxies.len());
     let peer_queues = peers
         .into_iter()
         .map(|(id, addr, origin)| {
@@ -330,43 +361,65 @@ where
                 ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
             peer_channels.push(channel.clone());
             let client = ParosInternalClient::with_origin(channel, origin);
-            let regular = PeerMailbox::new(tunables.peer_queue_capacity);
-            let snapshot = PeerMailbox::new(tunables.snapshot_queue_capacity);
-            providers
-                .task()
-                .spawn_task(
-                    "paros-grpc-peer-delivery",
-                    run_peer_delivery(
-                        client.clone(),
-                        providers.time().clone(),
-                        incarnation_shutdown.clone(),
-                        regular.clone(),
-                        tunables,
-                        audit.clone(),
-                        self_id,
-                        id,
-                    ),
-                )
-                .detach();
-            providers
-                .task()
-                .spawn_task(
-                    "paros-grpc-snapshot-delivery",
-                    run_peer_delivery(
-                        client,
-                        providers.time().clone(),
-                        incarnation_shutdown.clone(),
-                        snapshot.clone(),
-                        tunables,
-                        audit.clone(),
-                        self_id,
-                        id,
-                    ),
-                )
-                .detach();
-            (id, PeerQueues { regular, snapshot })
+            let to = Party::Node(id);
+            let regular = open_lane(
+                &providers,
+                "paros-grpc-peer-delivery",
+                client.clone(),
+                tunables,
+                incarnation_shutdown.clone(),
+                audit,
+                me,
+                to,
+                tunables.peer_queue_capacity,
+            );
+            let snapshot = open_lane(
+                &providers,
+                "paros-grpc-snapshot-delivery",
+                client,
+                tunables,
+                incarnation_shutdown.clone(),
+                audit,
+                me,
+                to,
+                tunables.snapshot_queue_capacity,
+            );
+            (
+                id,
+                PeerQueues {
+                    regular,
+                    snapshot: Some(snapshot),
+                },
+            )
         })
         .collect::<BTreeMap<_, _>>();
+    // The proxy leaders (#142): one lane each, on the same lossy keep-newest
+    // contract as a peer's. A delegation lost here is re-delegated on the
+    // next beat, exactly as a lost `Accept` is re-sent. Empty on a
+    // deployment without proxies, whose transport is byte-for-byte today's.
+    let proxy_queues = proxies
+        .into_iter()
+        .map(|(id, addr)| {
+            let origin = http::Uri::try_from(format!("http://{addr}"))
+                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
+            let channel =
+                ReconnectingChannel::new(&providers, addr, grpc_channel_config(&tunables));
+            peer_channels.push(channel.clone());
+            let client = ParosInternalClient::with_origin(channel, origin);
+            let lane = open_lane(
+                &providers,
+                "paros-grpc-proxy-delivery",
+                client,
+                tunables,
+                incarnation_shutdown.clone(),
+                audit,
+                me,
+                Party::Proxy(id),
+                tunables.peer_queue_capacity,
+            );
+            Ok((id, lane))
+        })
+        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
 
     // The matchmaker links (#120): one reconnecting channel per matchmaker,
     // and the inbox their answers come back through. Empty on plain
@@ -416,7 +469,8 @@ where
     // concurrent RPCs over that shared connection.
     let out = Outbound {
         peer_queues,
-        self_id,
+        proxy_queues,
+        sender: me,
     };
     let loop_ctx = NodeLoop {
         providers: &providers,
@@ -533,7 +587,13 @@ where
                         .filter(|c| *c < cols),
                     _ => None,
                 };
-                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, Delegation::Auto) {
+                // The delegation override (#142), under the same gate: only
+                // a leader of a deployment with proxies is asked, first
+                // whether to run this round colocated, then which proxy to
+                // hand it to; `Delegation::Auto` — the core's `slot %
+                // proxy_count` — stands under `NoHooks`.
+                let delegation = delegation_choice(&node, hooks);
+                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, delegation) {
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.
@@ -1121,6 +1181,16 @@ where
                         tracing::info!(node = self_id, "accept_resend_skipped");
                     } else {
                         node.resend_pending();
+                    }
+                    // Liveness under a dead proxy (#142): a delegated round
+                    // re-delegated the budget's worth of beats without its
+                    // `Commit` is taken back and run colocated. The budget
+                    // is driver policy (`proxy_take_back_resends`, born
+                    // buggified); the core only counts. A no-op on a
+                    // deployment without proxies.
+                    for (slot, proxy) in node.take_back_delegated(tunables.proxy_take_back_resends) {
+                        audit.delegation_taken_back(NodeId(self_id), slot, proxy);
+                        tracing::info!(node = self_id, slot = slot.0, proxy = proxy.0, "delegation_taken_back");
                     }
                 }
                 // The open matchmaking request's re-send (#120): paced by

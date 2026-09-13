@@ -170,6 +170,16 @@ re-delegations it **takes the round back** and runs it itself. The fallback is
 always the classic Phase 2, and safety never rests on it, because two fan-outs of
 one `(slot, ballot, command)` are idempotent at every acceptor.
 
+The proxy runs on a process of its own, driven by the third driver beside the
+node's and the matchmaker's. It has nothing to persist: no promise, no log, no
+format marker, so a crash reboots it empty and the leader's next re-delegation
+rebuilds every round it still needs. In the simulation the proxies are their
+own process group, drawn per seed like the matchmakers, killed and revived by
+their own attrition regime, and judged by one claim the node's own `Commit`
+already answers to: every `Commit` a proxy emits must be backed by a Phase-2
+quorum of durable accepts at one ballot, as the audit folded them from the
+acceptors' own reports, never from the proxy's tally.
+
 The model checker that proves this found one rule the core was missing. A
 delegated round left no record at the leader, so a handoff successor that
 crashed rebooted with its allocator rewound, and a duplicated `Relinquish`
@@ -182,9 +192,11 @@ hole. The rule that closes both is in the next section.
 `Delegation`, `ColocatedNode::propose_in`, `ColocatedNode::take_back_delegated`
 (`node.rs`, `node/phase2.rs`); `Party`, `Audience::Proxy` (`message.rs`);
 `Config::proxy_count` (`state.rs`); the model checker `proxy_model.rs`; the
-example `paros-core/examples/proxy_leader.rs`. Paper: Whittaker et al.,
-*Compartmentalized Paxos* §3.1. No level yet: the proxy's driver and process
-group are the second half of the work.
+example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
+(`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
+(`paros-sim/src/process.rs`, `roles.rs`), the audit's
+`observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
+al., *Compartmentalized Paxos* §3.1. No level yet.
 
 ## Cooperative leader handoff
 

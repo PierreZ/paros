@@ -21,9 +21,9 @@ use std::collections::BTreeMap;
 
 use paros_core::{
     AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
-    RegistrationKind, Slot,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap,
+    ProxyId, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep,
+    Registration, RegistrationKind, Slot,
 };
 
 use crate::driver::BootRefusal;
@@ -40,6 +40,21 @@ pub enum StorageFaultDecision {
     /// Fail-stop: the node crashes rather than run on state it does not
     /// durably have, and recovery is the ordinary crash/restart path.
     Crash,
+}
+
+/// What a delegated `Accept` did when it reached a proxy leader (#142), as
+/// reported by [`Audit::proxy_delegated`]: the proxy's own counters, read at
+/// the step, say which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelegationOutcome {
+    /// A fresh round was opened and fanned out.
+    Opened,
+    /// A re-delegation of an open round: re-fanned-out (P2b-idempotent),
+    /// the leader hint refreshed.
+    Refanned,
+    /// Ignored: a round this proxy already decided at that ballot, a ballot
+    /// below the one it works for, or a delegation naming another party.
+    Ignored,
 }
 
 /// A node's durable deployment, as reported at boot by [`Audit::recovered`]:
@@ -118,6 +133,21 @@ pub trait Audit {
     /// This node handed `msg` to the transport, addressed to `to`. Reports the
     /// core's outbound decision even when the network later drops it.
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {}
+
+    /// This node handed `msg` — a delegated `Accept` (#142) — to the
+    /// transport, addressed to the proxy leader `proxy`: the first
+    /// delegation of a round, a re-send's re-delegation, or a handoff
+    /// successor's re-delegation with `leader` naming itself. The leader's
+    /// exercise of its Phase-2 authority for that slot, exactly as a
+    /// colocated `Accept` send is.
+    fn delegation_sent(&self, node: NodeId, proxy: ProxyId, msg: &Message) {}
+
+    /// The proxy leader `proxy` handed `msg` to the transport, addressed to
+    /// `to`: the `Accept` it fans out to a column (`reply_to` naming the
+    /// proxy, `leader` the node whose authority it carries), the `Commit` it
+    /// emits to every learner, or a `Nack` it relays to the delegating
+    /// leader.
+    fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {}
 
     /// This node became leader at `won`, holding `promised` at that instant and
     /// having filled `gap_fills` undecided holes with no-ops, and now runs
@@ -236,13 +266,14 @@ pub trait Audit {
     /// injected-vs-detected accounting into O(1) state without string parsing.
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {}
 
-    /// This node dropped one outbound message at the send seam (hook-decided
-    /// per-message loss, indistinguishable from network loss to the peers).
-    fn dropped_at_send(&self, node: NodeId, to: NodeId, msg: &Message) {}
+    /// `from` (a node, or a proxy leader) dropped one outbound message at
+    /// the send seam (hook-decided per-message loss, indistinguishable from
+    /// network loss to the peers).
+    fn dropped_at_send(&self, from: Party, to: Party, msg: &Message) {}
 
     /// The driver deliberately sent this one outbound message twice
     /// ([`DriverHooks::duplicate_outgoing`](crate::DriverHooks)).
-    fn duplicated_at_send(&self, node: NodeId, to: NodeId, msg: &Message) {}
+    fn duplicated_at_send(&self, from: Party, to: Party, msg: &Message) {}
 
     /// The driver deliberately dropped this one client-facing reply after the
     /// server state advanced ([`DriverHooks::drop_client_reply`](crate::DriverHooks)).
@@ -392,13 +423,14 @@ pub trait Audit {
     /// ran out.
     fn read_expired(&self, node: NodeId, early: bool) {}
 
-    /// This node dropped one outbound message at a bounded in-process mailbox
-    /// (the lossy per-peer transport handoff): either the enqueue found the
-    /// peer queue full, or the delivery task discarded a stale backlog entry
-    /// to keep the newest batch. `kind` is the message's stable label.
-    /// Deliberately lossy by design (heartbeats/resends repair it); surfaced
-    /// so a sweep can see the loss instead of inferring it.
-    fn dropped_at_mailbox(&self, node: NodeId, to: NodeId, kind: &'static str) {}
+    /// `from` (a node, or a proxy leader) dropped one outbound message at a
+    /// bounded in-process mailbox (the lossy per-peer transport handoff):
+    /// either the enqueue found the peer queue full, or the delivery task
+    /// discarded a stale backlog entry to keep the newest batch. `kind` is
+    /// the message's stable label. Deliberately lossy by design
+    /// (heartbeats/resends repair it); surfaced so a sweep can see the loss
+    /// instead of inferring it.
+    fn dropped_at_mailbox(&self, from: Party, to: Party, kind: &'static str) {}
 
     /// This node skipped materializing a snapshot offer because its applied
     /// application state did not cover the offered boundary (a legitimate
@@ -415,7 +447,76 @@ pub trait Audit {
     /// resends repair whichever messages were lost. Reported from the
     /// delivery task (the audit handle is cloned into it), so implementations
     /// must stay observation-only here as everywhere.
-    fn delivery_failed(&self, node: NodeId, to: NodeId) {}
+    fn delivery_failed(&self, from: Party, to: Party) {}
+
+    // ---- proxy leaders (#142): the leader's side and `run_proxy` -------------
+
+    /// This leader **took back** the round at `slot` it had delegated to
+    /// `proxy` — re-delegated `after_resends` times without the proxy's
+    /// `Commit` — and now runs it colocated
+    /// ([`paros_core::ColocatedNode::take_back_delegated`]). Reported once
+    /// per round taken back, on the beat that took it.
+    fn delegation_taken_back(&self, node: NodeId, slot: Slot, proxy: ProxyId) {}
+
+    /// The proxy leader `proxy` (re)booted, empty, over the bootstrap
+    /// configuration `acceptors`. A proxy holds nothing durable, so every
+    /// boot is a first boot; a rebooted proxy relearns its rounds from the
+    /// leader's re-delegations.
+    fn proxy_booted(&self, proxy: ProxyId, acceptors: &AcceptorConfig) {}
+
+    /// The proxy leader `proxy` stepped a delegated `Accept` from `leader`
+    /// for `slot` at `ballot` (the command hashed to `vhash`), and `outcome`
+    /// says what it did with it. Reported at the step, before the batch it
+    /// produced is drained.
+    fn proxy_delegated(
+        &self,
+        proxy: ProxyId,
+        leader: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        vhash: u64,
+        outcome: DelegationOutcome,
+    ) {
+    }
+
+    /// The proxy leader `proxy` closed `count` open rounds of a lower ballot
+    /// because a delegation at a higher one arrived: the leadership they
+    /// belonged to is superseded and no `Commit` will ever close them here.
+    fn proxy_rounds_superseded(&self, proxy: ProxyId, count: u64) {}
+
+    /// The proxy leader `proxy` fanned the `Accept` for `slot` at `ballot`
+    /// (carrying `leader` as the hint and the command hashed to `vhash`) out
+    /// to `addressees` acceptors of `column`. Once per fan-out (the first,
+    /// and every re-fan-out a re-delegation or the proxy's beat produces),
+    /// reported as the batch is drained, before its messages leave.
+    #[allow(clippy::too_many_arguments)]
+    fn proxy_fanned_out(
+        &self,
+        proxy: ProxyId,
+        leader: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        vhash: u64,
+        column: Option<usize>,
+        addressees: usize,
+    ) {
+    }
+
+    /// The proxy leader `proxy` **decided** `slot` at `ballot` (the command
+    /// hashed to `vhash`) on a Phase-2 quorum of the round's column and is
+    /// emitting the `Commit`. Reported as the batch is drained, before the
+    /// `Commit` leaves — the instant an oracle judges the decision against
+    /// the durable accepts it has already folded.
+    fn proxy_decided(&self, proxy: ProxyId, slot: Slot, ballot: Ballot, vhash: u64) {}
+
+    /// The proxy leader `proxy` relayed an acceptor's `Nack` for `slot` at
+    /// `ballot` to `leader`, the node that delegated the round, and closed
+    /// the round.
+    fn proxy_nack_relayed(&self, proxy: ProxyId, leader: NodeId, slot: Slot, ballot: Ballot) {}
+
+    /// The proxy leader `proxy` deliberately skipped this beat's re-fan-out
+    /// of its open rounds ([`DriverHooks::skip_proxy_resend`](crate::DriverHooks)).
+    fn proxy_resend_skipped(&self, proxy: ProxyId) {}
 
     /// This node lost its leadership with client replies still parked:
     /// `writes` proposals whose slot may yet commit under the successor (their
@@ -423,11 +524,11 @@ pub trait Audit {
     /// redirect on the spot.
     fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
 
-    /// The gRPC edge refused an inbound request before it reached the node
-    /// loop — a peer message that decoded from the wire but not into a
-    /// `Message`. The refusal happens at the edge; nothing inside the node
-    /// changed.
-    fn edge_rejected(&self, node: NodeId, kind: EdgeRejection) {}
+    /// The gRPC edge of `at` (a node, or a proxy leader) refused an inbound
+    /// request before it reached the loop — a peer message that decoded from
+    /// the wire but not into a `Message`. The refusal happens at the edge;
+    /// nothing inside the process changed.
+    fn edge_rejected(&self, at: Party, kind: EdgeRejection) {}
 
     // ---- the leader-side matchmaking phase (#120) and reconfiguration (#122) ----
 

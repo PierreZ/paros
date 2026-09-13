@@ -632,23 +632,9 @@ impl World {
             }
             let node = self.site(id).live.as_mut().expect("live");
             node.resend_pending();
-            let delegated_before: BTreeSet<Slot> = node
-                .delegated_rounds()
-                .into_iter()
-                .map(|(s, _)| s)
-                .collect();
-            node.take_back_delegated(after);
-            let delegated_after: BTreeSet<Slot> = node
-                .delegated_rounds()
-                .into_iter()
-                .map(|(s, _)| s)
-                .collect();
-            let still_open: Vec<Slot> = delegated_before
-                .difference(&delegated_after)
-                .filter(|slot| node.proposer().rounds().contains_key(slot))
-                .copied()
-                .collect();
-            self.taken_back.extend(still_open);
+            let taken = node.take_back_delegated(after);
+            self.taken_back
+                .extend(taken.into_iter().map(|(slot, _)| slot));
             if self.taken_back.len() > taken_before {
                 self.reach.taken_back += 1;
             }

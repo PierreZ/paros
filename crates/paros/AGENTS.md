@@ -32,12 +32,18 @@ the driver, never in a sim-only path.
   `BootKind` against — `BootRefusal`, `RunError::Refused`), `MemStorage`,
   `storage_contract_suite` · `matchmaker/{mod,storage}.rs` `run_matchmaker`,
   `MatchmakerConfig`, `MatchmakerStorage: RegistryStorage`,
-  `MemMatchmakerStorage`, `matchmaker_storage_contract_suite`.
+  `MemMatchmakerStorage`, `matchmaker_storage_contract_suite` ·
+  `proxy/mod.rs` `run_proxy`, `ProxyConfig` (#142: the third driver — the
+  node contract's Phase-2 subset over the same `Outbound` mailboxes, nothing
+  durable, `RunError::Infra` its only exit). Every send names a `Party`
+  sender and destination (`Outbound::sender`, `proxy_queues`); `run_node`
+  takes the deployment map's proxies beside its peers.
 - `grpc.rs` + `proto/{common,internal,matchmaker,paros}.proto` (built by
   `build.rs` with `tonic-prost-build`; runtime-free tonic so `paros` stays
   wasm-checkable): `Paros` (Propose/Read/Compact/Reconfigure/
-  ReconfigureMatchmakers), `ParosInternal` (Deliver/Inspect/Retire),
-  `ParosMatchmaker` (Matchmake/GarbageCollect/Reconfigure).
+  ReconfigureMatchmakers), `ParosInternal` (Deliver/Inspect/Retire; a proxy
+  leader serves its `Deliver` alone — `ProxyService`), `ParosMatchmaker`
+  (Matchmake/GarbageCollect/Reconfigure).
 - `corruption.rs` the CTRL record classification (`classify_log`).
 
 ## Rules local to this crate

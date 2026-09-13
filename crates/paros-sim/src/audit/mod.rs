@@ -43,12 +43,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
-    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, PendingBootstrap, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam,
-    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash, message_kind,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, DelegationOutcome, Deployment,
+    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
+    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
+    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
+    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    message_kind,
 };
 
 use self::state::AuditState;
@@ -663,18 +664,20 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// Persist-before-send, observed at the send seam: the two replies whose
     /// meaning is a durable fact must find that fact already folded — an
     /// `Accepted` its sender's durable accept, a `Commit` a quorum decision
-    /// on the tally (see [`AuditWorld::check_final_convergence`]).
-    fn observe_durable_send(&self, node: NodeId, msg: &Message) {
+    /// on the tally (see [`AuditWorld::check_final_convergence`]). `from` is
+    /// a node, or the proxy leader that decided the `Commit` (#142); only a
+    /// node ever sends an `Accepted`.
+    fn observe_durable_send(&self, from: Party, msg: &Message) {
         if let Message::Accepted { ballot, slot, .. } = msg {
             let st = self.state();
             let holds = st
                 .accept_sets
                 .get(&(slot.0, ballot.round, ballot.node.0))
-                .is_some_and(|holders| holders.contains(&node.0));
+                .is_some_and(|holders| from.node().is_some_and(|n| holders.contains(&n.0)));
             assert_always!(
                 holds,
                 "an outgoing Accepted names a durably accepted record",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
         }
         if let Message::Commit {
@@ -694,13 +697,33 @@ impl<T: TimeProvider> NodeAudit<T> {
             assert_always!(
                 decided.is_some(),
                 "an outgoing Commit names a slot a durable accept quorum already decided",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
             assert_always!(
                 decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == command_hash(command)),
                 "an outgoing Commit carries the quorum-decided value",
-                { "node" => node.0, "slot" => slot.0, "round" => ballot.round }
+                { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
+        }
+    }
+
+    /// A `Commit` on the wire, whoever sends it: it names a decided slot,
+    /// and where the durable-accept tally already knows the decision it
+    /// carries that value. Checked against `decided`, never the apply-fed
+    /// `chosen` map: a #94 re-chosen identity applies as a `Noop` everywhere
+    /// while its commit honestly carries the decided user command.
+    fn observe_commit_send(&self, from: Party, msg: &Message) {
+        self.observe_durable_send(from, msg);
+        if let Message::Commit { slot, command, .. } = msg {
+            let vhash = command_hash(command);
+            let st = self.state();
+            if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
+                assert_always!(
+                    vhash == decided_vhash,
+                    "a commit carries the chosen value",
+                    { "from" => from.to_string(), "slot" => slot.0 }
+                );
+            }
         }
     }
 }
@@ -987,32 +1010,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
         // and reported before the send; a re-answer names an older record
-        // that was folded when it was first written or re-read at boot).
-        self.observe_durable_send(node, msg);
-        // A `Commit` names a decided slot; where the durable-accept tally
-        // already knows the decision, the commit must carry that value.
-        // Checked against `decided`, never the apply-fed `chosen` map: a #94
-        // re-chosen identity applies as a `Noop` everywhere while its commit
-        // honestly carries the decided user command.
-        if let Message::Commit { slot, command, .. } = msg {
-            let vhash = command_hash(command);
-            let st = self.state();
-            if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
-                assert_always!(
-                    vhash == decided_vhash,
-                    "a commit carries the chosen value",
-                    { "node" => node.0, "slot" => slot.0 }
-                );
-            }
-        }
-        // The Phase-2 half of P2b, checked *on the wire*: a ballot names its
-        // own proposer, so exactly one node ever sends `Accept`s at it, and
-        // two different commands under one `(ballot, slot)` mean the
-        // proposer allocated a slot it already had in flight. Reading the
-        // send rather than the receive is deliberate — it indicts the
-        // proposer, not the network — and it is the only place the anomaly
-        // is visible: an accept quorum may reject it, leaving no durable
-        // trace at all.
+        // that was folded when it was first written or re-read at boot). A
+        // `Commit` names a decided slot and carries the decided value.
+        self.observe_commit_send(Party::Node(node), msg);
+        // The Phase-2 half of P2b, checked *on the wire*, and the two claims
+        // around it: *who* may propose under this ballot (authority
+        // uniqueness — checked first, since a violation of it explains a
+        // violation of the rest), *whom* it addresses and *on what Phase-1
+        // licence* (#121, #122), then *what* was proposed.
         if let Message::Accept {
             ballot,
             slot,
@@ -1022,26 +1027,147 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         {
             let vhash = command_hash(command);
             let mut st = self.state();
-            // Authority uniqueness first: *who* may propose under this ballot,
-            // checked before *what* they proposed. A violation of the first
-            // explains a violation of the second, so ordering them this way
-            // makes the root cause the one that fires.
             st.observe_authority_use(node.0, *ballot);
-            // Then *whom* it addresses and *on what Phase-1 licence* (#121,
-            // #122): the ballot's own acceptors, once every prior
-            // configuration promised a quorum.
-            st.observe_accept_send(node.0, to.0, *ballot);
-            st.any_proposal_checked = true;
-            if let Some(prev) = st
-                .proposed
-                .insert((ballot.round, ballot.node.0, slot.0), vhash)
-            {
-                assert_always!(
-                    prev == vhash,
-                    "one ballot proposes at most one command for a slot"
-                );
-            }
+            st.observe_accept_send(Party::Node(node), to.0, *ballot);
+            st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
         }
+    }
+
+    fn delegation_sent(&self, node: NodeId, proxy: ProxyId, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
+        // A delegation is the leader exercising its Phase-2 authority for
+        // the slot — the same two claims a colocated `Accept` makes about
+        // *who* and *what*; *whom* it addresses is a proxy, which is judged
+        // at the proxy's own fan-out.
+        if let Message::Accept {
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        {
+            let vhash = command_hash(command);
+            let mut st = self.state();
+            st.observe_authority_use(node.0, *ballot);
+            st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
+        }
+        let _ = proxy;
+    }
+
+    fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
+        let from = Party::Proxy(proxy);
+        match msg {
+            // The fan-out carries the leader's command to the ballot's own
+            // acceptors: *whom* and *what* are judged exactly as the leader's
+            // colocated `Accept` is; *who* is the leader the hint names, whose
+            // authority the delegation already exercised.
+            Message::Accept {
+                ballot,
+                slot,
+                command,
+                ..
+            } => {
+                let vhash = command_hash(command);
+                let mut st = self.state();
+                st.observe_accept_send(from, to.0, *ballot);
+                st.observe_proposal(from, *ballot, slot.0, vhash);
+            }
+            Message::Commit { .. } => self.observe_commit_send(from, msg),
+            _ => {}
+        }
+    }
+
+    fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {
+        self.state().delegation_taken_back = true;
+    }
+
+    fn proxy_booted(&self, proxy: ProxyId, _acceptors: &AcceptorConfig) {
+        let mut st = self.state();
+        let boots = st.proxy_boots.entry(proxy.0).or_default();
+        *boots += 1;
+        if *boots > 1 {
+            reach_once!(st.proxy_rebooted, "proxy: a proxy leader reboots empty");
+        }
+    }
+
+    fn proxy_delegated(
+        &self,
+        _proxy: ProxyId,
+        _leader: NodeId,
+        _slot: Slot,
+        _ballot: Ballot,
+        _vhash: u64,
+        outcome: DelegationOutcome,
+    ) {
+        let mut st = self.state();
+        match outcome {
+            DelegationOutcome::Opened => {}
+            DelegationOutcome::Refanned => reach_once!(
+                st.proxy_refanned,
+                "proxy: a re-delegation re-fans-out an open round"
+            ),
+            DelegationOutcome::Ignored => reach_once!(
+                st.proxy_delegation_ignored,
+                "proxy: a stale or closed delegation is ignored"
+            ),
+        }
+    }
+
+    fn proxy_rounds_superseded(&self, _proxy: ProxyId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_rounds_superseded,
+            "proxy: a higher ballot closes a proxy's older rounds"
+        );
+    }
+
+    fn proxy_fanned_out(
+        &self,
+        _proxy: ProxyId,
+        leader: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        _vhash: u64,
+        _column: Option<usize>,
+        _addressees: usize,
+    ) {
+        // Every leader hint a round's fan-outs ever named: a second one is
+        // a handoff successor's re-delegation refreshing it.
+        self.state()
+            .fanout_leaders
+            .entry((slot.0, ballot.round, ballot.node.0))
+            .or_default()
+            .insert(leader.0);
+    }
+
+    fn proxy_decided(&self, proxy: ProxyId, slot: Slot, ballot: Ballot, vhash: u64) {
+        self.state()
+            .observe_proxy_decision(proxy.0, slot.0, ballot, vhash);
+    }
+
+    fn proxy_nack_relayed(&self, _proxy: ProxyId, _leader: NodeId, _slot: Slot, _ballot: Ballot) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_nack_relayed,
+            "proxy: a Nack is relayed to the delegating leader"
+        );
+    }
+
+    fn proxy_resend_skipped(&self, _proxy: ProxyId) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_resend_skipped,
+            "proxy: a proxy skips a re-fan-out beat"
+        );
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, round = won.round))]
@@ -1646,7 +1772,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn dropped_at_send(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+    fn dropped_at_send(&self, _from: Party, to: Party, msg: &Message) {
+        if let (Party::Proxy(_), Message::Accept { .. }) = (to, msg) {
+            // The delegation itself, lost: the leader re-delegates on its
+            // next beat, and the budget counts it toward a take-back.
+            let mut st = self.state();
+            reach_once!(
+                st.dropped_delegation,
+                "proxy: a delegation is lost at the send seam"
+            );
+        }
         let mut st = self.state();
         match msg {
             Message::Accept { .. } => {
@@ -1723,7 +1858,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn duplicated_at_send(&self, _node: NodeId, _to: NodeId, msg: &Message) {
+    fn duplicated_at_send(&self, _from: Party, _to: Party, msg: &Message) {
         let mut st = self.state();
         reach_once!(
             st.duplicated_any,
@@ -1858,7 +1993,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn dropped_at_mailbox(&self, _node: NodeId, _to: NodeId, _kind: &'static str) {
+    fn dropped_at_mailbox(&self, _from: Party, _to: Party, _kind: &'static str) {
         let mut st = self.state();
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
     }
@@ -1916,7 +2051,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn delivery_failed(&self, _node: NodeId, _to: NodeId) {
+    fn delivery_failed(&self, _from: Party, _to: Party) {
         let mut st = self.state();
         st.delivery_failures += 1;
         reach_once!(st.delivery_failed, "a peer delivery RPC fails or times out");
@@ -1949,7 +2084,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn edge_rejected(&self, _node: NodeId, _kind: EdgeRejection) {
+    fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
         let mut st = self.state();
         st.edge_rejections += 1;
         reach_once!(

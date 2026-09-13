@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use moonpool_core::{Providers, TimeProvider};
+use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
 use moonpool_hyper::ReconnectingChannel;
-use paros_core::{Message, NodeId};
+use paros_core::{Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -20,13 +20,14 @@ use crate::hooks::DriverHooks;
 use super::config::{DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
-/// One peer's two outbound mailboxes: `regular` for ordinary protocol
-/// traffic and `snapshot` for the bulky `InstallSnapshot` class. Separate
-/// bounded queues, so a snapshot push can never evict the beats and `Accept`s
-/// queued beside it (and vice versa).
+/// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
+/// and `snapshot` for the bulky `InstallSnapshot` class. Separate bounded
+/// queues, so a snapshot push can never evict the beats and `Accept`s queued
+/// beside it (and vice versa). A proxy leader opens no snapshot lane: it
+/// never serves one.
 pub(crate) struct PeerQueues {
     pub(crate) regular: PeerMailbox,
-    pub(crate) snapshot: PeerMailbox,
+    pub(crate) snapshot: Option<PeerMailbox>,
 }
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
@@ -189,28 +190,78 @@ impl PeerMailbox {
     }
 }
 
-/// The driver's outbound side: every peer's mailboxes plus this node's id for
-/// the observability events. Bundled so `drain_ready` takes one handle.
+/// The driver's outbound side: every peer's mailboxes, every proxy leader's
+/// mailbox (#142; empty on a deployment without proxies), and the sender's
+/// identity for the observability events — a node, or a proxy leader running
+/// [`run_proxy`](crate::run_proxy), which sends through exactly this handle.
+/// Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
     pub(crate) peer_queues: BTreeMap<NodeId, PeerQueues>,
-    /// This node's id, for the observability events.
-    pub(crate) self_id: u64,
+    /// The proxy leaders' regular mailboxes: a node delegates through them,
+    /// and nothing bulky ever goes to a proxy (a proxy holds no snapshot).
+    pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
+    /// Who is sending, for the observability events and the audit.
+    pub(crate) sender: Party,
 }
 
 impl Outbound {
+    /// The node this handle sends as. The node driver's own paths (the
+    /// `Ready` drain, the snapshot repair plane) are the only callers, and
+    /// they never run on a proxy.
+    ///
+    /// # Panics
+    ///
+    /// If the sender is a proxy leader — a programmer error, never an
+    /// operating condition.
+    pub(crate) fn self_node(&self) -> NodeId {
+        self.sender
+            .node()
+            .expect("the node driver's paths send as a node, never as a proxy")
+    }
+
+    /// Report one send through the audit port: the callback is chosen by
+    /// **who** sends to **whom**, so each keeps its own checks — a node's
+    /// send, a node's delegation to a proxy, a proxy's fan-out or `Commit`.
+    /// A proxy never addresses a proxy.
+    fn report_sent<A: Audit>(&self, audit: &A, to: Party, msg: &Message) {
+        match (self.sender, to) {
+            (Party::Node(from), Party::Node(to)) => audit.sent(from, to, msg),
+            (Party::Node(from), Party::Proxy(proxy)) => audit.delegation_sent(from, proxy, msg),
+            (Party::Proxy(proxy), Party::Node(to)) => audit.proxy_sent(proxy, to, msg),
+            (Party::Proxy(_), Party::Proxy(_)) => {
+                unreachable!("a proxy leader never addresses a proxy leader")
+            }
+        }
+    }
+
+    /// The mailbox `to`'s copy of `msg` goes into, if the deployment map
+    /// names `to` at all.
+    fn mailbox_for(&self, to: Party, msg: &Message) -> Option<&PeerMailbox> {
+        match to {
+            Party::Node(node) => self.peer_queues.get(&node).map(|queues| {
+                if matches!(msg, Message::InstallSnapshot { .. }) {
+                    queues.snapshot.as_ref().unwrap_or(&queues.regular)
+                } else {
+                    &queues.regular
+                }
+            }),
+            Party::Proxy(proxy) => self.proxy_queues.get(&proxy),
+        }
+    }
+
     /// Hand `msg` to the lossy per-peer transport and surface the protocol send.
     /// `msg_sent` deliberately records the core's outbound decision even when
     /// the bounded mailbox or network later drops it; safety oracles inspect the
     /// messages a proposer attempted, independently of delivery.
-    #[tracing::instrument(level = "trace", skip_all, fields(node = self.self_id, to = to.0, kind = message_kind(msg)))]
+    #[tracing::instrument(level = "trace", skip_all, fields(from = %self.sender, to = %to, kind = message_kind(msg)))]
     pub(crate) fn transmit<H: DriverHooks, A: Audit>(
         &self,
         hooks: &H,
         audit: &A,
-        to: NodeId,
+        to: Party,
         msg: &Message,
     ) {
-        audit.sent(NodeId(self.self_id), to, msg);
+        self.report_sent(audit, to, msg);
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
         // only one whose command hash the trace needs: it is what lets an oracle
@@ -225,8 +276,8 @@ impl Outbound {
                 command,
                 ..
             } => tracing::info!(
-                node = self.self_id,
-                to = to.0,
+                from = %self.sender,
+                to = %to,
                 kind,
                 bround = ballot.round,
                 bnode = ballot.node.0,
@@ -236,8 +287,8 @@ impl Outbound {
             ),
             _ => match message_route(msg) {
                 Some((_, ballot, Some(slot))) => tracing::info!(
-                    node = self.self_id,
-                    to = to.0,
+                    from = %self.sender,
+                    to = %to,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
@@ -248,29 +299,24 @@ impl Outbound {
                 // no slot to report, and reporting a bare `0` would put back on the
                 // trace exactly the sentinel #56 took off the wire.
                 Some((_, ballot, None)) => tracing::info!(
-                    node = self.self_id,
-                    to = to.0,
+                    from = %self.sender,
+                    to = %to,
                     kind,
                     bround = ballot.round,
                     bnode = ballot.node.0,
                     "msg_sent"
                 ),
-                None => tracing::info!(node = self.self_id, to = to.0, kind, "msg_sent"),
+                None => tracing::info!(from = %self.sender, to = %to, kind, "msg_sent"),
             },
         }
-        if let Some(queues) = self.peer_queues.get(&to) {
+        if let Some(queue) = self.mailbox_for(to, msg) {
             let Ok(message) = message_to_proto(msg) else {
                 tracing::warn!(
-                    node = self.self_id,
-                    to = to.0,
+                    from = %self.sender,
+                    to = %to,
                     "failed to encode Paxos message"
                 );
                 return;
-            };
-            let queue = if matches!(msg, Message::InstallSnapshot { .. }) {
-                &queues.snapshot
-            } else {
-                &queues.regular
             };
             // The mailbox's four decisions, all taken here on the node loop,
             // each consulted only where it can have an observable effect.
@@ -298,16 +344,53 @@ impl Outbound {
                 // happens, naming the *evicted* message, not the one that
                 // displaced it.
                 let evicted_kind = proto_message_kind(&evicted);
-                audit.dropped_at_mailbox(NodeId(self.self_id), to, evicted_kind);
+                audit.dropped_at_mailbox(self.sender, to, evicted_kind);
                 tracing::debug!(
-                    node = self.self_id,
-                    to = to.0,
+                    from = %self.sender,
+                    to = %to,
                     kind = evicted_kind,
                     "evicted oldest Paxos message from a full peer gRPC mailbox"
                 );
             }
         }
     }
+}
+
+/// Open one outbound lane toward `to`: a bounded keep-newest mailbox of
+/// `capacity`, drained by a detached delivery task over `client`'s
+/// reconnecting channel until `shutdown` fires. Shared by the node driver
+/// (two lanes per peer, one per proxy) and the proxy driver (one per
+/// acceptor): the lane is the same whoever sends through it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_lane<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
+    providers: &P,
+    task: &'static str,
+    client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
+    tunables: DriverTunables,
+    shutdown: CancellationToken,
+    audit: &A,
+    from: Party,
+    to: Party,
+    capacity: usize,
+) -> PeerMailbox {
+    let mailbox = PeerMailbox::new(capacity);
+    providers
+        .task()
+        .spawn_task(
+            task,
+            run_peer_delivery(
+                client,
+                providers.time().clone(),
+                shutdown,
+                mailbox.clone(),
+                tunables,
+                audit.clone(),
+                from,
+                to,
+            ),
+        )
+        .detach();
+    mailbox
 }
 
 /// Feed bounded unary batches over one reconnecting h2 channel per peer. While
@@ -321,7 +404,7 @@ impl Outbound {
 // lifecycle, queue, batch shape, and the audit identity for drop reports);
 // a bundle would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(level = "debug", skip_all, fields(node = self_id, to = to.0))]
+#[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
 pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
@@ -329,8 +412,8 @@ pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
     messages: PeerMailbox,
     tunables: DriverTunables,
     audit: A,
-    self_id: u64,
-    to: NodeId,
+    from: Party,
+    to: Party,
 ) {
     let batch_limit = tunables.delivery_batch;
     let mut carried = None;
@@ -358,7 +441,7 @@ pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
             }
         }
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, self_id, to);
+        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, from, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -368,25 +451,25 @@ pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
         match outcome {
             Ok(Ok(_)) => {}
             Ok(Err(status)) => {
-                audit.delivery_failed(NodeId(self_id), to);
+                audit.delivery_failed(from, to);
                 tracing::debug!(%status, "peer gRPC delivery failed");
             }
             Err(_) => {
-                audit.delivery_failed(NodeId(self_id), to);
+                audit.delivery_failed(from, to);
                 tracing::debug!("peer gRPC delivery timed out");
             }
         }
     }
 }
 
-#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, to = to.0))]
+#[tracing::instrument(level = "trace", skip_all, fields(from = %from, to = %to))]
 fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &PeerMailbox,
     batch_limit: usize,
     audit: &A,
-    self_id: u64,
-    to: NodeId,
+    from: Party,
+    to: Party,
 ) -> (internal::Deliver, Option<internal::ConsensusMessage>) {
     // Do not spend the eventual-synchrony tail replaying a bounded but stale
     // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
@@ -408,10 +491,10 @@ fn delivery_batch<A: Audit>(
         };
         // The stale head of the backlog is discarded, never silently: report
         // it at the instant of the drop, like the enqueue-side overflow.
-        audit.dropped_at_mailbox(NodeId(self_id), to, proto_message_kind(&first));
+        audit.dropped_at_mailbox(from, to, proto_message_kind(&first));
         tracing::debug!(
-            node = self_id,
-            to = to.0,
+            from = %from,
+            to = %to,
             "dropped stale Paxos message from delivery backlog"
         );
         first = newer;
@@ -444,50 +527,50 @@ fn delivery_batch<A: Audit>(
 /// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
-pub(crate) fn trace_send_drop<A: Audit>(audit: &A, self_id: u64, to: NodeId, msg: &Message) {
-    audit.dropped_at_send(NodeId(self_id), to, msg);
+pub(crate) fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
+    audit.dropped_at_send(from, to, msg);
     let kind = message_kind(msg);
     if let Message::Accept { slot, .. } = msg {
         tracing::info!(
-            node = self_id,
-            to = to.0,
+            from = %from,
+            to = %to,
             kind,
             slot = slot.0,
             "msg_dropped_at_send"
         );
     } else {
-        tracing::info!(node = self_id, to = to.0, kind, "msg_dropped_at_send");
+        tracing::info!(from = %from, to = %to, kind, "msg_dropped_at_send");
     }
 }
 
 /// Send one batch's addressed messages (fire-and-forget). The core addresses
-/// each one; the driver maps `NodeId` → address. Each message may be dropped
+/// each one; the driver maps a [`Party`] → address. Each message may be dropped
 /// at this seam — per-message loss the network layer cannot produce on its own
 /// (a TCP stream loses intervals, never one isolated message), with
 /// `resend_pending` re-deriving what matters — or sent twice (retransmission
 /// is legal transport behavior; set-based quorum counting must tolerate it).
-#[tracing::instrument(level = "trace", skip_all, fields(node = out.self_id, messages = messages.len()))]
+#[tracing::instrument(level = "trace", skip_all, fields(from = %out.sender, messages = messages.len()))]
 pub(crate) fn send_messages<H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    messages: Vec<(NodeId, Message)>,
+    messages: Vec<(Party, Message)>,
 ) where
     H: DriverHooks,
     A: Audit,
 {
-    let self_id = out.self_id;
+    let from = out.sender;
     for (to, msg) in messages {
         if hooks.drop_outgoing(to, &msg) {
-            trace_send_drop(audit, self_id, to, &msg);
+            trace_send_drop(audit, from, to, &msg);
             continue;
         }
         out.transmit(hooks, audit, to, &msg);
         if hooks.duplicate_outgoing(to, &msg) {
-            audit.duplicated_at_send(NodeId(self_id), to, &msg);
+            audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
-                node = self_id,
-                to = to.0,
+                from = %from,
+                to = %to,
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );

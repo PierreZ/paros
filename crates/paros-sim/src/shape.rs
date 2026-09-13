@@ -213,6 +213,14 @@ impl NodeShape {
             // each other — a liveness cost the stall budget ends, never a
             // safety one.
             reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The delegated round's take-back budget (#142), in
+            // re-delegations (one per beat). Floor 1: a round taken back
+            // after a single re-delegation runs colocated while its proxy
+            // may still decide it, and the two verdicts must agree
+            // (P2b-idempotent fan-outs) — the whole point of pushing it.
+            // The ceiling stretches a dead proxy's cost per slot; the
+            // recovery tail still outlasts it.
+            proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64),
         };
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
@@ -229,6 +237,10 @@ impl NodeShape {
         if tunables.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
+        }
+        if tunables.proxy_take_back_resends != 10 {
+            // BUGGIFY pairing: the take-back budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme proxy take-back budget");
         }
         // The crash bias is a plain multiplier with no floor to defend: at
         // its extreme the seams crash on one batch in three inside the

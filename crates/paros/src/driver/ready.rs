@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use moonpool_core::SimulationError;
 use paros_core::{
     AcceptorWrite, Ballot, ColocatedNode, Command, Control, GcRequest, MatchRequest, MatchmakerId,
-    Message, NodeId, NodeRole, ReadState, SessionEntry, Slot, Value, WriteOp,
+    Message, NodeId, NodeRole, Party, ReadState, SessionEntry, Slot, Value, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -47,7 +47,8 @@ async fn send_snapshot_offers<S, H, A>(
     H: DriverHooks,
     A: Audit,
 {
-    let mut offers: Vec<(NodeId, Message)> = Vec::with_capacity(snapshot_offers.len());
+    let me = out.self_node();
+    let mut offers: Vec<(Party, Message)> = Vec::with_capacity(snapshot_offers.len());
     for &(to, offered_index, ballot) in snapshot_offers {
         // The mismatch skip below, taken spuriously: the requester re-asks
         // every tick and any other custodian may answer, so an unserved beat
@@ -60,9 +61,9 @@ async fn send_snapshot_offers<S, H, A>(
         // satisfy it trivially. The hook's own BUGGIFY pairing proves this
         // location fires; the trace field says which of the two skips a reader
         // is looking at.
-        if hooks.skip_snapshot_offer(to) {
+        if hooks.skip_snapshot_offer(Party::Node(to)) {
             tracing::info!(
-                node = out.self_id,
+                node = me.0,
                 offered = offered_index.0,
                 reason = "hook",
                 "snapshot_offer_skipped"
@@ -79,9 +80,9 @@ async fn send_snapshot_offers<S, H, A>(
             // serves it. The core already withholds offers while its own
             // repair is open; this driver-side guard covers any other
             // application lag the core cannot see.
-            audit.snapshot_offer_skipped(NodeId(out.self_id), offered_index);
+            audit.snapshot_offer_skipped(me, offered_index);
             tracing::info!(
-                node = out.self_id,
+                node = me.0,
                 offered = offered_index.0,
                 reason = "mismatch",
                 "snapshot_offer_skipped"
@@ -89,9 +90,9 @@ async fn send_snapshot_offers<S, H, A>(
             continue;
         }
         offers.push((
-            to,
+            Party::Node(to),
             Message::InstallSnapshot {
-                from: NodeId(out.self_id),
+                from: me,
                 ballot,
                 chosen_index: offered_index,
                 snapshot: Value(storage.snapshot().await),
@@ -220,7 +221,7 @@ where
     H: DriverHooks,
     A: Audit,
 {
-    let self_id = out.self_id;
+    let self_id = out.self_node().0;
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
     let pool: Vec<NodeId> = node.config().pool().to_vec();
@@ -249,16 +250,22 @@ where
         paros_core::MustSync::Relaxed
     };
     // The deployment map, applied: the core hands out audiences (one entry
-    // per fan-out), the driver turns each into the node ids its own pool
-    // names, in order, and sends. The bytes and their order are exactly what
-    // an enumerated batch carried.
-    let messages: Vec<(NodeId, Message)> = ready
+    // per fan-out), the driver turns each into the parties its own map
+    // names — the node ids of the pool, or the one proxy leader a
+    // delegation is for (#142) — in order, and sends. The bytes and their
+    // order are exactly what an enumerated batch carried.
+    let messages: Vec<(Party, Message)> = ready
         .messages()
         .iter()
         .flat_map(|(audience, msg)| {
-            audience
+            let proxy = audience.proxy().map(Party::Proxy);
+            let nodes = audience
                 .resolve(&pool, NodeId(self_id))
                 .into_iter()
+                .map(Party::Node);
+            proxy
+                .into_iter()
+                .chain(nodes)
                 .map(move |to| (to, msg.clone()))
         })
         .collect();

@@ -828,6 +828,29 @@ impl public::paros_server::Paros for RpcService {
     }
 }
 
+/// Decode one `Deliver` batch and enqueue it, message by message, into the
+/// loop's inbox. The ack means "in the inbox", not "processed" — the bounded
+/// send is the only wait — and a message that decodes from the wire but not
+/// into a [`Message`] is refused at the edge and reported through
+/// `on_reject`. Shared by the node's handler and the proxy leader's.
+async fn enqueue_delivery(
+    inbox: &mpsc::Sender<Message>,
+    on_reject: &OnReject,
+    request: Request<internal::Deliver>,
+) -> Result<Response<internal::DeliverAck>, Status> {
+    for message in request.into_inner().messages {
+        let message = message_from_proto(message).map_err(|error| {
+            on_reject(EdgeRejection::MessageDecode);
+            Status::invalid_argument(format!("invalid Paxos message: {error}"))
+        })?;
+        inbox
+            .send(message)
+            .await
+            .map_err(|_| Status::unavailable("driver stopped"))?;
+    }
+    Ok(Response::new(internal::DeliverAck {}))
+}
+
 #[tonic::async_trait]
 impl internal::paros_internal_server::ParosInternal for RpcService {
     #[tracing::instrument(level = "trace", skip_all)]
@@ -835,19 +858,7 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         &self,
         request: Request<internal::Deliver>,
     ) -> Result<Response<internal::DeliverAck>, Status> {
-        for message in request.into_inner().messages {
-            let message = message_from_proto(message).map_err(|error| {
-                (self.on_reject)(EdgeRejection::MessageDecode);
-                Status::invalid_argument(format!("invalid Paxos message: {error}"))
-            })?;
-            // Enqueue and move on: the ack means "in the peer's inbox", not
-            // "processed" — the bounded send is the only wait.
-            self.deliver
-                .send(message)
-                .await
-                .map_err(|_| Status::unavailable("node driver stopped"))?;
-        }
-        Ok(Response::new(internal::DeliverAck {}))
+        enqueue_delivery(&self.deliver, &self.on_reject, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -865,6 +876,65 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         dispatch(&self.retire, request.into_inner())
             .await
             .map(Response::new)
+    }
+}
+
+// ---- the proxy leader (#142) ------------------------------------------------
+
+/// The proxy leader's tonic handler: the node contract's **Phase-2 subset**.
+/// A proxy receives delegated `Accept`s, `Accepted`s and `Nack`s through the
+/// same `Deliver` lane a node does, and nothing a client or an operator asks
+/// a node — it holds no replica to inspect and retires by stopping its
+/// process — so the other two internal methods are refused as unimplemented.
+#[derive(Clone)]
+pub(crate) struct ProxyService {
+    deliver: mpsc::Sender<Message>,
+    on_reject: OnReject,
+}
+
+/// Construct the proxy leader's handler/inbox pair; `peer_inbox` bounds the
+/// one lane (at least 1).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn proxy_channel(
+    peer_inbox: usize,
+    on_reject: OnReject,
+) -> (ProxyService, mpsc::Receiver<Message>) {
+    let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
+    (
+        ProxyService {
+            deliver: deliver_tx,
+            on_reject,
+        },
+        deliver_rx,
+    )
+}
+
+#[tonic::async_trait]
+impl internal::paros_internal_server::ParosInternal for ProxyService {
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn deliver(
+        &self,
+        request: Request<internal::Deliver>,
+    ) -> Result<Response<internal::DeliverAck>, Status> {
+        enqueue_delivery(&self.deliver, &self.on_reject, request).await
+    }
+
+    async fn inspect(
+        &self,
+        _request: Request<InspectRequest>,
+    ) -> Result<Response<InspectReply>, Status> {
+        Err(Status::unimplemented(
+            "a proxy leader holds no replica to inspect",
+        ))
+    }
+
+    async fn retire(
+        &self,
+        _request: Request<RetireRequest>,
+    ) -> Result<Response<RetireAck>, Status> {
+        Err(Status::unimplemented(
+            "a proxy leader is retired by stopping its process",
+        ))
     }
 }
 

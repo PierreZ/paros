@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, QuorumSystem, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Party, QuorumSystem, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -484,6 +484,30 @@ pub(super) struct AuditState {
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
     pub(super) cross_config_phase1_checked: bool,
+
+    // --- proxy leaders (#142) ---------------------------------------------
+    /// Per delegated round `(slot, ballot round, ballot node)`: every leader
+    /// a proxy's fan-out named as the hint — more than one means a handoff
+    /// successor re-delegated the round and the proxy refreshed the hint.
+    pub(super) fanout_leaders: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
+    /// Per proxy: how many times it booted (every boot is an empty one).
+    pub(super) proxy_boots: BTreeMap<u64, u64>,
+    /// The two outcomes the campaign must reach: a slot decided by a proxy's
+    /// `Commit`, and a delegated round taken back by its leader.
+    pub(super) decided_through_proxy: bool,
+    pub(super) delegation_taken_back: bool,
+    /// The causes, recorded when they fire: a proxied round outliving a
+    /// handoff, a proxy rebooting empty, a re-delegation re-fanning-out, a
+    /// delegation ignored, a `Nack` relayed, a proxy's rounds superseded, a
+    /// skipped re-fan-out beat, a delegation lost at the send seam.
+    pub(super) proxied_round_survived_handoff: bool,
+    pub(super) proxy_rebooted: bool,
+    pub(super) proxy_refanned: bool,
+    pub(super) proxy_delegation_ignored: bool,
+    pub(super) proxy_nack_relayed: bool,
+    pub(super) proxy_rounds_superseded: bool,
+    pub(super) proxy_resend_skipped: bool,
+    pub(super) dropped_delegation: bool,
 }
 
 impl AuditState {
@@ -562,22 +586,48 @@ impl AuditState {
         }
     }
 
-    /// Fold one `Accept` leaving `node` for `to` at `ballot` (#121, #122),
-    /// judged on the wire. Two claims: Phase 2 addresses only the ballot's
-    /// own acceptors (a removed member is never asked to vote at a ballot it
-    /// is not in), and it opens only once **every** prior configuration has
-    /// a promise quorum for the ballot — counted per configuration over the
-    /// promises that actually left the wire plus the owner's own vote, never
-    /// over their union. The union rule would count here and be wrong: it is
+    /// The Phase-2 half of P2b, checked **on the wire** whoever sends: a
+    /// ballot names its own proposer, so exactly one leadership ever
+    /// proposes at it, and two different commands under one `(ballot,
+    /// slot)` mean the proposer allocated a slot it already had in flight.
+    /// Fed by the leader's colocated `Accept`s, its delegations to a proxy
+    /// (#142) and the proxy's fan-outs alike — a proxy carries the leader's
+    /// command verbatim, so its fan-out is judged against the very same
+    /// record. Reading the send rather than the receive is deliberate — it
+    /// indicts the proposer, not the network — and it is the only place the
+    /// anomaly is visible: an accept quorum may reject it, leaving no durable
+    /// trace at all.
+    pub(super) fn observe_proposal(&mut self, from: Party, ballot: Ballot, slot: u64, vhash: u64) {
+        self.any_proposal_checked = true;
+        if let Some(prev) = self
+            .proposed
+            .insert((ballot.round, ballot.node.0, slot), vhash)
+        {
+            assert_always!(
+                prev == vhash,
+                "one ballot proposes at most one command for a slot",
+                { "from" => from.to_string(), "slot" => slot, "round" => ballot.round }
+            );
+        }
+    }
+
+    /// Fold one `Accept` leaving `from` (a leader, or a proxy fanning a
+    /// leader's round out) for `to` at `ballot` (#121, #122), judged on the
+    /// wire. Two claims: Phase 2 addresses only the ballot's own acceptors
+    /// (a removed member is never asked to vote at a ballot it is not in),
+    /// and it opens only once **every** prior configuration has a promise
+    /// quorum for the ballot — counted per configuration over the promises
+    /// that actually left the wire plus the owner's own vote, never over
+    /// their union. The union rule would count here and be wrong: it is
     /// exactly what the negative core test refuses.
-    pub(super) fn observe_accept_send(&mut self, node: u64, to: u64, ballot: Ballot) {
+    pub(super) fn observe_accept_send(&mut self, from: Party, to: u64, ballot: Ballot) {
         let Some(config) = self.config_of(ballot).cloned() else {
             return;
         };
         assert_always!(
             config.contains(paros::NodeId(to)),
             "reconfiguration: an Accept reaches only the ballot's own acceptors",
-            { "node" => node, "to" => to, "round" => ballot.round }
+            { "from" => from.to_string(), "to" => to, "round" => ballot.round }
         );
         if self
             .bootstrap
@@ -612,7 +662,7 @@ impl AuditState {
             uncovered == 0,
             "reconfiguration: no Accept leaves before every prior configuration promised a quorum",
             {
-                "node" => node,
+                "from" => from.to_string(),
                 "round" => ballot.round,
                 "prior" => prior.len(),
                 "uncovered" => uncovered
@@ -671,6 +721,20 @@ impl AuditState {
         if self.decided_off_column {
             assert_reachable!("grid: a slot is decided on a column other than its own");
         }
+        // The proxy outcomes (#142): a seed with proxies delegates every
+        // settled proposal, so a sweep decides through a proxy; and the
+        // take-back — the leader's liveness under a dead or slow proxy —
+        // fires wherever a proxy's `Commit` is late by the budget, which a
+        // killed proxy, a lost delegation or the budget's own floor
+        // produces.
+        assert_sometimes!(
+            self.decided_through_proxy,
+            "proxy: a slot is decided through a proxy leader"
+        );
+        assert_sometimes!(
+            self.delegation_taken_back,
+            "proxy: a leader takes a delegated round back"
+        );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -1041,6 +1105,74 @@ impl AuditState {
         entry.frontier = next_slot.0;
         entry.retired.insert(from);
         entry.holder = None;
+    }
+
+    /// A proxy leader's decision (#142), judged against the disks: the
+    /// `Commit` it is about to emit for `slot` at `ballot` must be backed by
+    /// a Phase-2 quorum of the ballot's configuration holding a durable
+    /// accept of exactly `vhash` **at that ballot** — the tally the proxy
+    /// folded is never trusted, only the accepts the acceptors reported
+    /// durable before their `Accepted`s left (the proxy model checker's
+    /// claim 2, on the real transport). And the value is the one the ballot
+    /// proposed for the slot: a proxy carries a command, it never picks one.
+    /// Below the cluster-wide compaction floor the per-slot tally is pruned
+    /// and the slot is applied everywhere, so the apply-fed `chosen` map is
+    /// the witness there.
+    pub(super) fn observe_proxy_decision(
+        &mut self,
+        proxy: u64,
+        slot: u64,
+        ballot: Ballot,
+        vhash: u64,
+    ) {
+        let key = (slot, ballot.round, ballot.node.0);
+        if slot >= self.cluster_min_floor() {
+            let voters: BTreeSet<paros::NodeId> = self
+                .accept_sets
+                .get(&key)
+                .map(|holders| holders.iter().map(|n| paros::NodeId(*n)).collect())
+                .unwrap_or_default();
+            let backed = self
+                .config_of(ballot)
+                .is_some_and(|c| c.has_phase2_quorum(&voters));
+            assert_always!(
+                backed,
+                "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
+                {
+                    "proxy" => proxy,
+                    "slot" => slot,
+                    "round" => ballot.round,
+                    "bnode" => ballot.node.0,
+                    "voters" => voters.len()
+                }
+            );
+        } else if let Some(&chosen) = self.chosen.get(&slot) {
+            assert_always!(
+                chosen == vhash,
+                "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
+                { "proxy" => proxy, "slot" => slot, "round" => ballot.round, "below_floor" => true }
+            );
+        }
+        let proposed = self
+            .proposed
+            .get(&(ballot.round, ballot.node.0, slot))
+            .copied();
+        assert_always!(
+            proposed.is_none_or(|p| p == vhash),
+            "proxy: a proxy decides the command it was delegated",
+            { "proxy" => proxy, "slot" => slot, "round" => ballot.round }
+        );
+        self.decided_through_proxy = true;
+        if self
+            .fanout_leaders
+            .get(&key)
+            .is_some_and(|leaders| leaders.len() > 1)
+        {
+            reach_once!(
+                self.proxied_round_survived_handoff,
+                "proxy: a delegated round survives a leader handoff"
+            );
+        }
     }
 
     /// Fold one observed exercise of a logical authority: `node` put an
