@@ -39,9 +39,12 @@ the driver, never in a sim-only path.
   `MemMatchmakerStorage`, `matchmaker_storage_contract_suite` ·
   `proxy/mod.rs` `run_proxy`, `ProxyConfig` (#142: the third driver — the
   node contract's Phase-2 subset over the same `Outbound` mailboxes, nothing
-  durable, `RunError::Infra` its only exit). Every send names a `Party`
-  sender and destination (`Outbound::sender`, `proxy_queues`); `run_node`
-  takes the deployment map's proxies beside its peers.
+  durable, `RunError::Infra` its only exit; its beat evicts unanswered
+  rounds on `proxy_round_resends` before re-fanning-out the rest). Every send
+  names a `Party` sender and destination (`Outbound::sender`,
+  `proxy_queues`), and a node's send to a proxy — a delegation or an
+  acceptor's reply — reaches the audit as `sent_to_proxy`; `run_node` takes
+  the deployment map's proxies beside its peers.
 - `grpc.rs` + `proto/{common,internal,matchmaker,paros}.proto` (built by
   `build.rs` with `tonic-prost-build`; runtime-free tonic so `paros` stays
   wasm-checkable): `Paros` (Propose/Read/Compact/Reconfigure/

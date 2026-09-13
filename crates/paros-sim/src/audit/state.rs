@@ -172,6 +172,17 @@ pub(super) struct AuditState {
     /// is recorded even if no node ever applies the slot, which is exactly
     /// the blind spot the apply-fed `chosen` map has.
     pub(super) decided: BTreeMap<u64, (u64, u64, u64)>,
+    /// Per slot pruned from `decided` below the cluster-wide floor: the
+    /// vhash the durable-accept quorum decided — the **consensus witness** a
+    /// late `Commit` for a compacted slot is judged against. Never the
+    /// apply-fed `chosen` map: a #94 re-chosen identity legitimately
+    /// applies as a `Noop` everywhere while the command consensus decided,
+    /// and therefore the command its `Commit` honestly carries, is the
+    /// original user command — the two are distinct facts, and a proxy's
+    /// `Commit` for delayed votes trailing the whole cluster's truncation
+    /// carries the decided one. One `u64` per pruned slot (`decided`'s
+    /// tally, `accept_sets`, is what pruning reclaims).
+    pub(super) decided_below_floor: BTreeMap<u64, u64>,
     /// The highest slot ever quorum-decided — a monotone scalar the
     /// below-floor pruning of `decided` never lowers, so the cross-restart
     /// frontier check stays sound after the whole prefix compacts away.
@@ -482,9 +493,10 @@ pub(super) struct AuditState {
     pub(super) decided_through_proxy: bool,
     pub(super) delegation_taken_back: bool,
     /// The causes, recorded when they fire: a proxied round outliving a
-    /// handoff, a skipped re-fan-out beat.
+    /// handoff, a skipped re-fan-out beat, an unanswered round evicted.
     pub(super) proxied_round_survived_handoff: bool,
     pub(super) proxy_resend_skipped: bool,
+    pub(super) proxy_round_expired: bool,
 }
 
 impl AuditState {
@@ -951,6 +963,36 @@ impl AuditState {
             .unwrap_or(0)
     }
 
+    /// Reclaim the per-slot safety tallies below the cluster-wide floor
+    /// (an O(log n) split, on the rare truncation path), keeping one
+    /// scalar per pruned slot — the decided vhash — as the consensus
+    /// witness a late `Commit` there is judged against
+    /// (`decided_below_floor`).
+    pub(super) fn prune_below_floor(&mut self) {
+        let min_floor = self.cluster_min_floor();
+        if min_floor == 0 {
+            return;
+        }
+        let kept = self.decided.split_off(&min_floor);
+        let pruned = std::mem::replace(&mut self.decided, kept);
+        self.decided_below_floor.extend(
+            pruned
+                .into_iter()
+                .map(|(slot, (_, _, vhash))| (slot, vhash)),
+        );
+        self.accept_sets = self.accept_sets.split_off(&(min_floor, 0, 0));
+    }
+
+    /// The vhash the durable-accept quorum decided for `slot`, wherever the
+    /// slot stands against the floor: from the live tally, or from the
+    /// witness kept when the tally was pruned.
+    pub(super) fn decided_vhash(&self, slot: u64) -> Option<u64> {
+        self.decided
+            .get(&slot)
+            .map(|&(_, _, vhash)| vhash)
+            .or_else(|| self.decided_below_floor.get(&slot).copied())
+    }
+
     /// Fold one broadcast leader beat (#95). A leader beating at a ballot that
     /// a **promise-majority** has durably promised strictly past is deposed for
     /// good: an acceptor only acks a beat at or above its promise, so at most a
@@ -1112,9 +1154,10 @@ impl AuditState {
     /// durable before their `Accepted`s left (the proxy model checker's
     /// claim 2, on the real transport). And the value is the one the ballot
     /// proposed for the slot: a proxy carries a command, it never picks one.
-    /// Below the cluster-wide compaction floor the per-slot tally is pruned
-    /// and the slot is applied everywhere, so the apply-fed `chosen` map is
-    /// the witness there.
+    /// Below the cluster-wide compaction floor the per-slot tally is pruned,
+    /// so the witness there is the decided vhash the pruning kept
+    /// (`decided_below_floor`) — the consensus decision, never the applied
+    /// command, which a #94 re-chosen identity turns into a `Noop`.
     pub(super) fn observe_proxy_decision(
         &mut self,
         proxy: u64,
@@ -1143,9 +1186,10 @@ impl AuditState {
                     "voters" => voters.len()
                 }
             );
-        } else if let Some(&chosen) = self.chosen.get(&slot) {
+        } else {
+            let decided = self.decided_below_floor.get(&slot).copied();
             assert_always!(
-                chosen == vhash,
+                decided == Some(vhash),
                 "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
                 { "proxy" => proxy, "slot" => slot, "round" => ballot.round, "below_floor" => true }
             );

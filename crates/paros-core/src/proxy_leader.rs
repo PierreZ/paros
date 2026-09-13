@@ -68,6 +68,26 @@
 //!   (relayed, round closed). The model checker found a round of each
 //!   kind held open forever before the beat existed (seeds 20 and 87 of
 //!   the first runs). Skipping a beat is always safe.
+//! - **Bounded retention: [`ProxyLeader::expire_stale`].** A round the beat
+//!   has re-fanned-out `after` times without closing is **evicted**. The
+//!   re-send above closes a round only when the acceptors *answer* it, and
+//!   one class never answers: a slot every acceptor has compacted past —
+//!   an `Accept` below the floor is ignored, neither `Accepted` nor `Nack`
+//!   (the slot is chosen, so a refusal would depose a leader for nothing).
+//!   A delegation that reaches the proxy late (delayed on the wire until
+//!   the leader took the round back, decided it colocated and the cluster
+//!   truncated past it), or a round whose votes were lost until after the
+//!   truncation, would otherwise be re-fanned-out forever and hold its
+//!   command and its page of the re-send cursor for the rest of the
+//!   process's life. Eviction is **not a decision**: no `Commit`, no
+//!   `done` entry (a later re-delegation reopens the round fresh, which is
+//!   what a leader that still needs it does on its next re-send page), and
+//!   the leader's take-back remains the liveness — an evicted round the
+//!   leader still needs is at worst re-delegated and taken back on the
+//!   leader's own budget. The threshold is driver policy
+//!   (`DriverTunables::proxy_round_resends` in `paros`), never a constant
+//!   of this state machine; floor 1, since evicting a round after one
+//!   unanswered re-fan-out is always safe.
 //!
 //! # What it deliberately does not know
 //!
@@ -142,6 +162,9 @@ pub struct ProxyCounters {
     /// Rounds of a lower ballot closed because a delegation at a higher
     /// ballot arrived.
     pub superseded: u64,
+    /// Rounds evicted by [`ProxyLeader::expire_stale`]: re-fanned-out the
+    /// caller's budget of times without an answer.
+    pub expired: u64,
 }
 
 /// The proxy leader: a Phase-2 tally on a process of its own (see the
@@ -436,6 +459,34 @@ impl ProxyLeader {
         !self.rounds.is_empty()
     }
 
+    /// **Bounded retention** (see the module doc): close every open round
+    /// re-fanned-out at least `after` times ([`Rounds::stalled`]) without
+    /// closing, and report the slots evicted. Nothing is emitted and
+    /// nothing is remembered as done — an eviction is not a decision, and
+    /// a later delegation of the slot reopens it fresh. **The driver is
+    /// expected to call this on each beat, before the re-fan-out**, with
+    /// its retention budget; the budget is the driver's policy (floor 1)
+    /// and calling with `u64::MAX` is the unbounded retention this method
+    /// replaces. Always safe: a proxy decides nothing, so evicting a round
+    /// only stops this proxy folding it, and the leader's re-delegation and
+    /// take-back recover a round that is still needed.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
+    pub fn expire_stale(&mut self, after: u64) -> Vec<Slot> {
+        let stale = self.rounds.stalled(after);
+        for slot in &stale {
+            self.rounds.close(*slot);
+            self.delegators.remove(slot);
+            self.counters.expired += 1;
+        }
+        self.assert_invariants();
+        stale
+    }
+
     /// Remember `slot` closed at `ballot`, forgetting the lowest slot past
     /// [`DONE_MEMORY`].
     fn remember_done(&mut self, slot: Slot, ballot: Ballot) {
@@ -719,6 +770,60 @@ mod tests {
             "a delegation for another proxy is not folded"
         );
         assert!(!proxy.rounds().by_slot().contains_key(&Slot(5)));
+    }
+
+    /// Bounded retention: a round nobody answers — the case is a slot every
+    /// acceptor compacted past, whose `Accept` is ignored without a reply —
+    /// is re-fanned-out the budget's worth of beats and then evicted with
+    /// no `Commit` and no `done` entry, so a later delegation of the slot
+    /// reopens it fresh instead of being ignored as decided. The scenario
+    /// the eviction exists for: a delegation delayed on the wire until
+    /// after the leader took the round back, decided it colocated and the
+    /// cluster truncated past it, released and ticked under the same
+    /// ballot, used to be re-fanned-out forever.
+    #[test]
+    fn an_unanswered_round_is_evicted_after_its_budget() {
+        let mut proxy = ProxyLeader::new(ProxyId(0), majority(&[0, 1, 2]));
+        // The late delegation of a slot the acceptors will never answer.
+        proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+        assert_eq!(drain(&mut proxy).len(), 1);
+        for beat in 1..=3 {
+            assert!(
+                proxy.expire_stale(3).is_empty(),
+                "under budget at beat {beat}"
+            );
+            proxy.resend_pending();
+            let out = drain(&mut proxy);
+            assert_eq!(out.len(), 1, "the round is re-fanned-out on beat {beat}");
+            assert!(matches!(out[0].1, Message::Accept { .. }));
+        }
+        assert_eq!(proxy.rounds().by_slot()[&Slot(4)].resends(), 3);
+        assert!(
+            proxy.expire_stale(4).is_empty(),
+            "the budget is the caller's"
+        );
+        assert_eq!(proxy.expire_stale(3), vec![Slot(4)]);
+        assert!(!proxy.has_pending_accepts());
+        assert_eq!(proxy.delegator(Slot(4)), None);
+        assert!(drain(&mut proxy).is_empty(), "an eviction emits nothing");
+        assert_eq!(proxy.counters().expired, 1);
+        assert_eq!(proxy.counters().decided, 0);
+        // Not a decision: the same delegation, under the same ballot, opens
+        // the round again (a leader that still needs it re-delegates), and
+        // a vote can still decide it.
+        proxy.step(delegation(0, 0, ballot(3, 0), 4, cmd(4)));
+        assert_eq!(proxy.counters().delegated, 2);
+        assert_eq!(proxy.counters().ignored, 0);
+        assert_eq!(drain(&mut proxy).len(), 1);
+        proxy.step(accepted(1, ballot(3, 0), 4, &cmd(4)));
+        proxy.step(accepted(2, ballot(3, 0), 4, &cmd(4)));
+        assert!(
+            matches!(
+                drain(&mut proxy).as_slice(),
+                [(Audience::Learners, Message::Commit { .. })]
+            ),
+            "a reopened round decides as any round does"
+        );
     }
 
     /// A refusal closes the round and reaches the leader that delegated it.

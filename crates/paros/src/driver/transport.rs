@@ -225,12 +225,13 @@ impl Outbound {
 
     /// Report one send through the audit port: the callback is chosen by
     /// **who** sends to **whom**, so each keeps its own checks — a node's
-    /// send, a node's delegation to a proxy, a proxy's fan-out or `Commit`.
-    /// A proxy never addresses a proxy.
+    /// send to a node, a node's send to a proxy (a leader's delegation *or*
+    /// an acceptor's `Accepted` / `Nack` reply to a delegated round), a
+    /// proxy's fan-out or `Commit`. A proxy never addresses a proxy.
     fn report_sent<A: Audit>(&self, audit: &A, to: Party, msg: &Message) {
         match (self.sender, to) {
             (Party::Node(from), Party::Node(to)) => audit.sent(from, to, msg),
-            (Party::Node(from), Party::Proxy(proxy)) => audit.delegation_sent(from, proxy, msg),
+            (Party::Node(from), Party::Proxy(proxy)) => audit.sent_to_proxy(from, proxy, msg),
             (Party::Proxy(proxy), Party::Node(to)) => audit.proxy_sent(proxy, to, msg),
             (Party::Proxy(_), Party::Proxy(_)) => {
                 unreachable!("a proxy leader never addresses a proxy leader")

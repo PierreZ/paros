@@ -14,7 +14,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
   (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
-  `proxy_take_back_resends`, the run's `QuorumPolicy`
+  `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
+  the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
   per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,

@@ -692,21 +692,21 @@ impl<T: TimeProvider> NodeAudit<T> {
             // by its durable accept, so the tally has already decided the slot
             // — and with this value, at this or a lower ballot (P2: a later
             // ballot re-decides only the same value). Below the cluster-wide
-            // compaction floor the per-slot tally is pruned and the slot is
-            // applied everywhere, so the apply-fed `chosen` map is the
-            // witness there: a proxy leader has no floor and never learns a
-            // slot chosen, so its `Commit` for a round whose votes arrived
-            // late can trail the whole cluster's truncation (seed
-            // 17112434982126988317: slot 34 committed by a proxy at a
-            // cluster floor of 38 — harmless, every learner ignores it).
+            // compaction floor the per-slot tally is pruned, and the witness
+            // there is the decided vhash the pruning kept
+            // (`AuditState::decided_vhash`) — the consensus decision, never
+            // the apply-fed `chosen` map, whose entry for a #94 re-chosen
+            // identity is the `Noop` it applied as while its `Commit`
+            // honestly carries the decided user command. A proxy leader has
+            // no floor and never learns a slot chosen, so its `Commit` for a
+            // round whose votes arrived late can trail the whole cluster's
+            // truncation (seed 17112434982126988317: slot 34 committed by a
+            // proxy at a cluster floor of 38 — harmless, every learner
+            // ignores it).
             let st = self.state();
             let vhash = command_hash(command);
             let min_floor = st.cluster_min_floor();
-            let decided = if slot.0 < min_floor {
-                st.chosen.get(&slot.0).map(|chosen| (0, 0, *chosen))
-            } else {
-                st.decided.get(&slot.0).copied()
-            };
+            let decided = st.decided_vhash(slot.0);
             assert_always!(
                 decided.is_some(),
                 "an outgoing Commit names a slot a durable accept quorum already decided",
@@ -718,7 +718,7 @@ impl<T: TimeProvider> NodeAudit<T> {
                 }
             );
             assert_always!(
-                decided.is_none_or(|(_, _, decided_vhash)| decided_vhash == vhash),
+                decided.is_none_or(|decided_vhash| decided_vhash == vhash),
                 "an outgoing Commit carries the quorum-decided value",
                 { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
@@ -851,12 +851,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
         // Below the *cluster-wide* minimum floor every node has truncated, so
         // the per-slot safety tallies can never be consulted again: reclaim
-        // them (an O(log n) split, on the rare truncation path).
-        let min_floor = st.cluster_min_floor();
-        if min_floor > 0 {
-            st.decided = st.decided.split_off(&min_floor);
-            st.accept_sets = st.accept_sets.split_off(&(min_floor, 0, 0));
-        }
+        // them, keeping the decided vhash per pruned slot as the witness a
+        // late `Commit` there is judged against.
+        st.prune_below_floor();
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, chosen_index = chosen_index.0))]
@@ -1051,12 +1048,20 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn delegation_sent(&self, node: NodeId, proxy: ProxyId, msg: &Message) {
+    fn sent_to_proxy(&self, node: NodeId, proxy: ProxyId, msg: &Message) {
         *self
             .state()
             .sent_kinds
             .entry(message_kind(msg))
             .or_default() += 1;
+        // Persist-before-send at the accept seam, whoever the vote goes to:
+        // an acceptor's `Accepted` to a proxy claims "I hold this durably"
+        // exactly as one to a leader does, so the check `sent` runs is run
+        // here on the same message (a node never sends a `Commit` to a
+        // proxy; the call is the shared seam). Routing Phase 2 through a
+        // proxy removes no check — the proxy's later quorum check judges
+        // the decision, not the order of each vote and its fsync.
+        self.observe_commit_send(Party::Node(node), msg);
         // A delegation is the leader exercising its Phase-2 authority for
         // the slot — the same two claims a colocated `Accept` makes about
         // *who* and *what*; *whom* it addresses is a proxy, which is judged
@@ -1142,6 +1147,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.proxy_resend_skipped,
             "proxy: a proxy skips a re-fan-out beat"
+        );
+    }
+
+    fn proxy_round_expired(&self, _proxy: ProxyId, _slot: Slot) {
+        let mut st = self.state();
+        reach_once!(
+            st.proxy_round_expired,
+            "proxy: a proxy evicts a round nobody answers"
         );
     }
 
@@ -2629,5 +2642,123 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         decision: StorageFaultDecision,
     ) {
         self.state().matchmaker.storage_fault(matchmaker, decision);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Mechanism pins for two oracle rules a review of #142 part B found
+    //! missing (their scenarios — a proxy's delayed `Commit` for a compacted
+    //! slot, an `Accepted` replied to a proxy — are the campaign's to reach;
+    //! these pin the checks themselves, on the state and on the real
+    //! node-to-proxy route).
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use moonpool_sim::{TimeError, TimeProvider, has_always_violations, reset_always_violations};
+    use paros::{Ballot, Message, NodeId, ProxyId, Slot};
+
+    use super::state::{AuditState, Floor};
+    use super::{Audit, AuditWorld, NodeAudit};
+
+    /// A clock that never moves: the audit reads it only to stamp floors.
+    #[derive(Clone)]
+    struct FrozenClock;
+
+    impl TimeProvider for FrozenClock {
+        async fn sleep(&self, _duration: Duration) -> Result<(), TimeError> {
+            Ok(())
+        }
+
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        async fn timeout<F, T>(&self, _duration: Duration, future: F) -> Result<T, TimeError>
+        where
+            F: std::future::Future<Output = T> + Send,
+            T: Send,
+        {
+            Ok(future.await)
+        }
+    }
+
+    fn ballot(round: u64, node: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(node),
+        }
+    }
+
+    /// Below the cluster-wide floor a `Commit` is judged against the
+    /// command consensus decided, kept when the tally was pruned — never
+    /// against the applied command, which a #94 re-chosen identity turns
+    /// into a `Noop` while its `Commit` honestly carries the user command.
+    #[test]
+    fn a_below_floor_commit_is_judged_against_the_decided_command_not_the_applied_one() {
+        let user = 11;
+        let noop = 22;
+        let b = ballot(3, 0);
+        let mut st = AuditState::default();
+        st.decided.insert(5, (b.round, b.node.0, user));
+        // The slot applied as a `Noop` everywhere (the at-most-once
+        // suppression), then every node truncated past it.
+        st.chosen.insert(5, noop);
+        st.booted.insert(0);
+        st.floor.insert(
+            0,
+            Floor {
+                now: 8,
+                ..Floor::default()
+            },
+        );
+        st.prune_below_floor();
+        assert!(!st.decided.contains_key(&5), "the tally is reclaimed");
+        assert_eq!(st.decided_below_floor.get(&5), Some(&user));
+        assert_eq!(st.decided_vhash(5), Some(user));
+
+        reset_always_violations();
+        st.observe_proxy_decision(0, 5, b, user);
+        assert!(
+            !has_always_violations(),
+            "the delayed Commit carries the decided user command and is valid"
+        );
+        st.observe_proxy_decision(0, 5, b, noop);
+        assert!(
+            has_always_violations(),
+            "a Commit carrying anything but the decided command is red"
+        );
+        reset_always_violations();
+    }
+
+    /// The persist-before-send check on an `Accepted` runs on the real
+    /// node-to-proxy route: a vote replied to a proxy before its durable
+    /// accept was reported is red exactly as one replied to a leader is.
+    #[test]
+    fn an_accepted_replied_to_a_proxy_needs_its_durable_accept_first() {
+        let world = Arc::new(AuditWorld::default());
+        let audit = NodeAudit::new(FrozenClock, world);
+        let b = ballot(3, 0);
+        let vote = Message::Accepted {
+            from: NodeId(1),
+            ballot: b,
+            slot: Slot(4),
+            vhash: 9,
+        };
+        reset_always_violations();
+        audit.sent_to_proxy(NodeId(1), ProxyId(0), &vote);
+        assert!(
+            has_always_violations(),
+            "an Accepted to a proxy without its durable accept is red"
+        );
+        reset_always_violations();
+        audit.promised(NodeId(1), b);
+        audit.accepted(NodeId(1), Slot(4), b, b, 9);
+        audit.sent_to_proxy(NodeId(1), ProxyId(0), &vote);
+        assert!(
+            !has_always_violations(),
+            "once the durable accept is folded the same vote is clean"
+        );
     }
 }

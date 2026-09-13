@@ -12,9 +12,13 @@
 //! batch the core produces on the wire through the same lossy keep-newest
 //! per-peer mailboxes the node driver sends through: the `Accept` fanned out
 //! to a column, the `Commit` to every learner, a relayed `Nack` to the
-//! delegating leader. On each beat it asks the core to re-fan-out its open
-//! rounds ([`ProxyLeader::resend_pending`]; the driver's [`DriverHooks`]
-//! may skip a beat).
+//! delegating leader. On each beat it first evicts the rounds the core has
+//! re-fanned-out `DriverTunables::proxy_round_resends` times without an
+//! answer ([`ProxyLeader::expire_stale`] — bounded retention: a slot every
+//! acceptor compacted past is never answered, and an eviction is not a
+//! decision), then asks the core to re-fan-out the rest
+//! ([`ProxyLeader::resend_pending`]; the driver's [`DriverHooks`] may skip
+//! a beat).
 //!
 //! **Nothing here is durable.** A proxy has no storage seam, no boot scan,
 //! no format marker and no crash seam: it reboots empty, and the leader's
@@ -208,7 +212,8 @@ fn drain<H: DriverHooks, A: Audit>(
 /// `members` — the full **node pool** (`NodeId` → address), the same list
 /// every node is given, so a fan-out to a column and a `Commit` to every
 /// learner resolve through the same deployment map. `tunables` supplies the
-/// tick cadence, the h2 keep-alive and the mailbox shape; `hooks` and
+/// tick cadence, the retention budget (`proxy_round_resends`), the h2
+/// keep-alive and the mailbox shape; `hooks` and
 /// `audit` are the provider-generic seams every driver in this crate takes,
 /// with the proxy's own beat location ([`DriverHooks::skip_proxy_resend`])
 /// and the send seam's per-message drop and duplicate locations.
@@ -347,6 +352,16 @@ where
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
+                // Bounded retention first: a round re-fanned-out the
+                // budget's worth of beats without an answer is evicted (a
+                // compacted slot is never answered; an eviction decides
+                // nothing and the leader's re-delegation reopens a round it
+                // still needs). Driver policy (`proxy_round_resends`, born
+                // buggified); the core only counts.
+                for slot in proxy.expire_stale(tunables.proxy_round_resends) {
+                    audit.proxy_round_expired(id, slot);
+                    tracing::info!(proxy = id.0, slot = slot.0, "proxy_round_expired");
+                }
                 // The beat: re-fan-out every open round. Consulted only
                 // with rounds open, so a skip always costs a beat; skipping
                 // is always safe (the leader's take-back is the liveness).

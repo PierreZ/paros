@@ -134,13 +134,19 @@ pub trait Audit {
     /// core's outbound decision even when the network later drops it.
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {}
 
-    /// This node handed `msg` — a delegated `Accept` (#142) — to the
-    /// transport, addressed to the proxy leader `proxy`: the first
-    /// delegation of a round, a re-send's re-delegation, or a handoff
-    /// successor's re-delegation with `leader` naming itself. The leader's
-    /// exercise of its Phase-2 authority for that slot, exactly as a
-    /// colocated `Accept` send is.
-    fn delegation_sent(&self, node: NodeId, proxy: ProxyId, msg: &Message) {}
+    /// This node handed `msg` to the transport, addressed to the proxy
+    /// leader `proxy` (#142) — **every** node-to-proxy message, which is one
+    /// of two things. A leader's delegated `Accept`: the first delegation
+    /// of a round, a re-send's re-delegation, or a handoff successor's
+    /// re-delegation with `leader` naming itself — the leader's exercise of
+    /// its Phase-2 authority for that slot, exactly as a colocated `Accept`
+    /// send is. Or an acceptor's reply to a delegated round — the
+    /// `Accepted` or `Nack` it sends to the `reply_to` party instead of the
+    /// leader — which makes exactly the claim it makes on the way to a
+    /// leader (an `Accepted` says "I hold this durably"), so the
+    /// persist-before-send checks [`Audit::sent`] runs on it apply here
+    /// unchanged: routing Phase 2 through a proxy removes no check.
+    fn sent_to_proxy(&self, node: NodeId, proxy: ProxyId, msg: &Message) {}
 
     /// The proxy leader `proxy` handed `msg` to the transport, addressed to
     /// `to`: the `Accept` it fans out to a column (`reply_to` naming the
@@ -148,6 +154,13 @@ pub trait Audit {
     /// emits to every learner, or a `Nack` it relays to the delegating
     /// leader.
     fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {}
+
+    /// The proxy leader `proxy` **evicted** its open round for `slot` on the
+    /// driver's beat (`ProxyLeader::expire_stale`, #142): re-fanned-out
+    /// `DriverTunables::proxy_round_resends` times without an answer. Not a
+    /// decision — nothing was emitted and the slot is not remembered as
+    /// done; a later delegation reopens it.
+    fn proxy_round_expired(&self, proxy: ProxyId, slot: Slot) {}
 
     /// This node became leader at `won`, holding `promised` at that instant and
     /// having filled `gap_fills` undecided holes with no-ops, and now runs

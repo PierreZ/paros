@@ -221,6 +221,16 @@ impl NodeShape {
             // The ceiling stretches a dead proxy's cost per slot; the
             // recovery tail still outlasts it.
             proxy_take_back_resends: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The proxy's retention budget (#142), in unanswered re-fan-outs
+            // (one per beat), drawn independently of the take-back so a
+            // seed can evict before the leader takes back or long after.
+            // Floor 1: a round evicted after one unanswered beat decides
+            // nothing and is reopened by the leader's next re-delegation,
+            // so the cost is traffic, never safety or liveness (the
+            // take-back is the liveness). The ceiling stretches how long a
+            // round for a compacted slot is re-fanned-out; the tail
+            // outlasts it.
+            proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
         };
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.

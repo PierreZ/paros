@@ -153,6 +153,23 @@ pub struct DriverTunables {
     /// round a dead proxy holds forever being recovered by the next
     /// leadership's Phase 1. Meaningless on a deployment without proxies.
     pub proxy_take_back_resends: u64,
+    /// How many times a proxy leader may re-fan-out an open round (once per
+    /// beat, by `ProxyLeader::resend_pending`) without an answer before it
+    /// **evicts** it (`ProxyLeader::expire_stale`, #142) — the proxy's
+    /// bounded retention. A round nobody answers is a real state, not a
+    /// slow one: an `Accept` for a slot every acceptor compacted past is
+    /// ignored without `Accepted` or `Nack`, so a delegation delayed until
+    /// after the leader took the round back and the cluster truncated the
+    /// slot would otherwise be re-fanned-out for the rest of the process's
+    /// life. Eviction is never a decision — the leader's re-delegation
+    /// reopens a round it still needs and its take-back
+    /// (`proxy_take_back_resends`) stays the liveness — so the floor is 1
+    /// and the ceiling is unbounded and still winnable. The default is twice
+    /// the take-back budget, so in the default configuration the leader has
+    /// taken a stalled round back before its proxy evicts it and the
+    /// eviction reclaims only rounds the leader is done with. Meaningless
+    /// on a proxy-less deployment, and read only by `run_proxy`.
+    pub proxy_round_resends: u64,
 }
 
 impl Default for DriverTunables {
@@ -176,6 +193,7 @@ impl Default for DriverTunables {
             reconfigure_timeout_elections: RECONFIGURE_TIMEOUT_ELECTIONS,
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
+            proxy_round_resends: PROXY_ROUND_RESENDS,
         }
     }
 }
@@ -216,6 +234,15 @@ const ELECTION_TIMEOUT_BASE: u64 = 5;
 /// an election. Driver policy (the core only counts), and a
 /// [`DriverTunables`] field so the harness can push it to its floor.
 const PROXY_TAKE_BACK_RESENDS: u64 = ELECTION_TIMEOUT_BASE * 2;
+
+/// Default retention budget of a proxy leader's open round (#142), in
+/// unanswered re-fan-outs — one per beat: twice the take-back budget, so the
+/// leader reclaims a stalled round first and the proxy's eviction is the
+/// backstop for rounds nobody will ever answer (a compacted slot, a round
+/// the leader already decided colocated). Driver policy (the core only
+/// counts), and a [`DriverTunables`] field so the harness can push it to
+/// its floor.
+const PROXY_ROUND_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS * 2;
 
 /// Default stall budget for a matchmaker-set handover, in election timeouts:
 /// long enough for a slow matchmaker to answer a re-sent request, short enough

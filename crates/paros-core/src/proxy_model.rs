@@ -14,7 +14,10 @@
 //! **empty**; nodes crash at any step — before or after their batch is
 //! durable — and reboot from exactly what their disk holds; a leader
 //! resigns, or hands its authority off mid-round to a peer that re-delegates
-//! what it inherited. After every step the model asserts:
+//! what it inherited; every proxy evicts its unanswered rounds on a
+//! per-seed retention budget ([`ProxyLeader::expire_stale`]), interleaved
+//! with the leader's take-back so the two policies meet in every order.
+//! After every step the model asserts:
 //!
 //! 1. **at most one value is chosen per slot** — over every `Commit` any
 //!    party emits and every replica's chosen log;
@@ -209,6 +212,8 @@ struct Reach {
     leader_hint_refreshed: u64,
     /// A proxy crashed with rounds open.
     proxy_crashed_open: u64,
+    /// A proxy evicted an unanswered round on its retention budget.
+    round_expired: u64,
     /// A proxy relayed a `Nack` to the leader that delegated the round.
     nack_relayed: u64,
     /// A node rebooted from its disk.
@@ -242,6 +247,7 @@ impl Reach {
             ("handoff_redelegated", self.handoff_redelegated),
             ("leader_hint_refreshed", self.leader_hint_refreshed),
             ("proxy_crashed_open", self.proxy_crashed_open),
+            ("round_expired", self.round_expired),
             ("nack_relayed", self.nack_relayed),
             ("node_rebooted", self.node_rebooted),
             ("crash_before_persist", self.crash_before_persist),
@@ -276,6 +282,10 @@ struct World {
     /// The driver's take-back budget for this seed (re-delegations a proxy
     /// may swallow before the leader runs the round itself).
     take_back_after: u64,
+    /// The driver's proxy retention budget for this seed (re-fan-outs a
+    /// round may go unanswered before the proxy evicts it), drawn
+    /// independently of the take-back so either may come first.
+    expire_after: u64,
     /// Next client sequence to propose.
     next_seq: u64,
     /// Slots a leader was seen holding delegated, with the proxy.
@@ -300,6 +310,7 @@ impl World {
         let pool: Vec<NodeId> = (0..n).map(NodeId).collect();
         let config = AcceptorConfig::new(pool.clone(), system);
         let take_back_after = 1 + rng.below(3);
+        let expire_after = 1 + rng.below(4);
         let mut world = Self {
             rng,
             config,
@@ -321,6 +332,7 @@ impl World {
             reach: Reach::default(),
             chaos: true,
             take_back_after,
+            expire_after,
             next_seq: 1,
             delegated: BTreeMap::new(),
             taken_back: BTreeSet::new(),
@@ -604,15 +616,23 @@ impl World {
     // ---- the clock and the clients ------------------------------------
 
     /// One driver beat at every live node — tick, re-send, take back, feed
-    /// the election clock — and at every live proxy.
+    /// the election clock — and at every live proxy (evict, then re-send,
+    /// the driver's order).
     fn tick_all(&mut self) {
         let after = self.take_back_after;
+        let expire_after = self.expire_after;
         for p in 0..PROXIES {
             let id = ProxyId(p as u64);
-            if let Some(proxy) = self.proxy(id).live.as_mut() {
-                proxy.resend_pending();
-                self.drain_proxy(id);
-            }
+            let expired = match self.proxy(id).live.as_mut() {
+                Some(proxy) => {
+                    let expired = proxy.expire_stale(expire_after).len() as u64;
+                    proxy.resend_pending();
+                    expired
+                }
+                None => continue,
+            };
+            self.reach.round_expired += expired;
+            self.drain_proxy(id);
         }
         for i in 0..self.pool.len() {
             let id = NodeId(i as u64);
@@ -989,6 +1009,7 @@ fn proxy_leaders_are_safe_under_chaos_and_live_after_it() {
         total.handoff_redelegated += reach.handoff_redelegated;
         total.leader_hint_refreshed += reach.leader_hint_refreshed;
         total.proxy_crashed_open += reach.proxy_crashed_open;
+        total.round_expired += reach.round_expired;
         total.nack_relayed += reach.nack_relayed;
         total.node_rebooted += reach.node_rebooted;
         total.crash_before_persist += reach.crash_before_persist;

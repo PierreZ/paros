@@ -43,14 +43,11 @@ pub enum Custody<Id> {
         accepted_by: BTreeSet<Id>,
     },
     /// A proxy fans out and folds; the opener learns the decision from the
-    /// proxy's `Commit` and remembers only whom it asked and how often it
-    /// asked again — the count a take-back is judged on.
+    /// proxy's `Commit` and remembers only whom it asked (how often it asked
+    /// again is the round's [`Round::resends`]).
     Delegated {
         /// The proxy the round was handed to.
         proxy: ProxyId,
-        /// How many re-send pages have re-delegated this round without a
-        /// decision arriving.
-        redelegations: u64,
     },
 }
 
@@ -81,6 +78,12 @@ pub struct Round<Id, V> {
     /// the column its decision is judged by. `None` under a majority or a
     /// flexible split, which name no column.
     column: Option<usize>,
+    /// How many re-send pages ([`Rounds::resend_page`]) this round has been
+    /// on without closing: a re-send of a colocated round, a re-delegation
+    /// of a delegated one. The count a policy is judged on — the leader's
+    /// take-back of a delegated round ([`Rounds::stalled_delegations`]) and
+    /// a proxy's eviction of a round nobody answers ([`Rounds::stalled`]).
+    resends: u64,
 }
 
 impl<Id, V> Round<Id, V> {
@@ -107,6 +110,12 @@ impl<Id, V> Round<Id, V> {
     #[must_use]
     pub fn custody(&self) -> &Custody<Id> {
         &self.custody
+    }
+
+    /// How many re-send pages this round has been on without closing.
+    #[must_use]
+    pub fn resends(&self) -> u64 {
+        self.resends
     }
 
     /// The proxy this round is delegated to, if it is.
@@ -233,9 +242,22 @@ impl<Id, V> Rounds<Id, V> {
     pub fn stalled_delegations(&self, after: u64) -> Vec<Slot> {
         self.by_slot
             .iter()
-            .filter(|(_, r)| {
-                matches!(r.custody, Custody::Delegated { redelegations, .. } if redelegations >= after)
-            })
+            .filter(|(_, r)| r.resends >= after && r.proxy().is_some())
+            .map(|(s, _)| *s)
+            .collect()
+    }
+
+    /// Every round re-sent at least `after` times without closing, whatever
+    /// its custody: what a tally that holds nothing durable **evicts** (a
+    /// proxy leader's bounded retention, [`ProxyLeader::expire_stale`]).
+    /// The threshold is the caller's policy.
+    ///
+    /// [`ProxyLeader::expire_stale`]: crate::proxy_leader::ProxyLeader::expire_stale
+    #[must_use]
+    pub fn stalled(&self, after: u64) -> Vec<Slot> {
+        self.by_slot
+            .iter()
+            .filter(|(_, r)| r.resends >= after)
             .map(|(s, _)| *s)
             .collect()
     }
@@ -300,6 +322,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 command,
                 custody: Custody::colocated(own_vote),
                 column,
+                resends: 0,
             },
         );
     }
@@ -330,11 +353,9 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             Round {
                 ballot,
                 command,
-                custody: Custody::Delegated {
-                    proxy,
-                    redelegations: 0,
-                },
+                custody: Custody::Delegated { proxy },
                 column,
+                resends: 0,
             },
         );
     }
@@ -437,9 +458,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// around from the lowest round held, and the cursor advances past the
     /// page. Each entry carries the column the round was opened against, so
     /// the re-send addresses exactly the column the first send did, and the
-    /// proxy a delegated round goes through — a re-send of a delegated round
-    /// is a **re-delegation**, counted on the round so a stall is visible
-    /// ([`Rounds::stalled_delegations`]).
+    /// proxy a delegated round goes through. Every round on the page counts
+    /// one more re-send ([`Round::resends`]) — a delegated round's is a
+    /// **re-delegation** — so a stall is visible to the policies that
+    /// judge it ([`Rounds::stalled_delegations`], [`Rounds::stalled`]).
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
         // No round survives below the compaction floor (the cross-role
         // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
@@ -463,12 +485,8 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             pending.extend(self.by_slot.range(..start).take(remaining).map(page));
         }
         for accept in &pending {
-            if let Some(Round {
-                custody: Custody::Delegated { redelegations, .. },
-                ..
-            }) = self.by_slot.get_mut(&accept.slot)
-            {
-                *redelegations = redelegations.saturating_add(1);
+            if let Some(round) = self.by_slot.get_mut(&accept.slot) {
+                round.resends = round.resends.saturating_add(1);
             }
         }
         self.resend_cursor = pending
@@ -756,16 +774,27 @@ mod tests {
         assert!(rounds.decided(Slot(3), &config).is_none());
         assert!(rounds.is_open_at(Slot(3), ballot(1, 0)));
         assert!(rounds.stalled_delegations(1).is_empty());
+        assert!(rounds.stalled(1).is_empty());
         let page = rounds.resend_page();
         assert_eq!(page[0].proxy, Some(ProxyId(1)));
+        assert_eq!(rounds.by_slot()[&Slot(3)].resends(), 1);
         assert_eq!(rounds.stalled_delegations(1), vec![Slot(3)]);
         assert!(rounds.stalled_delegations(2).is_empty());
+        assert_eq!(rounds.stalled(1), vec![Slot(3)]);
         assert!(rounds.take_back(Slot(3), Some(NodeId(0))));
         assert!(
             !rounds.take_back(Slot(3), None),
             "a colocated round is not taken back"
         );
-        assert!(rounds.stalled_delegations(0).is_empty());
+        assert!(
+            rounds.stalled_delegations(0).is_empty(),
+            "a taken-back round is no delegation"
+        );
+        assert_eq!(
+            rounds.stalled(1),
+            vec![Slot(3)],
+            "the re-send count is the round's, whatever its custody"
+        );
         assert!(rounds.fold_accepted(
             NodeId(1),
             ballot(1, 0),

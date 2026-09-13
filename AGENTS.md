@@ -181,15 +181,27 @@ own**. The roles:
   (`DriverHooks::skip_proxy_resend`) — and `run_node` takes the deployment map's proxies beside
   its peers, resolves `Audience::Proxy` through them, and asks two hooks before a proposal opens
   (`DriverHooks::skip_delegation`, then `DriverHooks::proxy_for`, each its own BUGGIFY location,
-  consulted only on a leader of a deployment with proxies). Every send names a `Party` sender
-  and destination, and the audit hears a node's delegation (`delegation_sent`) and a proxy's
-  fan-out, `Commit` and relayed `Nack` (`proxy_sent`, `proxy_fanned_out`, `proxy_decided`,
-  `proxy_nack_relayed`) apart from a node's sends; the sim audit judges every proxy `Commit`
-  against the durable accepts it folded from the acceptors (`observe_proxy_decision`), and its
-  `sometimes` gates are a slot decided through a proxy and a leader taking a round back (the
-  proxy's own paths — a reboot, a re-fan-out, an ignored delegation, a relayed `Nack` — are
-  reported, not gated: the model checker proves them and the 512-slot budget is spent on
-  outcomes; `sim-paros-hunt` prints the slots a campaign uses). Proven by the sans-IO model
+  consulted only on a leader of a deployment with proxies). A proxy's retention is
+  **bounded** (`ProxyLeader::expire_stale`, `DriverTunables::proxy_round_resends`, a knob born
+  buggified, floor 1): a round re-fanned-out the budget's worth of beats without an answer is
+  evicted, because one class of round is never answered — a slot every acceptor compacted past
+  is ignored without `Accepted` or `Nack`, so a delegation delayed past the leader's take-back
+  and the cluster's truncation would otherwise be re-fanned-out forever. An eviction is not a
+  decision (nothing emitted, nothing remembered as done; a later delegation reopens the round)
+  and the leader's take-back stays the liveness. Every send names a `Party` sender and
+  destination, and the audit hears every node-to-proxy message (`sent_to_proxy`: a leader's
+  delegation *and* an acceptor's `Accepted` / `Nack` reply to a delegated round, on which the
+  persist-before-send check runs exactly as on a reply to a leader) and a proxy's fan-out,
+  `Commit`, relayed `Nack` and eviction (`proxy_sent`, `proxy_fanned_out`, `proxy_decided`,
+  `proxy_nack_relayed`, `proxy_round_expired`) apart from a node's sends; the sim audit judges
+  every proxy `Commit` against the durable accepts it folded from the acceptors
+  (`observe_proxy_decision`) — below the cluster-wide floor against the decided vhash the
+  pruning kept (`decided_below_floor`), never the applied command, which a re-chosen identity
+  turns into a `Noop` — and its `sometimes` gates are a slot decided through a proxy and a
+  leader taking a round back (the proxy's own paths — a reboot, a re-fan-out, an eviction, an
+  ignored delegation, a relayed `Nack` — are reported, not gated: the model checker proves
+  them and the 512-slot budget is spent on outcomes; `sim-paros-hunt` prints the slots a
+  campaign uses). Proven by the sans-IO model
   checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
   reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
   per slot, every proxy `Commit` backed by a durable Phase-2 quorum at one ballot, and the
