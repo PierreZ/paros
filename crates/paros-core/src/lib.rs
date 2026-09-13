@@ -113,7 +113,7 @@ pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
 pub use retained::RetainedWindow;
-pub use state::{Config, HardState};
+pub use state::{Config, ConfigError, HardState};
 pub use storage::Storage;
 pub use types::{
     Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId, SessionEntry, Slot,

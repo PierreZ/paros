@@ -1190,11 +1190,20 @@ impl MatchmakerSet {
     /// matchmaker quorum system would have to satisfy too.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
-        let n = self.members.len();
-        if n == 0 {
-            return false;
-        }
-        QuorumSystem::Majority.cross_intersects(n) && self.members.windows(2).all(|w| w[0] < w[1])
+        Self::admits(&self.members) && self.members.windows(2).all(|w| w[0] < w[1])
+    }
+
+    /// Whether `members`, once normalized, would make a well-formed set —
+    /// the rule [`MatchmakerSet::new`] asserts, asked *before* constructing:
+    /// at least one distinct matchmaker, and the majority system every
+    /// matchmaker-side quorum is drawn from cross-intersecting over them
+    /// (`2q > n`, true of every non-empty set). Public so a deployment's
+    /// proof obligations ([`crate::Config::check`]) can restate the rule by
+    /// calling it rather than duplicating it.
+    #[must_use]
+    pub fn admits(members: &[MatchmakerId]) -> bool {
+        let distinct = members.iter().collect::<BTreeSet<_>>().len();
+        distinct >= 1 && QuorumSystem::Majority.cross_intersects(distinct)
     }
 }
 
