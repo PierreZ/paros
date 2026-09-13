@@ -80,7 +80,7 @@ use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, Reco
 use paros_core::replica::Replica;
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId,
-    QuorumSystem, Slot, Value, WriteOp,
+    QuorumSystem, Quorums, Slot, Value, WriteOp,
 };
 
 const N1: NodeId = NodeId(1);

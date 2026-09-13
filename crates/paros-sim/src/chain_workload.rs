@@ -14,8 +14,8 @@ use moonpool_sim::{
 };
 use paros::{
     Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose,
-    QuorumSystem, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, WireQuorumSystem,
-    parse_addr, quorum_system_from_proto, quorum_system_to_proto,
+    QuorumSystem, Quorums, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot,
+    WireQuorumSystem, parse_addr, quorum_system_from_proto, quorum_system_to_proto,
 };
 
 use crate::audit::{ClientHistory, audit_world, check_run};

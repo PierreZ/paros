@@ -24,14 +24,23 @@ impl ColocatedNode {
     /// # Panics
     ///
     /// If the configuration is malformed (membership not sorted/deduplicated,
-    /// or missing this node's own id) or the durable state violates the write
-    /// ordering contract (a floor past the chosen prefix). A broken invariant
-    /// here means corrupted storage or a broken storage implementation;
+    /// or missing this node's own id), if the deployment fails one of its
+    /// proof obligations ([`Config::check`] — a quorum system whose law does
+    /// not hold over the membership, reported with the obligation it failed),
+    /// or if the durable state violates the write ordering contract (a floor
+    /// past the chosen prefix). A broken invariant here means a malformed
+    /// deployment, corrupted storage or a broken storage implementation;
     /// crashing beats running on it.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
     pub fn new<S: Storage>(storage: &S) -> Self {
         let (hard_state, config) = storage.initial_state();
         assert_config_shape(&config);
+        // The flavor's proof obligations, judged once here — before the
+        // bootstrap configuration is built from them, so a failure names the
+        // law rather than the constructor's assert.
+        if let Err(error) = config.check() {
+            panic!("the deployment fails a proof obligation: {error}");
+        }
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
         // The `None` arm of the state machine: a plain deployment holds no
         // matchmaker set at all, never an empty one.

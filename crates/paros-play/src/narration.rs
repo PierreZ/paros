@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
     Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, QuorumSystem,
-    Slot, proposer::Round,
+    Quorums, Slot, proposer::Round,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

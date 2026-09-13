@@ -58,9 +58,9 @@ use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
     MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
-    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureRefusal,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal,
-    Value,
+    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, Quorums, ReadIndexResult,
+    ReconfigureRefusal, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep,
+    Slot, StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

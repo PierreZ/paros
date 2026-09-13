@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{MatchmakerId, MatchmakerSet};
-use crate::membership::{AcceptorConfig, QuorumSystem};
+use crate::membership::{AcceptorConfig, QuorumSystem, Quorums};
 use crate::proposer::{Campaign, PromiseFold, Proposer, Round};
 use crate::types::{Ballot, Fingerprint, Slot};
 

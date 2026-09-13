@@ -12,6 +12,9 @@
 //!        deliverable is an entropy leak, named by the first diverging draw.
 //!        `sim-paros-hunt explore-main <seed>` — root + explored continuation
 //!        timelines, for failures that live only on explorer branches.
+//!        `sim-paros-hunt replay-recipe <seed> <count>:<seed>[,<count>:<seed>…]`
+//!        — one explored timeline, exactly as the sweep prints a `bug
+//!        recipe seed=<seed> [(<count>, <seed>), …]`.
 //!        `sim-paros-hunt corpus [iterations]` — the E1 mask corpus: each seed
 //!        draws a per-slot × per-node corruption mask and asserts its
 //!        analytically derived outcome (Correct vs `CorrectlyUnavailable`).
@@ -29,13 +32,18 @@
 
 use paros_sim::{
     ChunkLiveCase, EXPLORATION_TIMELINES_PER_SEED, chain_canary_hunt, chain_seed_canary,
-    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
-    run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_departed_straggler_case, run_snapshot_lifecycle_case,
+    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, replay_chain_recipe,
+    run_bare_quorum_case, run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask,
+    run_corpus_seed, run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
+
+    if axis == "replay-recipe" {
+        replay_recipe();
+        return;
+    }
 
     if let "replay-main"
     | "replay-canary"
@@ -134,5 +142,38 @@ fn main() {
     }
     println!("VIOLATIONS: {:#?}", report.assertion_violations);
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
+    std::process::exit(1);
+}
+
+/// `replay-recipe <seed> <count>:<seed>[,<count>:<seed>…]`: one explored
+/// timeline of the main campaign, exactly as the sweep prints a `bug recipe
+/// seed=<seed> [(<count>, <seed>), …]`. Exits non-zero on a violation.
+fn replay_recipe() {
+    let seed = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("replay-recipe needs a root seed");
+    let recipe: Vec<(u64, u64)> = std::env::args()
+        .nth(3)
+        .expect("replay-recipe needs a recipe")
+        .split(',')
+        .map(|pair| {
+            let (count, fork) = pair
+                .split_once(':')
+                .expect("a recipe entry is <rng_call_count>:<seed>");
+            (
+                count.parse().expect("rng call count"),
+                fork.parse().expect("fork seed"),
+            )
+        })
+        .collect();
+    println!("--- replay: recipe seed {seed} {recipe:?} ---");
+    let report = replay_chain_recipe(seed, recipe);
+    if report.assertion_violations.is_empty() && report.failed_runs == 0 {
+        println!("seed {seed}: GREEN");
+        return;
+    }
+    println!("seed {seed}: RED");
+    println!("VIOLATIONS: {:#?}", report.assertion_violations);
     std::process::exit(1);
 }

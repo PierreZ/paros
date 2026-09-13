@@ -213,7 +213,7 @@ impl<Id: Copy + Ord> Authority<Id> {
     /// chosen anything this leader has not seen. What makes the answer sound
     /// is that a Phase-2 quorum of this ballot's configuration acked a beat
     /// at this ballot: every future Phase-1 quorum intersects it
-    /// ([`crate::QuorumSystem::cross_intersects`]), so a successor's election
+    /// ([`crate::Quorums::cross_intersects`]), so a successor's election
     /// must meet an acceptor that still held this ballot's promise when the
     /// read was answered, and could therefore not have decided anything below
     /// the read's index behind its back. Under a flexible quorum system that
