@@ -6,8 +6,12 @@
 //! around: the proposer, the read rounds, `CheckQuorum` and the GC fence all
 //! ask [`AcceptorConfig::has_phase1_quorum`] or
 //! [`AcceptorConfig::has_phase2_quorum`], which ask
-//! [`QuorumSystem::is_phase1_quorum`] / [`QuorumSystem::is_phase2_quorum`];
-//! no tally compares a count against a threshold on its own. Three quorum
+//! [`Quorums::is_phase1_quorum`] / [`Quorums::is_phase2_quorum`];
+//! no tally compares a count against a threshold on its own. That surface is
+//! the [`Quorums`] trait — the *flavor* of Paxos a deployment runs, stated as
+//! the one law every implementation must satisfy (every Phase-1 quorum meets
+//! every Phase-2 quorum, [`Quorums::cross_intersects`]) — and
+//! [`QuorumSystem`] is its wire-borne implementation. Three quorum
 //! systems exist: [`QuorumSystem::Majority`], the default, where the two
 //! predicates coincide; [`QuorumSystem::Flexible`], where they differ for
 //! the first time — Flexible Paxos's simple quorums, `|Q1| = q1` and
@@ -19,7 +23,7 @@
 //! configuration — never a rewrite of the tallies. The predicates are
 //! **phase-split** precisely so such a variant is expressible: Paxos safety
 //! needs every Phase-1 quorum to intersect every Phase-2 quorum (`q1 + q2 >
-//! n`, see [`QuorumSystem::cross_intersects`]), not each phase's quorums to
+//! n`, see [`Quorums::cross_intersects`]), not each phase's quorums to
 //! intersect each other, and a system that exploits the difference cannot be
 //! written against one un-tagged predicate. The majority is the plain
 //! deployment's system and stays the default: a flexible or grid system is
@@ -27,18 +31,18 @@
 //!
 //! **Addressing crosses the same boundary.** A grid does not only *judge*
 //! Phase 2 by column, it *addresses* it by column: every slot's `Accept`
-//! goes to one column ([`QuorumSystem::column_of`] — `slot % cols`, a pure
+//! goes to one column ([`Quorums::column_of`] — `slot % cols`, a pure
 //! function of the slot so every incarnation of a leadership derives the
 //! same column without carrying it), and the round is decided by that
-//! column alone ([`QuorumSystem::is_phase2_quorum_in`]). That is
+//! column alone ([`Quorums::is_phase2_quorum_in`]). That is
 //! Compartmentalized Paxos's §3.2: every acceptor sees `1 / cols` of the
 //! commands. A majority or a flexible split names no column and addresses
 //! the whole membership. The claims that rest on *any* Phase-2 quorum — a
 //! leader's standing authority, a read's confirmation, the GC fence — ask
 //! the column-less predicate and are satisfied by any full column. The read
 //! side mirrors it (#143): a quorum read is addressed to **one row**
-//! ([`QuorumSystem::row_of`] — `ctx % rows`, [`QuorumSystem::phase1_addressees`])
-//! and judged by that row alone ([`QuorumSystem::is_phase1_quorum_in`]); an
+//! ([`Quorums::row_of`] — `ctx % rows`, [`Quorums::phase1_addressees`])
+//! and judged by that row alone ([`Quorums::is_phase1_quorum_in`]); an
 //! election's `Prepare` still goes to the whole membership and any full row
 //! completes it.
 //!
@@ -53,13 +57,17 @@ use std::collections::BTreeSet;
 use crate::types::{Fingerprint, NodeId, Slot};
 
 /// The quorum system a configuration uses: which sets of acceptors count as a
-/// quorum for Phase 1 (election) and Phase 2 (decide).
+/// quorum for Phase 1 (election) and Phase 2 (decide). **One implementation
+/// of [`Quorums`]** — the one the wire carries, since an [`AcceptorConfig`]
+/// rides inside messages and holds this enum; every predicate and every
+/// addressing question it answers is the trait's, and the law it satisfies
+/// is stated there once.
 ///
 /// Carried as a *value* in [`crate::Config`] so that a reconfiguration is a
 /// *data* change — a different quorum system per configuration — rather than
 /// a rewrite of the election/decide logic. Paxos safety rests on every
 /// Phase-1 quorum intersecting every Phase-2 quorum
-/// ([`QuorumSystem::cross_intersects`]); a simple majority satisfies that
+/// ([`Quorums::cross_intersects`]); a simple majority satisfies that
 /// trivially, and a flexible split satisfies it by construction
 /// ([`AcceptorConfig::new`] asserts it once).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -83,7 +91,7 @@ pub enum QuorumSystem {
     /// acceptor learns a value in one hop, but recovery needs everyone up".
     ///
     /// Well-formed over `n` members when `1 <= q1 <= n`, `1 <= q2 <= n` and
-    /// `q1 + q2 > n` ([`QuorumSystem::admits`]); a configuration that does
+    /// `q1 + q2 > n` ([`Quorums::admits`]); a configuration that does
     /// not admit its system cannot be constructed.
     Flexible {
         /// The Phase-1 quorum size: promises an election needs.
@@ -98,10 +106,10 @@ pub enum QuorumSystem {
     /// derives the same one. **A Phase-1 quorum is any full row; a Phase-2
     /// quorum is any full column.** Every row meets every column in exactly
     /// one cell, so the cross-phase intersection holds by construction — no
-    /// arithmetic to check ([`QuorumSystem::cross_intersects`] answers `true`).
+    /// arithmetic to check ([`Quorums::cross_intersects`] answers `true`).
     ///
     /// What the grid buys: each slot's Phase 2 is addressed to **one column**
-    /// ([`QuorumSystem::column_of`], `slot % cols`), so every acceptor sees
+    /// ([`Quorums::column_of`], `slot % cols`), so every acceptor sees
     /// `1 / cols` of the commands and the acceptor tier's throughput scales
     /// with `cols`. What it costs: a Phase-1 quorum is a *whole* row (`cols`
     /// specific acceptors, not any `cols`), and a Phase-2 quorum a whole
@@ -112,7 +120,7 @@ pub enum QuorumSystem {
     /// mirror: well formed here, and a deployment's own business.
     ///
     /// Well-formed over `n` members when `rows >= 1`, `cols >= 1` and
-    /// `rows * cols == n` ([`QuorumSystem::admits`]); a configuration that
+    /// `rows * cols == n` ([`Quorums::admits`]); a configuration that
     /// does not admit its grid cannot be constructed.
     Grid {
         /// Rows of the grid: how many Phase-1 quorums there are.
@@ -158,57 +166,77 @@ fn all_voted<'a, I: Ord + 'a>(cell: impl IntoIterator<Item = &'a I>, voters: &BT
     cell.into_iter().all(|m| voters.contains(m))
 }
 
-impl QuorumSystem {
+/// The membership size past which [`Quorums::cross_intersects`]'s default
+/// brute force gives up: `2^n` subsets, each judged by both predicates,
+/// is cheap to sixteen members and past a lesson's reach beyond.
+pub const BRUTE_FORCE_MEMBERS: usize = 16;
+
+/// The **quorum system** a configuration runs: which subsets of a
+/// membership count as a Phase-1 quorum (an election, a repair probe, a
+/// quorum read) and which as a Phase-2 quorum (a decision, and every claim
+/// that rests on one), and which members each phase's message is addressed
+/// to. This is the one surface the roles reach a quorum system through —
+/// [`AcceptorConfig`] forwards every one of its quorum questions here and
+/// nothing else in the crate asks another way — so a *flavor* of Paxos is
+/// an implementation of this trait handed to the same roles, and the law it
+/// has to satisfy is stated once, here.
+///
+/// # The law
+///
+/// **Every Phase-1 quorum meets every Phase-2 quorum.** That is the whole
+/// of what Paxos safety asks of a quorum system (Flexible Paxos §3: `∀ Q1,
+/// ∀ Q2 : Q1 ∩ Q2 ≠ ∅`, and nothing within a phase): a value chosen by a
+/// Phase-2 quorum at one ballot is reported to every later ballot's Phase-1
+/// quorum by the member they share, which is what lets the proposer's P2c
+/// rule adopt it. [`Quorums::cross_intersects`] is the check;
+/// [`Quorums::admits`] is the well-formedness arm [`AcceptorConfig::new`]
+/// asserts once, at the only construction site, so no tally re-checks it.
+/// Two Phase-1 quorums need not meet, and neither need two Phase-2 quorums
+/// — the freedom [`QuorumSystem::Flexible`] spends.
+///
+/// # The contract between the methods
+///
+/// - The `_in` predicates and the addressees agree: `is_phase2_quorum_in(m,
+///   v, Some(c))` counts exactly the members `phase2_addressees(m, Some(c))`
+///   names, and a member outside them is never an addressee
+///   (`is_phase2_addressee`); the Phase-1 trio says the same of a row.
+/// - The column-less and row-less forms are the disjunction: `None` names no
+///   column, and *any* column (row) satisfies it.
+/// - Addressing is a pure function of the slot (`column_of`) and of the read
+///   token (`row_of`): the core draws nothing, and every incarnation of a
+///   leadership derives the same column without carrying it.
+/// - `column_of` answers `Some` exactly when `column_count` does, and every
+///   column it names is below the count.
+/// - The predicates are **monotone**: a superset of a quorum is a quorum
+///   (a quorum system is an upward-closed family). The default
+///   `cross_intersects` relies on it.
+///
+/// # Implementing it
+///
+/// A system that names no rows and no columns — a majority, a flexible
+/// split, a reader's own two-site rule — implements the two sizes, the two
+/// `_in` predicates and `admits`, and keeps every default: the addressing
+/// methods default to the whole membership, `column_of` / `row_of` /
+/// `column_count` to `None`, and `cross_intersects` to a brute force over
+/// every subset. A system that addresses a column or a row overrides the
+/// whole addressing family together, exactly as [`QuorumSystem::Grid`] does.
+///
+/// [`QuorumSystem`] is the one implementation the wire carries: an
+/// [`AcceptorConfig`] rides in `Message::Accept` and in every
+/// `Option<AcceptorConfig>` a message names, and it holds the enum, not a
+/// generic. A reader's own implementation drives the roles by hand — as the
+/// crate's examples do — and never goes on the wire.
+pub trait Quorums {
     /// The number of acceptors a **Phase-1** quorum over a membership of
-    /// `members` takes. Kept, with [`QuorumSystem::phase2_quorum_size`], for
+    /// `members` takes. Kept, with [`Quorums::phase2_quorum_size`], for
     /// the one thing a predicate cannot report — how many more answers a
     /// pending tally still waits for; whether a tally *holds* is always
-    /// [`QuorumSystem::is_phase1_quorum`].
-    #[must_use]
-    pub fn phase1_quorum_size(self, members: usize) -> usize {
-        match self {
-            QuorumSystem::Majority => majority_of(members),
-            QuorumSystem::Flexible { q1, .. } => q1,
-            // A row: `cols` acceptors wide.
-            QuorumSystem::Grid { cols, .. } => cols,
-        }
-    }
+    /// [`Quorums::is_phase1_quorum`].
+    fn phase1_quorum_size(&self, members: usize) -> usize;
 
     /// The number of acceptors a **Phase-2** quorum over a membership of
-    /// `members` takes. See [`QuorumSystem::phase1_quorum_size`].
-    #[must_use]
-    pub fn phase2_quorum_size(self, members: usize) -> usize {
-        match self {
-            QuorumSystem::Majority => majority_of(members),
-            QuorumSystem::Flexible { q2, .. } => q2,
-            // A column: `rows` acceptors tall.
-            QuorumSystem::Grid { rows, .. } => rows,
-        }
-    }
-
-    /// Whether every Phase-1 quorum of a membership of `members` intersects
-    /// every Phase-2 quorum of it — the one fact Paxos safety rests on. For
-    /// the cardinality systems it is arithmetic, `q1 + q2 > n` (Flexible
-    /// Paxos §4): [`QuorumSystem::Majority`] takes the same `q` in both
-    /// phases, so it reduces to the familiar `2q > n`;
-    /// [`QuorumSystem::Flexible`] answers `q1 + q2 > n` and is free to let
-    /// one phase's quorums *not* intersect each other (the paper's whole
-    /// point — an even cluster with `|Q2| = n/2`), which the old
-    /// self-intersection assert forbade outright. For [`QuorumSystem::Grid`]
-    /// it is **geometry, true by construction**: a row and a column of the
-    /// same grid always share exactly one cell, so a full row always meets a
-    /// full column — whatever `rows` and `cols` are.
-    #[must_use]
-    pub fn cross_intersects(self, members: usize) -> bool {
-        match self {
-            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
-                self.phase1_quorum_size(members)
-                    .saturating_add(self.phase2_quorum_size(members))
-                    > members
-            }
-            QuorumSystem::Grid { .. } => true,
-        }
-    }
+    /// `members` takes. See [`Quorums::phase1_quorum_size`].
+    fn phase2_quorum_size(&self, members: usize) -> usize;
 
     /// Whether this quorum system can be run over a membership of `members`
     /// at all: each phase's quorum is at least one acceptor and at most the
@@ -216,58 +244,212 @@ impl QuorumSystem {
     /// well-formedness arm [`AcceptorConfig::new`] asserts once; it is public
     /// so a wire boundary can *refuse* a malformed configuration before
     /// constructing one, where the constructor would panic.
-    ///
-    /// A majority admits every non-empty membership. A flexible split admits
-    /// `n` when `1 <= q1 <= n`, `1 <= q2 <= n` and `q1 + q2 > n`. A grid
-    /// admits `n` when `rows >= 1`, `cols >= 1` and `rows * cols == n` — the
-    /// layout must tile the membership exactly, or some row or column would
-    /// be short and the set-membership predicates would answer for a cell
-    /// that does not exist.
-    #[must_use]
-    pub fn admits(self, members: usize) -> bool {
-        match self {
-            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
-                let q1 = self.phase1_quorum_size(members);
-                let q2 = self.phase2_quorum_size(members);
-                members >= 1
-                    && (1..=members).contains(&q1)
-                    && (1..=members).contains(&q2)
-                    && self.cross_intersects(members)
-            }
-            QuorumSystem::Grid { rows, cols } => {
-                rows >= 1 && cols >= 1 && rows.checked_mul(cols) == Some(members)
-            }
+    fn admits(&self, members: usize) -> bool;
+
+    /// Whether every Phase-1 quorum of a membership of `members` intersects
+    /// every Phase-2 quorum of it — the one fact Paxos safety rests on (the
+    /// law above). The default proves it by **brute force**: every subset
+    /// of `members` that [`Quorums::is_phase1_quorum`] accepts must have a
+    /// complement that [`Quorums::is_phase2_quorum`] refuses (with monotone
+    /// predicates, a Phase-2 quorum disjoint from `Q1` would be a subset of
+    /// the complement, and so would the complement itself be a quorum). It
+    /// is `O(2^n · n)`: exact to [`BRUTE_FORCE_MEMBERS`] members and
+    /// **`false` beyond** — an unproven law is a refused configuration, so a
+    /// system for a larger deployment overrides it with its own argument, as
+    /// [`QuorumSystem`] does with arithmetic and geometry (and a test pins
+    /// that the two agree).
+    fn cross_intersects(&self, members: usize) -> bool {
+        if members > BRUTE_FORCE_MEMBERS {
+            return false;
         }
+        let all: Vec<usize> = (0..members).collect();
+        let every = 1u64 << members;
+        (0..every).all(|mask| {
+            let voters: BTreeSet<usize> =
+                all.iter().copied().filter(|m| mask >> m & 1 == 1).collect();
+            if !self.is_phase1_quorum(&all, &voters) {
+                return true;
+            }
+            let rest: BTreeSet<usize> =
+                all.iter().copied().filter(|m| mask >> m & 1 == 0).collect();
+            !self.is_phase2_quorum(&all, &rest)
+        })
+    }
+
+    /// Whether `voters` form a **Phase-1** quorum over `members`: the
+    /// promises an election (or a CTRL repair probe) must hold before it may
+    /// conclude anything about what an earlier ballot could have chosen. A
+    /// voter outside `members` never counts. The row-less form an election
+    /// asks — [`Quorums::is_phase1_quorum_in`] with no row, *any* full row
+    /// under a grid; a quorum read addressed to one row is judged by that
+    /// row.
+    fn is_phase1_quorum<I: Ord>(&self, members: &[I], voters: &BTreeSet<I>) -> bool {
+        self.is_phase1_quorum_in(members, voters, None)
+    }
+
+    /// Whether `voters` form a **Phase-1** quorum over `members` **in
+    /// `row`**: the form a quorum read asks (#143), judged by the row it
+    /// was addressed to. `None` names no row — the whole membership under a
+    /// system without rows, *any* full row under a grid.
+    ///
+    /// # Panics
+    ///
+    /// An implementation without rows panics on a named row: a caller that
+    /// names one holds a read opened against a different quorum system than
+    /// the one it judges by — a programmer error, never wire input (the row
+    /// is derived by [`Quorums::row_of`] from the same configuration).
+    fn is_phase1_quorum_in<I: Ord>(
+        &self,
+        members: &[I],
+        voters: &BTreeSet<I>,
+        row: Option<usize>,
+    ) -> bool;
+
+    /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
+    /// that choose a value, and every claim that rests on one — a leader's
+    /// standing authority (`CheckQuorum`), a read's confirmation, the GC
+    /// fence's custody claim. A voter outside `members` never counts. The
+    /// column-less form the standing claims ask —
+    /// [`Quorums::is_phase2_quorum_in`] with no column, *any* full column
+    /// under a grid; a round that was addressed to one column is judged by
+    /// that column.
+    fn is_phase2_quorum<I: Ord>(&self, members: &[I], voters: &BTreeSet<I>) -> bool {
+        self.is_phase2_quorum_in(members, voters, None)
+    }
+
+    /// Whether `voters` form a **Phase-2** quorum over `members` **in
+    /// `column`**: the form a decision asks, judged by the column the round
+    /// was addressed to. `None` names no column — the whole membership under
+    /// a system without columns, *any* full column under a grid.
+    ///
+    /// A vote from outside the column never counts here, even from a
+    /// configured acceptor: an acceptor that received a misrouted or
+    /// duplicated `Accept` may well have accepted it (acceptor guards are
+    /// pool-based, never configuration-based), but the round's quorum is its
+    /// column, and only a full column proves the value chosen. The caller
+    /// keeps such a vote out of the tally
+    /// ([`Quorums::is_phase2_addressee`]); the decision restates it.
+    ///
+    /// # Panics
+    ///
+    /// An implementation without columns panics on a named column: a caller
+    /// that names one holds a round opened against a different quorum
+    /// system than the one it judges by — a programmer error, never wire
+    /// input (the column is derived by [`Quorums::column_of`] from the same
+    /// configuration).
+    fn is_phase2_quorum_in<I: Ord>(
+        &self,
+        members: &[I],
+        voters: &BTreeSet<I>,
+        column: Option<usize>,
+    ) -> bool;
+
+    /// Whether `node` is one of the acceptors a Phase-1 message in `row` is
+    /// addressed to — the guard a quorum read's tally applies to a
+    /// `PreReadAck` before counting it. A node outside `members` is never an
+    /// addressee. The default is the system without rows: every member, and
+    /// `row` must be `None`.
+    ///
+    /// # Panics
+    ///
+    /// If a row is named under a system without rows (see
+    /// [`Quorums::is_phase1_quorum_in`]).
+    fn is_phase1_addressee<I: Ord>(&self, members: &[I], node: &I, row: Option<usize>) -> bool {
+        assert!(
+            row.is_none(),
+            "only a grid names a row for a Phase-1 addressee"
+        );
+        members.binary_search(node).is_ok()
+    }
+
+    /// The acceptors a Phase-1 message in `row` is addressed to, out of
+    /// `members`, in membership order — the read-side twin of
+    /// [`Quorums::phase2_addressees`]. The default is the system without
+    /// rows: the whole membership, and `row` must be `None`. Under a grid,
+    /// `None` addresses every row: an election's `Prepare` goes to the
+    /// whole membership, since which row will be whole is not known ahead.
+    ///
+    /// # Panics
+    ///
+    /// If a row is named under a system without rows (see
+    /// [`Quorums::is_phase1_quorum_in`]).
+    fn phase1_addressees<I: Copy>(&self, members: &[I], row: Option<usize>) -> Vec<I> {
+        assert!(
+            row.is_none(),
+            "only a grid names a row for a Phase-1 fan-out"
+        );
+        members.to_vec()
+    }
+
+    /// Whether `node` is one of the acceptors a Phase-2 message in `column`
+    /// is addressed to — the guard a round's tally applies to an `Accepted`
+    /// before counting it. A node outside `members` is never an addressee.
+    /// The default is the system without columns: every member, and
+    /// `column` must be `None`.
+    ///
+    /// # Panics
+    ///
+    /// If a column is named under a system without columns (see
+    /// [`Quorums::is_phase2_quorum_in`]).
+    fn is_phase2_addressee<I: Ord>(&self, members: &[I], node: &I, column: Option<usize>) -> bool {
+        assert!(
+            column.is_none(),
+            "only a grid names a column for a Phase-2 addressee"
+        );
+        members.binary_search(node).is_ok()
+    }
+
+    /// The acceptors a Phase-2 message in `column` is addressed to, out of
+    /// `members`, in membership order. The default is the system without
+    /// columns: the whole membership — any subset large enough may answer —
+    /// and `column` must be `None`. Under a grid, `None` addresses every
+    /// column.
+    ///
+    /// # Panics
+    ///
+    /// If a column is named under a system without columns (see
+    /// [`Quorums::is_phase2_quorum_in`]).
+    fn phase2_addressees<I: Copy>(&self, members: &[I], column: Option<usize>) -> Vec<I> {
+        assert!(
+            column.is_none(),
+            "only a grid names a column for a Phase-2 fan-out"
+        );
+        members.to_vec()
     }
 
     /// The **column** a slot's Phase 2 is addressed to under this quorum
-    /// system: `slot % cols` on a [`QuorumSystem::Grid`], `None` — the whole
-    /// membership — under a majority or a flexible split, which name no
-    /// column.
-    ///
-    /// A **pure function of the slot**, deliberately: the core has no RNG,
-    /// and the column must be derivable by every incarnation of a leadership
-    /// without carrying it — a handoff successor re-proposing an inherited
-    /// round and a restarted leader's re-send both land on the same column
-    /// the round was opened against. (frankenpaxos draws
-    /// `grid.randomWriteQuorum()`; paros replaces the draw by the modulus,
-    /// and a driver that wants to perturb the choice does so through its own
-    /// hook, never inside the core.) Consecutive slots walk the columns
-    /// round-robin, so a leader streaming commands spreads them evenly:
-    /// Compartmentalized Paxos's `1 / w` per acceptor.
-    #[must_use]
-    pub fn column_of(self, slot: Slot) -> Option<usize> {
-        match self {
-            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
-            QuorumSystem::Grid { cols, .. } => {
-                let cols = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
-                // `slot % cols < cols`, and `cols` came from a `usize`, so the
-                // remainder always converts back.
-                Some(usize::try_from(slot.0 % cols).unwrap_or(0))
-            }
-        }
+    /// system, or `None` — the whole membership — under a system that names
+    /// no column (the default). A **pure function of the slot**,
+    /// deliberately: the core has no RNG, and the column must be derivable
+    /// by every incarnation of a leadership without carrying it. `Some`
+    /// exactly when [`Quorums::column_count`] is, and always below it.
+    fn column_of(&self, slot: Slot) -> Option<usize> {
+        let _ = slot;
+        None
     }
 
+    /// The **row** a quorum read is addressed to under this quorum system
+    /// (#143), or `None` — the whole membership — under a system that
+    /// names no row (the default). The Phase-1 twin of
+    /// [`Quorums::column_of`]: a pure function of the read's token, so the
+    /// core draws nothing.
+    fn row_of(&self, ctx: u64) -> Option<usize> {
+        let _ = ctx;
+        None
+    }
+
+    /// How many columns this quorum system addresses Phase 2 to — the
+    /// modulus [`Quorums::column_of`] draws from — or `None` under a system
+    /// that names no column (the default). What a caller checks a column
+    /// against without knowing which implementation it holds: a named
+    /// column is one below this count, and none at all where there is no
+    /// count.
+    fn column_count(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl QuorumSystem {
     /// Whether `voters` form a **majority** of the sorted membership
     /// `members`. The body of [`QuorumSystem::Majority`]'s two predicates and
     /// of every matchmaker-side tally ([`MatchmakerSet::has_quorum`]) — and
@@ -285,19 +467,104 @@ impl QuorumSystem {
     pub fn is_majority<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> bool {
         counted(members, voters) >= majority_of(members.len())
     }
+}
 
-    /// The **row** a quorum read is addressed to under this quorum system
-    /// (#143): `ctx % rows` on a [`QuorumSystem::Grid`], `None` — the whole
-    /// membership — under a majority or a flexible split, which name no row.
-    /// The Phase-1 twin of [`QuorumSystem::column_of`]: a pure function of
-    /// the read's token, so the core draws nothing (a driver that wants to
-    /// perturb the choice does so through its own hook, never here).
-    /// Compartmentalized Paxos §3.4 sends `PreRead` to *a* read quorum; which
-    /// one is the reader's choice, and spreading reads over the rows is what
-    /// lets the read load scale with the number of rows.
-    #[must_use]
-    pub fn row_of(self, ctx: u64) -> Option<usize> {
-        match self {
+/// The wire's implementation of [`Quorums`]: the three systems the enum
+/// names, each answering the trait's questions its own way — a count for
+/// [`QuorumSystem::Majority`] and [`QuorumSystem::Flexible`], set
+/// membership over rows and columns for [`QuorumSystem::Grid`]. The law is
+/// arithmetic for the first two and geometry for the third, and the
+/// override of [`Quorums::cross_intersects`] says so; a test pins it to the
+/// trait's brute force.
+impl Quorums for QuorumSystem {
+    fn phase1_quorum_size(&self, members: usize) -> usize {
+        match *self {
+            QuorumSystem::Majority => majority_of(members),
+            QuorumSystem::Flexible { q1, .. } => q1,
+            // A row: `cols` acceptors wide.
+            QuorumSystem::Grid { cols, .. } => cols,
+        }
+    }
+
+    fn phase2_quorum_size(&self, members: usize) -> usize {
+        match *self {
+            QuorumSystem::Majority => majority_of(members),
+            QuorumSystem::Flexible { q2, .. } => q2,
+            // A column: `rows` acceptors tall.
+            QuorumSystem::Grid { rows, .. } => rows,
+        }
+    }
+
+    /// For the cardinality systems it is arithmetic, `q1 + q2 > n` (Flexible
+    /// Paxos §4): [`QuorumSystem::Majority`] takes the same `q` in both
+    /// phases, so it reduces to the familiar `2q > n`;
+    /// [`QuorumSystem::Flexible`] answers `q1 + q2 > n` and is free to let
+    /// one phase's quorums *not* intersect each other (the paper's whole
+    /// point — an even cluster with `|Q2| = n/2`), which the old
+    /// self-intersection assert forbade outright. For [`QuorumSystem::Grid`]
+    /// it is **geometry, true by construction**: a row and a column of the
+    /// same grid always share exactly one cell, so a full row always meets a
+    /// full column — whatever `rows` and `cols` are.
+    fn cross_intersects(&self, members: usize) -> bool {
+        match *self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
+                self.phase1_quorum_size(members)
+                    .saturating_add(self.phase2_quorum_size(members))
+                    > members
+            }
+            QuorumSystem::Grid { .. } => true,
+        }
+    }
+
+    /// A majority admits every non-empty membership. A flexible split admits
+    /// `n` when `1 <= q1 <= n`, `1 <= q2 <= n` and `q1 + q2 > n`. A grid
+    /// admits `n` when `rows >= 1`, `cols >= 1` and `rows * cols == n` — the
+    /// layout must tile the membership exactly, or some row or column would
+    /// be short and the set-membership predicates would answer for a cell
+    /// that does not exist.
+    fn admits(&self, members: usize) -> bool {
+        match *self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
+                let q1 = self.phase1_quorum_size(members);
+                let q2 = self.phase2_quorum_size(members);
+                members >= 1
+                    && (1..=members).contains(&q1)
+                    && (1..=members).contains(&q2)
+                    && self.cross_intersects(members)
+            }
+            QuorumSystem::Grid { rows, cols } => {
+                rows >= 1 && cols >= 1 && rows.checked_mul(cols) == Some(members)
+            }
+        }
+    }
+
+    /// `slot % cols` on a [`QuorumSystem::Grid`], `None` — the whole
+    /// membership — under a majority or a flexible split, which name no
+    /// column. (frankenpaxos draws `grid.randomWriteQuorum()`; paros
+    /// replaces the draw by the modulus, and a driver that wants to perturb
+    /// the choice does so through its own hook, never inside the core.)
+    /// Consecutive slots walk the columns round-robin, so a leader streaming
+    /// commands spreads them evenly: Compartmentalized Paxos's `1 / w` per
+    /// acceptor.
+    fn column_of(&self, slot: Slot) -> Option<usize> {
+        match *self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
+            QuorumSystem::Grid { cols, .. } => {
+                let cols = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
+                // `slot % cols < cols`, and `cols` came from a `usize`, so the
+                // remainder always converts back.
+                Some(usize::try_from(slot.0 % cols).unwrap_or(0))
+            }
+        }
+    }
+
+    /// `ctx % rows` on a [`QuorumSystem::Grid`], `None` — the whole
+    /// membership — under a majority or a flexible split, which name no
+    /// row. Compartmentalized Paxos §3.4 sends `PreRead` to *a* read quorum;
+    /// which one is the reader's choice, and spreading reads over the rows
+    /// is what lets the read load scale with the number of rows.
+    fn row_of(&self, ctx: u64) -> Option<usize> {
+        match *self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
             QuorumSystem::Grid { rows, .. } => {
                 let rows = u64::try_from(rows).unwrap_or(u64::MAX).max(1);
@@ -307,40 +574,26 @@ impl QuorumSystem {
         }
     }
 
-    /// Whether `voters` form a **Phase-1** quorum over `members`: the
-    /// promises an election (or a CTRL repair probe) must hold before it may
-    /// conclude anything about what an earlier ballot could have chosen.
-    /// Identical to [`QuorumSystem::is_phase2_quorum`] under
-    /// [`QuorumSystem::Majority`]; [`QuorumSystem::Flexible`] counts against
-    /// `q1` here and `q2` there. A voter outside `members` never counts.
-    /// Under a grid this is *any* full row — the row-less form an election
-    /// asks; a quorum read addressed to one row is judged by
-    /// [`QuorumSystem::is_phase1_quorum_in`] with that row.
-    #[must_use]
-    pub fn is_phase1_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
-        self.is_phase1_quorum_in(members, voters, None)
+    /// `cols` on a [`QuorumSystem::Grid`], `None` under a majority or a
+    /// flexible split.
+    fn column_count(&self) -> Option<usize> {
+        match *self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
+            QuorumSystem::Grid { cols, .. } => Some(cols),
+        }
     }
 
-    /// Whether `voters` form a **Phase-1** quorum over `members` **in
-    /// `row`**: the form a quorum read asks (#143), judged by the row it
-    /// was addressed to. `None` names no row — the whole membership under a
-    /// majority or a flexible split, *any* full row under a grid.
-    ///
-    /// # Panics
-    ///
-    /// If a row is named under a majority or a flexible split: neither has
-    /// rows, so a caller that names one holds a read opened against a
-    /// different quorum system than the one it judges by — a programmer
-    /// error, never wire input (the row is derived by
-    /// [`QuorumSystem::row_of`] from the same configuration).
-    #[must_use]
-    pub fn is_phase1_quorum_in<I: Ord>(
-        self,
+    /// Identical to [`Quorums::is_phase2_quorum`] under
+    /// [`QuorumSystem::Majority`]; [`QuorumSystem::Flexible`] counts against
+    /// `q1` here and `q2` there; a [`QuorumSystem::Grid`] answers by set
+    /// membership — the named row, or some row, lies wholly in `voters`.
+    fn is_phase1_quorum_in<I: Ord>(
+        &self,
         members: &[I],
         voters: &BTreeSet<I>,
         row: Option<usize>,
     ) -> bool {
-        match self {
+        match *self {
             QuorumSystem::Majority => {
                 assert!(
                     row.is_none(),
@@ -364,23 +617,13 @@ impl QuorumSystem {
         }
     }
 
-    /// Whether `node` is one of the acceptors a Phase-1 message in `row` is
-    /// addressed to — the guard a quorum read's tally applies to a
-    /// `PreReadAck` before counting it. A member of the configuration under
-    /// a majority or a flexible split (`row` is `None` there); a member of
-    /// exactly that row under a grid. A node outside `members` is never an
-    /// addressee.
-    ///
-    /// # Panics
-    ///
-    /// If a row is named under a majority or a flexible split (see
-    /// [`QuorumSystem::is_phase1_quorum_in`]).
-    #[must_use]
-    pub fn is_phase1_addressee<I: Ord>(self, members: &[I], node: &I, row: Option<usize>) -> bool {
+    /// A member of the configuration under a majority or a flexible split
+    /// (`row` is `None` there); a member of exactly that row under a grid.
+    fn is_phase1_addressee<I: Ord>(&self, members: &[I], node: &I, row: Option<usize>) -> bool {
         let Ok(position) = members.binary_search(node) else {
             return false;
         };
-        match self {
+        match *self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     row.is_none(),
@@ -394,22 +637,13 @@ impl QuorumSystem {
         }
     }
 
-    /// The acceptors a Phase-1 message in `row` is addressed to, out of
-    /// `members`, in membership order — the read-side twin of
-    /// [`QuorumSystem::phase2_addressees`]. A majority or a flexible split
-    /// addresses the whole membership; a grid addresses **one row** — the
-    /// one [`QuorumSystem::row_of`] derived for the read — so every acceptor
-    /// answers `1 / rows` of the reads (Compartmentalized Paxos §3.4). `None`
-    /// under a grid addresses every row: an election's `Prepare` goes to the
-    /// whole membership, since which row will be whole is not known ahead.
-    ///
-    /// # Panics
-    ///
-    /// If a row is named under a majority or a flexible split (see
-    /// [`QuorumSystem::is_phase1_quorum_in`]).
-    #[must_use]
-    pub fn phase1_addressees<I: Copy>(self, members: &[I], row: Option<usize>) -> Vec<I> {
-        match self {
+    /// A majority or a flexible split addresses the whole membership; a grid
+    /// addresses **one row** — the one [`Quorums::row_of`] derived for the
+    /// read — so every acceptor answers `1 / rows` of the reads
+    /// (Compartmentalized Paxos §3.4). `None` under a grid addresses every
+    /// row.
+    fn phase1_addressees<I: Copy>(&self, members: &[I], row: Option<usize>) -> Vec<I> {
+        match *self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     row.is_none(),
@@ -424,46 +658,15 @@ impl QuorumSystem {
         }
     }
 
-    /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
-    /// that choose a value, and every claim that rests on one — a leader's
-    /// standing authority (`CheckQuorum`), a read's confirmation, the GC
-    /// fence's custody claim. A voter outside `members` never counts. Under a
-    /// grid this is *any* full column — the column-less form the standing
-    /// claims ask; a round that was addressed to one column is judged by
-    /// [`QuorumSystem::is_phase2_quorum_in`] with that column.
-    #[must_use]
-    pub fn is_phase2_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
-        self.is_phase2_quorum_in(members, voters, None)
-    }
-
-    /// Whether `voters` form a **Phase-2** quorum over `members` **in
-    /// `column`**: the form a decision asks, judged by the column the round
-    /// was addressed to. `None` names no column — the whole membership under
-    /// a majority or a flexible split, *any* full column under a grid.
-    ///
-    /// A vote from outside the column never counts here, even from a
-    /// configured acceptor: an acceptor that received a misrouted or
-    /// duplicated `Accept` may well have accepted it (acceptor guards are
-    /// pool-based, never configuration-based), but the round's quorum is its
-    /// column, and only a full column proves the value chosen. The caller
-    /// keeps such a vote out of the tally
-    /// ([`QuorumSystem::is_phase2_addressee`]); the decision restates it.
-    ///
-    /// # Panics
-    ///
-    /// If a column is named under a majority or a flexible split: neither
-    /// has columns, so a caller that names one holds a round opened against
-    /// a different quorum system than the one it judges by — a programmer
-    /// error, never wire input (the column is derived by
-    /// [`QuorumSystem::column_of`] from the same configuration).
-    #[must_use]
-    pub fn is_phase2_quorum_in<I: Ord>(
-        self,
+    /// A count against `q` (a majority) or `q2` (a flexible split); set
+    /// membership over the named column — or some column — under a grid.
+    fn is_phase2_quorum_in<I: Ord>(
+        &self,
         members: &[I],
         voters: &BTreeSet<I>,
         column: Option<usize>,
     ) -> bool {
-        match self {
+        match *self {
             QuorumSystem::Majority => {
                 assert!(
                     column.is_none(),
@@ -487,27 +690,14 @@ impl QuorumSystem {
         }
     }
 
-    /// Whether `node` is one of the acceptors a Phase-2 message in `column`
-    /// is addressed to — the guard a round's tally applies to an `Accepted`
-    /// before counting it. A member of the configuration under a majority or
-    /// a flexible split (`column` is `None` there); a member of exactly that
-    /// column under a grid. A node outside `members` is never an addressee.
-    ///
-    /// # Panics
-    ///
-    /// If a column is named under a majority or a flexible split (see
-    /// [`QuorumSystem::is_phase2_quorum_in`]).
-    #[must_use]
-    pub fn is_phase2_addressee<I: Ord>(
-        self,
-        members: &[I],
-        node: &I,
-        column: Option<usize>,
-    ) -> bool {
+    /// A member of the configuration under a majority or a flexible split
+    /// (`column` is `None` there); a member of exactly that column under a
+    /// grid.
+    fn is_phase2_addressee<I: Ord>(&self, members: &[I], node: &I, column: Option<usize>) -> bool {
         let Ok(position) = members.binary_search(node) else {
             return false;
         };
-        match self {
+        match *self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     column.is_none(),
@@ -521,27 +711,18 @@ impl QuorumSystem {
         }
     }
 
-    /// The acceptors a Phase-2 message in `column` is addressed to, out of
-    /// `members`, in membership order.
-    ///
     /// A majority addresses the whole membership: any subset large enough may
     /// answer. So does a flexible split — any `q2` of them decide, so every
     /// one of them is asked (the paper's `2|Q2|` message saving, addressing
     /// only `q2` and retrying on the rest, is a latency trade paros does not
     /// take). A grid addresses **one column** — the one
-    /// [`QuorumSystem::column_of`] derived for the slot — and that is the
+    /// [`Quorums::column_of`] derived for the slot — and that is the
     /// whole of Compartmentalized Paxos's acceptor-side change: the caller
     /// ([`crate::ColocatedNode`]'s Phase-2 fan-out) asks the boundary instead
     /// of iterating the membership itself. `None` under a grid addresses
     /// every column.
-    ///
-    /// # Panics
-    ///
-    /// If a column is named under a majority or a flexible split (see
-    /// [`QuorumSystem::is_phase2_quorum_in`]).
-    #[must_use]
-    pub fn phase2_addressees<I: Copy>(self, members: &[I], column: Option<usize>) -> Vec<I> {
-        match self {
+    fn phase2_addressees<I: Copy>(&self, members: &[I], column: Option<usize>) -> Vec<I> {
+        match *self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     column.is_none(),
@@ -647,9 +828,9 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
 
     /// Whether this configuration can be run at all: at least one acceptor, a
     /// membership that is sorted and deduplicated, and a quorum system the
-    /// membership admits ([`QuorumSystem::admits`]: each phase's quorum
+    /// membership admits ([`Quorums::admits`]: each phase's quorum
     /// between one acceptor and the whole membership, and the two phases'
-    /// quorums always intersecting, [`QuorumSystem::cross_intersects`] —
+    /// quorums always intersecting, [`Quorums::cross_intersects`] —
     /// `2q > n` for a majority, `q1 + q2 > n` for a flexible split, and for
     /// a grid a layout that tiles the membership, `rows * cols == n`). This
     /// is the invariant
@@ -679,7 +860,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// Whether `voters` hold a **Phase-1** quorum of this configuration in
-    /// `row` — [`QuorumSystem::is_phase1_quorum_in`] over it: the form a
+    /// `row` — [`Quorums::is_phase1_quorum_in`] over it: the form a
     /// quorum read asks, by the row it was addressed to.
     ///
     /// # Panics
@@ -692,7 +873,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// The row a quorum read with token `ctx` is addressed to under this
-    /// configuration — [`QuorumSystem::row_of`]: `ctx % rows` on a grid,
+    /// configuration — [`Quorums::row_of`]: `ctx % rows` on a grid,
     /// `None` otherwise.
     #[must_use]
     pub fn row_of(&self, ctx: u64) -> Option<usize> {
@@ -700,7 +881,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// Whether `node` is an acceptor a Phase-1 message in `row` is addressed
-    /// to — [`QuorumSystem::is_phase1_addressee`] over this membership. With
+    /// to — [`Quorums::is_phase1_addressee`] over this membership. With
     /// no row, exactly [`AcceptorConfig::contains`].
     ///
     /// # Panics
@@ -713,7 +894,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// The acceptors a Phase-1 message in `row` addresses, out of this
-    /// membership — [`QuorumSystem::phase1_addressees`] over it.
+    /// membership — [`Quorums::phase1_addressees`] over it.
     ///
     /// # Panics
     ///
@@ -735,7 +916,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// Whether `voters` hold a **Phase-2** quorum of this configuration in
-    /// `column` — [`QuorumSystem::is_phase2_quorum_in`] over it: the form a
+    /// `column` — [`Quorums::is_phase2_quorum_in`] over it: the form a
     /// decision asks, by the column its round was addressed to.
     ///
     /// # Panics
@@ -748,7 +929,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// The column `slot`'s Phase 2 is addressed to under this configuration
-    /// — [`QuorumSystem::column_of`]: `slot % cols` on a grid, `None`
+    /// — [`Quorums::column_of`]: `slot % cols` on a grid, `None`
     /// otherwise.
     #[must_use]
     pub fn column_of(&self, slot: Slot) -> Option<usize> {
@@ -756,7 +937,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// Whether `node` is an acceptor a Phase-2 message in `column` is
-    /// addressed to — [`QuorumSystem::is_phase2_addressee`] over this
+    /// addressed to — [`Quorums::is_phase2_addressee`] over this
     /// membership. With no column, exactly [`AcceptorConfig::contains`].
     ///
     /// # Panics
@@ -769,7 +950,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// The acceptors a Phase-2 message in `column` addresses, out of this
-    /// membership — [`QuorumSystem::phase2_addressees`] over it.
+    /// membership — [`Quorums::phase2_addressees`] over it.
     ///
     /// # Panics
     ///
@@ -1021,7 +1202,9 @@ impl MatchmakerSet {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem};
+    use super::{
+        AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem, Quorums,
+    };
     use crate::types::{NodeId, Slot};
 
     fn nodes(ids: impl IntoIterator<Item = u64>) -> Vec<NodeId> {
@@ -1268,5 +1451,158 @@ mod tests {
         let three: BTreeSet<MatchmakerId> = [1, 2, 3].into_iter().map(MatchmakerId).collect();
         assert!(!set.has_quorum(&two));
         assert!(set.has_quorum(&three));
+    }
+
+    /// A [`Quorums`] that forwards everything to a [`QuorumSystem`] except
+    /// [`Quorums::cross_intersects`], which it leaves to the trait's brute
+    /// force — so the enum's arithmetic and geometry can be pinned to it.
+    struct BruteForce(QuorumSystem);
+
+    impl Quorums for BruteForce {
+        fn phase1_quorum_size(&self, members: usize) -> usize {
+            self.0.phase1_quorum_size(members)
+        }
+        fn phase2_quorum_size(&self, members: usize) -> usize {
+            self.0.phase2_quorum_size(members)
+        }
+        fn admits(&self, members: usize) -> bool {
+            self.0.admits(members)
+        }
+        fn is_phase1_quorum_in<I: Ord>(
+            &self,
+            members: &[I],
+            voters: &BTreeSet<I>,
+            row: Option<usize>,
+        ) -> bool {
+            self.0.is_phase1_quorum_in(members, voters, row)
+        }
+        fn is_phase2_quorum_in<I: Ord>(
+            &self,
+            members: &[I],
+            voters: &BTreeSet<I>,
+            column: Option<usize>,
+        ) -> bool {
+            self.0.is_phase2_quorum_in(members, voters, column)
+        }
+    }
+
+    /// The trait's default `cross_intersects` is trustworthy because the
+    /// enum's hand-written override agrees with it: over every membership up
+    /// to eight, for the majority, every `Flexible { q1, q2 }` with `1 <= q1,
+    /// q2 <= n` (well formed or not — both must refuse `q1 + q2 <= n`) and
+    /// every grid that tiles `n`, the brute force over all `2^n` subsets and
+    /// the arithmetic or geometry answer the same.
+    #[test]
+    fn the_brute_force_agrees_with_arithmetic_and_geometry() {
+        for n in 0..=8 {
+            let mut systems = vec![QuorumSystem::Majority];
+            for q1 in 1..=n {
+                for q2 in 1..=n {
+                    systems.push(QuorumSystem::Flexible { q1, q2 });
+                }
+            }
+            for rows in 1..=n {
+                if n % rows == 0 {
+                    systems.push(QuorumSystem::Grid {
+                        rows,
+                        cols: n / rows,
+                    });
+                }
+            }
+            for system in systems {
+                assert_eq!(
+                    BruteForce(system).cross_intersects(n),
+                    system.cross_intersects(n),
+                    "{system:?} over {n} members"
+                );
+            }
+        }
+        // Past the brute force's reach the default refuses — an unproven
+        // law — where the override still proves it by arithmetic.
+        let past = super::BRUTE_FORCE_MEMBERS + 1;
+        assert!(!BruteForce(QuorumSystem::Majority).cross_intersects(past));
+        assert!(QuorumSystem::Majority.cross_intersects(past));
+    }
+
+    /// The deliberately wrong system: `q1 = q2 = n / 2` over an even
+    /// membership, so `q1 + q2 == n` — two halves that never meet. A reader's
+    /// own implementation, written against the trait alone.
+    struct HalfAndHalf;
+
+    impl Quorums for HalfAndHalf {
+        fn phase1_quorum_size(&self, members: usize) -> usize {
+            members / 2
+        }
+        fn phase2_quorum_size(&self, members: usize) -> usize {
+            members / 2
+        }
+        /// The cardinality rule, as the enum states it, over the brute
+        /// force: this is the arm the constructor asserts.
+        fn admits(&self, members: usize) -> bool {
+            let q1 = self.phase1_quorum_size(members);
+            let q2 = self.phase2_quorum_size(members);
+            (1..=members).contains(&q1)
+                && (1..=members).contains(&q2)
+                && self.cross_intersects(members)
+        }
+        fn is_phase1_quorum_in<I: Ord>(
+            &self,
+            members: &[I],
+            voters: &BTreeSet<I>,
+            row: Option<usize>,
+        ) -> bool {
+            assert!(row.is_none(), "two halves name no row");
+            super::counted(members, voters) >= self.phase1_quorum_size(members.len())
+        }
+        fn is_phase2_quorum_in<I: Ord>(
+            &self,
+            members: &[I],
+            voters: &BTreeSet<I>,
+            column: Option<usize>,
+        ) -> bool {
+            assert!(column.is_none(), "two halves name no column");
+            super::counted(members, voters) >= self.phase2_quorum_size(members.len())
+        }
+    }
+
+    /// What [`AcceptorConfig::new`] asserts, restated over any [`Quorums`]:
+    /// the membership is sorted and deduplicated and admits its system. The
+    /// constructor itself takes only the wire's enum, so a reader's system
+    /// is judged by the same arm here.
+    fn acceptor_config_would_accept<Q: Quorums>(members: &[NodeId], system: &Q) -> bool {
+        !members.is_empty()
+            && members.windows(2).all(|w| w[0] < w[1])
+            && system.admits(members.len())
+    }
+
+    /// The law bites: two halves fail the brute force, and the constructor's
+    /// arm refuses the configuration with it — while the witness is plain to
+    /// see, `{1, 2}` elects and `{3, 4}` decides, sharing nothing.
+    #[test]
+    fn two_halves_never_meet_and_are_refused() {
+        let members = nodes(1..=4);
+        assert!(HalfAndHalf.is_phase1_quorum(&members, &voters([1, 2])));
+        assert!(HalfAndHalf.is_phase2_quorum(&members, &voters([3, 4])));
+        assert!(!HalfAndHalf.cross_intersects(4));
+        assert!(!HalfAndHalf.admits(4));
+        assert!(!acceptor_config_would_accept(&members, &HalfAndHalf));
+        // The same arm accepts the wire's systems, so it is the arm and not
+        // the helper that refuses.
+        assert!(acceptor_config_would_accept(
+            &members,
+            &QuorumSystem::Majority
+        ));
+        assert!(acceptor_config_would_accept(
+            &members,
+            &QuorumSystem::Flexible { q1: 3, q2: 2 }
+        ));
+        // And the defaults a system without rows or columns keeps: the
+        // whole membership is the addressee set, and no column is named.
+        assert_eq!(HalfAndHalf.phase2_addressees(&members, None), members);
+        assert!(HalfAndHalf.is_phase1_addressee(&members, &NodeId(3), None));
+        assert!(!HalfAndHalf.is_phase1_addressee(&members, &NodeId(9), None));
+        assert_eq!(HalfAndHalf.column_of(Slot(7)), None);
+        assert_eq!(HalfAndHalf.column_count(), None);
+        assert_eq!(HalfAndHalf.row_of(7), None);
     }
 }

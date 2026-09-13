@@ -4,7 +4,7 @@
 //! handover, and the three re-sends.
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
+    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, Quorums, ReconfigureRefusal,
     ReconfigureResult, StartRefusal,
 };
 

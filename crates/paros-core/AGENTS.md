@@ -21,7 +21,9 @@ doctrine; this file is the map.
   on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
   handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
   `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
-  `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
+  `MatchmakerSet`, the `Quorums` trait (the one quorum boundary and the law it states — every
+  Phase-1 quorum meets every Phase-2 quorum, `cross_intersects`) and `QuorumSystem`, its wire
+  implementation (`Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,
   `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen, and
   whose row addressing — `row_of`, `phase1_addressees`, `is_phase1_addressee`,

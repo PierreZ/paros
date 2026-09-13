@@ -76,7 +76,7 @@ pub enum ReconfigureRefusal {
     /// pool, which this deployment can neither reach nor prepare.
     UnknownMember,
     /// The requested membership does not admit the requested quorum system
-    /// ([`crate::QuorumSystem::admits`]). Decided at the boundary that
+    /// ([`crate::Quorums::admits`]). Decided at the boundary that
     /// decodes the request — `ColocatedNode::reconfigure` takes an
     /// [`AcceptorConfig`], which cannot exist malformed — and carried here so
     /// a refusal is one type wherever it is judged.

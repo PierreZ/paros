@@ -20,7 +20,7 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, Proposer};
 use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Entry, Fingerprint,
-    Message, NodeId, QuorumSystem, Slot, Value,
+    Message, NodeId, QuorumSystem, Quorums, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Phase};

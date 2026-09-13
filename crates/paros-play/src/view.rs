@@ -20,7 +20,7 @@
 //! discriminant ([`control_kind`]) so the renderer styles a `Truncate`
 //! differently from a client's `alpha` without parsing either.
 
-use paros_core::{Ballot, Command, Control, NodeRole, QuorumSystem, Slot};
+use paros_core::{Ballot, Command, Control, NodeRole, QuorumSystem, Quorums, Slot};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 

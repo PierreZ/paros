@@ -7,7 +7,7 @@ use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, GcAck, GcRequest,
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, MatchmakerGeneration, MatchmakerId,
     MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap, ProxyId,
-    QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind,
+    QuorumSystem, Quorums, ReconfigureReply, ReconfigureRequest, Registration, RegistrationKind,
     SessionEntry, Slot, Value,
 };
 use tokio::sync::{mpsc, oneshot};

@@ -28,7 +28,7 @@
 use super::{
     Audience, Ballot, ColocatedNode, Command, Delegation, Message, NodeId, NodeRole, Party, Slot,
 };
-use crate::membership::{ProxyId, QuorumSystem};
+use crate::membership::{ProxyId, Quorums};
 
 impl ColocatedNode {
     /// Leader: collect an `Accepted` for a streamed slot; decide on a quorum.
@@ -150,9 +150,9 @@ impl ColocatedNode {
         // membership boundary, and a driver's override is checked against
         // the same boundary — a stray column is a programmer error.
         assert!(
-            match self.acceptors.quorum_system() {
-                QuorumSystem::Grid { cols, .. } => column.is_none_or(|c| c < cols),
-                _ => column.is_none(),
+            match self.acceptors.quorum_system().column_count() {
+                Some(cols) => column.is_none_or(|c| c < cols),
+                None => column.is_none(),
             },
             "an accept round's column is a column of the active configuration"
         );

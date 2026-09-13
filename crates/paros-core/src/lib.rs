@@ -41,7 +41,7 @@
 //!
 //! [`ColocatedNode`] is one deployment of a few composable **roles** —
 //! [`proposer::Proposer`], [`acceptor::Acceptor`], [`replica::Replica`] — and
-//! the roles can be driven by hand. Three runnable examples in this crate's
+//! the roles can be driven by hand. Seven runnable examples in this crate's
 //! `examples/` directory do exactly that, in order, each with a printed trace
 //! and assertions on the property it teaches:
 //!
@@ -53,11 +53,20 @@
 //!    and the [`matchmaking::Matchmaking`] phase, reconfiguration, and the
 //!    matchmaker set itself chosen by the same single-decree Paxos over
 //!    `Vec<MatchmakerId>`, persisted through a [`MemRegistry`].
+//! 4. `flexible_quorums.rs` — Flexible Paxos: the same roles under
+//!    `Flexible { q1: 3, q2: 2 }`, one change of data.
+//! 5. `acceptor_grid.rs` — the acceptor grid: a row elects, a column decides,
+//!    every slot addressed to one column.
+//! 6. `quorum_read.rs` — Paxos Quorum Reads: a linearizable read with no
+//!    leader and no clock.
+//! 7. `proxy_leader.rs` — the first **second deployment**: a [`ProxyLeader`]
+//!    beside a leader, the Phase-2 tally on another process.
 //!
-//! Beside them, `flexible_quorums.rs`, `acceptor_grid.rs` and
-//! `quorum_read.rs` change the *data* the same roles run over, and
-//! `proxy_leader.rs` runs the first **second deployment**: a
-//! [`ProxyLeader`] beside a leader, the Phase-2 tally on another process.
+//! The data the roles run over in 4–6 is a [`Quorums`]: a reader can
+//! implement the trait — the one law it states is that every Phase-1 quorum
+//! meets every Phase-2 quorum, and its default `cross_intersects` checks it
+//! by brute force — and drive the same roles with it by hand, exactly as the
+//! examples drive them with [`QuorumSystem`].
 
 pub mod acceptor;
 mod collector;
@@ -91,6 +100,7 @@ pub use matchmaker::{
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,
+    Quorums,
 };
 pub use message::{Audience, Message, Party};
 pub use node::{
