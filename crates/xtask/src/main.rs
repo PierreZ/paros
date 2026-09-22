@@ -60,7 +60,7 @@ fn sim_dispatch(args: &[String]) {
     match args.first().map(std::string::String::as_str) {
         Some("list") => sim_list(&args[1..]),
         Some("run") => sim_run(&args[1..]),
-        Some("run-all") => sim_run_all(),
+        Some("run-all") => run_binaries(&filter_binaries(&[]), &[]),
         Some("help" | "--help" | "-h") | None => sim_help(),
         Some(cmd) => {
             eprintln!("unknown sim subcommand: {cmd}");
@@ -97,26 +97,22 @@ fn fmt_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// The registered binaries matching any filter (all of them when there is
+/// none); exits when nothing matches.
 fn filter_binaries(filters: &[String]) -> Vec<&'static SimBinary> {
-    if filters.is_empty() {
-        SIM_BINARIES.iter().collect()
-    } else {
-        SIM_BINARIES
-            .iter()
-            .filter(|b| filters.iter().any(|f| b.name.contains(f.as_str())))
-            .collect()
+    let binaries: Vec<_> = SIM_BINARIES
+        .iter()
+        .filter(|b| filters.is_empty() || filters.iter().any(|f| b.name.contains(f.as_str())))
+        .collect();
+    if binaries.is_empty() {
+        eprintln!("No binaries match filters: {filters:?}");
+        process::exit(1);
     }
+    binaries
 }
 
 fn sim_list(args: &[String]) {
-    let binaries = filter_binaries(args);
-
-    if binaries.is_empty() {
-        eprintln!("No binaries match filters: {args:?}");
-        process::exit(1);
-    }
-
-    for bin in &binaries {
+    for bin in filter_binaries(args) {
         println!("{}", bin.display_name());
     }
 }
@@ -136,19 +132,7 @@ fn sim_run(args: &[String]) {
         process::exit(1);
     }
 
-    let binaries = filter_binaries(filter_args);
-
-    if binaries.is_empty() {
-        eprintln!("No binaries match filters: {filter_args:?}");
-        process::exit(1);
-    }
-
-    run_binaries(&binaries, binary_args);
-}
-
-fn sim_run_all() {
-    let binaries: Vec<&SimBinary> = SIM_BINARIES.iter().collect();
-    run_binaries(&binaries, &[]);
+    run_binaries(&filter_binaries(filter_args), binary_args);
 }
 
 /// Path under the sancov target dir where we stamp the active instrumentation set.
@@ -232,27 +216,21 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
             cmd.args(extra_args);
         }
 
+        let name = bin.display_name();
+        let elapsed = || fmt_duration(bin_start.elapsed());
         match cmd.status() {
             Ok(status) if status.success() => {
-                eprintln!(
-                    "--- {} --- ({})\n",
-                    bin.display_name(),
-                    fmt_duration(bin_start.elapsed())
-                );
-                passed.push(bin.display_name());
+                eprintln!("--- {name} --- ({})\n", elapsed());
+                passed.push(name);
             }
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
-                eprintln!(
-                    "{}: exited with code {code} ({})\n",
-                    bin.display_name(),
-                    fmt_duration(bin_start.elapsed())
-                );
-                failed.push(bin.display_name());
+                eprintln!("{name}: exited with code {code} ({})\n", elapsed());
+                failed.push(name);
             }
             Err(e) => {
-                eprintln!("{}: failed to launch: {e}\n", bin.display_name());
-                failed.push(bin.display_name());
+                eprintln!("{name}: failed to launch: {e}\n");
+                failed.push(name);
             }
         }
     }
