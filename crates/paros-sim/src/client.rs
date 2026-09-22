@@ -2,9 +2,8 @@
 //! and one internal gRPC client per server, sharing one
 //! [`ReconnectingChannel`] each, every channel closed when the bundle drops.
 //!
-//! The corpus builds its [`CorpusClients`](crate::corpus) on it; the chain
-//! workload still carries its own copy of the same block beside its
-//! `OnDrop` guard and could adopt it.
+//! The corpus builds its [`CorpusClients`](crate::corpus) on it, and the
+//! chain workload opens one per run.
 
 use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{SimContext, SimulationError, SimulationResult};

@@ -54,7 +54,7 @@ use paros::{
 };
 
 use crate::audit::audit_world;
-use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
+use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
 use crate::client::{ClientSet, SimChannel};
 use crate::lifecycle;
 use crate::world::{
@@ -331,12 +331,7 @@ impl CorpusClients {
         exclude: Option<usize>,
         deadline: Duration,
     ) -> bool {
-        let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
-        tracing::info!(
-            cmd = %hash_text(command_hash(&control)),
-            up_to,
-            "chain_control_submitted"
-        );
+        trace_truncate(up_to);
         self.until_accepted(ctx, 0, exclude, deadline, |mut client| async move {
             let ack = client.compact(Compact { up_to }).await.ok()?.into_inner();
             Some(if ack.accepted {
@@ -439,6 +434,21 @@ impl CorpusClients {
                 return false;
             }
             time.sleep(POLL_INTERVAL).await.ok();
+        }
+    }
+
+    /// Red-path diagnostic: each node's live state and durable evidence.
+    async fn print_node_diagnostics(&self, ctx: &SimContext, servers: &[String]) {
+        for (n, ip) in servers.iter().enumerate() {
+            let live = self.inspect(ctx, n).await;
+            let probe = corpus_disk_probe(ctx.state(), ip);
+            eprintln!(
+                "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} applied={:?}",
+                live.map(|s| (s.applied_count, s.chain_hash)),
+                probe.as_ref().map(|p| p.clean_slots.clone()),
+                probe.as_ref().map(|p| p.floor),
+                probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
+            );
         }
     }
 
@@ -760,17 +770,7 @@ impl Workload for E1MaskWorkload {
             if !(reached && held) {
                 // Failure diagnostic (fires only on the red path): each node's
                 // live state and durable evidence at the moment of judgment.
-                for (n, ip) in servers.iter().enumerate() {
-                    let live = clients.inspect(ctx, n).await;
-                    let probe = corpus_disk_probe(ctx.state(), ip);
-                    eprintln!(
-                        "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} applied={:?}",
-                        live.map(|s| (s.applied_count, s.chain_hash)),
-                        probe.as_ref().map(|p| p.clean_slots.clone()),
-                        probe.as_ref().map(|p| p.floor),
-                        probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
-                    );
-                }
+                clients.print_node_diagnostics(ctx, &servers).await;
                 eprintln!(
                     "CORPUS-DIAG mask={mask:#011b} derived={derived_unrecoverable:?} world={:?} expected_hold=({}, {:016x}) full=({}, {:016x})",
                     unrecoverable_slots(ctx.state()),
@@ -1204,17 +1204,7 @@ impl Workload for DepartedStragglerWorkload {
             .wait_all_at(ctx, &full, time.now() + OUTCOME_BUDGET)
             .await;
         if !recovered {
-            for (n, ip) in servers.iter().enumerate() {
-                let live = clients.inspect(ctx, n).await;
-                let probe = corpus_disk_probe(ctx.state(), ip);
-                eprintln!(
-                    "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} applied={:?}",
-                    live.map(|s| (s.applied_count, s.chain_hash)),
-                    probe.as_ref().map(|p| p.clean_slots.clone()),
-                    probe.as_ref().map(|p| p.floor),
-                    probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
-                );
-            }
+            clients.print_node_diagnostics(ctx, &servers).await;
             eprintln!(
                 "CORPUS-DIAG audit: {}",
                 audit_world(ctx.state()).diagnostics()

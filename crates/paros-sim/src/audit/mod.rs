@@ -58,16 +58,10 @@ use self::state::AuditState;
 /// [`AuditWorld`] is published (shared by every node and every workload).
 const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 
-/// Get-or-create the singleton [`AuditWorld`] for this iteration. Get-then-
-/// publish is race-free: the sim executor is single-threaded and this runs
-/// synchronously (no `.await` between the get and the publish).
+/// Get-or-create the singleton [`AuditWorld`] for this iteration
+/// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
-    if let Some(world) = state.get::<Arc<AuditWorld>>(AUDIT_WORLD_KEY) {
-        return world;
-    }
-    let world = Arc::new(AuditWorld::default());
-    state.publish(AUDIT_WORLD_KEY, world.clone());
-    world
+    crate::state::published_arc(state, AUDIT_WORLD_KEY, AuditWorld::default)
 }
 
 /// The per-iteration shared checker.

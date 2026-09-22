@@ -177,6 +177,18 @@ pub(crate) fn hash_text(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
+/// Log the `Truncate { up_to }` control command a compaction request asks
+/// for, and return its hash.
+pub(crate) fn trace_truncate(up_to: u64) -> u64 {
+    let cmd_hash = command_hash(&Command::Control(Control::Truncate { up_to: Slot(up_to) }));
+    tracing::info!(
+        cmd = %hash_text(cmd_hash),
+        up_to,
+        "chain_control_submitted"
+    );
+    cmd_hash
+}
+
 fn command_kind(command: &Command) -> &'static str {
     match command {
         Command::User(_) => "user",

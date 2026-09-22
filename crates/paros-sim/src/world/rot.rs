@@ -4,9 +4,7 @@
 
 use moonpool_sim::{assert_reachable, buggify_knob, buggify_with_prob, sim::sim_random};
 
-use super::{
-    CorruptionInjection, CorruptionKind, CorruptionOutcome, RecordHealth, SlotHealth, StorageWorld,
-};
+use super::{CorruptionInjection, CorruptionKind, RecordHealth, SlotHealth, StorageWorld};
 use paros::{MetadataFault, Slot, StorageRecord, WitnessStatus, snap_chunk_count};
 
 /// Per-boot firing probabilities of the Stage-7 rot BUGGIFY sites — each fault
@@ -131,11 +129,8 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             .or_default()
             .insert(slot.0);
         world.note_corruption(CorruptionInjection {
-            node,
-            record: StorageRecord::Accepted(slot),
-            kind,
             block,
-            outcome: CorruptionOutcome::Dormant,
+            ..CorruptionInjection::dormant(node, StorageRecord::Accepted(slot), kind)
         });
     };
 
@@ -257,13 +252,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
         if let Some(disk) = world.disks.get_mut(key) {
             disk.snapshot_health = RecordHealth::Faulty;
         }
-        world.note_corruption(CorruptionInjection {
+        world.note_corruption(CorruptionInjection::dormant(
             node,
-            record: StorageRecord::Snapshot,
-            kind: CorruptionKind::BitFlip,
-            block: false,
-            outcome: CorruptionOutcome::Dormant,
-        });
+            StorageRecord::Snapshot,
+            CorruptionKind::BitFlip,
+        ));
         // Slots this node truncated past lose their local custody: re-derive
         // the unrecoverable ground truth over the folded prefix (mirrors
         // `corpus_corrupt_snapshot`; unbudgeted only — a budgeted run never
@@ -286,13 +279,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 }
                 world.park(key, node);
                 for _copy in 0..2 {
-                    world.note_corruption(CorruptionInjection {
+                    world.note_corruption(CorruptionInjection::dormant(
                         node,
-                        record: StorageRecord::Promise,
-                        kind: CorruptionKind::PromiseCopy,
-                        block: false,
-                        outcome: CorruptionOutcome::Dormant,
-                    });
+                        StorageRecord::Promise,
+                        CorruptionKind::PromiseCopy,
+                    ));
                 }
             }
         } else {
@@ -312,13 +303,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 if let Some(disk) = world.disks.get_mut(key) {
                     disk.promise_health[copy] = RecordHealth::Faulty;
                 }
-                world.note_corruption(CorruptionInjection {
+                world.note_corruption(CorruptionInjection::dormant(
                     node,
-                    record: StorageRecord::Promise,
-                    kind: CorruptionKind::PromiseCopy,
-                    block: false,
-                    outcome: CorruptionOutcome::Dormant,
-                });
+                    StorageRecord::Promise,
+                    CorruptionKind::PromiseCopy,
+                ));
             }
         }
     }
@@ -334,13 +323,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             disk.meta_fault = Some(fault);
         }
         world.park(key, node);
-        world.note_corruption(CorruptionInjection {
+        world.note_corruption(CorruptionInjection::dormant(
             node,
-            record: StorageRecord::Store,
-            kind: CorruptionKind::Metadata,
-            block: false,
-            outcome: CorruptionOutcome::Dormant,
-        });
+            StorageRecord::Store,
+            CorruptionKind::Metadata,
+        ));
     }
     // #101: chunk rot on the retained decided snapshot point — the value of
     // one fixed-size chunk is lost while the point's identity (and every
@@ -381,13 +368,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
                 }
                 if disk.snap_chunk_health[index] == RecordHealth::Clean {
                     disk.snap_chunk_health[index] = RecordHealth::Faulty;
-                    world.note_corruption(CorruptionInjection {
+                    world.note_corruption(CorruptionInjection::dormant(
                         node,
-                        record: StorageRecord::SnapChunk(Slot(at), chunk),
-                        kind: CorruptionKind::BitFlip,
-                        block: false,
-                        outcome: CorruptionOutcome::Dormant,
-                    });
+                        StorageRecord::SnapChunk(Slot(at), chunk),
+                        CorruptionKind::BitFlip,
+                    ));
                     // The point is custody for the folded prefix: losing its
                     // last clean copy of a chunk can strand every slot below
                     // the floor. Re-derive the unrecoverable ground truth
@@ -423,13 +408,11 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
         if let Some(disk) = world.disks.get_mut(key) {
             disk.read_eio = Some(record);
         }
-        world.note_corruption(CorruptionInjection {
+        world.note_corruption(CorruptionInjection::dormant(
             node,
             record,
-            kind: CorruptionKind::ReadEio,
-            block: false,
-            outcome: CorruptionOutcome::Dormant,
-        });
+            CorruptionKind::ReadEio,
+        ));
     }
 }
 

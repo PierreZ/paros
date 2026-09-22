@@ -5,21 +5,22 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use futures::future::join_all;
-use moonpool_hyper::ReconnectingChannel;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
     buggify_with_prob, swarm_op_enabled,
 };
 use paros::{
-    Command, Compact, Control, InspectRequest, ParosClient, ParosInternalClient, Propose,
-    QuorumSystem, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, Slot, WireQuorumSystem,
-    parse_addr, quorum_system_from_proto, quorum_system_to_proto,
+    Compact, InspectReply, InspectRequest, ParosInternalClient, Propose, ProposeAck, QuorumSystem,
+    Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, WireQuorumSystem,
+    quorum_system_from_proto, quorum_system_to_proto,
 };
 
-use crate::audit::{ClientHistory, audit_world, check_run};
-use crate::chain::{ChainState, command_hash, hash_text, user_command_hash};
+use crate::audit::{AuditWorld, ClientHistory, audit_world, check_run};
+use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
+use crate::client::{ClientSet, SimChannel};
 use crate::{CHAOS_DURATION_MS, DigestSink};
 
 const PROPOSE: u8 = 0;
@@ -307,10 +308,57 @@ impl Retarget {
     }
 }
 
+/// The client's belief about who leads: the current hint, and the leader it
+/// last replaced (the stale leader a `COMPACT_STORM` step aims at).
+#[derive(Clone, Copy, Default)]
+struct LeaderHint {
+    current: Option<usize>,
+    stale: Option<usize>,
+}
+
+impl LeaderHint {
+    /// Adopt the leader a reply named (`None`, or an id outside the pool,
+    /// clears the hint); a change of leader remembers the previous one.
+    fn observe(&mut self, observed: Option<u64>, server_count: usize) {
+        let next = observed
+            .and_then(|id| usize::try_from(id).ok())
+            .filter(|node| *node < server_count);
+        if let (Some(previous), Some(next)) = (self.current, next)
+            && previous != next
+        {
+            self.stale = Some(previous);
+        }
+        self.current = next;
+    }
+}
+
 enum ProposalResult {
     Acked { leader: Option<u64>, slot: u64 },
     Rejected { leader: Option<u64> },
     Ambiguous,
+}
+
+impl ProposalResult {
+    /// Judge one `Propose` RPC's answer: a transport error is ambiguous, a
+    /// reply is committed or a redirect.
+    fn from_response(
+        response: Result<tonic::Response<ProposeAck>, tonic::Status>,
+        seq: u64,
+    ) -> Self {
+        let Ok(response) = response else {
+            return Self::Ambiguous;
+        };
+        let ack = response.into_inner();
+        assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
+        if ack.committed {
+            Self::Acked {
+                leader: ack.leader,
+                slot: ack.slot.unwrap_or_default(),
+            }
+        } else {
+            Self::Rejected { leader: ack.leader }
+        }
+    }
 }
 
 enum CompactResult {
@@ -444,6 +492,61 @@ fn live_candidates(ips: &[String], dead: &std::collections::BTreeSet<String>) ->
         .collect()
 }
 
+/// One user command this client issued: its identity, its bytes, the
+/// payload class its bytes were drawn from, and its hash.
+struct Submission {
+    seq: u64,
+    payload: Vec<u8>,
+    payload_class: usize,
+    cmd_hash: u64,
+}
+
+impl Submission {
+    /// The command, committed at `slot` and acknowledged through `node`.
+    fn acked(self, slot: u64, node: usize) -> AckedCommand {
+        AckedCommand {
+            seq: self.seq,
+            payload: self.payload,
+            cmd_hash: self.cmd_hash,
+            slot,
+            node,
+        }
+    }
+}
+
+/// Race `request` against `timeout` and the run's shutdown: `fallback` when
+/// either comes first (an ambiguous observation, never a refusal).
+async fn within<T>(
+    ctx: &SimContext,
+    timeout: Duration,
+    fallback: T,
+    request: impl Future<Output = T>,
+) -> T {
+    moonpool_sim::select! {
+        result = request => result,
+        _ = ctx.time().sleep(timeout) => fallback,
+        () = ctx.shutdown().cancelled() => fallback,
+    }
+}
+
+/// One `Inspect` probe of `client`, bounded like every other request.
+async fn inspect(
+    ctx: &SimContext,
+    client: &mut ParosInternalClient<SimChannel>,
+    timeout: Duration,
+) -> Option<InspectReply> {
+    let probe = client
+        .inspect(InspectRequest {})
+        .map(|response| response.ok().map(tonic::Response::into_inner));
+    within(ctx, timeout, None, probe).await
+}
+
+/// A read-index watermark as a signed trace/detail value: `-1` is the empty
+/// applied prefix.
+fn signed_watermark(watermark: Option<u64>) -> i64 {
+    watermark.map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX))
+}
+
 #[derive(Clone)]
 struct AckedCommand {
     seq: u64,
@@ -507,12 +610,7 @@ struct Tail {
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
-    if let Some(tail) = state.get::<Arc<Mutex<Tail>>>(TAIL_KEY) {
-        return tail;
-    }
-    let tail = Arc::new(Mutex::new(Tail::default()));
-    state.publish(TAIL_KEY, tail.clone());
-    tail
+    crate::state::published(state, TAIL_KEY, Tail::default)
 }
 
 /// Sticky per-run coverage facts for the adversarial operations — a *flag
@@ -543,26 +641,6 @@ struct AdversarialCoverage {
     retire_refused: bool,
     /// A refused retirement handed the parked identity back to the world.
     retire_released: bool,
-}
-
-struct OnDrop<F: FnOnce()> {
-    action: Option<F>,
-}
-
-impl<F: FnOnce()> OnDrop<F> {
-    fn new(action: F) -> Self {
-        Self {
-            action: Some(action),
-        }
-    }
-}
-
-impl<F: FnOnce()> Drop for OnDrop<F> {
-    fn drop(&mut self) {
-        if let Some(action) = self.action.take() {
-            action();
-        }
-    }
 }
 
 /// Factory-created stateful test driver. Its model is the client's own
@@ -620,21 +698,65 @@ impl ChainWorkload {
         enabled[0]
     }
 
-    fn update_leader_hint(
-        current: &mut Option<usize>,
-        stale: &mut Option<usize>,
-        observed: Option<u64>,
-        server_count: usize,
-    ) {
-        let next = observed
-            .and_then(|id| usize::try_from(id).ok())
-            .filter(|node| *node < server_count);
-        if let (Some(previous), Some(next)) = (*current, next)
-            && previous != next
-        {
-            *stale = Some(previous);
+    /// Issue the next user command from the caller's `class` and `seed` draws
+    /// (it draws nothing itself): allocate its `seq`, build its payload, and
+    /// record the submission with the audit, the history and the trace.
+    fn submit(
+        &mut self,
+        audit: &AuditWorld,
+        config: &ChainConfig,
+        next_seq: &mut u64,
+        class: u64,
+        seed: u64,
+        now_ms: u64,
+    ) -> Submission {
+        let seq = *next_seq;
+        *next_seq = next_seq.saturating_add(1);
+        let payload_class = usize::try_from(class % 4).unwrap_or(0);
+        let payload = Self::payload(
+            class,
+            config.command_bytes,
+            config.large_command_bytes,
+            seed,
+        );
+        let cmd_hash = user_command_hash(&payload);
+        audit.note_submitted(cmd_hash);
+        self.history.record_write_issued(seq, now_ms);
+        tracing::info!(
+            cmd = %hash_text(cmd_hash),
+            seq,
+            bytes = payload.len() as u64,
+            "chain_command_submitted"
+        );
+        Submission {
+            seq,
+            payload,
+            payload_class,
+            cmd_hash,
         }
-        *current = next;
+    }
+
+    /// Record a committed acknowledgement of `submission` at `slot` in the
+    /// history and the trace.
+    fn record_ack(
+        &mut self,
+        client_id: u64,
+        submission: &Submission,
+        slot: u64,
+        leader: Option<u64>,
+        now_ms: u64,
+    ) {
+        let (seq, cmd_hash) = (submission.seq, submission.cmd_hash);
+        self.history.record_write_ack(seq, Some(slot), now_ms);
+        tracing::info!(
+            cmd = %hash_text(cmd_hash),
+            seq,
+            slot,
+            "chain_command_acked"
+        );
+        if let Some(node) = leader {
+            tracing::info!(client_id, seq_id = seq, slot, node, "client_acknowledged");
+        }
     }
 
     fn payload(class: u64, ordinary: usize, large: usize, mut seed: u64) -> Vec<u8> {
@@ -685,15 +807,6 @@ impl Workload for ChainWorkload {
             ));
         }
 
-        let endpoints = servers
-            .iter()
-            .map(|ip| {
-                let addr = parse_addr(ip)?;
-                let origin = http::Uri::try_from(format!("http://{addr}"))
-                    .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-                Ok((addr, origin))
-            })
-            .collect::<SimulationResult<Vec<_>>>()?;
         let config = ChainConfig::for_timeline();
         // Membership as protocol data (#122): whether this seed deploys
         // matchmakers (the opt-in for reconfiguration), and the floor no
@@ -729,20 +842,8 @@ impl Workload for ChainWorkload {
             Duration::from_millis(config.keep_alive_interval_ms),
             Duration::from_millis(config.keep_alive_timeout_ms),
         );
-        let mut public_clients = Vec::with_capacity(endpoints.len());
-        let mut internal_clients = Vec::with_capacity(endpoints.len());
-        let mut channels = Vec::with_capacity(endpoints.len());
-        for (addr, origin) in endpoints {
-            let channel = ReconnectingChannel::new(ctx.providers(), addr, channel_config.clone());
-            public_clients.push(ParosClient::with_origin(channel.clone(), origin.clone()));
-            internal_clients.push(ParosInternalClient::with_origin(channel.clone(), origin));
-            channels.push(channel);
-        }
-        let _channel_guard = OnDrop::new(move || {
-            for channel in channels {
-                channel.close();
-            }
-        });
+        let clients = ClientSet::connect(ctx, &servers, &channel_config)?;
+        let (public_clients, internal_clients) = (&clients.public, &clients.internal);
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
@@ -756,9 +857,9 @@ impl Workload for ChainWorkload {
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
         };
         let server_count = public_clients.len();
+        let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let mut next_seq = 0_u64;
-        let mut leader_hint: Option<usize> = None;
-        let mut stale_leader_hint: Option<usize> = None;
+        let mut hint = LeaderHint::default();
         let mut max_acked_slot: Option<u64> = None;
         let mut successful_after_ambiguity = false;
         let mut live_states = BTreeMap::<u64, u64>::new();
@@ -781,39 +882,11 @@ impl Workload for ChainWorkload {
                 });
                 if abandon {
                     moonpool_sim::select! {
-                        response = call => match response {
-                            Ok(response) => {
-                                let ack = response.into_inner();
-                                assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
-                                if ack.committed {
-                                    ProposalResult::Acked {
-                                        leader: ack.leader,
-                                        slot: ack.slot.unwrap_or_default(),
-                                    }
-                                } else {
-                                    ProposalResult::Rejected { leader: ack.leader }
-                                }
-                            }
-                            Err(_) => ProposalResult::Ambiguous,
-                        },
+                        response = call => ProposalResult::from_response(response, seq),
                         _ = time.sleep(Duration::from_millis(10)) => ProposalResult::Ambiguous,
                     }
                 } else {
-                    match call.await {
-                        Ok(response) => {
-                            let ack = response.into_inner();
-                            assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
-                            if ack.committed {
-                                ProposalResult::Acked {
-                                    leader: ack.leader,
-                                    slot: ack.slot.unwrap_or_default(),
-                                }
-                            } else {
-                                ProposalResult::Rejected { leader: ack.leader }
-                            }
-                        }
-                        Err(_) => ProposalResult::Ambiguous,
-                    }
+                    ProposalResult::from_response(call.await, seq)
                 }
             }
         };
@@ -871,6 +944,17 @@ impl Workload for ChainWorkload {
                     }
                 }
                 CompactResult::Ambiguous
+            }
+        };
+        // One compaction request as the trace tells it: the `Truncate` it asks
+        // for, then whether the leader accepted it.
+        let compact_traced = |target: usize, up_to: u64| {
+            trace_truncate(up_to);
+            let attempt = compact_once(target, up_to);
+            async move {
+                if matches!(attempt.await, CompactResult::Accepted { .. }) {
+                    tracing::info!(up_to, "chain_compact_accepted");
+                }
             }
         };
         let reconfigure_once = |target: usize, members: Vec<u64>, quorum_system: QuorumSystem| {
@@ -982,35 +1066,19 @@ impl Workload for ChainWorkload {
         if operations.contains(&PROPOSE) {
             let mut primer = Vec::with_capacity(config.pipeline_depth);
             for _ in 0..config.pipeline_depth {
-                let seq = next_seq;
-                next_seq = next_seq.saturating_add(1);
                 // One draw per primer entry shapes its payload class, its
                 // bytes, and its first target — every combination is a valid
                 // client.
                 let raw = ctx.random().random::<u64>();
-                let payload_class = usize::try_from(raw % 4).unwrap_or(0);
                 let primer_target =
                     usize::try_from((raw >> 2) % u64::try_from(server_count).unwrap_or(1))
                         .unwrap_or(0);
-                let payload = Self::payload(
-                    raw % 4,
-                    config.command_bytes,
-                    config.large_command_bytes,
-                    raw,
-                );
-                let cmd_hash = user_command_hash(&payload);
-                audit.note_submitted(cmd_hash);
-                self.history.record_write_issued(seq, now_ms());
-                tracing::info!(
-                    cmd = %hash_text(cmd_hash),
-                    seq,
-                    bytes = payload.len() as u64,
-                    "chain_command_submitted"
-                );
-                primer.push((seq, payload, payload_class, cmd_hash, primer_target));
+                let submission = self.submit(&audit, &config, &mut next_seq, raw, raw, now_ms());
+                primer.push((submission, primer_target));
             }
-            let results = join_all(primer.iter().map(|(seq, payload, _, _, target)| {
-                let attempt = propose_once(*target, *seq, payload.clone(), false);
+            let results = join_all(primer.iter().map(|(submission, target)| {
+                let attempt =
+                    propose_once(*target, submission.seq, submission.payload.clone(), false);
                 let time = time.clone();
                 async move {
                     moonpool_sim::select! {
@@ -1020,50 +1088,18 @@ impl Workload for ChainWorkload {
                 }
             }))
             .await;
-            for ((seq, payload, payload_class, cmd_hash, target), result) in
-                primer.into_iter().zip(results)
-            {
+            for ((submission, target), result) in primer.into_iter().zip(results) {
+                let (seq, cmd_hash) = (submission.seq, submission.cmd_hash);
                 match result {
                     ProposalResult::Acked { leader, slot } => {
-                        Self::update_leader_hint(
-                            &mut leader_hint,
-                            &mut stale_leader_hint,
-                            leader,
-                            server_count,
-                        );
-                        max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                        self.history.record_write_ack(seq, Some(slot), now_ms());
-                        tracing::info!(
-                            cmd = %hash_text(cmd_hash),
-                            seq,
-                            slot,
-                            "chain_command_acked"
-                        );
-                        if let Some(node) = leader {
-                            tracing::info!(
-                                client_id,
-                                seq_id = seq,
-                                slot,
-                                node,
-                                "client_acknowledged"
-                            );
-                        }
-                        acked_commands.push(AckedCommand {
-                            seq,
-                            payload,
-                            cmd_hash,
-                            slot,
-                            node: leader_hint.unwrap_or(target),
-                        });
-                        self.adversarial.payload_classes[payload_class] = true;
+                        hint.observe(leader, server_count);
+                        max_acked_slot = max_acked_slot.max(Some(slot));
+                        self.record_ack(client_id, &submission, slot, leader, now_ms());
+                        self.adversarial.payload_classes[submission.payload_class] = true;
+                        acked_commands.push(submission.acked(slot, hint.current.unwrap_or(target)));
                     }
                     ProposalResult::Rejected { leader } => {
-                        Self::update_leader_hint(
-                            &mut leader_hint,
-                            &mut stale_leader_hint,
-                            leader,
-                            server_count,
-                        );
+                        hint.observe(leader, server_count);
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
                     ProposalResult::Ambiguous => {
@@ -1072,20 +1108,9 @@ impl Workload for ChainWorkload {
                 }
             }
             if let Some(up_to) = max_acked_slot.filter(|_| config.compaction) {
-                let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
-                tracing::info!(
-                    cmd = %hash_text(command_hash(&control)),
-                    up_to,
-                    "chain_control_submitted"
-                );
                 let fallback =
                     usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-                if matches!(
-                    compact_once(leader_hint.unwrap_or(fallback), up_to).await,
-                    CompactResult::Accepted { .. }
-                ) {
-                    tracing::info!(up_to, "chain_compact_accepted");
-                }
+                compact_traced(hint.current.unwrap_or(fallback), up_to).await;
             }
         }
 
@@ -1116,27 +1141,19 @@ impl Workload for ChainWorkload {
 
             match op {
                 PROPOSE | PROPOSE_TO_NON_LEADER => {
-                    let seq = next_seq;
-                    next_seq = next_seq.saturating_add(1);
-                    let payload_class = usize::try_from(raw_class % 4).unwrap_or(0);
-                    let payload = Self::payload(
+                    let submission = self.submit(
+                        &audit,
+                        &config,
+                        &mut next_seq,
                         raw_class,
-                        config.command_bytes,
-                        config.large_command_bytes,
                         raw_payload,
+                        now_ms(),
                     );
-                    let cmd_hash = user_command_hash(&payload);
-                    audit.note_submitted(cmd_hash);
-                    self.history.record_write_issued(seq, now_ms());
-                    tracing::info!(
-                        cmd = %hash_text(cmd_hash),
-                        seq,
-                        bytes = payload.len() as u64,
-                        "chain_command_submitted"
-                    );
+                    let (seq, cmd_hash, payload) =
+                        (submission.seq, submission.cmd_hash, &submission.payload);
 
                     let chosen_target = if op == PROPOSE_TO_NON_LEADER {
-                        leader_hint.map_or(target, |leader| {
+                        hint.current.map_or(target, |leader| {
                             if server_count > 1 {
                                 (leader + 1 + target % (server_count - 1)) % server_count
                             } else {
@@ -1146,7 +1163,7 @@ impl Workload for ChainWorkload {
                     } else if ignore_hint {
                         target
                     } else {
-                        leader_hint.unwrap_or(target)
+                        hint.current.unwrap_or(target)
                     };
                     // Honest ambiguity: abandon the client observation, never
                     // falsify a server acknowledgement. The identical identity
@@ -1168,16 +1185,18 @@ impl Workload for ChainWorkload {
                         if remaining.is_zero() {
                             break ProposalResult::Ambiguous;
                         }
-                        let attempt = moonpool_sim::select! {
-                            result = propose_once(
+                        let attempt = within(
+                            ctx,
+                            remaining,
+                            ProposalResult::Ambiguous,
+                            propose_once(
                                 attempt_target,
                                 seq,
                                 payload.clone(),
                                 abandon && first_attempt,
-                            ) => result,
-                            _ = time.sleep(remaining) => ProposalResult::Ambiguous,
-                            () = shutdown.cancelled() => ProposalResult::Ambiguous,
-                        };
+                            ),
+                        )
+                        .await;
                         first_attempt = false;
                         match attempt {
                             ProposalResult::Rejected { leader }
@@ -1200,14 +1219,16 @@ impl Workload for ChainWorkload {
                         // hinted leader / the next node.
                         let retry_target = retarget.next(
                             chosen_target,
-                            leader_hint.and_then(|node| u64::try_from(node).ok()),
+                            hint.current.and_then(|node| u64::try_from(node).ok()),
                             server_count,
                         );
-                        let reconciled = moonpool_sim::select! {
-                            result = propose_once(retry_target, seq, payload.clone(), false) => result,
-                            _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
-                            () = shutdown.cancelled() => ProposalResult::Ambiguous,
-                        };
+                        let reconciled = within(
+                            ctx,
+                            request_timeout,
+                            ProposalResult::Ambiguous,
+                            propose_once(retry_target, seq, payload.clone(), false),
+                        )
+                        .await;
                         if matches!(reconciled, ProposalResult::Acked { .. }) {
                             successful_after_ambiguity = true;
                         }
@@ -1218,37 +1239,13 @@ impl Workload for ChainWorkload {
 
                     match result {
                         ProposalResult::Acked { leader, slot } => {
-                            Self::update_leader_hint(
-                                &mut leader_hint,
-                                &mut stale_leader_hint,
-                                leader,
-                                server_count,
+                            hint.observe(leader, server_count);
+                            max_acked_slot = max_acked_slot.max(Some(slot));
+                            self.record_ack(client_id, &submission, slot, leader, now_ms());
+                            self.adversarial.payload_classes[submission.payload_class] = true;
+                            acked_commands.push(
+                                submission.acked(slot, hint.current.unwrap_or(chosen_target)),
                             );
-                            max_acked_slot = Some(max_acked_slot.map_or(slot, |max| max.max(slot)));
-                            self.history.record_write_ack(seq, Some(slot), now_ms());
-                            tracing::info!(
-                                cmd = %hash_text(cmd_hash),
-                                seq,
-                                slot,
-                                "chain_command_acked"
-                            );
-                            if let Some(node) = leader {
-                                tracing::info!(
-                                    client_id,
-                                    seq_id = seq,
-                                    slot,
-                                    node,
-                                    "client_acknowledged"
-                                );
-                            }
-                            acked_commands.push(AckedCommand {
-                                seq,
-                                payload: payload.clone(),
-                                cmd_hash,
-                                slot,
-                                node: leader_hint.unwrap_or(chosen_target),
-                            });
-                            self.adversarial.payload_classes[payload_class] = true;
                             if config.compaction && seq.is_multiple_of(config.compact_every) {
                                 // How far to ask: the just-acked slot, a
                                 // partial prefix below it, or one past it (a
@@ -1258,28 +1255,11 @@ impl Workload for ChainWorkload {
                                     1 => slot + 1 + (raw_policy >> 7) % 8,
                                     _ => slot,
                                 };
-                                let control =
-                                    Command::Control(Control::Truncate { up_to: Slot(up_to) });
-                                tracing::info!(
-                                    cmd = %hash_text(command_hash(&control)),
-                                    up_to,
-                                    "chain_control_submitted"
-                                );
-                                if matches!(
-                                    compact_once(leader_hint.unwrap_or(chosen_target), up_to).await,
-                                    CompactResult::Accepted { .. }
-                                ) {
-                                    tracing::info!(up_to, "chain_compact_accepted");
-                                }
+                                compact_traced(hint.current.unwrap_or(chosen_target), up_to).await;
                             }
                         }
                         ProposalResult::Rejected { leader } => {
-                            Self::update_leader_hint(
-                                &mut leader_hint,
-                                &mut stale_leader_hint,
-                                leader,
-                                server_count,
-                            );
+                            hint.observe(leader, server_count);
                             self.history.record_write_failed(seq);
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
@@ -1289,7 +1269,7 @@ impl Workload for ChainWorkload {
                     }
                 }
                 DUP_REPROPOSE => {
-                    if let Some(current_leader) = leader_hint {
+                    if let Some(current_leader) = hint.current {
                         let candidates = acked_commands
                             .iter()
                             .filter(|command| command.node != current_leader)
@@ -1322,16 +1302,13 @@ impl Workload for ChainWorkload {
                             assert_reachable!("chain: duplicate reproposal executes");
                             self.adversarial.duplicate_reproposed = true;
                         }
-                        let result = moonpool_sim::select! {
-                            result = propose_once(
-                                duplicate_target,
-                                command.seq,
-                                command.payload,
-                                false,
-                            ) => result,
-                            _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
-                            () = shutdown.cancelled() => ProposalResult::Ambiguous,
-                        };
+                        let result = within(
+                            ctx,
+                            request_timeout,
+                            ProposalResult::Ambiguous,
+                            propose_once(duplicate_target, command.seq, command.payload, false),
+                        )
+                        .await;
                         match result {
                             ProposalResult::Acked { leader, slot } => {
                                 self.history
@@ -1351,20 +1328,10 @@ impl Workload for ChainWorkload {
                                     );
                                     self.adversarial.duplicate_across_leader_change = true;
                                 }
-                                Self::update_leader_hint(
-                                    &mut leader_hint,
-                                    &mut stale_leader_hint,
-                                    leader,
-                                    server_count,
-                                );
+                                hint.observe(leader, server_count);
                             }
                             ProposalResult::Rejected { leader } => {
-                                Self::update_leader_hint(
-                                    &mut leader_hint,
-                                    &mut stale_leader_hint,
-                                    leader,
-                                    server_count,
-                                );
+                                hint.observe(leader, server_count);
                             }
                             ProposalResult::Ambiguous => {}
                         }
@@ -1372,24 +1339,15 @@ impl Workload for ChainWorkload {
                 }
                 DUAL_SUBMIT => {
                     if server_count > 1 && time.now() < Duration::from_millis(CHAOS_DURATION_MS) {
-                        let seq = next_seq;
-                        next_seq = next_seq.saturating_add(1);
-                        let payload_class = usize::try_from(raw_class % 4).unwrap_or(0);
-                        let payload = Self::payload(
+                        let submission = self.submit(
+                            &audit,
+                            &config,
+                            &mut next_seq,
                             raw_class,
-                            config.command_bytes,
-                            config.large_command_bytes,
                             raw_payload,
+                            now_ms(),
                         );
-                        let cmd_hash = user_command_hash(&payload);
-                        audit.note_submitted(cmd_hash);
-                        self.history.record_write_issued(seq, now_ms());
-                        tracing::info!(
-                            cmd = %hash_text(cmd_hash),
-                            seq,
-                            bytes = payload.len() as u64,
-                            "chain_command_submitted"
-                        );
+                        let (seq, cmd_hash) = (submission.seq, submission.cmd_hash);
                         let second_target = (target
                             + 1
                             + usize::try_from(
@@ -1411,16 +1369,12 @@ impl Workload for ChainWorkload {
 
                         let targets = [target, second_target];
                         let attempts = targets.iter().map(|target| {
-                            let attempt = propose_once(*target, seq, payload.clone(), false);
-                            let time = time.clone();
-                            let shutdown = shutdown.clone();
-                            async move {
-                                moonpool_sim::select! {
-                                    result = attempt => result,
-                                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
-                                    () = shutdown.cancelled() => ProposalResult::Ambiguous,
-                                }
-                            }
+                            within(
+                                ctx,
+                                request_timeout,
+                                ProposalResult::Ambiguous,
+                                propose_once(*target, seq, submission.payload.clone(), false),
+                            )
                         });
                         let results = join_all(attempts).await;
                         let mut committed: Option<(u64, Option<u64>, usize)> = None;
@@ -1452,45 +1406,14 @@ impl Workload for ChainWorkload {
                         }
 
                         if let Some((slot, leader, ack_target)) = committed {
-                            Self::update_leader_hint(
-                                &mut leader_hint,
-                                &mut stale_leader_hint,
-                                leader,
-                                server_count,
-                            );
-                            max_acked_slot =
-                                Some(max_acked_slot.map_or(slot, |maximum| maximum.max(slot)));
-                            self.history.record_write_ack(seq, Some(slot), now_ms());
-                            tracing::info!(
-                                cmd = %hash_text(cmd_hash),
-                                seq,
-                                slot,
-                                "chain_command_acked"
-                            );
-                            if let Some(node) = leader {
-                                tracing::info!(
-                                    client_id,
-                                    seq_id = seq,
-                                    slot,
-                                    node,
-                                    "client_acknowledged"
-                                );
-                            }
-                            acked_commands.push(AckedCommand {
-                                seq,
-                                payload,
-                                cmd_hash,
-                                slot,
-                                node: leader_hint.unwrap_or(ack_target),
-                            });
-                            self.adversarial.payload_classes[payload_class] = true;
+                            hint.observe(leader, server_count);
+                            max_acked_slot = max_acked_slot.max(Some(slot));
+                            self.record_ack(client_id, &submission, slot, leader, now_ms());
+                            self.adversarial.payload_classes[submission.payload_class] = true;
+                            acked_commands
+                                .push(submission.acked(slot, hint.current.unwrap_or(ack_target)));
                         } else if rejected == targets.len() {
-                            Self::update_leader_hint(
-                                &mut leader_hint,
-                                &mut stale_leader_hint,
-                                redirect,
-                                server_count,
-                            );
+                            hint.observe(redirect, server_count);
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -1510,18 +1433,7 @@ impl Workload for ChainWorkload {
                         && config.compaction
                         && raw_pause % config.compact_every == 0
                     {
-                        let control = Command::Control(Control::Truncate { up_to: Slot(up_to) });
-                        let cmd_hash = command_hash(&control);
-                        tracing::info!(
-                            cmd = %hash_text(cmd_hash),
-                            up_to,
-                            "chain_control_submitted"
-                        );
-                        let target = leader_hint.unwrap_or(target);
-                        let accepted = compact_once(target, up_to).await;
-                        if matches!(accepted, CompactResult::Accepted { .. }) {
-                            tracing::info!(up_to, "chain_compact_accepted");
-                        }
+                        compact_traced(hint.current.unwrap_or(target), up_to).await;
                     }
                 }
                 COMPACT_STORM => {
@@ -1533,10 +1445,10 @@ impl Workload for ChainWorkload {
                                 0 => (
                                     "overask",
                                     base.saturating_add(10_000 + raw_payload % 10_000),
-                                    leader_hint.unwrap_or(target),
+                                    hint.current.unwrap_or(target),
                                 ),
-                                1 if server_count > 1 && leader_hint.is_some() => {
-                                    let leader = leader_hint.unwrap_or(target) % server_count;
+                                1 if server_count > 1 && hint.current.is_some() => {
+                                    let leader = hint.current.unwrap_or(target) % server_count;
                                     let offset = 1 + usize::try_from(
                                         (raw_target + u64::try_from(attempt).unwrap_or(0))
                                             % u64::try_from(server_count - 1).unwrap_or(1),
@@ -1544,21 +1456,12 @@ impl Workload for ChainWorkload {
                                     .unwrap_or(0);
                                     ("follower", base, (leader + offset) % server_count)
                                 }
-                                2 if stale_leader_hint.is_some()
-                                    && stale_leader_hint != leader_hint =>
-                                {
-                                    ("stale-leader", base, stale_leader_hint.unwrap_or(target))
+                                2 if hint.stale.is_some() && hint.stale != hint.current => {
+                                    ("stale-leader", base, hint.stale.unwrap_or(target))
                                 }
                                 _ => continue,
                             };
-                            let control =
-                                Command::Control(Control::Truncate { up_to: Slot(up_to) });
-                            let cmd_hash = command_hash(&control);
-                            tracing::info!(
-                                cmd = %hash_text(cmd_hash),
-                                up_to,
-                                "chain_control_submitted"
-                            );
+                            let cmd_hash = trace_truncate(up_to);
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 up_to,
@@ -1603,21 +1506,11 @@ impl Workload for ChainWorkload {
                             };
                             match result {
                                 CompactResult::Accepted { leader } => {
-                                    Self::update_leader_hint(
-                                        &mut leader_hint,
-                                        &mut stale_leader_hint,
-                                        leader,
-                                        server_count,
-                                    );
+                                    hint.observe(leader, server_count);
                                     tracing::info!(up_to, "chain_compact_accepted");
                                 }
                                 CompactResult::Rejected { leader } => {
-                                    Self::update_leader_hint(
-                                        &mut leader_hint,
-                                        &mut stale_leader_hint,
-                                        leader,
-                                        server_count,
-                                    );
+                                    hint.observe(leader, server_count);
                                 }
                                 CompactResult::Ambiguous => {}
                             }
@@ -1638,7 +1531,7 @@ impl Workload for ChainWorkload {
                     self.history.record_read_issued(seq, now_ms());
                     let read_deadline =
                         time.now() + Duration::from_millis(config.request_timeout_ms);
-                    let mut attempt_target = leader_hint.unwrap_or(target) % server_count;
+                    let mut attempt_target = hint.current.unwrap_or(target) % server_count;
                     let mut attempts: u64 = 0;
                     let outcome = loop {
                         let remaining = read_deadline.saturating_sub(time.now());
@@ -1647,12 +1540,18 @@ impl Workload for ChainWorkload {
                         }
                         attempts += 1;
                         let mut client = public_clients[attempt_target].clone();
-                        let attempt = moonpool_sim::select! {
-                            response = client.read(Read { client: client_id, seq }) =>
-                                response.ok().map(tonic::Response::into_inner),
-                            _ = time.sleep(remaining) => None,
-                            () = shutdown.cancelled() => None,
-                        };
+                        let attempt = within(
+                            ctx,
+                            remaining,
+                            None,
+                            client
+                                .read(Read {
+                                    client: client_id,
+                                    seq,
+                                })
+                                .map(|response| response.ok().map(tonic::Response::into_inner)),
+                        )
+                        .await;
                         match attempt {
                             Some(ack) => {
                                 assert_always!(
@@ -1686,8 +1585,7 @@ impl Workload for ChainWorkload {
                         tracing::info!(
                             client_id,
                             seq_id = seq,
-                            read_index = watermark
-                                .map_or(-1_i64, |wm| { i64::try_from(wm).unwrap_or(i64::MAX) }),
+                            read_index = signed_watermark(watermark),
                             "chain_read_index_acked"
                         );
                         // Per-client monotonicity: this client's committed
@@ -1696,10 +1594,8 @@ impl Workload for ChainWorkload {
                             watermark >= last_read_frontier,
                             "chain: a client's read-index watermarks never move backwards",
                             {
-                                "previous" => last_read_frontier
-                                    .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
-                                "observed" => watermark
-                                    .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
+                                "previous" => signed_watermark(last_read_frontier),
+                                "observed" => signed_watermark(watermark),
                             }
                         );
                         last_read_frontier = last_read_frontier.max(watermark);
@@ -1712,8 +1608,7 @@ impl Workload for ChainWorkload {
                                 "chain: a read-index ack covers the client's acked writes",
                                 {
                                     "max_acked_slot" => acked,
-                                    "observed" => watermark
-                                        .map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX)),
+                                    "observed" => signed_watermark(watermark),
                                 }
                             );
                         }
@@ -1727,13 +1622,10 @@ impl Workload for ChainWorkload {
                 }
                 READ_STATE => {
                     let mut client = internal_clients[target].clone();
-                    if let Some(state) = moonpool_sim::select! {
-                        response = client.inspect(InspectRequest {}) => response
-                            .ok()
-                            .and_then(|response| ChainState::decode(&response.into_inner().snapshot).ok()),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                        () = shutdown.cancelled() => None,
-                    } {
+                    if let Some(state) = inspect(ctx, &mut client, request_timeout)
+                        .await
+                        .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
+                    {
                         let prior = live_states.insert(state.applied_count, state.chain_hash);
                         assert_always!(
                             prior.is_none_or(|hash| hash == state.chain_hash),
@@ -1762,29 +1654,24 @@ impl Workload for ChainWorkload {
                     // ballot's `Prepare`, so a stale answer only makes the
                     // request refused (`unchanged`, `unknown_member`) — an
                     // operating condition, never a wrong state.
-                    let probe_target = leader_hint.unwrap_or(target);
+                    let probe_target = hint.current.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
-                    let in_force = moonpool_sim::select! {
-                        response = probe.inspect(InspectRequest {}) => response
-                            .ok()
-                            .map(|response| {
-                                let reply = response.into_inner();
-                                let wire = WireQuorumSystem {
-                                    quorum_system: reply.quorum_system,
-                                    phase1_quorum: reply.phase1_quorum,
-                                    phase2_quorum: reply.phase2_quorum,
-                                    rows: reply.rows,
-                                    cols: reply.cols,
-                                };
-                                (reply.members, quorum_system_from_proto(&wire).ok())
-                            }),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                        () = shutdown.cancelled() => None,
-                    };
+                    let in_force = inspect(ctx, &mut probe, request_timeout)
+                        .await
+                        .map(|reply| {
+                            let wire = WireQuorumSystem {
+                                quorum_system: reply.quorum_system,
+                                phase1_quorum: reply.phase1_quorum,
+                                phase2_quorum: reply.phase2_quorum,
+                                rows: reply.rows,
+                                cols: reply.cols,
+                            };
+                            (reply.members, quorum_system_from_proto(&wire).ok())
+                        });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
-                    let leader_id = leader_hint.and_then(|l| u64::try_from(l).ok());
+                    let leader_id = hint.current.and_then(|l| u64::try_from(l).ok());
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
@@ -1930,12 +1817,7 @@ impl Workload for ChainWorkload {
                                     { "shape" => name }
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
-                                Self::update_leader_hint(
-                                    &mut leader_hint,
-                                    &mut stale_leader_hint,
-                                    leader,
-                                    server_count,
-                                );
+                                hint.observe(leader, server_count);
                             }
                             ReconfigureResult::Refused { leader, refusal } => {
                                 if refusal == "no_matchmakers" {
@@ -1956,12 +1838,7 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                Self::update_leader_hint(
-                                    &mut leader_hint,
-                                    &mut stale_leader_hint,
-                                    leader,
-                                    server_count,
-                                );
+                                hint.observe(leader, server_count);
                             }
                             ReconfigureResult::Ambiguous => {}
                         }
@@ -1974,14 +1851,10 @@ impl Workload for ChainWorkload {
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
                     let mut probe = internal_clients[target].clone();
-                    let current: Option<(u64, Vec<u64>)> = moonpool_sim::select! {
-                        response = probe.inspect(InspectRequest {}) => response.ok().map(|response| {
-                            let reply = response.into_inner();
-                            (reply.matchmaker_generation, reply.matchmakers)
-                        }),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                        () = shutdown.cancelled() => None,
-                    };
+                    let current: Option<(u64, Vec<u64>)> =
+                        inspect(ctx, &mut probe, request_timeout)
+                            .await
+                            .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
@@ -2075,7 +1948,7 @@ impl Workload for ChainWorkload {
                     // Only a leader reports what its effective floor retired;
                     // a follower answers an empty list and the step is a
                     // no-op.
-                    let probe_target = leader_hint.unwrap_or(target);
+                    let probe_target = hint.current.unwrap_or(target);
                     let mut probe = internal_clients[probe_target].clone();
                     // The retirable list, the configuration in force and the
                     // effective GC watermark come from the *same* reply: the
@@ -2083,13 +1956,7 @@ impl Workload for ChainWorkload {
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = moonpool_sim::select! {
-                        response = probe.inspect(InspectRequest {}) => response
-                            .ok()
-                            .map(tonic::Response::into_inner),
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                        () = shutdown.cancelled() => None,
-                    };
+                    let inspected = inspect(ctx, &mut probe, request_timeout).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -2142,13 +2009,17 @@ impl Workload for ChainWorkload {
                         if reserved {
                             tracing::info!(node = victim as u64, "chain_retire_request");
                             let mut client = internal_clients[victim].clone();
-                            let accepted: Option<bool> = moonpool_sim::select! {
-                                response = client.retire(RetireRequest { gc_watermark }) => response
-                                    .ok()
-                                    .map(|response| response.into_inner().accepted),
-                                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                                () = shutdown.cancelled() => None,
-                            };
+                            let accepted: Option<bool> = within(
+                                ctx,
+                                request_timeout,
+                                None,
+                                client
+                                    .retire(RetireRequest { gc_watermark })
+                                    .map(|response| {
+                                        response.ok().map(|response| response.into_inner().accepted)
+                                    }),
+                            )
+                            .await;
                             tracing::info!(node = victim as u64, accepted = ?accepted, "chain_retire_outcome");
                             match accepted {
                                 Some(true) => self.adversarial.retired = true,
@@ -2276,52 +2147,25 @@ impl Workload for ChainWorkload {
         let recovery_deadline = time.now() + Duration::from_millis(config.recovery_budget_ms);
         let mut recovery_acked = 0_u64;
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-        let mut target = leader_hint.unwrap_or(first) % server_count;
+        let mut target = hint.current.unwrap_or(first) % server_count;
         for _ in 0..config.recovery_proposals {
-            let seq = next_seq;
-            next_seq = next_seq.saturating_add(1);
             let raw = ctx.random().random::<u64>();
-            let payload = Self::payload(
-                raw % 4,
-                config.command_bytes,
-                config.large_command_bytes,
-                raw,
-            );
-            let cmd_hash = user_command_hash(&payload);
-            audit.note_submitted(cmd_hash);
-            self.history.record_write_issued(seq, now_ms());
-            tracing::info!(
-                cmd = %hash_text(cmd_hash),
-                seq,
-                bytes = payload.len() as u64,
-                "chain_command_submitted"
-            );
+            let submission = self.submit(&audit, &config, &mut next_seq, raw, raw, now_ms());
             let mut acknowledged = false;
             while time.now() < recovery_deadline && !shutdown.is_cancelled() {
-                let result = moonpool_sim::select! {
-                    result = propose_once(target, seq, payload.clone(), false) => result,
-                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ProposalResult::Ambiguous,
-                    () = shutdown.cancelled() => ProposalResult::Ambiguous,
-                };
+                let result = within(
+                    ctx,
+                    request_timeout,
+                    ProposalResult::Ambiguous,
+                    propose_once(target, submission.seq, submission.payload.clone(), false),
+                )
+                .await;
                 match result {
                     ProposalResult::Acked { leader, slot } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
-                        self.history.record_write_ack(seq, Some(slot), now_ms());
-                        tracing::info!(
-                            cmd = %hash_text(cmd_hash),
-                            seq,
-                            slot,
-                            "chain_command_acked"
-                        );
+                        self.record_ack(client_id, &submission, slot, leader, now_ms());
                         if let Some(node) = leader {
-                            tracing::info!(
-                                client_id,
-                                seq_id = seq,
-                                slot,
-                                node,
-                                "client_acknowledged"
-                            );
                             target = usize::try_from(node).unwrap_or(target) % server_count;
                         }
                         break;
@@ -2369,13 +2213,9 @@ impl Workload for ChainWorkload {
             let mut unanswered = false;
             for &node in &live {
                 let mut client = internal_clients[node].clone();
-                let state = moonpool_sim::select! {
-                    response = client.inspect(InspectRequest {}) => response
-                        .ok()
-                        .and_then(|response| ChainState::decode(&response.into_inner().snapshot).ok()),
-                    _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => None,
-                    () = shutdown.cancelled() => None,
-                };
+                let state = inspect(ctx, &mut client, request_timeout)
+                    .await
+                    .and_then(|reply| ChainState::decode(&reply.snapshot).ok());
                 let Some(state) = state else {
                     unanswered = true;
                     break;

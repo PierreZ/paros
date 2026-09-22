@@ -216,6 +216,20 @@ pub(crate) struct CorruptionInjection {
     pub(crate) outcome: CorruptionOutcome,
 }
 
+impl CorruptionInjection {
+    /// A single-record injection of `kind` on `node`'s `record`, not yet
+    /// read back.
+    pub(crate) fn dormant(node: u64, record: StorageRecord, kind: CorruptionKind) -> Self {
+        Self {
+            node,
+            record,
+            kind,
+            block: false,
+            outcome: CorruptionOutcome::Dormant,
+        }
+    }
+}
+
 /// Sticky per-family / per-verdict facts for the Stage-7 coverage gates,
 /// recorded at the detection instant and read once per run by
 /// [`check_storage_gates`]. Independent bits, not a state machine (the
@@ -1179,13 +1193,11 @@ pub(crate) fn corpus_corrupt_snap_chunk(
         disk.snap_chunk_health[index] = RecordHealth::Faulty;
         (at, disk.first_slot.0)
     };
-    guard.note_corruption(CorruptionInjection {
+    guard.note_corruption(CorruptionInjection::dormant(
         node,
-        record: StorageRecord::SnapChunk(Slot(at), chunk),
-        kind: CorruptionKind::BitFlip,
-        block: false,
-        outcome: CorruptionOutcome::Dormant,
-    });
+        StorageRecord::SnapChunk(Slot(at), chunk),
+        CorruptionKind::BitFlip,
+    ));
     for slot in 0..floor {
         guard.note_if_unrecoverable(slot);
     }
@@ -1215,13 +1227,11 @@ pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, sl
         },
     );
     guard.marks.entry(ip.to_string()).or_default().insert(slot);
-    guard.note_corruption(CorruptionInjection {
+    guard.note_corruption(CorruptionInjection::dormant(
         node,
-        record: StorageRecord::Accepted(Slot(slot)),
-        kind: CorruptionKind::BitFlip,
-        block: false,
-        outcome: CorruptionOutcome::Dormant,
-    });
+        StorageRecord::Accepted(Slot(slot)),
+        CorruptionKind::BitFlip,
+    ));
     guard.note_if_unrecoverable(slot);
     true
 }
@@ -1238,13 +1248,11 @@ pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64)
     };
     disk.snapshot_health = RecordHealth::Faulty;
     let floor = disk.first_slot.0;
-    guard.note_corruption(CorruptionInjection {
+    guard.note_corruption(CorruptionInjection::dormant(
         node,
-        record: StorageRecord::Snapshot,
-        kind: CorruptionKind::BitFlip,
-        block: false,
-        outcome: CorruptionOutcome::Dormant,
-    });
+        StorageRecord::Snapshot,
+        CorruptionKind::BitFlip,
+    ));
     for slot in 0..floor {
         guard.note_if_unrecoverable(slot);
     }
