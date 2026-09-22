@@ -281,6 +281,39 @@ impl World {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.clock += 1;
+        self.tick_node(id, index);
+        Ok(())
+    }
+
+    /// Advance every live node's clock by one tick, in id order. Stops at the
+    /// first prompt a tick raises.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn tick_all(&mut self) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        self.clock += 1;
+        let pool = self.pool.clone();
+        for id in pool {
+            if self.prompt.is_some() {
+                break;
+            }
+            let Some(index) = self.index_of(id) else {
+                continue;
+            };
+            if self.nodes[index].is_none() {
+                continue;
+            }
+            self.tick_node(id, index);
+        }
+        Ok(())
+    }
+
+    /// One tick of the live node `id`, at `index`, on the clock already
+    /// advanced.
+    fn tick_node(&mut self, id: NodeId, index: usize) {
         let resend = self.policy.auto_resend;
         self.narrate_tick(id, index);
         self.observe(id, move |world| {
@@ -296,44 +329,6 @@ impl World {
         // stall clock advances, a freeze whose quorum answered is closed, and
         // a phase that has stopped moving is given up.
         self.beat_reconfigurer(index);
-        Ok(())
-    }
-
-    /// Advance every live node's clock by one tick, in id order. Stops at the
-    /// first prompt a tick raises.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
-    pub fn tick_all(&mut self) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
-        self.clock += 1;
-        let resend = self.policy.auto_resend;
-        let pool = self.pool.clone();
-        for id in pool {
-            if self.prompt.is_some() {
-                break;
-            }
-            let Some(index) = self.index_of(id) else {
-                continue;
-            };
-            if self.nodes[index].is_none() {
-                continue;
-            }
-            self.narrate_tick(id, index);
-            self.observe(id, move |world| {
-                if let Some(node) = world.nodes[index].as_mut() {
-                    node.tick();
-                    if resend {
-                        node.resend_pending();
-                    }
-                }
-                world.pump(id);
-            });
-            self.beat_reconfigurer(index);
-        }
-        Ok(())
     }
 
     /// The line a tick gets, before anything is stepped.
