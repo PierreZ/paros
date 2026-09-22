@@ -14,7 +14,7 @@ use paros_core::{
 use paros_play::action::Seam;
 use paros_play::prompt::{PromptKind, Verdict};
 use paros_play::world::matchmakers::MatchmakerProcess;
-use paros_play::world::{Disk, NO_CHECK_QUORUM, Party, World, WorldPolicy};
+use paros_play::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, World, WorldPolicy};
 
 const CLIENT: u64 = 7;
 
@@ -26,41 +26,59 @@ fn policy(manual: &[PromptKind]) -> WorldPolicy {
     }
 }
 
+/// Node `id`'s configuration in the cluster `peers` under `system`.
+fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
+    Config {
+        id,
+        peers: peers.to_vec(),
+        quorum_system: system,
+        ..Config::default()
+    }
+}
+
+/// A cluster of `size` nodes under a majority, with one client.
 fn cluster(size: u64) -> World {
+    cluster_with(size, QuorumSystem::Majority)
+}
+
+/// A cluster of `size` nodes under `system`, with one client.
+fn cluster_with(size: u64, system: QuorumSystem) -> World {
     let peers: Vec<NodeId> = (0..size).map(NodeId).collect();
-    let configs = peers
-        .iter()
-        .map(|id| Config {
-            id: *id,
-            peers: peers.clone(),
-            quorum_system: QuorumSystem::Majority,
-            ..Config::default()
-        })
-        .collect();
+    let configs = peers.iter().map(|id| config(*id, &peers, system)).collect();
     let mut world = World::new(configs, &[CLIENT], 10);
     world.set_policy(policy(&[]));
     world
 }
 
-/// Deliver everything in flight for which `keep` holds, lowest id first, to
-/// quiescence. Stops if a prompt opens.
-fn deliver_where(world: &mut World, keep: impl Fn(&Message) -> bool) {
+/// The lowest-id wire entry `keep` accepts, whatever tier it belongs to.
+fn lowest(world: &World, keep: impl Fn(&World, &InFlight) -> bool) -> Option<u64> {
+    world
+        .wire()
+        .iter()
+        .filter(|entry| keep(world, entry))
+        .map(|entry| entry.id)
+        .min()
+}
+
+/// Deliver every wire entry `keep` accepts, lowest id first, to quiescence.
+/// Stops if a prompt opens.
+fn deliver_lowest(world: &mut World, keep: impl Fn(&World, &InFlight) -> bool) {
     for _ in 0..2000 {
         if world.prompt().is_some() {
             return;
         }
-        let Some(id) = world
-            .wire()
-            .iter()
-            .filter(|entry| entry.message().is_some_and(&keep))
-            .map(|entry| entry.id)
-            .min()
-        else {
+        let Some(id) = lowest(world, &keep) else {
             return;
         };
         world.deliver(id).expect("a message that is in flight");
     }
     panic!("delivery reached quiescence");
+}
+
+/// Deliver everything in flight for which `keep` holds, lowest id first, to
+/// quiescence. Stops if a prompt opens.
+fn deliver_where(world: &mut World, keep: impl Fn(&Message) -> bool) {
+    deliver_lowest(world, |_, entry| entry.message().is_some_and(&keep));
 }
 
 fn deliver_all(world: &mut World) {
@@ -70,13 +88,7 @@ fn deliver_all(world: &mut World) {
 /// Drop everything in flight for which `hit` holds — a partition the player
 /// never heals.
 fn drop_where(world: &mut World, hit: impl Fn(&Message) -> bool) {
-    while let Some(id) = world
-        .wire()
-        .iter()
-        .filter(|entry| entry.message().is_some_and(&hit))
-        .map(|entry| entry.id)
-        .min()
-    {
+    while let Some(id) = lowest(world, |_, entry| entry.message().is_some_and(&hit)) {
         world.drop_message(id).expect("a message that is in flight");
     }
 }
@@ -88,16 +100,10 @@ fn isolate(world: &mut World, isolated: NodeId) {
         if world.prompt().is_some() {
             return;
         }
-        while let Some(id) = world
-            .wire()
-            .iter()
-            .filter(|entry| entry.to_node() == Some(isolated))
-            .map(|entry| entry.id)
-            .min()
-        {
+        while let Some(id) = lowest(world, |_, entry| entry.to_node() == Some(isolated)) {
             world.drop_message(id).expect("in flight");
         }
-        let Some(id) = world.wire().iter().map(|entry| entry.id).min() else {
+        let Some(id) = lowest(world, |_, _| true) else {
             return;
         };
         world.deliver(id).expect("in flight");
@@ -1031,12 +1037,7 @@ fn a_recovered_noop_is_re_proposed_not_re_filled() {
     let disks: Vec<Disk> = peers
         .iter()
         .map(|id| {
-            let config = Config {
-                id: *id,
-                peers: peers.clone(),
-                quorum_system: QuorumSystem::Majority,
-                ..Config::default()
-            };
+            let config = config(*id, &peers, QuorumSystem::Majority);
             if id.0 == 1 {
                 Disk::seeded(config, carried, seeded.clone(), None)
             } else {
@@ -1180,23 +1181,6 @@ fn a_read_across_a_leader_change_is_linearizable() {
 }
 
 // ---- Act IV: the grid -------------------------------------------------------
-
-/// A cluster of `size` nodes under `system`, with one client.
-fn cluster_with(size: u64, system: QuorumSystem) -> World {
-    let peers: Vec<NodeId> = (0..size).map(NodeId).collect();
-    let configs = peers
-        .iter()
-        .map(|id| Config {
-            id: *id,
-            peers: peers.clone(),
-            quorum_system: system,
-            ..Config::default()
-        })
-        .collect();
-    let mut world = World::new(configs, &[CLIENT], 10);
-    world.set_policy(policy(&[]));
-    world
-}
 
 const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
 
@@ -1698,16 +1682,7 @@ fn matchmaker_cluster(
 
 /// Deliver every wire entry, whatever tier it belongs to.
 fn deliver_everything(world: &mut World) {
-    for _ in 0..2000 {
-        if world.prompt().is_some() {
-            return;
-        }
-        let Some(id) = world.wire().iter().map(|entry| entry.id).min() else {
-            return;
-        };
-        world.deliver(id).expect("a message that is in flight");
-    }
-    panic!("delivery reached quiescence");
+    deliver_lowest(world, |_, _| true);
 }
 
 #[test]
@@ -2304,22 +2279,7 @@ fn gc_request_to(world: &World, id: u64) -> Option<u64> {
 
 /// Deliver every matchmaker-plane entry of one render family.
 fn deliver_where_plane(world: &mut World, family: &str) {
-    for _ in 0..2000 {
-        if world.prompt().is_some() {
-            return;
-        }
-        let Some(id) = world
-            .wire()
-            .iter()
-            .filter(|entry| world.render(entry).phase == family)
-            .map(|entry| entry.id)
-            .min()
-        else {
-            return;
-        };
-        world.deliver(id).expect("a message that is in flight");
-    }
-    panic!("delivery reached quiescence");
+    deliver_lowest(world, |world, entry| world.render(entry).phase == family);
 }
 
 /// Deliver everything, answering every prompt with the core's own answer.
@@ -2330,7 +2290,7 @@ fn answer_through(world: &mut World) {
             world.answer(id, &choice).expect("a legal move");
             continue;
         }
-        let Some(id) = world.wire().iter().map(|entry| entry.id).min() else {
+        let Some(id) = lowest(world, |_, _| true) else {
             return;
         };
         world.deliver(id).expect("a message that is in flight");

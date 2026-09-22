@@ -79,15 +79,18 @@ impl Script {
         self.play(Action::Answer { prompt: id, choice })
     }
 
-    /// Deliver the lowest-id message `keep` accepts, if there is one.
-    pub(crate) fn deliver_one(&mut self, keep: &impl Fn(&MessageView) -> bool) -> bool {
-        let Some(id) = self
-            .wire()
+    /// The lowest-id message `keep` accepts, if there is one.
+    fn lowest(&self, keep: impl Fn(&MessageView) -> bool) -> Option<u64> {
+        self.wire()
             .iter()
             .filter(|message| keep(message))
             .map(|message| message.id)
             .min()
-        else {
+    }
+
+    /// Deliver the lowest-id message `keep` accepts, if there is one.
+    fn deliver_one(&mut self, keep: &impl Fn(&MessageView) -> bool) -> bool {
+        let Some(id) = self.lowest(keep) else {
             return false;
         };
         self.play(Action::Deliver { id });
@@ -128,13 +131,7 @@ impl Script {
     /// Drop every message `hit` accepts — the partition the player never heals.
     pub(crate) fn drop_all(&mut self, hit: impl Fn(&MessageView) -> bool) -> &mut Self {
         for _ in 0..BUDGET {
-            let Some(id) = self
-                .wire()
-                .iter()
-                .filter(|message| hit(message))
-                .map(|message| message.id)
-                .min()
-            else {
+            let Some(id) = self.lowest(&hit) else {
                 return self;
             };
             self.play(Action::Drop { id });
