@@ -387,23 +387,7 @@ where
                 .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             snap_markers.push(*slot);
         }
-        let vhash = command_hash(command);
-        audit.applied(
-            NodeId(self_id),
-            *slot,
-            vhash,
-            match command {
-                Command::User(e) => Some((e.client.0, e.seq.0)),
-                Command::Control(_) => None,
-            },
-        );
-        tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
-        tracing::info!(
-            node = self_id,
-            slot = slot.0,
-            applied_index = slot.0,
-            "log_applied"
-        );
+        report_applied(audit, self_id, *slot, command);
     }
 
     // Application state is part of the durable replica contract. Flush all
@@ -431,10 +415,7 @@ where
     // The decided snapshot points captured above are durable with the
     // application fsync; only now are they reported (never claiming a point a
     // crash-before-sync would discard).
-    for at in &snap_markers {
-        audit.snap_recorded(NodeId(self_id), *at);
-        tracing::info!(node = self_id, at = at.0, "snap_recorded");
-    }
+    report_snap_recorded(audit, self_id, &snap_markers);
 
     // Only now that the application state covering the dropped slots is
     // fsync-durable may the compaction floor become durable (see the batch
@@ -497,6 +478,35 @@ where
     })
 }
 
+/// Report one slot applied — by the live batch walk or by the boot replay,
+/// which apply it identically: the audit's apply callback, then the
+/// `value_chosen` and `log_applied` traces.
+pub(crate) fn report_applied<A: Audit>(audit: &A, self_id: u64, slot: Slot, command: &Command) {
+    let vhash = command_hash(command);
+    audit.applied(
+        NodeId(self_id),
+        slot,
+        vhash,
+        command.user().map(|e| (e.client.0, e.seq.0)),
+    );
+    tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
+    tracing::info!(
+        node = self_id,
+        slot = slot.0,
+        applied_index = slot.0,
+        "log_applied"
+    );
+}
+
+/// Report decided snapshot points recorded durably — only after the fsync
+/// that made them so (never claiming a point a crash-before-sync discards).
+pub(crate) fn report_snap_recorded<A: Audit>(audit: &A, self_id: u64, points: &[Slot]) {
+    for at in points {
+        audit.snap_recorded(NodeId(self_id), *at);
+        tracing::info!(node = self_id, at = at.0, "snap_recorded");
+    }
+}
+
 /// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
 /// [`MustSync`], and surface the persisted state for the safety + recovery
 /// oracles: a `node_state` event when the promised ballot rose, and a per-slot
@@ -519,13 +529,10 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
 ) -> Result<(), RunError> {
     let mut promise_changed = false;
     for op in writes {
-        match op {
+        let staged = match op {
             WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)) => {
-                storage
-                    .persist_ballot(*ballot)
-                    .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
                 promise_changed = true;
+                storage.persist_ballot(*ballot).await
             }
             WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
@@ -535,20 +542,9 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
                 storage
                     .append_accepted(*slot, *ballot, command.clone())
                     .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
-            WriteOp::SetChosenIndex(slot) => {
-                storage
-                    .set_chosen_index(*slot)
-                    .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-            }
-            WriteOp::Truncate { first, sealed } => {
-                storage
-                    .truncate(*first, sealed)
-                    .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-            }
+            WriteOp::SetChosenIndex(slot) => storage.set_chosen_index(*slot).await,
+            WriteOp::Truncate { first, sealed } => storage.truncate(*first, sealed).await,
             WriteOp::InstallSnapshot {
                 chosen_index,
                 ballot,
@@ -558,9 +554,9 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
                 storage
                     .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
                     .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             }
-        }
+        };
+        staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
 
     // Crash seam: the batch is staged but not yet flushed. A crash here loses the

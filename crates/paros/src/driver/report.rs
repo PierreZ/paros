@@ -142,6 +142,59 @@ pub(crate) struct Deltas {
     pub(crate) matchmaker_generation: u64,
 }
 
+impl Deltas {
+    /// The trackers' starting point: the counters the core recovered with.
+    pub(crate) fn new(node: &ColocatedNode) -> Self {
+        Self {
+            role: node.role(),
+            duplicates: node.replica().duplicates_suppressed(),
+            quorum_lost: node.quorum_lost_step_downs(),
+            repair: node.repair_counters(),
+            handoff: node.handoff_counters(),
+            membership: node.membership_counters(),
+            matchmaking: None,
+            matchmaking_timeouts: node.matchmaking_timeouts(),
+            matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
+        }
+    }
+}
+
+/// A re-send clock: ticks since an open request was last (re-)sent, due every
+/// `cadence` ticks (a cadence of zero is read as one).
+#[derive(Default)]
+pub(crate) struct Cadence {
+    elapsed: u64,
+}
+
+impl Cadence {
+    /// One tick while a request is open: whether its re-send is due now (the
+    /// clock restarts when it is).
+    pub(crate) fn tick(&mut self, cadence: u64) -> bool {
+        self.elapsed += 1;
+        if self.elapsed >= cadence.max(1) {
+            self.elapsed = 0;
+            return true;
+        }
+        false
+    }
+
+    /// One tick of a request that may be closed: nothing is due and the
+    /// clock restarts while `open` is false.
+    pub(crate) fn tick_if(&mut self, open: bool, cadence: u64) -> bool {
+        if open {
+            self.tick(cadence)
+        } else {
+            self.reset();
+            false
+        }
+    }
+
+    /// Restart the clock.
+    pub(crate) fn reset(&mut self) {
+        self.elapsed = 0;
+    }
+}
+
 /// Surface the campaign-membership transitions (#122): a campaign this node
 /// declined as a non-member, and a leadership it resigned once its own
 /// reconfiguration removed it.

@@ -31,10 +31,13 @@
 //! - [`matchmaking`] — the matchmaker links, the requests a drained batch hands
 //!   the loop, and the reports of what each answer did.
 //! - [`handover`] — the driver-side policy around the matchmaker-set handover.
+//! - [`operator`] — the operator RPCs answered from the core: compaction,
+//!   acceptor-set reconfiguration, retirement and inspection.
 //! - [`boot`] — the (re)boot replay of durable state.
 //! - [`report`] — the post-batch upkeep and its cross-batch delta trackers.
 //!
-//! `mod.rs` itself holds only [`run_node`], the select loop that wires them.
+//! `mod.rs` itself holds only [`run_node`], the select loop that wires them,
+//! and the per-arm steps that loop shares (`NodeLoop`).
 
 mod boot;
 pub(crate) mod config;
@@ -42,6 +45,7 @@ pub(crate) mod edge;
 pub(crate) mod events;
 mod handover;
 mod matchmaking;
+mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
@@ -54,46 +58,42 @@ pub use events::{command_hash, message_kind, registration_history_hash};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use moonpool_core::{Providers, RandomProvider, TimeProvider};
+use moonpool_core::{Providers, RandomProvider, SimulationResult, TimeProvider};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
-    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
-    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureRefusal,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal,
-    Value,
+    ClientId, ClientSeq, ColocatedNode, Delegation, GcAck, MatchRefusal, MatchReply, MatchStep,
+    MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId,
+    QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
+    StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use moonpool_core::SimulationResult;
-
 use crate::grpc::{
-    CompactAck, InspectReply, ParosInternalClient, ParosInternalServer, ParosMatchmakerClient,
-    ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck,
-    RpcInbox, WireQuorumSystem, common, rpc_channel,
+    ParosInternalClient, ParosInternalServer, ParosMatchmakerClient, ParosServer, ProposeAck,
+    ReadAck, ReconfigureMatchmakersAck, ReplySender, RpcInbox, rpc_channel,
 };
 use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
 
-use boot::replay_boot_state;
+use boot::{check_format_marker, replay_boot_state};
 use edge::GrpcEdge;
 use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
-    MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
+    MatchmakerLinks, folded_answer, report_match_step, send_outbox, send_reconfigure_requests,
+    surface_matchmaking,
 };
 use ready::{ClientWaiters, drain_ready, storage_fault_crash};
-use reply::{answer, maybe_duplicate};
-use report::{Deltas, draw_election_timeout, handoff_context, maintain};
-use snap_repair::{
-    SnapRepair, handle_snap_chunk_request, handle_snap_chunk_response, snap_repair_tick,
-};
+use reply::maybe_duplicate;
+use report::{Cadence, Deltas, draw_election_timeout, handoff_context, maintain};
+use snap_repair::{SnapRepair, route_snap_message, snap_repair_tick};
 use transport::{Channels, LaneOpener, Outbound, PeerQueues};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
-/// call instead of four repeated at every arm.
+/// call instead of four repeated at every arm, and so the steps the arms share
+/// take one handle.
 struct NodeLoop<'a, P: Providers, H: DriverHooks, A: Audit> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
@@ -101,7 +101,7 @@ struct NodeLoop<'a, P: Providers, H: DriverHooks, A: Audit> {
     hooks: &'a H,
     audit: &'a A,
     self_id: u64,
-    election_base: u64,
+    tunables: DriverTunables,
 }
 
 impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
@@ -132,11 +132,283 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             last,
             waiters,
             self.self_id,
-            self.election_base,
+            self.tunables.election_timeout_base,
             self.hooks,
             self.audit,
         );
         Ok(())
+    }
+
+    /// Answer one client-facing reply through the reply seam
+    /// ([`reply::answer`]).
+    fn answer<T>(&self, kind: Reply, waiter: ReplySender<T>, ack: T) {
+        reply::answer(
+            self.hooks,
+            self.audit,
+            NodeId(self.self_id),
+            kind,
+            waiter,
+            ack,
+        );
+    }
+
+    /// Put matchmaker-set handover requests on the matchmaker wire.
+    fn send_reconfigure(&self, requests: Vec<(MatchmakerId, ReconfigureRequest)>) {
+        send_reconfigure_requests(
+            self.providers,
+            self.links,
+            self.audit,
+            self.self_id,
+            requests,
+        );
+    }
+
+    /// The two straggler paths of a handover (#125), taken by whichever node
+    /// meets them in a matchmaker's refusal: a registry frozen with no
+    /// successor is finished by this node (the reconfigurer's decree adopts
+    /// whatever was voted, or re-chooses the same members under a fresh
+    /// generation); a member left inactive or behind is told the chosen set
+    /// this node already knows.
+    fn on_match_refusal(
+        &self,
+        node: &ColocatedNode,
+        handover: &mut HandoverDriver,
+        matchmaker: MatchmakerId,
+        step: &MatchStep,
+    ) {
+        let (audit, self_id) = (self.audit, self.self_id);
+        match step {
+            // Sound to finish *this* node's believed set: a matchmaker
+            // answers `Stopped { successor: None }` only when the generation
+            // it froze is the one the request named
+            // (`Matchmaker::generation_refusal` answers a mismatch with
+            // `Generation { current }` or `Inactive` instead), so the
+            // generation this node is finishing is exactly the one it
+            // believes in force.
+            MatchStep::Refused(MatchRefusal::Stopped { successor: None })
+                if !handover.is_busy() =>
+            {
+                if let Some(current) = node.matchmaker_set().cloned()
+                    && handover.finish(&current).is_ok()
+                {
+                    audit.reconfigurer_started(NodeId(self_id), &current, current.members());
+                    tracing::info!(
+                        node = self_id,
+                        generation = current.generation.0,
+                        target = current.members().len() as u64,
+                        finishing = true,
+                        "reconfigurer_started"
+                    );
+                    self.send_reconfigure(handover.take_requests());
+                }
+            }
+            MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
+                // A refusal is only ever folded on a matchmaker deployment (a
+                // plain node ignores every reply), so the believed set is
+                // there to republish.
+                let set = node.matchmaker_set().cloned();
+                let behind = match (step, &set) {
+                    (MatchStep::Refused(MatchRefusal::Generation { current }), Some(set)) => {
+                        current.generation < set.generation
+                    }
+                    (_, Some(_)) => true,
+                    (_, None) => false,
+                };
+                if let Some(set) = set
+                    && behind
+                    && set.generation.0 > 0
+                {
+                    audit.successor_republished(NodeId(self_id), matchmaker, &set);
+                    tracing::info!(
+                        node = self_id,
+                        matchmaker = matchmaker.0,
+                        generation = set.generation.0,
+                        "successor_republished"
+                    );
+                    let request = ReconfigureRequest::Chosen {
+                        from: NodeId(self_id),
+                        generation: MatchmakerGeneration(set.generation.0 - 1),
+                        successor: set,
+                    };
+                    self.send_reconfigure(vec![(matchmaker, request)]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// One tick of the running matchmaker-set handover (#125): its stall
+    /// clock, the two ways it is given up, and its re-send — its own cadence
+    /// and its own location; a preempted decree reopens only here, so two
+    /// dueling reconfigurers are paced by their drivers.
+    fn pace_handover(&self, node: &ColocatedNode, handover: &mut HandoverDriver) {
+        let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
+        handover.tick();
+        let stall_budget = node
+            .election_timeout()
+            .saturating_mul(self.tunables.reconfigure_timeout_elections);
+        if handover.is_busy()
+            && stall_budget != 0
+            && handover.stalled_for() >= stall_budget
+            && handover.abandon()
+        {
+            // A phase that no member answers any more (a lost registry, a
+            // machine gone) is abandoned: the frozen generation is finished
+            // by the next node to meet it, with the members that do answer.
+            audit.reconfigurer_aborted(NodeId(self_id));
+            tracing::info!(node = self_id, "reconfigurer_aborted");
+        }
+        // The same decision taken early, on the node loop: giving up a
+        // handover is always safe (the reconfigurer holds no durable state
+        // and the freeze, the bootstrap and the votes are all idempotent or
+        // durable elsewhere), and it is what puts a *second* reconfigurer on
+        // a half-replaced generation.
+        if handover.is_busy() && hooks.abandon_reconfigurer(handover.phase()) && handover.abandon()
+        {
+            audit.reconfigurer_aborted(NodeId(self_id));
+            tracing::info!(node = self_id, hooked = true, "reconfigurer_aborted");
+        }
+        if !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
+            return;
+        }
+        // The freeze closes here, not on the ack that completed its quorum: a
+        // quorum is the floor the reconstruction rests on, and every
+        // straggler that answered since widens it — and, for a `finish`, the
+        // successor set it proposes (review finding P5).
+        if let Some((generation, reconstruction)) = handover.close_stop() {
+            let bootstrap = &reconstruction.bootstrap;
+            audit.reconfigurer_reconstructed(
+                NodeId(self_id),
+                generation.0,
+                bootstrap,
+                reconstruction.disagreements,
+            );
+            tracing::info!(
+                node = self_id,
+                generation = generation.0,
+                members = bootstrap.set.members().len() as u64,
+                registrations = bootstrap.history.len() as u64,
+                watermark_round = bootstrap.gc_watermark.round,
+                disagreements = reconstruction.disagreements,
+                "reconfigurer_reconstructed"
+            );
+            self.send_reconfigure(handover.take_requests());
+        }
+        if hooks.skip_reconfigurer_resend() {
+            audit.reconfigurer_resend_skipped(NodeId(self_id));
+            tracing::info!(node = self_id, "reconfigurer_resend_skipped");
+        } else {
+            handover.resend();
+            self.send_reconfigure(handover.take_requests());
+        }
+    }
+
+    /// Give up the leadership, or not, on this tick. Cooperative leader
+    /// handoff (`DPaxos`) first: move the existing Phase-2 authority to
+    /// another physical node instead of letting an election destroy it and
+    /// make the successor rediscover the log through Phase 1. Consulted only
+    /// when the core says the leadership is transferable, so a `true` always
+    /// has an effect; answering `false` is always safe (a handoff is an
+    /// optimization, never a requirement). Offered *before* the resignation
+    /// hook: both give up the leadership, and the cooperative one is strictly
+    /// the more interesting outcome.
+    fn offer_handoff(&self, node: &mut ColocatedNode) {
+        let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
+        let mut handed_off = false;
+        if node.can_relinquish() {
+            let candidates = node.handoff_candidates();
+            if !candidates.is_empty() {
+                let ctx = handoff_context(node, candidates.len());
+                if hooks.initiate_handoff(ctx) {
+                    let fallback = self.providers.random().random_range(0..candidates.len());
+                    let target = hooks
+                        .handoff_target(&candidates)
+                        .filter(|t| candidates.contains(t))
+                        .unwrap_or(candidates[fallback]);
+                    if let Some(handoff) = node.relinquish_to(target) {
+                        handed_off = true;
+                        audit.authority_relinquished(NodeId(self_id), handoff);
+                        tracing::info!(
+                            node = self_id,
+                            to = handoff.to.0,
+                            round = handoff.ballot.round,
+                            bnode = handoff.ballot.node.0,
+                            next_slot = handoff.next_slot.0,
+                            decided = handoff.decided,
+                            pending = handoff.pending,
+                            "authority_relinquished"
+                        );
+                    }
+                }
+            }
+        }
+        if !handed_off && node.role() == NodeRole::Leader && hooks.resign_leadership() {
+            audit.stepped_down(NodeId(self_id));
+            tracing::info!(node = self_id, "leadership_resigned");
+            node.step_down();
+        }
+    }
+
+    /// Expire parked reads whose confirmation is overdue (lost acks, a
+    /// minority-partitioned leader that never steps down): answer a retry
+    /// redirect while the client still has deadline left. A late core
+    /// confirmation finds the ctx gone and is ignored. The early-expiry hook
+    /// (consulted only while reads are parked) takes the same exit before the
+    /// deadline.
+    fn expire_parked_reads(&self, waiters: &mut ClientWaiters, ticks: u64) {
+        let expire_all = !waiters.pending_reads.is_empty() && self.hooks.expire_parked_read_early();
+        // `(ctx, early)`: `early` marks a read the hook expired while its
+        // deadline still had ticks left — the audit keeps the two exits apart.
+        let overdue: Vec<(u64, bool)> = waiters
+            .pending_reads
+            .iter()
+            .filter_map(|(ctx, (_, parked_at, _))| {
+                let by_deadline = ticks.saturating_sub(*parked_at) > self.tunables.read_retry_ticks;
+                (expire_all || by_deadline).then_some((*ctx, !by_deadline))
+            })
+            .collect();
+        for (ctx, early) in overdue {
+            if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
+                self.audit.read_expired(NodeId(self.self_id), early);
+                self.answer(
+                    Reply::ReadRedirect,
+                    waiter,
+                    ReadAck {
+                        seq,
+                        leader: Some(self.self_id),
+                        committed: false,
+                        read_index: None,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Surface a peer message's arrival (mirror of `msg_sent`), so the demo can
+/// pair sends with receives and mark the unmatched ones as network drops.
+fn trace_received(self_id: u64, msg: &Message) {
+    let kind = message_kind(msg);
+    match message_route(msg) {
+        Some((from, ballot, Some(slot))) => tracing::info!(
+            node = self_id,
+            from = %from,
+            kind,
+            bround = ballot.round,
+            bnode = ballot.node.0,
+            slot = slot.0,
+            "msg_received"
+        ),
+        // The empty-prefix beat: no slot field, mirroring `msg_sent`.
+        Some((from, ballot, None)) => tracing::info!(
+            node = self_id,
+            from = %from,
+            kind,
+            bround = ballot.round,
+            bnode = ballot.node.0,
+            "msg_received"
+        ),
+        None => tracing::info!(node = self_id, kind, "msg_received"),
     }
 }
 
@@ -261,48 +533,13 @@ where
     // may only discard a crash-truncatable tail or repair a `HardState` copy
     // from its twin (see [`NodeStorage::boot_scan`]); it never truncates on a
     // corruption verdict.
-    let boot_id = storage.initial_state().1.id.0;
+    let self_id = storage.initial_state().1.id.0;
     storage
         .boot_scan()
         .await
-        .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
-
-    // #147: the operator's claim against the store's format marker, judged
-    // before the core reads a byte. The marker is what makes "a wiped
-    // identity never rejoins" a property of the library rather than of
-    // whoever runs it: an empty-but-openable store is indistinguishable
-    // from a first boot to `ColocatedNode::new`, so the refusal has to
-    // happen here, on the claim. A first boot formats the store durably
-    // first — the marker lands on disk no later than the first promise,
-    // which is the ordering the refusal relies on.
-    match (boot, storage.is_formatted()) {
-        (BootKind::ExistingMember, true) => {}
-        (BootKind::FirstBoot, false) => {
-            storage
-                .format()
-                .await
-                .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
-            storage
-                .sync(paros_core::MustSync::Sync)
-                .await
-                .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
-            tracing::info!(node = boot_id, "store_formatted");
-        }
-        (BootKind::ExistingMember, false) => {
-            audit.boot_refused(NodeId(boot_id), BootRefusal::Amnesia);
-            tracing::warn!(node = boot_id, refusal = "amnesia", "boot_refused");
-            return Err(RunError::Refused(BootRefusal::Amnesia));
-        }
-        (BootKind::FirstBoot, true) => {
-            audit.boot_refused(NodeId(boot_id), BootRefusal::AlreadyFormatted);
-            tracing::warn!(
-                node = boot_id,
-                refusal = "already_formatted",
-                "boot_refused"
-            );
-            return Err(RunError::Refused(BootRefusal::AlreadyFormatted));
-        }
-    }
+        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+    // #147: the operator's claim against the store's format marker.
+    check_format_marker(&mut storage, boot, self_id, audit).await?;
 
     // Every task spawned by this incarnation must stop when `run_node` exits,
     // including a durability-seam error that immediately starts a replacement
@@ -316,10 +553,10 @@ where
     // externally meaningful transition (observation only: the closure
     // returns nothing and the edge's answer does not depend on it). Pure
     // construction, built before the bind so the edge takes its routes whole.
-    let self_id = boot_id;
+    let me = Party::Node(NodeId(self_id));
     let on_reject: crate::grpc::OnReject = {
         let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(Party::Node(NodeId(self_id)), kind))
+        Arc::new(move |kind| audit.edge_rejected(me, kind))
     };
     let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
         tunables.client_inbox_capacity,
@@ -349,7 +586,6 @@ where
     // Every reconnecting channel this incarnation opens, closed when the
     // bundle drops; a bad origin fails the connect and the bundle closes
     // whatever was opened before it.
-    let me = Party::Node(NodeId(self_id));
     let mut channels = Channels::with_capacity(members.len() + proxies.len() + matchmakers.len());
     let lanes = LaneOpener {
         providers: &providers,
@@ -361,9 +597,12 @@ where
     let peer_queues = members
         .into_iter()
         .map(|(id, addr)| {
-            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
-                ParosInternalClient::with_origin(channel, origin)
-            })?;
+            let client = channels.connect(
+                &providers,
+                &tunables,
+                addr,
+                ParosInternalClient::with_origin,
+            )?;
             let to = Party::Node(id);
             let regular = lanes.open(
                 "paros-grpc-peer-delivery",
@@ -393,9 +632,12 @@ where
     let proxy_queues = proxies
         .into_iter()
         .map(|(id, addr)| {
-            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
-                ParosInternalClient::with_origin(channel, origin)
-            })?;
+            let client = channels.connect(
+                &providers,
+                &tunables,
+                addr,
+                ParosInternalClient::with_origin,
+            )?;
             let lane = lanes.open(
                 "paros-grpc-proxy-delivery",
                 client,
@@ -414,9 +656,12 @@ where
     let matchmaker_clients = matchmakers
         .into_iter()
         .map(|(id, addr)| {
-            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
-                ParosMatchmakerClient::with_origin(channel, origin)
-            })?;
+            let client = channels.connect(
+                &providers,
+                &tunables,
+                addr,
+                ParosMatchmakerClient::with_origin,
+            )?;
             Ok((id, client))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
@@ -459,24 +704,15 @@ where
         hooks,
         audit,
         self_id,
-        election_base: tunables.election_timeout_base,
+        tunables,
     };
 
     // The held client replies: proposals keyed by slot (ack-on-commit), reads
     // keyed by their read-index ctx.
     let mut waiters = ClientWaiters::default();
     let mut next_read_ctx: u64 = 0;
-    // The snapshot-point repair layer (#101): the boot scan's rotted-chunk
-    // classification arms the chunk pull; everything else fills in per tick.
-    let mut snap = SnapRepair::default();
-    for (at, chunk) in storage.faulty_snap_chunks() {
-        snap.pending.entry(at.0).or_default().insert(chunk);
-    }
-    for (&at, chunks) in &snap.pending {
-        let count = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
-        audit.snap_chunks_reported(NodeId(self_id), Slot(at), count);
-        tracing::info!(node = self_id, at, chunks = count, "snap_chunks_reported");
-    }
+    // The snapshot-point repair layer (#101).
+    let mut snap = SnapRepair::from_boot_scan(&storage, audit, self_id);
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     let first_timeout = draw_election_timeout(
         &providers,
@@ -487,22 +723,12 @@ where
     );
     node.set_election_timeout(first_timeout);
     audit.election_timeout_set(NodeId(self_id), first_timeout);
-    let mut last = Deltas {
-        role: node.role(),
-        duplicates: node.replica().duplicates_suppressed(),
-        quorum_lost: node.quorum_lost_step_downs(),
-        repair: node.repair_counters(),
-        handoff: node.handoff_counters(),
-        membership: node.membership_counters(),
-        matchmaking: None,
-        matchmaking_timeouts: node.matchmaking_timeouts(),
-        matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
-    };
+    let mut last = Deltas::new(&node);
     // Ticks since the open matchmaking request was last (re-)sent.
-    let mut match_resend_elapsed: u64 = 0;
+    let mut match_resend = Cadence::default();
     // Ticks since the open GC request was last (re-)sent. The running
     // handover's own clocks live in `handover`.
-    let mut gc_resend_elapsed: u64 = 0;
+    let mut gc_resend = Cadence::default();
 
     let time = providers.time().clone();
     let mut ticks: u64 = 0;
@@ -550,10 +776,7 @@ where
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.
-                        answer(
-                            hooks,
-                            audit,
-                            NodeId(self_id),
+                        loop_ctx.answer(
                             Reply::ProposeRedirect,
                             reply,
                             ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None },
@@ -571,10 +794,7 @@ where
                         // claim against the applied prefix.
                         audit.client_acked(NodeId(self_id), client, seq, slot, storage.applied_slot(), true);
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
-                        answer(
-                            hooks,
-                            audit,
-                            NodeId(self_id),
+                        loop_ctx.answer(
                             Reply::ProposeDedup,
                             reply,
                             ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) },
@@ -593,10 +813,7 @@ where
                 let seq = req.seq;
                 match node.read_index(next_read_ctx) {
                     ReadIndexResult::NotLeader(hint) => {
-                        answer(
-                            hooks,
-                            audit,
-                            NodeId(self_id),
+                        loop_ctx.answer(
                             Reply::ReadRedirect,
                             reply,
                             ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None },
@@ -613,31 +830,8 @@ where
                 // A peer Paxos message → the core's single input router. The same
                 // `paros_core::Message` is sent and received (no DTO). The sender
                 // was acknowledged when the message entered the inbox, so nothing
-                // here answers it. Surface the arrival (mirror of `msg_sent`) so
-                // the demo can pair sends with receives and mark the unmatched
-                // ones as network drops.
-                let kind = message_kind(&msg);
-                match message_route(&msg) {
-                    Some((from, ballot, Some(slot))) => tracing::info!(
-                        node = self_id,
-                        from = %from,
-                        kind,
-                        bround = ballot.round,
-                        bnode = ballot.node.0,
-                        slot = slot.0,
-                        "msg_received"
-                    ),
-                    // The empty-prefix beat: no slot field, mirroring `msg_sent`.
-                    Some((from, ballot, None)) => tracing::info!(
-                        node = self_id,
-                        from = %from,
-                        kind,
-                        bround = ballot.round,
-                        bnode = ballot.node.0,
-                        "msg_received"
-                    ),
-                    None => tracing::info!(node = self_id, kind, "msg_received"),
-                }
+                // here answers it.
+                trace_received(self_id, &msg);
                 // An ack at the inbox, whatever the core makes of it: what
                 // refills a leader's `CheckQuorum` window, and what the
                 // deposed-leader oracle measures its clock from.
@@ -659,57 +853,7 @@ where
                         "prepare_below_floor"
                     );
                 }
-                // Snapshot-repair traffic is driver-terminal (#101): handled
-                // here, never stepped into the core — consensus state must
-                // not depend on snapshot custody.
-                let snap_handled = match &msg {
-                    Message::SnapAck { from, at_index } => {
-                        // Custody counts toward the coupling quorum only from
-                        // members of the active configuration.
-                        if node.is_leader() && node.acceptors().contains(*from) {
-                            snap.acks.entry(*at_index).or_default().insert(*from);
-                        }
-                        true
-                    }
-                    Message::SnapChunkRequest {
-                        from,
-                        at_index,
-                        chunks,
-                    } => {
-                        handle_snap_chunk_request(
-                            &node, &storage, &out, hooks, audit, *from, *at_index, chunks,
-                        )
-                        .await;
-                        true
-                    }
-                    Message::SnapChunkResponse {
-                        from,
-                        at_index,
-                        chunks,
-                    } => {
-                        // Pool-checked: only a pooled node's chunk bytes are
-                        // installed (a replica outside the active
-                        // configuration holds the same decided point).
-                        if node.config().pool().contains(from) {
-                            let at = *at_index;
-                            let chunks = chunks.clone();
-                            handle_snap_chunk_response(
-                                &mut node,
-                                &mut storage,
-                                &mut snap,
-                                hooks,
-                                audit,
-                                self_id,
-                                at,
-                                &chunks,
-                            )
-                            .await?;
-                        }
-                        true
-                    }
-                    _ => false,
-                };
-                if !snap_handled {
+                if !route_snap_message(&mut node, &mut storage, &mut snap, &out, hooks, audit, &msg).await? {
                     node.step(msg);
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
@@ -731,64 +875,10 @@ where
                     registered = matches!(reply.outcome, paros_core::MatchOutcome::Registered { .. }),
                     "match_reply_received"
                 );
-                let folded = crate::driver::matchmaking::folded_answer(&reply);
+                let folded = folded_answer(&reply);
                 let step = node.on_match_reply(reply);
                 report_match_step(&node, audit, self_id, matchmaker, ballot, folded, &step);
-                // The two straggler paths of a handover (#125), taken by
-                // whichever node meets them: a registry frozen with no
-                // successor is finished by this node (the reconfigurer's
-                // decree adopts whatever was voted, or re-chooses the same
-                // members under a fresh generation); a member left inactive
-                // or behind is told the chosen set this node already knows.
-                match &step {
-                    // Sound to finish *this* node's believed set: a
-                    // matchmaker answers `Stopped { successor: None }` only
-                    // when the generation it froze is the one the request
-                    // named (`Matchmaker::generation_refusal` answers a
-                    // mismatch with `Generation { current }` or `Inactive`
-                    // instead), so the generation this node is finishing is
-                    // exactly the one it believes in force.
-                    MatchStep::Refused(MatchRefusal::Stopped { successor: None }) if !handover.is_busy() => {
-                        if let Some(current) = node.matchmaker_set().cloned()
-                            && handover.finish(&current).is_ok()
-                        {
-                            audit.reconfigurer_started(NodeId(self_id), &current, current.members());
-                            tracing::info!(
-                                node = self_id,
-                                generation = current.generation.0,
-                                target = current.members().len() as u64,
-                                finishing = true,
-                                "reconfigurer_started"
-                            );
-                            send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
-                        }
-                    }
-                    MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
-                        // A refusal is only ever folded on a matchmaker
-                        // deployment (a plain node ignores every reply), so
-                        // the believed set is there to republish.
-                        let set = node.matchmaker_set().cloned();
-                        let behind = match (&step, &set) {
-                            (MatchStep::Refused(MatchRefusal::Generation { current }), Some(set)) => current.generation < set.generation,
-                            (_, Some(_)) => true,
-                            (_, None) => false,
-                        };
-                        if let Some(set) = set
-                            && behind
-                            && set.generation.0 > 0
-                        {
-                            audit.successor_republished(NodeId(self_id), matchmaker, &set);
-                            tracing::info!(node = self_id, matchmaker = matchmaker.0, generation = set.generation.0, "successor_republished");
-                            let request = ReconfigureRequest::Chosen {
-                                from: NodeId(self_id),
-                                generation: MatchmakerGeneration(set.generation.0 - 1),
-                                successor: set,
-                            };
-                            send_reconfigure_requests(&providers, &links, audit, self_id, vec![(matchmaker, request)]);
-                        }
-                    }
-                    _ => {}
-                }
+                loop_ctx.on_match_refusal(&node, &mut handover, matchmaker, &step);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some(ack) = gc_acks.recv() => {
@@ -845,7 +935,7 @@ where
                     audit.reconfigurer_backoff(NodeId(self_id), ticks);
                     tracing::info!(node = self_id, ticks, "reconfigurer_backoff");
                 }
-                send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
+                loop_ctx.send_reconfigure(handover.take_requests());
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
@@ -877,14 +967,11 @@ where
                         finishing = false,
                         "reconfigurer_started"
                     );
-                    send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
+                    loop_ctx.send_reconfigure(handover.take_requests());
                 }
                 audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
                 tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
-                answer(
-                    hooks,
-                    audit,
-                    NodeId(self_id),
+                loop_ctx.answer(
                     Reply::ReconfigureMatchmakers,
                     reply,
                     ReconfigureMatchmakersAck {
@@ -897,207 +984,30 @@ where
             Some((req, reply)) = rpc.retire.recv() => {
                 // No settle tail: this arm only reads the core and arms a flag
                 // the tick arm acts on, so it produces no `Ready` batch.
-                // Operator decommissioning (#123): a node a leader's GC named
-                // retirable is shut down for good. The decision is the core's
-                // (`ColocatedNode::may_retire`), because the deciding condition is a
-                // protocol fact — an effective GC watermark strictly above
-                // every ballot a configuration naming this node was bound to —
-                // and not the operator's belief that it read a retirable list.
-                let watermark = req
-                    .gc_watermark
-                    .map(|b| Ballot { round: b.round, node: NodeId(b.node) });
-                let accepted = watermark.is_some_and(|w| node.may_retire(w));
-                let refusal = if accepted {
-                    ""
-                } else if !node.config().has_matchmakers() {
-                    "plain"
-                } else if node.is_leader() {
-                    "leader"
-                } else if node.is_acceptor() {
-                    "member"
-                } else {
-                    "not_collected"
-                };
-                audit.retire_acked(NodeId(self_id), accepted, refusal);
-                tracing::info!(node = self_id, accepted, refusal, "retire_acked");
-                if accepted {
-                    retiring = true;
-                }
-                answer(
-                    hooks,
-                    audit,
-                    NodeId(self_id),
-                    Reply::Retire,
-                    reply,
-                    RetireAck {
-                        accepted,
-                        refusal: refusal.to_string(),
-                    },
-                );
+                let ack = operator::retire(&node, audit, self_id, &req);
+                retiring |= ack.accepted;
+                loop_ctx.answer(Reply::Retire, reply, ack);
             }
             Some((req, reply)) = rpc.reconfigure.recv() => {
-                // An online reconfiguration (#122): the leader moves to a fresh
-                // ballot registered with the new acceptor set. Refusable like
-                // `Compact` — a non-leader redirects, a plain deployment
-                // refuses outright, and an unsettled leadership asks the
-                // client to retry.
-                let members: Vec<NodeId> = req.members.iter().copied().map(NodeId).collect();
-                // The quorum system is the request's (#140): a data change
-                // like the membership. Wire input, so a system the
-                // membership does not admit is *refused* here — the one
-                // place it is validated — where `AcceptorConfig::new` would
-                // panic on it.
-                let quorum_system = crate::grpc::quorum_system_from_proto(&WireQuorumSystem::from(&req));
-                let distinct = members.iter().collect::<std::collections::BTreeSet<_>>().len();
-                let result = match quorum_system {
-                    _ if members.is_empty() => {
-                        ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember)
-                    }
-                    Ok(quorum_system) if quorum_system.admits(distinct) => {
-                        node.reconfigure(&AcceptorConfig::new(members.clone(), quorum_system))
-                    }
-                    _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
-                };
-                audit.reconfigure_acked(NodeId(self_id), &members, result);
-                let (accepted, refusal, round) = events::reconfigure_outcome(result);
-                let leader = match result {
-                    ReconfigureResult::NotLeader(hint) => hint.map(|n| n.0),
-                    _ => Some(self_id),
-                };
-                tracing::info!(
-                    node = self_id,
-                    members = members.len() as u64,
-                    accepted,
-                    refusal,
-                    round = round.unwrap_or(0),
-                    "reconfigure_acked"
-                );
+                let ack = operator::reconfigure(&mut node, audit, self_id, &req);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost reconfiguration ack is ambiguous to the client, which
                 // re-asks; a started reconfiguration stands (a retry is refused
                 // as `not_leader` while it runs, then `unchanged` once done).
-                answer(
-                    hooks,
-                    audit,
-                    NodeId(self_id),
-                    Reply::Reconfigure,
-                    reply,
-                    ReconfigureAck { leader, accepted, refusal: refusal.to_string(), round },
-                );
+                loop_ctx.answer(Reply::Reconfigure, reply, ack);
             }
             Some((req, reply)) = rpc.compact.recv() => {
-                // The application permits dropping the log prefix up to `up_to`.
-                // Only the leader admits it: it proposes a `Truncate` control
-                // command into the next slot, decided by ordinary Paxos and
-                // forwarded to every node, each of which truncates lazily when it
-                // applies that slot. A non-leader redirects (like `propose`).
-                //
-                // The coupling rule (#101, CTRL §3.5): a `Truncate{up_to}` is
-                // proposed only once a quorum holds the decided snapshot at
-                // (or past) `up_to` — that is what makes chunk repair sound
-                // once the log below the floor is gone. A request no decided
-                // point covers first seeds a `Snap` marker and answers
-                // `accepted: false`; the client's retry finds the point once
-                // the quorum's custody advertisements land. Proposal-side
-                // policy only — the acceptor paths stay fully opaque.
-                let ack = if node.is_leader() {
-                    // The quorum question goes through the configuration in
-                    // force, never a raw count: an ack from a node the current
-                    // acceptor set no longer names does not witness custody.
-                    let covered = snap
-                        .acks
-                        .iter()
-                        .filter(|(_, holders)| node.acceptors().has_phase2_quorum(holders))
-                        .map(|(&point, _)| point)
-                        .max();
-                    let propose_marker = |node: &mut ColocatedNode, snap: &mut SnapRepair| {
-                        if snap.marker_pending.is_none()
-                            && let ProposeResult::Accepted(slot) = node.propose_snap_marker()
-                        {
-                            snap.marker_pending = Some(slot);
-                            tracing::info!(node = self_id, at = slot.0, "snap_marker_proposed");
-                        }
-                    };
-                    if let Some(point) = covered {
-                        let up_to = Slot(req.up_to.min(point.0));
-                        // Honest ack: `accepted: true` only when the Truncate
-                        // proposal was actually admitted. `propose_control`
-                        // can refuse (a step-down raced this request), and the
-                        // client's retry handles `accepted: false` exactly
-                        // like the coupling refusal below.
-                        let proposed = matches!(
-                            node.propose_control(Control::Truncate { up_to }),
-                            ProposeResult::Accepted(_)
-                        );
-                        tracing::info!(
-                            node = self_id,
-                            requested = req.up_to,
-                            up_to = up_to.0,
-                            point = point.0,
-                            accepted = proposed,
-                            "truncate_coupled_to_snap_point"
-                        );
-                        if req.up_to > point.0 {
-                            // The request outruns the covered prefix: seed the
-                            // next point so a later compact can go further.
-                            propose_marker(&mut node, &mut snap);
-                        }
-                        CompactAck {
-                            leader: Some(self_id),
-                            accepted: proposed,
-                            first_slot: node.acceptor().first_slot().0,
-                        }
-                    } else {
-                        propose_marker(&mut node, &mut snap);
-                        CompactAck {
-                            leader: Some(self_id),
-                            accepted: false,
-                            first_slot: node.acceptor().first_slot().0,
-                        }
-                    }
-                } else {
-                    CompactAck {
-                        leader: node.leader().map(|n| n.0),
-                        accepted: false,
-                        first_slot: node.acceptor().first_slot().0,
-                    }
-                };
+                let ack = operator::compact(&mut node, &mut snap, req.up_to, self_id);
                 audit.compact_acked(NodeId(self_id), ack.accepted);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost compaction ack is ambiguous to the client, which
                 // re-asks; the marker/Truncate it may have seeded stands.
-                answer(hooks, audit, NodeId(self_id), Reply::Compact, reply, ack);
+                loop_ctx.answer(Reply::Compact, reply, ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core and the
                 // store, so it produces no `Ready` batch.
-                let since = node.acceptors_since();
-                let matchmakers = node.matchmaker_set();
-                let (gc_watermark, retirable) = node.gc_effective().map_or((None, Vec::new()), |(w, retired)| {
-                    (
-                        Some(common::Ballot { round: w.round, node: w.node.0 }),
-                        retired.iter().map(|n| n.0).collect(),
-                    )
-                });
-                let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
-                    crate::grpc::quorum_system_to_proto(node.acceptors().quorum_system()).into_parts();
-                let _ = reply.send(InspectReply {
-                    chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
-                    first_slot: node.acceptor().first_slot().0,
-                    snapshot: storage.snapshot().await,
-                    members: node.acceptors().members().iter().map(|n| n.0).collect(),
-                    quorum_system,
-                    phase1_quorum,
-                    phase2_quorum,
-                    rows,
-                    cols,
-                    config_ballot: Some(common::Ballot { round: since.round, node: since.node.0 }),
-                    leader: node.is_leader(),
-                    matchmaker_generation: matchmakers.map_or(0, |set| set.generation.0),
-                    matchmakers: matchmakers.map_or_else(Vec::new, |set| set.members().iter().map(|m| m.0).collect()),
-                    retirable,
-                    gc_watermark,
-                });
+                let _ = reply.send(operator::inspect(&node, &storage).await);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1140,177 +1050,31 @@ where
                 // The open matchmaking request's re-send (#120): paced by
                 // `match_resend_ticks`, and its own BUGGIFY location — consulted
                 // only when a re-send is due, so a skip always costs a beat.
-                if node.matchmaking_pending() {
-                    match_resend_elapsed += 1;
-                    if match_resend_elapsed >= tunables.match_resend_ticks.max(1) {
-                        match_resend_elapsed = 0;
-                        if hooks.skip_matchmaking_resend() {
-                            audit.matchmaking_resend_skipped(NodeId(self_id));
-                            tracing::info!(node = self_id, "matchmaking_resend_skipped");
-                        } else {
-                            node.resend_matchmaking();
-                        }
+                if match_resend.tick_if(node.matchmaking_pending(), tunables.match_resend_ticks) {
+                    if hooks.skip_matchmaking_resend() {
+                        audit.matchmaking_resend_skipped(NodeId(self_id));
+                        tracing::info!(node = self_id, "matchmaking_resend_skipped");
+                    } else {
+                        node.resend_matchmaking();
                     }
-                } else {
-                    match_resend_elapsed = 0;
                 }
                 // The open GC request's re-send (#123): its own cadence
                 // (`gc_resend_ticks`) and its own BUGGIFY location.
-                if node.gc_pending() {
-                    gc_resend_elapsed += 1;
-                    if gc_resend_elapsed >= tunables.gc_resend_ticks.max(1) {
-                        gc_resend_elapsed = 0;
-                        if hooks.skip_gc_resend() {
-                            audit.gc_resend_skipped(NodeId(self_id));
-                            tracing::info!(node = self_id, "gc_resend_skipped");
-                        } else {
-                            node.resend_gc();
-                        }
-                    }
-                } else {
-                    gc_resend_elapsed = 0;
-                }
-                // The running handover's re-send (#125): its own cadence
-                // and its own location; a preempted decree reopens only here,
-                // so two dueling reconfigurers are paced by their drivers.
-                handover.tick();
-                let stall_budget = node
-                    .election_timeout()
-                    .saturating_mul(tunables.reconfigure_timeout_elections);
-                if handover.is_busy()
-                    && stall_budget != 0
-                    && handover.stalled_for() >= stall_budget
-                    && handover.abandon()
-                {
-                    // A phase that no member answers any more (a lost
-                    // registry, a machine gone) is abandoned: the frozen
-                    // generation is finished by the next node to meet it,
-                    // with the members that do answer.
-                    audit.reconfigurer_aborted(NodeId(self_id));
-                    tracing::info!(node = self_id, "reconfigurer_aborted");
-                }
-                // The same decision taken early, on the node loop: giving up
-                // a handover is always safe (the reconfigurer holds no
-                // durable state and the freeze, the bootstrap and the votes
-                // are all idempotent or durable elsewhere), and it is what
-                // puts a *second* reconfigurer on a half-replaced
-                // generation.
-                if handover.is_busy()
-                    && hooks.abandon_reconfigurer(handover.phase())
-                    && handover.abandon()
-                {
-                    audit.reconfigurer_aborted(NodeId(self_id));
-                    tracing::info!(node = self_id, hooked = true, "reconfigurer_aborted");
-                }
-                if handover.resend_due(tunables.reconfigurer_resend_ticks) {
-                    // The freeze closes here, not on the ack that completed
-                    // its quorum: a quorum is the floor the reconstruction
-                    // rests on, and every straggler that answered since
-                    // widens it — and, for a `finish`, the successor set it
-                    // proposes (review finding P5).
-                    if let Some((generation, reconstruction)) = handover.close_stop() {
-                        let bootstrap = &reconstruction.bootstrap;
-                        audit.reconfigurer_reconstructed(
-                            NodeId(self_id),
-                            generation.0,
-                            bootstrap,
-                            reconstruction.disagreements,
-                        );
-                        tracing::info!(
-                            node = self_id,
-                            generation = generation.0,
-                            members = bootstrap.set.members().len() as u64,
-                            registrations = bootstrap.history.len() as u64,
-                            watermark_round = bootstrap.gc_watermark.round,
-                            disagreements = reconstruction.disagreements,
-                            "reconfigurer_reconstructed"
-                        );
-                        send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
-                    }
-                    if hooks.skip_reconfigurer_resend() {
-                        audit.reconfigurer_resend_skipped(NodeId(self_id));
-                        tracing::info!(node = self_id, "reconfigurer_resend_skipped");
+                if gc_resend.tick_if(node.gc_pending(), tunables.gc_resend_ticks) {
+                    if hooks.skip_gc_resend() {
+                        audit.gc_resend_skipped(NodeId(self_id));
+                        tracing::info!(node = self_id, "gc_resend_skipped");
                     } else {
-                        handover.resend();
-                        send_reconfigure_requests(&providers, &links, audit, self_id, handover.take_requests());
+                        node.resend_gc();
                     }
                 }
-                // Cooperative leader handoff (`DPaxos`): move the existing
-                // Phase-2 authority to another physical node instead of letting
-                // an election destroy it and make the successor rediscover the
-                // log through Phase 1. Consulted only when the core says the
-                // leadership is transferable, so a `true` always has an effect;
-                // answering `false` is always safe (a handoff is an
-                // optimization, never a requirement). Offered *before* the
-                // resignation hook: both give up the leadership, and the
-                // cooperative one is strictly the more interesting outcome.
-                let mut handed_off = false;
-                if node.can_relinquish() {
-                    let candidates = node.handoff_candidates();
-                    if !candidates.is_empty() {
-                        let ctx = handoff_context(&node, candidates.len());
-                        if hooks.initiate_handoff(ctx) {
-                            let fallback = providers.random().random_range(0..candidates.len());
-                            let target = hooks
-                                .handoff_target(&candidates)
-                                .filter(|t| candidates.contains(t))
-                                .unwrap_or(candidates[fallback]);
-                            if let Some(handoff) = node.relinquish_to(target) {
-                                handed_off = true;
-                                audit.authority_relinquished(NodeId(self_id), handoff);
-                                tracing::info!(
-                                    node = self_id,
-                                    to = handoff.to.0,
-                                    round = handoff.ballot.round,
-                                    bnode = handoff.ballot.node.0,
-                                    next_slot = handoff.next_slot.0,
-                                    decided = handoff.decided,
-                                    pending = handoff.pending,
-                                    "authority_relinquished"
-                                );
-                            }
-                        }
-                    }
-                }
-                if !handed_off && node.role() == NodeRole::Leader && hooks.resign_leadership() {
-                    audit.stepped_down(NodeId(self_id));
-                    tracing::info!(node = self_id, "leadership_resigned");
-                    node.step_down();
-                }
+                loop_ctx.pace_handover(&node, &mut handover);
+                loop_ctx.offer_handoff(&mut node);
                 // Snapshot-point repair upkeep (#101): custody advertisement,
                 // the leader's coupling tally, and the chunk-repair pull.
                 snap_repair_tick(&node, &storage, &out, hooks, audit, &mut snap);
                 ticks += 1;
-                // Expire parked reads whose confirmation is overdue (lost acks, a
-                // minority-partitioned leader that never steps down): answer a
-                // retry redirect while the client still has deadline left. A late
-                // core confirmation finds the ctx gone and is ignored. The
-                // early-expiry hook (consulted only while reads are parked)
-                // takes the same exit before the deadline.
-                let expire_all = !waiters.pending_reads.is_empty() && hooks.expire_parked_read_early();
-                // `(ctx, early)`: `early` marks a read the hook expired while
-                // its deadline still had ticks left — the audit keeps the two
-                // exits apart.
-                let overdue: Vec<(u64, bool)> = waiters.pending_reads
-                    .iter()
-                    .filter_map(|(ctx, (_, parked_at, _))| {
-                        let by_deadline = ticks.saturating_sub(*parked_at) > tunables.read_retry_ticks;
-                        (expire_all || by_deadline).then_some((*ctx, !by_deadline))
-                    })
-                    .collect();
-                for (ctx, early) in overdue {
-                    if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
-                        audit.read_expired(NodeId(self_id), early);
-                        answer(
-                            hooks,
-                            audit,
-                            NodeId(self_id),
-                            Reply::ReadRedirect,
-                            waiter,
-                            ReadAck { seq, leader: Some(self_id), committed: false, read_index: None },
-                        );
-                    }
-                }
+                loop_ctx.expire_parked_reads(&mut waiters, ticks);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so

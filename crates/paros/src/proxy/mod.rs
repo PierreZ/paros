@@ -292,9 +292,12 @@ where
     let peer_queues = members
         .into_iter()
         .map(|(node, addr)| {
-            let client = channels.connect(&providers, &tunables, addr, |channel, origin| {
-                ParosInternalClient::with_origin(channel, origin)
-            })?;
+            let client = channels.connect(
+                &providers,
+                &tunables,
+                addr,
+                ParosInternalClient::with_origin,
+            )?;
             let regular = lanes.open(
                 "paros-grpc-proxy-fanout",
                 client,

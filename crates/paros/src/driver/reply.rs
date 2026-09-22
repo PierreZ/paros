@@ -11,10 +11,25 @@ use crate::audit::Audit;
 use crate::grpc::ReplySender;
 use crate::hooks::{DriverHooks, Reply};
 
+/// Consult the reply-drop hook exactly once, after the server state advanced,
+/// and either send `ack` to the held oneshot or report the drop through
+/// `report_drop`, where its trace is emitted.
+fn answer_or_drop<T, H: DriverHooks>(
+    hooks: &H,
+    kind: Reply,
+    waiter: ReplySender<T>,
+    ack: T,
+    report_drop: impl FnOnce(),
+) {
+    if hooks.drop_client_reply(kind) {
+        report_drop();
+    } else {
+        let _ = waiter.send(ack);
+    }
+}
+
 /// Answer one client-facing reply from the node driver, or drop it at the
-/// reply seam: the hook is consulted exactly once, here, after the server
-/// state advanced, and a drop is reported through
-/// [`Audit::client_reply_dropped`] where its trace is emitted.
+/// reply seam, reported through [`Audit::client_reply_dropped`].
 pub(crate) fn answer<T, H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
@@ -23,12 +38,10 @@ pub(crate) fn answer<T, H: DriverHooks, A: Audit>(
     waiter: ReplySender<T>,
     ack: T,
 ) {
-    if hooks.drop_client_reply(kind) {
+    answer_or_drop(hooks, kind, waiter, ack, || {
         audit.client_reply_dropped(node, kind);
         tracing::info!(node = node.0, reply = kind.label(), "client_reply_dropped");
-    } else {
-        let _ = waiter.send(ack);
-    }
+    });
 }
 
 /// The matchmaker driver's twin of [`answer`]: the same seam, reported
@@ -41,16 +54,14 @@ pub(crate) fn match_answer<T, H: DriverHooks, A: Audit>(
     waiter: ReplySender<T>,
     ack: T,
 ) {
-    if hooks.drop_client_reply(kind) {
+    answer_or_drop(hooks, kind, waiter, ack, || {
         audit.match_reply_dropped(matchmaker, kind);
         tracing::info!(
             matchmaker = matchmaker.0,
             reply = kind.label(),
             "match_reply_dropped"
         );
-    } else {
-        let _ = waiter.send(ack);
-    }
+    });
 }
 
 /// The duplicate seam of the matchmaker plane: re-queue `reply` so the node

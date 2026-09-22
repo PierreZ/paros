@@ -9,9 +9,53 @@ use crate::audit::{Audit, Deployment};
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::NodeStorage;
 
-use super::config::RunError;
+use super::config::{BootKind, BootRefusal, RunError};
 use super::events::command_hash;
-use super::ready::{crash_if, storage_fault_crash};
+use super::ready::{crash_if, report_applied, report_snap_recorded, storage_fault_crash};
+
+/// #147: judge the operator's claim against the store's format marker,
+/// before the core reads a byte. The marker is what makes "a wiped identity
+/// never rejoins" a property of the library rather than of whoever runs it:
+/// an empty-but-openable store is indistinguishable from a first boot to
+/// `ColocatedNode::new`, so the refusal has to happen here, on the claim. A
+/// first boot formats the store durably first — the marker lands on disk no
+/// later than the first promise, which is the ordering the refusal relies on.
+///
+/// # Errors
+///
+/// [`RunError::Refused`] when the claim and the marker disagree (nothing was
+/// written); [`RunError::Storage`] when formatting the store failed.
+pub(crate) async fn check_format_marker<S: NodeStorage, A: Audit>(
+    storage: &mut S,
+    boot: BootKind,
+    self_id: u64,
+    audit: &A,
+) -> Result<(), RunError> {
+    let refusal = match (boot, storage.is_formatted()) {
+        (BootKind::ExistingMember, true) => return Ok(()),
+        (BootKind::FirstBoot, false) => {
+            storage
+                .format()
+                .await
+                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+            storage
+                .sync(paros_core::MustSync::Sync)
+                .await
+                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
+            tracing::info!(node = self_id, "store_formatted");
+            return Ok(());
+        }
+        (BootKind::ExistingMember, false) => BootRefusal::Amnesia,
+        (BootKind::FirstBoot, true) => BootRefusal::AlreadyFormatted,
+    };
+    audit.boot_refused(NodeId(self_id), refusal);
+    let label = match refusal {
+        BootRefusal::Amnesia => "amnesia",
+        BootRefusal::AlreadyFormatted => "already_formatted",
+    };
+    tracing::warn!(node = self_id, refusal = label, "boot_refused");
+    Err(RunError::Refused(refusal))
+}
 
 /// On (re)boot the core rebuilt its volatile state from durable storage. Re-emit
 /// that recovered state so the oracles see this node's post-restart belief: the
@@ -162,23 +206,7 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
                     }
                     replayed_application = true;
                 }
-                let vhash = command_hash(command);
-                audit.applied(
-                    NodeId(self_id),
-                    slot,
-                    vhash,
-                    match command {
-                        Command::User(e) => Some((e.client.0, e.seq.0)),
-                        Command::Control(_) => None,
-                    },
-                );
-                tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
-                tracing::info!(
-                    node = self_id,
-                    slot = slot.0,
-                    applied_index = slot.0,
-                    "log_applied"
-                );
+                report_applied(audit, self_id, slot, command);
             }
         }
     }
@@ -200,10 +228,7 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
             .await
             .map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
-    for at in &replayed_snap_points {
-        audit.snap_recorded(NodeId(self_id), *at);
-        tracing::info!(node = self_id, at = at.0, "snap_recorded");
-    }
+    report_snap_recorded(audit, self_id, &replayed_snap_points);
     if let Some(from) = repair_from {
         let below_floor = from < node.acceptor().first_slot();
         node.open_app_repair(from);
