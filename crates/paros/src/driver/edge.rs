@@ -110,15 +110,35 @@ impl<P: Providers> GrpcEdge<P> {
     /// connection on its own detached task until the incarnation ends. One
     /// `select!` arm of every driver loop.
     ///
+    /// A connection that died between its handshake and the accept (a peer
+    /// reset, a connect timeout, a stream dropped with unread bytes) is that
+    /// connection's error, not the listener's: ECONNABORTED on a real kernel,
+    /// which accept(2) tells a server to retry. The next accept is already
+    /// armed, so the loop just goes on. Treating it as fatal ended the
+    /// incarnation for good — moonpool reports it since its #241 (pin
+    /// 533ef4a), and seed 42 of the main campaign then lost node 4 for the
+    /// rest of the run (prefix -1 at the end of the settle tail); a 1,000-seed
+    /// hunt lost a node on three more seeds and a proxy silently.
+    ///
     /// # Errors
     ///
-    /// The accept's own error, a genuine infrastructure failure.
+    /// Any other accept error, a genuine infrastructure failure.
     pub(crate) async fn serve_next(&mut self, providers: &P) -> SimulationResult<()> {
         let accepted = self.accept.as_mut().await;
         self.accept = accept_on::<P>(&self.listener);
-        let (stream, addr) = accepted.map_err(|e| {
-            SimulationError::InvalidState(format!("{} gRPC accept: {e}", self.role))
-        })?;
+        let (stream, addr) = match accepted {
+            Ok(accepted) => accepted,
+            Err(e) if is_per_connection(&e) => {
+                tracing::warn!(error = %e, role = self.role, "gRPC accept lost a connection");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(SimulationError::InvalidState(format!(
+                    "{} gRPC accept: {e}",
+                    self.role
+                )));
+            }
+        };
         let connection = self.server.serve_connection_with_shutdown(
             stream,
             self.routes.clone(),
@@ -127,6 +147,18 @@ impl<P: Providers> GrpcEdge<P> {
         accept_and_serve(providers, self.task, self.role, addr, connection);
         Ok(())
     }
+}
+
+/// An accept error that names one pending connection rather than the
+/// listener: the listener stays healthy and the loop re-accepts. (moonpool
+/// also uses `ConnectionAborted` for a listener closed under a pending
+/// accept, which cannot loop here: the edge holds the listener for the whole
+/// incarnation.)
+fn is_per_connection(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Serve one accepted gRPC connection on its own detached task, ending when

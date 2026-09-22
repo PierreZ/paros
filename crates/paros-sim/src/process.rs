@@ -670,8 +670,18 @@ async fn run_acceptor(
                 )));
             }
             // The only non-crash exit: a genuine infrastructure failure
-            // propagates to the harness instead of being retried.
-            Err(RunError::Infra(e)) => return Err(e),
+            // propagates to the harness instead of being retried. moonpool
+            // never restarts a process that returned, so the identity is
+            // gone for the rest of the run — name it here rather than leave
+            // it to surface as an unexplained convergence failure.
+            Err(RunError::Infra(e)) => {
+                assert_always!(
+                    false,
+                    "a node never exits on an infrastructure error",
+                    { "node" => self_rank.0, "error" => e.to_string() }
+                );
+                return Err(e);
+            }
             Ok(()) => return Ok(()),
         }
     }
@@ -788,7 +798,14 @@ async fn run_matchmaker_role(
                     id.0
                 )));
             }
-            Err(RunError::Infra(e)) => return Err(e),
+            Err(RunError::Infra(e)) => {
+                assert_always!(
+                    false,
+                    "a matchmaker never exits on an infrastructure error",
+                    { "matchmaker" => id.0, "error" => e.to_string() }
+                );
+                return Err(e);
+            }
             Ok(()) => return Ok(()),
         }
     }
@@ -836,7 +853,16 @@ async fn run_proxy_role(
     )
     .await
     .map_err(|e| match e {
-        RunError::Infra(e) => e,
+        // A dead proxy is covered by the leader's take-back, so without this
+        // its exit would pass unnoticed.
+        RunError::Infra(e) => {
+            assert_always!(
+                false,
+                "a proxy never exits on an infrastructure error",
+                { "proxy" => id.0, "error" => e.to_string() }
+            );
+            e
+        }
         // A proxy has no storage and no seam: the driver's other exits are
         // unreachable here, and one showing up is a driver bug.
         other => SimulationError::InvalidState(format!("proxy {} exited with {other}", id.0)),
