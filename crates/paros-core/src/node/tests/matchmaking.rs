@@ -64,19 +64,17 @@ fn registered_effective(
     wm: Ballot,
     effective: Option<(Ballot, AcceptorConfig)>,
 ) -> MatchReply {
-    MatchReply {
-        matchmaker: MatchmakerId(mm),
-        to: ballot.node,
+    registered_reply(
+        mm,
         ballot,
-        generation: MatchmakerGeneration(0),
-        outcome: MatchOutcome::Registered {
+        MatchOutcome::Registered {
             from_ballot: wm,
             history,
             next_from_ballot: None,
             gc_watermark: wm,
             effective,
         },
-    }
+    )
 }
 
 /// One page of a paged answer: it starts at `from`, and `next` is the cursor
@@ -88,18 +86,28 @@ fn registered_page(
     history: BTreeMap<Ballot, Registration>,
     next: Option<Ballot>,
 ) -> MatchReply {
-    MatchReply {
-        matchmaker: MatchmakerId(mm),
-        to: ballot.node,
+    registered_reply(
+        mm,
         ballot,
-        generation: MatchmakerGeneration(0),
-        outcome: MatchOutcome::Registered {
+        MatchOutcome::Registered {
             from_ballot: from,
             history,
             next_from_ballot: next,
             gc_watermark: Ballot::zero(),
             effective: None,
         },
+    )
+}
+
+/// The generation-0 reply from `mm` to `ballot`'s candidate carrying
+/// `outcome`.
+fn registered_reply(mm: u64, ballot: Ballot, outcome: MatchOutcome) -> MatchReply {
+    MatchReply {
+        matchmaker: MatchmakerId(mm),
+        to: ballot.node,
+        ballot,
+        generation: MatchmakerGeneration(0),
+        outcome,
     }
 }
 
@@ -135,12 +143,7 @@ fn a_campaign_registers_before_it_prepares() {
     assert!(n.matchmaking_pending());
     let msgs = drain(&mut n);
     assert!(prepares(&msgs).is_empty(), "no Prepare before the quorum");
-    let requests = {
-        let ready = n.ready();
-        let r = ready.match_requests().to_vec();
-        ready.advance();
-        r
-    };
+    let requests = drain_match_requests(&mut n);
     // The batch was drained above; re-run to see the requests were queued
     // with the campaign (one per matchmaker, all at the campaign ballot).
     assert!(requests.is_empty(), "drained with the batch");

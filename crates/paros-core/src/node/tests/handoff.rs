@@ -7,8 +7,8 @@
 use super::{
     ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
     LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot,
-    TestStorage, ballot, chosen_at, cluster_with_three_chosen, deliver_all, deliver_filtered,
-    drain, make_leader, node, ucmd, val,
+    TestStorage, ballot, chosen_at, cluster, cluster_with_three_chosen, deliver_all,
+    deliver_filtered, drain, make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
@@ -124,11 +124,7 @@ fn the_predecessor_redirects_clients_to_its_successor() {
 
 #[test]
 fn an_accepted_but_unchosen_slot_survives_the_handoff() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // Open a round and let *nobody* answer: the slot is in flight, unchosen.
     let ProposeResult::Accepted(stranded) = nodes[0].propose(ClientId(1), ClientSeq(1), val(42))
@@ -433,11 +429,7 @@ fn an_open_repair_or_recovery_blocks_the_handoff() {
 
 #[test]
 fn a_leader_trailing_its_own_frontier_past_the_bound_is_refused() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // Open more in-flight rounds than one payload may carry, answering none.
     for seq in 1..=(HANDOFF_BATCH as u64 + 1) {

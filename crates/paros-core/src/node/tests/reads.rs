@@ -93,12 +93,9 @@ fn fresh_leader_read_waits_for_the_read_floor() {
     let beats = drain(&mut nodes[1]);
     let mut acks = Vec::new();
     for (to, m) in beats {
-        let idx = nodes
-            .iter()
-            .position(|n| n.config().id == to)
-            .expect("beat addressed to a member");
-        nodes[idx].step(m);
-        acks.extend(drain(&mut nodes[idx]));
+        let n = node_at(&mut nodes, to);
+        n.step(m);
+        acks.extend(drain(n));
     }
     for (to, m) in acks {
         if to == NodeId(1) && matches!(m, Message::HeartbeatAck { .. }) {
@@ -117,12 +114,9 @@ fn fresh_leader_read_waits_for_the_read_floor() {
     let q = drain(&mut nodes[1]);
     let mut replies = Vec::new();
     for (to, m) in q {
-        let idx = nodes
-            .iter()
-            .position(|n| n.config().id == to)
-            .expect("message addressed to a member");
-        nodes[idx].step(m);
-        replies.extend(drain(&mut nodes[idx]));
+        let n = node_at(&mut nodes, to);
+        n.step(m);
+        replies.extend(drain(n));
     }
     for (to, m) in replies {
         if to == NodeId(1) {
@@ -215,13 +209,7 @@ fn stale_seq_ack_is_ignored_and_a_later_beat_confirms() {
 
 #[test]
 fn duplicate_acks_from_one_peer_are_not_a_quorum() {
-    let mut nodes = [
-        node(0, &[0, 1, 2, 3, 4]),
-        node(1, &[0, 1, 2, 3, 4]),
-        node(2, &[0, 1, 2, 3, 4]),
-        node(3, &[0, 1, 2, 3, 4]),
-        node(4, &[0, 1, 2, 3, 4]),
-    ];
+    let mut nodes = cluster::<5>();
     make_leader(&mut nodes, 0);
     let _ = nodes[0].read_index(5);
     let _ = drain(&mut nodes[0]);

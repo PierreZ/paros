@@ -73,33 +73,37 @@ impl Matchmaker {
         }
     }
 
+    /// Whether this matchmaker answers the handover of `generation`: the
+    /// one it is active or frozen for. Every other request is refused.
+    fn serves_handover_of(&self, generation: MatchmakerGeneration) -> bool {
+        self.set().generation == generation
+            && matches!(
+                self.phase(),
+                MatchmakerPhase::Active | MatchmakerPhase::Stopped
+            )
+    }
+
     /// `StopA`: freeze `generation` (durably, before the answer leaves) and
     /// report the registry the successor is reconstructed from.
     fn on_stop(&mut self, generation: MatchmakerGeneration) -> ReconfigureReply {
-        let me = self.config.id;
-        let current = self.set();
-        let phase = self.phase();
-        if current.generation != generation
-            || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
-        {
-            self.refusal()
-        } else {
-            if phase == MatchmakerPhase::Active {
-                // The freeze, durable before the answer leaves: a
-                // matchmaker that forgot it stopped and resumed
-                // registering would break the reconstruction the
-                // successor rests on.
-                self.freeze();
-            }
-            ReconfigureReply::Stopped {
-                matchmaker: me,
-                generation,
-                gc_watermark: self.hard_state.gc_watermark,
-                history: self.history_from_watermark(),
-                effective: self.hard_state.effective.clone(),
-                successor: self.hard_state.successor.clone(),
-                decree_promised: self.hard_state.decree.promised,
-            }
+        if !self.serves_handover_of(generation) {
+            return self.refusal();
+        }
+        if self.phase() == MatchmakerPhase::Active {
+            // The freeze, durable before the answer leaves: a
+            // matchmaker that forgot it stopped and resumed
+            // registering would break the reconstruction the
+            // successor rests on.
+            self.freeze();
+        }
+        ReconfigureReply::Stopped {
+            matchmaker: self.config.id,
+            generation,
+            gc_watermark: self.hard_state.gc_watermark,
+            history: self.history_from_watermark(),
+            effective: self.hard_state.effective.clone(),
+            successor: self.hard_state.successor.clone(),
+            decree_promised: self.hard_state.decree.promised,
         }
     }
 
@@ -194,36 +198,31 @@ impl Matchmaker {
         generation: MatchmakerGeneration,
         ballot: Ballot,
     ) -> ReconfigureReply {
+        if !self.serves_handover_of(generation) {
+            return self.refusal();
+        }
         let me = self.config.id;
-        let current = self.set();
-        let phase = self.phase();
-        if current.generation != generation
-            || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
-        {
-            self.refusal()
-        } else {
-            let mut acceptor = self.decree_acceptor();
-            let mut writes = Vec::new();
-            match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
-                // The floor is slot zero and so is the prepare, so a
-                // below-floor refusal is not expressible here.
-                PrepareOutcome::Promised { .. } => {
-                    let vote = acceptor.record(DECREE_SLOT).cloned();
-                    self.store_decree(&acceptor, &writes);
-                    ReconfigureReply::Promised {
-                        matchmaker: me,
-                        generation,
-                        ballot,
-                        vote,
-                    }
-                }
-                PrepareOutcome::Refused | PrepareOutcome::BelowFloor => ReconfigureReply::Nacked {
+        let mut acceptor = self.decree_acceptor();
+        let mut writes = Vec::new();
+        match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
+            // The floor is slot zero and so is the prepare, so a
+            // below-floor refusal is not expressible here.
+            PrepareOutcome::Promised { .. } => {
+                let vote = acceptor.record(DECREE_SLOT).cloned();
+                self.store_decree(&acceptor, &writes);
+                ReconfigureReply::Promised {
                     matchmaker: me,
                     generation,
                     ballot,
-                    promised: acceptor.promised(),
-                },
+                    vote,
+                }
             }
+            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => ReconfigureReply::Nacked {
+                matchmaker: me,
+                generation,
+                ballot,
+                promised: acceptor.promised(),
+            },
         }
     }
 
@@ -232,41 +231,35 @@ impl Matchmaker {
         &mut self,
         generation: MatchmakerGeneration,
         ballot: Ballot,
-        members: Vec<MatchmakerId>,
+        mut members: Vec<MatchmakerId>,
     ) -> ReconfigureReply {
+        if !self.serves_handover_of(generation) {
+            return self.refusal();
+        }
         let me = self.config.id;
-        let current = self.set();
-        let phase = self.phase();
-        if current.generation != generation
-            || !matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
-        {
-            self.refusal()
-        } else {
-            let mut members = members;
-            members.sort_unstable();
-            members.dedup();
-            let mut acceptor = self.decree_acceptor();
-            let mut writes = Vec::new();
-            match acceptor.admit(ballot, DECREE_SLOT) {
-                // A vote is a promise too: the acceptor raises the promise
-                // before it records, exactly as the log wiring does.
-                AcceptOutcome::Admitted => {
-                    acceptor.set_promise(ballot, &mut writes);
-                    acceptor.record_accepted(DECREE_SLOT, ballot, members, &mut writes);
-                    self.store_decree(&acceptor, &writes);
-                    ReconfigureReply::Accepted {
-                        matchmaker: me,
-                        generation,
-                        ballot,
-                    }
-                }
-                AcceptOutcome::Refused | AcceptOutcome::BelowFloor => ReconfigureReply::Nacked {
+        members.sort_unstable();
+        members.dedup();
+        let mut acceptor = self.decree_acceptor();
+        let mut writes = Vec::new();
+        match acceptor.admit(ballot, DECREE_SLOT) {
+            // A vote is a promise too: the acceptor raises the promise
+            // before it records, exactly as the log wiring does.
+            AcceptOutcome::Admitted => {
+                acceptor.set_promise(ballot, &mut writes);
+                acceptor.record_accepted(DECREE_SLOT, ballot, members, &mut writes);
+                self.store_decree(&acceptor, &writes);
+                ReconfigureReply::Accepted {
                     matchmaker: me,
                     generation,
                     ballot,
-                    promised: acceptor.promised(),
-                },
+                }
             }
+            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => ReconfigureReply::Nacked {
+                matchmaker: me,
+                generation,
+                ballot,
+                promised: acceptor.promised(),
+            },
         }
     }
 
@@ -303,9 +296,7 @@ impl Matchmaker {
                 activated: false,
                 at: current.generation,
             }
-        } else if current.generation == generation
-            && matches!(phase, MatchmakerPhase::Active | MatchmakerPhase::Stopped)
-        {
+        } else if self.serves_handover_of(generation) {
             if self
                 .hard_state
                 .successor

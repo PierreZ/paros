@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use super::{
     Ballot, ClientId, ClientSeq, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH,
-    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Slot, TestStorage, Value,
-    command_fingerprint,
+    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Slot, TestStorage,
+    Value, command_fingerprint, drain_with,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
@@ -25,22 +25,7 @@ fn command(slot: u64) -> Command {
 type ReadyOutput = (Vec<(NodeId, Message)>, Option<(usize, usize, usize)>);
 
 fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
-    let pool: Vec<NodeId> = node.config().pool().to_vec();
-    let me = node.config().id;
-    let ready = node.ready();
-    let messages: Vec<(NodeId, Message)> = ready
-        .messages()
-        .iter()
-        .flat_map(|(audience, msg)| {
-            audience
-                .resolve(&pool, me)
-                .into_iter()
-                .map(move |to| (to, msg.clone()))
-        })
-        .collect();
-    let recovery = ready.recovery_batch();
-    ready.advance();
-    (messages, recovery)
+    drain_with(node, Ready::recovery_batch)
 }
 
 fn candidate(id: u64) -> (ColocatedNode, Ballot) {

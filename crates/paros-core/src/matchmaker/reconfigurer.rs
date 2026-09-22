@@ -343,15 +343,7 @@ impl MatchmakerReconfigurer {
         let target = MatchmakerSet::new(current.generation.next(), target)
             .members()
             .to_vec();
-        self.phase = ReconfigurerPhase::Stopping {
-            old: current.clone(),
-            target: Some(target),
-            acks: BTreeMap::new(),
-            decree_floor: Ballot::zero(),
-            effective: None,
-        };
-        self.elapsed = 0;
-        self.resend();
+        self.begin_stopping(current, Some(target));
         Ok(())
     }
 
@@ -371,16 +363,23 @@ impl MatchmakerReconfigurer {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
         }
+        self.begin_stopping(current, None);
+        Ok(())
+    }
+
+    /// Enter the freeze of `current` toward `target` (`None`: the members
+    /// that answer it) and send its first requests — the opening
+    /// [`Self::start`] and [`Self::finish`] share.
+    fn begin_stopping(&mut self, current: &MatchmakerSet, target: Option<Vec<MatchmakerId>>) {
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
-            target: None,
+            target,
             acks: BTreeMap::new(),
             decree_floor: Ballot::zero(),
             effective: None,
         };
         self.elapsed = 0;
         self.resend();
-        Ok(())
     }
 
     /// One driver tick while a handover runs: the running phase's stall

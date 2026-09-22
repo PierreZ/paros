@@ -34,11 +34,7 @@ fn election_fires_after_timeout_and_becomes_candidate() {
 
 #[test]
 fn promise_quorum_makes_leader() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     assert_eq!(nodes[0].role(), NodeRole::Leader);
     assert_eq!(nodes[0].leader(), Some(NodeId(0)));
@@ -50,11 +46,7 @@ fn promise_quorum_makes_leader() {
 /// promise quorum {1,2} never saw — and what `next_slot` (3, from the recovered
 /// slot 2) jumped clean over.
 fn wedge_after_election() -> [ColocatedNode; 3] {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy, so every node's chosen prefix starts at slot 0.
@@ -152,11 +144,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     // 3-node cluster. Node 1 has accepted slot 0 at an old ballot but it was
     // never chosen. Node 2 wins a new election; its recovery must re-propose that
     // entry under node 2's higher ballot (gap fill / takeover).
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     let old = ballot(1, 0);
     let recovered = ucmd(5, 1, 99);
     nodes[1].step(Message::Accept {
@@ -464,11 +452,7 @@ fn leader_recovery_is_split_across_ready_batches() {
 fn leader_never_lowers_its_promise_on_self_accept() {
     // A leader streams, but a competing higher Prepare raises its promise; the
     // next self-accept must not pull the promise back down.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     let higher = ballot(99, 2);
     nodes[0].step(Message::Prepare {
@@ -510,11 +494,7 @@ fn single_node_cluster_elects_and_chooses_immediately() {
 /// for one slot, the DST-found `18153519926117387038` violation).
 #[test]
 fn truncated_quorum_refuses_a_blind_candidate() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slots 0 and 1 chosen everywhere.

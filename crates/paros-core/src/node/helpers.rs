@@ -130,6 +130,41 @@ impl ColocatedNode {
             .push((Audience::Learners, msg.clone()));
     }
 
+    /// Queue `msg` to the one node `to`.
+    pub(super) fn send(&mut self, to: NodeId, msg: Message) {
+        self.pending_messages.push((Audience::Node(to), msg));
+    }
+
+    /// Queue one `Prepare` at `ballot` from `from_slot`, carrying `config`,
+    /// to each of `targets` — the opening fan-out of a campaign, a Promise
+    /// page request and a repair probe's straggler re-query alike.
+    pub(super) fn send_prepare(
+        &mut self,
+        targets: impl IntoIterator<Item = NodeId>,
+        ballot: Ballot,
+        from_slot: Slot,
+        config: Option<AcceptorConfig>,
+    ) {
+        let prepare = Message::Prepare {
+            reply_to: self.config.id,
+            ballot,
+            from_slot,
+            config,
+        };
+        for to in targets {
+            self.send(to, prepare.clone());
+        }
+    }
+
+    /// A `CatchUpRequest` from this node for the decided range from
+    /// `from_slot`.
+    pub(super) fn catch_up_request(&self, from_slot: Slot) -> Message {
+        Message::CatchUpRequest {
+            from: self.config.id,
+            from_slot,
+        }
+    }
+
     /// Whether `party` is one this deployment can answer: a node of the
     /// pool ([`ColocatedNode::in_pool`]) or a proxy of the deployment
     /// (`ProxyId(0..proxy_count)`) — the wire-hygiene boundary an `Accept`'s

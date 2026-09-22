@@ -47,11 +47,7 @@ fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
 /// refuses the no-op, the unknown member, and the non-leader.
 #[test]
 fn reconfiguration_is_refused_where_it_cannot_run() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     assert_eq!(
         nodes[0].reconfigure(&cfg(&[0, 1])),

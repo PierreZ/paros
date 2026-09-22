@@ -311,20 +311,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         own_vote: Option<Id>,
         column: Option<usize>,
     ) {
-        assert!(
-            !self.by_slot.contains_key(&slot),
-            "a slot has at most one open Phase-2 round"
-        );
-        self.by_slot.insert(
-            slot,
-            Round {
-                ballot,
-                command,
-                custody: Custody::colocated(own_vote),
-                column,
-                resends: 0,
-            },
-        );
+        self.insert_round(slot, ballot, command, Custody::colocated(own_vote), column);
     }
 
     /// Open the round for `slot` at `ballot` against `column` **delegated**
@@ -344,6 +331,20 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         column: Option<usize>,
         proxy: ProxyId,
     ) {
+        self.insert_round(slot, ballot, command, Custody::Delegated { proxy }, column);
+    }
+
+    /// Insert a fresh round at `slot` under `custody` — the one path
+    /// [`Rounds::open`] and [`Rounds::open_delegated`] share, so neither
+    /// can open a second round at a slot.
+    fn insert_round(
+        &mut self,
+        slot: Slot,
+        ballot: Ballot,
+        command: V,
+        custody: Custody<Id>,
+        column: Option<usize>,
+    ) {
         assert!(
             !self.by_slot.contains_key(&slot),
             "a slot has at most one open Phase-2 round"
@@ -353,7 +354,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             Round {
                 ballot,
                 command,
-                custody: Custody::Delegated { proxy },
+                custody,
                 column,
                 resends: 0,
             },

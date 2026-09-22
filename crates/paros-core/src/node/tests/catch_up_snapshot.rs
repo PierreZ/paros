@@ -14,11 +14,7 @@ fn follower_missing_only_slot_zero_catches_up_on_an_idle_beat() {
     // never campaigns. With `commit: Option<Slot>` the beat says `Some(Slot(0))`,
     // which is strictly above the follower's `None`, and the ordinary catch-up
     // pull heals it.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0 — the *only* slot this cluster ever decides. Node 2 receives the
@@ -68,11 +64,7 @@ fn a_leader_that_lost_its_chosen_index_is_pushed_the_first_slot_back() {
     // old encoding both sides said `Slot(0)` — the leader meaning "nothing", the
     // follower meaning "slot 0" — so `commit < ci` was false, nobody pushed, and
     // the leader kept advertising an empty prefix that no follower could correct.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
     let q = drain(&mut nodes[0]);
@@ -104,11 +96,7 @@ fn follower_fills_a_hole_via_commit_replay_catch_up() {
     // for still-pending slots, never a `Commit`), until commit-replay catch-up
     // heals it. The `ConvergenceOracle` catches this in simulation; this is the
     // deterministic unit pin.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy — every node learns it.

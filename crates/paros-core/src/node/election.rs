@@ -7,8 +7,8 @@
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
 use super::{
-    Audience, BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
-    Message, NodeId, NodeRole, Slot,
+    BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin, Message,
+    NodeId, NodeRole, Slot,
 };
 use crate::matchmaker::{MatchRequest, RegistrationKind};
 use crate::matchmaking::Matchmaking;
@@ -175,16 +175,7 @@ impl ColocatedNode {
             self.acceptor.records(),
             self.acceptor.faulty(),
         );
-        let prepare = Message::Prepare {
-            reply_to: me,
-            ballot: self.ballot,
-            from_slot,
-            config: wire_config,
-        };
-        for to in targets {
-            self.pending_messages
-                .push((Audience::Node(to), prepare.clone()));
-        }
+        self.send_prepare(targets, self.ballot, from_slot, wire_config);
         // Proactive catch-up probe. The election clock fires precisely when we have
         // *not* heard a satisfactory leader — the same condition under which we may
         // be silently behind: a stale or absent leader beat never reveals a decided
@@ -194,10 +185,7 @@ impl ColocatedNode {
         // win (a won election gap-fills only *accepted* slots it can re-proposes;
         // this learns *chosen* ones outright). Harmless when we are not behind — a
         // peer with nothing past `from_slot` simply sends nothing.
-        self.broadcast(&Message::CatchUpRequest {
-            from: me,
-            from_slot,
-        });
+        self.broadcast(&self.catch_up_request(from_slot));
         self.try_become_leader();
     }
 
@@ -248,15 +236,7 @@ impl ColocatedNode {
     /// Ask `from` for its next `Promise` page at `ballot`, from `next`.
     fn request_promise_page(&mut self, from: NodeId, ballot: Ballot, next: Slot) {
         let config = self.phase1_wire_config();
-        self.pending_messages.push((
-            Audience::Node(from),
-            Message::Prepare {
-                reply_to: self.config.id,
-                ballot,
-                from_slot: next,
-                config,
-            },
-        ));
+        self.send_prepare([from], ballot, next, config);
     }
 
     /// Merge one straggler `Promise` page into the leader's open repair probe
