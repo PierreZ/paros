@@ -14,6 +14,7 @@ pub mod act1;
 pub mod act2;
 pub mod act3;
 pub mod act4;
+mod common;
 mod script;
 
 use crate::action::{Action, ActionError, ActionKind};

@@ -7,10 +7,11 @@
 //! intersection — with nothing else in the way: no log, no leader, no clock,
 //! no disk.
 
-use paros_core::{Ballot, Command, NodeId};
+use paros_core::{Ballot, NodeId};
 
 use crate::action::{Action, ActionKind, Phase};
 use crate::auto::AutomationFlag;
+use crate::level::common::{REPLIES_ONLY, chosen_text, open, text};
 use crate::level::{GoalStatus, Level, WorldKind};
 use crate::world::decree::{DecreeWorld, value};
 
@@ -42,9 +43,6 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::ReadServe,
 ];
 
-/// The convenience toggle every Act I level offers: deliver the replies for me.
-const TOGGLES: &[AutomationFlag] = &[AutomationFlag::DeliverReplies];
-
 const WIRE_ACTIONS: &[ActionKind] = &[
     ActionKind::OpenBallot,
     ActionKind::Deliver,
@@ -71,34 +69,12 @@ const WIRE_AND_REACH: &[ActionKind] = &[
     ActionKind::SetAutomation,
 ];
 
-/// The text inside a client command, for a goal that has to name a value.
-fn text(command: &Command) -> String {
-    command
-        .user()
-        .map(|entry| String::from_utf8_lossy(&entry.value.0).into_owned())
-        .unwrap_or_default()
-}
-
-fn chosen_text(world: &WorldKind) -> Option<String> {
-    world
-        .decree()
-        .and_then(|world| world.chosen())
-        .map(|(_, command)| text(command))
-}
-
 fn deliver(id: u64) -> Action {
     Action::Deliver { id }
 }
 
 fn drop_it(id: u64) -> Action {
     Action::Drop { id }
-}
-
-fn open(proposer: u64, value: &str) -> Action {
-    Action::OpenBallot {
-        proposer,
-        value: value.to_string(),
-    }
 }
 
 fn answer(prompt: u64, choice: &str) -> Action {
@@ -143,7 +119,7 @@ decision occurs at the proposer, and the third acceptor does not see it.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[],
     allowed_actions: WIRE_ACTIONS,
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5]))),
@@ -234,7 +210,7 @@ now holds. The rule for votes is not stricter than the rule for promises.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::AcceptorReplies],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::AcceptorReplies],
     allowed_actions: WIRE_AND_ANSWER,
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5, 8]))),
@@ -321,7 +297,7 @@ report from an agreed decision, so you must treat the report as a decision.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::ProposerP2c],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::ProposerP2c],
     allowed_actions: WIRE_AND_ANSWER,
     setup: || {
@@ -413,7 +389,7 @@ ballot.",
     symbols: &["Message::Nack", "Ballot", "Proposer::phase1_won"],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[],
     allowed_actions: WIRE_ACTIONS,
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5, 8]))),
@@ -497,7 +473,7 @@ intersection is necessary, and that `q1 + q2 > n` gives cheaper writes.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[],
     allowed_actions: WIRE_AND_REACH,
     setup: || {
@@ -607,7 +583,7 @@ new leader in Act II recovers the suffix before it proposes new values.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[],
     allowed_actions: WIRE_ACTIONS,
     setup: || {
