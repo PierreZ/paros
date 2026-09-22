@@ -1116,7 +1116,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     // The proxy's own paths — a reboot, a re-fan-out, an ignored or
     // superseded delegation, a relayed `Nack` — are reported through the
     // port but not gated here: the model checker proves each in-core, and
-    // the slot budget (512 per campaign process) is spent on outcomes.
+    // the slot budget (2048 per campaign process) is spent on outcomes.
 
     fn proxy_fanned_out(
         &self,

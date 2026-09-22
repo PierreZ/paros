@@ -113,7 +113,7 @@ through `app_applied`) asserts one command/state per applied index, contiguous l
 application, and proposal validity. Keep its messages stable. Client timeouts and deliberately
 abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
 bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
-recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
+recipes replay from a fresh builder. The shared assertion tables allow at most 2048 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
 **Moonpool questions.** For any question about moonpool's APIs or behavior, consult the
@@ -200,7 +200,7 @@ own**. The roles:
   turns into a `Noop` — and its `sometimes` gates are a slot decided through a proxy and a
   leader taking a round back (the proxy's own paths — a reboot, a re-fan-out, an eviction, an
   ignored delegation, a relayed `Nack` — are reported, not gated: the model checker proves
-  them and the 512-slot budget is spent on outcomes; `sim-paros-hunt` prints the slots a
+  them and the 2048-slot budget is spent on outcomes; `sim-paros-hunt` prints the slots a
   campaign uses). Proven by the sans-IO model
   checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
   reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
@@ -657,7 +657,7 @@ substitutes for the other:
   `sometimes`: whether a seed draws it is the swarm's business, and a gate on it turns a tuned
   probability into a CI failure. Pair every BUGGIFY site with a reachable proving it fired.
   **Budget:** one slot per
-  unique message string (identity = the message hash — never reword an existing message), 512
+  unique message string (identity = the message hash — never reword an existing message), 2048
   slots per campaign process shared with moonpool's own internals; overflow is reported as an
   always violation. Count before adding, keep messages short/stable/free of interpolated ids, and
   put dynamic context in the detail map.

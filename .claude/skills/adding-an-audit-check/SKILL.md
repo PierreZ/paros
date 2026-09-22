@@ -1,6 +1,6 @@
 ---
 name: adding-an-audit-check
-description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/paros/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 512-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
+description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/paros/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 2048-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
 ---
 
 # Adding an audit check
@@ -54,7 +54,7 @@ node of every seed.
 
 ## 4. Mind the budget and the identity
 
-512 slots per campaign process, shared with moonpool's own internals, and 256
+2048 slots per campaign process, shared with moonpool's own internals, and 256
 `sometimes_each` buckets. Identity is the hash of the message: **never reword
 an existing message** (its saturation history resets silently), and never use
 a slot, ballot, request id, seed or hash as a bucket key. Count before adding.

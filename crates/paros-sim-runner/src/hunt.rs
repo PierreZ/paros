@@ -108,7 +108,7 @@ fn main() {
         "{} seeds: {} ok, {} failed",
         report.iterations, report.successful_runs, report.failed_runs,
     );
-    // The assertion-slot budget (AGENTS.md, *Assertion doctrine*): 512
+    // The assertion-slot budget (AGENTS.md, *Assertion doctrine*): 2048
     // slots per campaign process, shared with moonpool's own internals.
     // Printed on every hunt so "count before adding" has a number to read,
     // and an overflow — evaluations dropped for want of a slot — is never
