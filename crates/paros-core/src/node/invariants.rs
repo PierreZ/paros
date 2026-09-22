@@ -10,7 +10,9 @@
 //! that may exist only on a leader.
 
 use super::{Ballot, ColocatedNode, LeadershipOrigin, NodeRole};
+use crate::membership::QuorumSystem;
 use crate::proposer::Round;
+use crate::quorum_read::QuorumRead;
 
 impl ColocatedNode {
     /// Assert every cross-field invariant of the node's volatile state, plus
@@ -54,6 +56,21 @@ impl ColocatedNode {
                 .is_none_or(|s| *s >= self.acceptor.first_slot()),
             "no in-flight round survives below the compaction floor"
         );
+        // The quorum reads' own tally, then the coupling the wiring owns:
+        // every configuration move abandons the reads opened against a
+        // configuration bound below it (`record_membership` →
+        // `QuorumReads::abandon_superseded`), so none survives below the
+        // configuration in force — the node-side pair of the tally's own
+        // `Superseded` fold.
+        self.quorum_reads.assert_invariants();
+        assert!(
+            self.quorum_reads
+                .pending()
+                .iter()
+                .map(QuorumRead::config_since)
+                .all(|since| since >= self.acceptors_since),
+            "no open quorum read is bound below the configuration in force"
+        );
         self.assert_deployment_invariants();
         self.assert_role_invariants();
         self.assert_leadership_state_invariants();
@@ -93,10 +110,19 @@ impl ColocatedNode {
                 "a plain deployment never opens a GC campaign"
             );
         }
-        if self.gc.is_some() {
+        if let Some(gc) = &self.gc {
             assert!(
                 self.role == NodeRole::Leader,
                 "only a leader holds an open GC campaign"
+            );
+            // A campaign addresses the generation believed when it opened,
+            // reset forward as newer ones are learned — never past the
+            // belief (`reset_gc_for_generation`).
+            assert!(
+                self.matchmakers
+                    .as_ref()
+                    .is_some_and(|set| gc.generation() <= set.generation),
+                "a GC campaign addresses no generation newer than the one believed"
             );
         }
         assert!(
@@ -247,6 +273,20 @@ impl ColocatedNode {
                 "a leader's every open round is recorded in its own log"
             );
         }
+        // Every open round's column is one the configuration in force has:
+        // a leader's rounds all run at its ballot, and a configuration moves
+        // only by a round change that abandons them — the standing half of
+        // the open-time check in `start_accept_round_in`. O(N) structural.
+        assert!(
+            self.proposer
+                .rounds()
+                .values()
+                .all(|round| match self.acceptors.quorum_system() {
+                    QuorumSystem::Grid { cols, .. } => round.column().is_none_or(|c| c < cols),
+                    _ => round.column().is_none(),
+                }),
+            "every open round's column is a column of the configuration in force"
+        );
         // Delegation (#142) is the `None` arm's opt-in: a deployment
         // without proxies delegates nothing, and a delegated round
         // names a proxy the deployment has.

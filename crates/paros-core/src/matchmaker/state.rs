@@ -156,11 +156,20 @@ pub(crate) fn resolved_set(
 /// bootstrap member active for generation 0 and anyone else a spare.
 ///
 /// `bootstrap` must be sorted (both callers keep it so).
+///
+/// # Panics
+///
+/// If `bootstrap` is not strictly sorted: the membership test is a binary
+/// search, which would silently miscount rather than fail.
 pub(crate) fn resolved_phase(
     scalars: &MatchmakerHardState,
     id: MatchmakerId,
     bootstrap: &[MatchmakerId],
 ) -> MatchmakerPhase {
+    assert!(
+        bootstrap.windows(2).all(|pair| pair[0] < pair[1]),
+        "a bootstrap matchmaker set is resolved sorted and deduplicated"
+    );
     match scalars.phase {
         MatchmakerPhase::Fresh => {
             if bootstrap.binary_search(&id).is_ok() {

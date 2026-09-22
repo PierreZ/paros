@@ -88,6 +88,12 @@ impl Collector {
         }
     }
 
+    /// The matchmaker generation the requests address.
+    #[must_use]
+    pub fn generation(&self) -> MatchmakerGeneration {
+        self.generation
+    }
+
     /// The election fence Region 1 is judged by.
     #[must_use]
     pub fn fence(&self) -> Option<Slot> {
@@ -124,7 +130,16 @@ impl Collector {
     /// Start the ack tally over at `generation`: acks from a replaced
     /// generation say nothing about the new one's quorum. A no-op once the
     /// floor is effective, or at the generation already addressed.
+    ///
+    /// # Panics
+    ///
+    /// If `generation` is older than the one this campaign addresses: a
+    /// node's belief about the matchmaker set only ever moves forward.
     pub fn reset_for_generation(&mut self, generation: MatchmakerGeneration) {
+        assert!(
+            generation >= self.generation,
+            "a GC campaign's matchmaker generation never regresses"
+        );
         if self.effective.is_none() && self.generation != generation {
             self.requested = false;
             self.acked_by.clear();
@@ -134,11 +149,26 @@ impl Collector {
 
     /// A configured peer reported its chosen index at this ballot (the
     /// monotone half of Region 1's tally).
+    ///
+    /// # Panics
+    ///
+    /// If the peer's recorded chosen index moved backwards (a programmer
+    /// error: the tally keeps the maximum).
     pub fn note_chosen(&mut self, from: NodeId, chosen: Option<Slot>) {
+        let before = self.peer_chosen.get(&from).copied();
         if let Some(chosen) = chosen {
             let entry = self.peer_chosen.entry(from).or_insert(chosen);
             *entry = (*entry).max(chosen);
         }
+        let after = self.peer_chosen.get(&from).copied();
+        assert!(
+            after >= before,
+            "a peer's reported chosen index never lowers in the GC tally"
+        );
+        assert!(
+            chosen.is_none_or(|c| after >= Some(c)),
+            "the GC tally holds at least the chosen index just reported"
+        );
     }
 
     /// Whether Region 1 is held: a Phase-2 quorum of `config` reports a
@@ -214,6 +244,12 @@ impl Collector {
         if ack.watermark < ballot {
             return GcStep::Ignored;
         }
+        // The caller's guard refuses a matchmaker outside the set it
+        // addressed; restated where the ack enters the quorum tally.
+        assert!(
+            matchmakers.contains(ack.matchmaker),
+            "a GC ack is counted only from the addressed matchmaker set"
+        );
         if !self.acked_by.insert(ack.matchmaker) {
             return GcStep::Ignored;
         }
@@ -233,6 +269,18 @@ impl Collector {
             .copied()
             .filter(|n| !config.contains(*n))
             .collect();
+        // Postconditions: the floor retires only prior members, and never
+        // one the configuration in force still names (the `# Panics`
+        // promise, and the collector half of the leader-side check in
+        // `ColocatedNode::on_gc_ack`).
+        assert!(
+            retired.iter().all(|n| self.prior_members.contains(n)),
+            "a GC floor retires only members of the prior configurations"
+        );
+        assert!(
+            retired.iter().all(|n| !config.contains(*n)),
+            "a GC floor never retires an acceptor the configuration in force names"
+        );
         self.effective = Some((ballot, retired.clone()));
         GcStep::Effective {
             watermark: ballot,

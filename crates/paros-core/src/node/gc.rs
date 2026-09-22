@@ -293,8 +293,8 @@ impl ColocatedNode {
                 !retired.contains(&me) || !acceptors.contains(me),
                 "a leader inside its configuration is never retired"
             );
-            self.assert_invariants();
         }
+        self.assert_invariants();
         step
     }
 

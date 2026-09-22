@@ -135,6 +135,12 @@ impl<Id: Copy + Ord> QuorumRead<Id> {
         &self.config
     }
 
+    /// The ballot the read's configuration was bound to at the reader.
+    #[must_use]
+    pub fn config_since(&self) -> Ballot {
+        self.config_since
+    }
+
     /// The acceptors that have answered, with the watermark each reported.
     #[must_use]
     pub fn watermarks(&self) -> &BTreeMap<Id, Option<Slot>> {
@@ -190,6 +196,37 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         self.reads.is_empty()
     }
 
+    /// The tally's own invariants, checked at the exit of every mutation:
+    /// one read per token, every watermark folded from an addressee of its
+    /// read's row (the fold-time half of the check `serve` restates at
+    /// confirmation), and a confirmed read's index is exactly the maximum of
+    /// the watermarks behind it. O(reads × answers), always on.
+    ///
+    /// # Panics
+    ///
+    /// When one of them is broken: a programmer error.
+    pub fn assert_invariants(&self) {
+        let mut tokens = BTreeSet::new();
+        for read in &self.reads {
+            assert!(
+                tokens.insert(read.ctx),
+                "an open quorum read's token is unique"
+            );
+            assert!(
+                read.watermarks
+                    .keys()
+                    .all(|id| read.config.is_phase1_addressee(*id, read.row)),
+                "every folded watermark comes from the read's row"
+            );
+            if let Stage::Confirmed { index } = read.stage {
+                assert!(
+                    index == read.max_watermark(),
+                    "a confirmed quorum read's index is its maximum watermark"
+                );
+            }
+        }
+    }
+
     /// Open a read at `ctx` against the row [`AcceptorConfig::row_of`]
     /// derives for it under `config` (bound to the reader at
     /// `config_since`), seeded with the reader's own watermark when it is
@@ -233,6 +270,7 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             created_tick,
             stage: Stage::Tallying,
         });
+        self.assert_invariants();
         addressees
     }
 
@@ -263,6 +301,12 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// answer named (`None` on a plain deployment): one above the read's
     /// abandons it — the row asked need not intersect the successor's
     /// columns.
+    ///
+    /// # Panics
+    ///
+    /// If a counted `from` is not an addressee of the read's row: the
+    /// caller's guard refuses any other sender, restated here where the
+    /// vote enters the tally.
     pub fn fold(
         &mut self,
         ctx: u64,
@@ -275,21 +319,37 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         };
         if config_since.is_some_and(|since| since > self.reads[position].config_since) {
             self.reads.remove(position);
+            // Negative space: the superseded read is gone whole.
+            assert!(
+                self.reads.iter().all(|r| r.ctx != ctx),
+                "a superseded quorum read is abandoned"
+            );
+            self.assert_invariants();
             return PreReadFold::Superseded;
         }
         let read = &mut self.reads[position];
         if read.stage != Stage::Tallying || read.watermarks.contains_key(&from) {
             return PreReadFold::Ignored;
         }
+        assert!(
+            read.config.is_phase1_addressee(from, read.row),
+            "a quorum read folds a watermark only from its row"
+        );
         read.watermarks.insert(from, watermark);
+        self.assert_invariants();
         PreReadFold::Counted
     }
 
     /// Abandon every read opened against a configuration bound below
     /// `config_since`: the reader learned a newer configuration, and a read
     /// over the superseded one may never complete.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
     pub fn abandon_superseded(&mut self, config_since: Ballot) {
         self.reads.retain(|r| r.config_since >= config_since);
+        self.assert_invariants();
     }
 
     /// Advance every read: a tallying read whose row is whole (a Phase-1
@@ -330,6 +390,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             served.push((read.ctx, index));
             false
         });
+        // Negative space: a served read is closed.
+        assert!(
+            served
+                .iter()
+                .all(|(ctx, _)| self.reads.iter().all(|r| r.ctx != *ctx)),
+            "a served quorum read is closed"
+        );
+        self.assert_invariants();
         served
     }
 
@@ -337,9 +405,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// answered whole, a watermark the replica never reached). Dropped
     /// silently, exactly like a read-index round: the read carries no
     /// durable obligation, and the driver owns the client reply.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
     pub fn expire(&mut self, now: u64, ttl: u64) {
         self.reads
             .retain(|r| now.saturating_sub(r.created_tick) <= ttl);
+        self.assert_invariants();
     }
 }
 

@@ -139,8 +139,8 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     ///
     /// # Panics
     ///
-    /// If a Phase 1 is already open, or a Phase-2 round is in flight (a
-    /// campaign opens on a node that holds no leadership).
+    /// If a Phase 1 is already open, or a repair probe or a Phase-2 round is
+    /// in flight (a campaign opens on a node that holds no leadership).
     pub fn open_phase1(
         &mut self,
         campaign: Campaign<Id>,
@@ -148,6 +148,10 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         own_faulty: &BTreeMap<Slot, Ballot>,
     ) -> Vec<Id> {
         assert!(self.election.is_none(), "one Phase 1 per ballot");
+        assert!(
+            self.probe.is_none(),
+            "a campaign opens with no repair probe open"
+        );
         assert!(
             self.rounds.is_empty(),
             "a campaign opens with no Phase-2 round in flight"

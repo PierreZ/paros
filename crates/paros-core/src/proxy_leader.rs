@@ -415,9 +415,14 @@ impl ProxyLeader {
             return;
         }
         self.rounds.close(slot);
-        let Some(leader) = self.delegators.remove(&slot) else {
-            return;
-        };
+        // Unreachable by the invariant that pairs every open round with its
+        // delegator (`assert_invariants`): the round was open at this very
+        // ballot one line up, and a duplicate or late `Nack` finds it closed
+        // and returns at the guard above.
+        let leader = self
+            .delegators
+            .remove(&slot)
+            .expect("a closed proxy round had a delegator");
         self.counters.relayed_nacks += 1;
         self.pending_messages
             .push((Audience::Node(leader), Message::Nack { from, ballot, slot }));

@@ -1186,10 +1186,16 @@ impl ColocatedNode {
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
     /// from its `RandomProvider`). Clears the [`ColocatedNode::needs_election_timeout`]
     /// flag.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
     pub fn set_election_timeout(&mut self, ticks: u64) {
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
+        self.assert_invariants();
     }
 
     /// The election timeout in force (in ticks; zero until the driver set

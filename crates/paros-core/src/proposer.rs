@@ -389,6 +389,16 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
                 .is_none_or(|r| r.policy() == RecoveryPolicy::Phase1Backed || r.blocked.is_empty()),
             "an inherited recovery blocks no slot"
         );
+        // The probe is the won election still running for its blocked
+        // slots: `close_phase1` takes the election as it opens the probe,
+        // and a new campaign opens only on an abandoned leadership.
+        assert!(
+            self.election.is_none() || self.probe.is_none(),
+            "an election and a repair probe are never open together"
+        );
+        if let Some(probe) = &self.probe {
+            probe.assert_invariants();
+        }
     }
 
     /// Drop every open tally: the campaign, the probe, the rounds, the

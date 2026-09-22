@@ -66,6 +66,41 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
         &self.blocked
     }
 
+    /// The probe's own invariants: its tallies are kept only for the slots
+    /// it is still blocked on, every blocked slot is one some acceptor
+    /// reported faulty, and nothing blocked sits below the suffix its Phase 1
+    /// covered.
+    ///
+    /// # Panics
+    ///
+    /// When one of them is broken: a programmer error.
+    pub fn assert_invariants(&self) {
+        assert!(
+            self.best_have
+                .keys()
+                .all(|slot| self.blocked.contains(slot)),
+            "a repair probe keeps a have only for a blocked slot"
+        );
+        assert!(
+            self.faulty_reports
+                .keys()
+                .all(|slot| self.blocked.contains(slot)),
+            "a repair probe keeps faulty reports only for a blocked slot"
+        );
+        assert!(
+            self.blocked
+                .iter()
+                .all(|slot| self.faulty_reports.get(slot).is_some_and(|r| !r.is_empty())),
+            "a blocked slot is one some acceptor reported faulty"
+        );
+        assert!(
+            self.blocked
+                .first()
+                .is_none_or(|slot| *slot >= self.promises.from_slot),
+            "a repair probe blocks no slot below its suffix start"
+        );
+    }
+
     /// The stragglers to re-query: the members of the prior configurations
     /// the election covered — the Phase-1 addressee union — that have not
     /// answered their full suffix. `me` is never a straggler.

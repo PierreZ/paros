@@ -367,6 +367,12 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// as it is. Always safe: a second fan-out of one `(slot, ballot,
     /// command)` is P2b-idempotent, so nothing the proxy may still do behind
     /// this can disagree with what the opener decides.
+    ///
+    /// # Panics
+    ///
+    /// If the taken-back round does not come out colocated, seeded with
+    /// exactly `own_vote`, at the ballot and command it was delegated with
+    /// (a programmer error).
     pub fn take_back(&mut self, slot: Slot, own_vote: Option<Id>) -> bool {
         let Some(round) = self.by_slot.get_mut(&slot) else {
             return false;
@@ -374,7 +380,26 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         if !matches!(round.custody, Custody::Delegated { .. }) {
             return false;
         }
+        let (ballot, vhash) = (round.ballot, round.command.fingerprint());
         round.custody = Custody::colocated(own_vote);
+        // Postconditions: only the custody changed — one `(slot, ballot)`
+        // keeps its one command across the take-back (P2b) — and the opener
+        // folds from its own vote alone.
+        assert!(
+            round.ballot == ballot,
+            "a taken-back round keeps its ballot"
+        );
+        assert!(
+            round.command.fingerprint() == vhash,
+            "a taken-back round keeps its command"
+        );
+        assert!(
+            round
+                .accepted_by()
+                .is_some_and(|by| by.len() == usize::from(own_vote.is_some())
+                    && own_vote.is_none_or(|me| by.contains(&me))),
+            "a taken-back round is colocated with only the opener's own vote"
+        );
         true
     }
 
@@ -517,7 +542,20 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
 
     /// Install the frontier a fresh leadership starts allocating from: what a
     /// won Phase 1 derived from its quorum report, or what a handoff carried.
+    ///
+    /// # Panics
+    ///
+    /// If a Phase-2 round is open at or above `slot`: a fresh leadership
+    /// installs its frontier before it opens a round, and never below one.
     pub fn set_next_slot(&mut self, slot: Slot) {
+        assert!(
+            self.rounds
+                .by_slot()
+                .keys()
+                .next_back()
+                .is_none_or(|open| *open < slot),
+            "an installed allocator frontier sits above every open round"
+        );
         self.next_slot = slot;
     }
 

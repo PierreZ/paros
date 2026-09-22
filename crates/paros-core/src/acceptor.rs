@@ -356,7 +356,58 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             (Some((slot, _)), None) | (None, Some((slot, _))) => Some(**slot),
             (Some((ra, _)), Some((rf, _))) => Some(*std::cmp::min(*ra, *rf)),
         };
+        self.assert_promise_page(from_slot, &page);
         page
+    }
+
+    /// The postconditions of [`Acceptor::promise_page`] — the sender half of
+    /// the shape the receiving proposer checks (`promise_page_shape_valid`):
+    /// bounded, inside `[from_slot, next_from_slot)`, disjoint, a cursor only
+    /// on a full page, and nothing in that window omitted.
+    fn assert_promise_page(&self, from_slot: Slot, page: &PromisePage<V>) {
+        let len = page.accepted.len() + page.faulty.len();
+        assert!(
+            len <= PROMISE_BATCH,
+            "a promise page never exceeds the batch"
+        );
+        assert!(
+            page.next_from_slot.is_none_or(|_| len == PROMISE_BATCH),
+            "a promise page names a continuation only when full"
+        );
+        let in_window =
+            |slot: Slot| slot >= from_slot && page.next_from_slot.is_none_or(|next| slot < next);
+        assert!(
+            page.accepted.keys().all(|slot| in_window(*slot)),
+            "a promise page reports records only inside its window"
+        );
+        assert!(
+            page.faulty.keys().all(|slot| in_window(*slot)),
+            "a promise page reports faulty entries only inside its window"
+        );
+        assert!(
+            page.faulty
+                .keys()
+                .all(|slot| !page.accepted.contains_key(slot)),
+            "a promise page reports no slot both readable and faulty"
+        );
+        // Negative space: nothing this acceptor holds inside the window was
+        // left out, so the continuation never skips a vote.
+        let upper = page
+            .next_from_slot
+            .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let window = (std::ops::Bound::Included(from_slot), upper);
+        assert!(
+            self.records
+                .range(window)
+                .all(|(slot, _)| page.accepted.contains_key(slot)),
+            "a promise page omits no record inside its window"
+        );
+        assert!(
+            self.faulty
+                .range(window)
+                .all(|(slot, _)| page.faulty.contains_key(slot)),
+            "a promise page omits no faulty entry inside its window"
+        );
     }
 
     // ---- Phase 2 ------------------------------------------------------------

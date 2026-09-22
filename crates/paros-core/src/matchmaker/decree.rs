@@ -94,8 +94,13 @@ impl Decree {
     /// # Panics
     ///
     /// If `old` names no matchmaker (a decree with no acceptor is a
-    /// programmer error; [`MatchmakerSet::new`] never builds one).
+    /// programmer error; [`MatchmakerSet::new`] never builds one), or if the
+    /// proposal names no successor member.
     pub(super) fn new(ballot: Ballot, old: &MatchmakerSet, proposal: Vec<MatchmakerId>) -> Self {
+        assert!(
+            !proposal.is_empty(),
+            "a decree proposes a non-empty successor set"
+        );
         let acceptors = AcceptorConfig::new(old.members().to_vec(), QuorumSystem::Majority);
         let mut proposer = Proposer::new();
         // A one-slot log, from slot zero, over one configuration: the decree
@@ -233,6 +238,11 @@ impl Decree {
 
     /// Fold one Phase-2b accept, reporting the chosen value when it completes
     /// the quorum.
+    ///
+    /// # Panics
+    ///
+    /// If the decision is not the round's own value at the decree's own
+    /// ballot (a programmer error).
     pub(super) fn on_accepted(&mut self, from: MatchmakerId) -> AcceptFold {
         if !self.acceptors.contains(from) || self.preempted.is_some() {
             return AcceptFold::Ignored;
@@ -253,13 +263,24 @@ impl Decree {
             return AcceptFold::Ignored;
         }
         let vhash = round.command().fingerprint();
+        let proposed = round.command().clone();
         if !self
             .proposer
             .fold_accepted(from, self.ballot, DECREE_SLOT, vhash)
         {
             return AcceptFold::Ignored;
         }
-        if let Some((_, value)) = self.proposer.decided(DECREE_SLOT, &self.acceptors) {
+        if let Some((ballot, value)) = self.proposer.decided(DECREE_SLOT, &self.acceptors) {
+            // Decision provenance: a decree chooses the value its own round
+            // proposed, at its own ballot — one ballot, one value.
+            assert!(
+                ballot == self.ballot,
+                "a decree is chosen at the ballot it runs at"
+            );
+            assert!(
+                value == proposed,
+                "a chosen decree value is the value its round proposed"
+            );
             return AcceptFold::Chosen(value);
         }
         let accepted = self

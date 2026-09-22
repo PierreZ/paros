@@ -282,10 +282,19 @@ impl Matchmaking {
     /// its watermark maxed, and its effective configuration taken if newer.
     /// A page is counted only at the exact cursor expected from its sender;
     /// a matchmaker whose complete answer is already merged is ignored.
+    ///
+    /// # Panics
+    ///
+    /// If a fold lowered the watermark or the effective configuration's
+    /// ballot, or left a matchmaker both mid-answer and counted (a
+    /// programmer error: both scalars are maxed, and a matchmaker's cursor
+    /// is dropped exactly as it is counted).
     pub fn fold(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchFold {
         if !self.accepts(matchmaker, &page) {
             return MatchFold::Ignored;
         }
+        let watermark_before = self.watermark;
+        let effective_before = self.effective.as_ref().map(|(ballot, _)| *ballot);
         let RegisteredPage {
             history,
             next_from_ballot,
@@ -317,14 +326,31 @@ impl Matchmaking {
         // The watermark is the maximum reported, never the minimum and never
         // a per-reply filter (§3.2): the union is filtered once, at closure.
         self.watermark = self.watermark.max(gc_watermark);
-        if let Some(next) = next_from_ballot {
+        let fold = if let Some(next) = next_from_ballot {
             self.page_next.insert(matchmaker, next);
             MatchFold::Paged(next)
         } else {
             self.page_next.remove(&matchmaker);
             self.registered_by.insert(matchmaker);
             MatchFold::Registered
-        }
+        };
+        // Postconditions: the two maxed scalars never lower, and a
+        // matchmaker is mid-answer or counted, never both.
+        assert!(
+            self.watermark >= watermark_before,
+            "a matchmaking watermark never lowers"
+        );
+        assert!(
+            self.effective.as_ref().map(|(ballot, _)| *ballot) >= effective_before,
+            "a matchmaking's effective configuration never moves to an older ballot"
+        );
+        assert!(
+            self.page_next
+                .keys()
+                .all(|m| !self.registered_by.contains(m)),
+            "a matchmaker is never both mid-answer and counted"
+        );
+        fold
     }
 
     /// Raise the effective configuration to `(ballot, config)` when it is

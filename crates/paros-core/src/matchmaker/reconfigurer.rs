@@ -541,6 +541,12 @@ impl MatchmakerReconfigurer {
     /// reply only stalls the handover until the next call), and a preempted
     /// decree is reopened at a fresh ballot only here — so the driver's
     /// cadence, not the core, paces dueling reconfigurers.
+    ///
+    /// # Panics
+    ///
+    /// If a reopened decree ballot does not sit strictly above both the
+    /// promise that refused it and its own previous ballot (a programmer
+    /// error).
     pub fn resend(&mut self) {
         let me = self.node;
         let mut queue: Vec<(MatchmakerId, ReconfigureRequest)> = Vec::new();
@@ -578,14 +584,19 @@ impl MatchmakerReconfigurer {
                 if let Some(promised) = decree.preempted() {
                     // Reopen strictly above the promise that refused us.
                     self.round = self.round.max(promised.round).saturating_add(1);
-                    **decree = Decree::new(
-                        Ballot {
-                            round: self.round,
-                            node: me,
-                        },
-                        old,
-                        bootstrap.set.members().to_vec(),
+                    let reopened = Ballot {
+                        round: self.round,
+                        node: me,
+                    };
+                    assert!(
+                        reopened > promised,
+                        "a preempted decree reopens strictly above the refusing promise"
                     );
+                    assert!(
+                        reopened > decree.ballot(),
+                        "a preempted decree reopens above its own previous ballot"
+                    );
+                    **decree = Decree::new(reopened, old, bootstrap.set.members().to_vec());
                 }
                 let ballot = decree.ballot();
                 let generation = old.generation;
@@ -767,6 +778,14 @@ impl MatchmakerReconfigurer {
                     round: self.round,
                     node: self.node,
                 };
+                assert!(
+                    ballot > *decree_floor,
+                    "a decree opens strictly above the stop quorum's decree promises"
+                );
+                assert!(
+                    ballot.node == self.node,
+                    "a reconfigurer's decree ballot is its own node's"
+                );
                 let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members().to_vec()));
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
