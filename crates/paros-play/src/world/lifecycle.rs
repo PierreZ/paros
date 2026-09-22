@@ -5,7 +5,7 @@
 use paros_core::{Ballot, ColocatedNode, NodeId, Slot};
 
 use crate::action::{ActionError, ActionErrorCode, Seam};
-use crate::narration::{NarrationKind, many, who};
+use crate::narration::{NarrationKind, at, many, who};
 use crate::view::show_ballot;
 use crate::world::drain::Paused;
 use crate::world::{World, unknown_node};
@@ -175,10 +175,7 @@ impl World {
             who(id),
             show_ballot(booted.acceptor().promised()),
             many(booted.acceptor().records().len(), "accepted record"),
-            booted
-                .replica()
-                .chosen_index()
-                .map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
+            at(booted.replica().chosen_index())
         );
         self.narrate(NarrationKind::Restart, text);
         self.observe(id, move |world| world.pump(id));

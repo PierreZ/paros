@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use paros_core::{NodeId, Slot};
 
 use super::{Choice, Prompt, PromptKind};
+use crate::narration;
 
 impl Prompt {
     /// A message just made `slot` chosen at this node. Apply it, or hold?
@@ -26,7 +27,7 @@ impl Prompt {
         first_unchosen: Slot,
         applies_now: bool,
     ) -> Self {
-        let at = chosen_index.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let at = narration::at(chosen_index);
         let expected = if applies_now { "apply" } else { "hold" };
         let mut explanations = BTreeMap::new();
         explanations.insert(
@@ -96,8 +97,7 @@ impl Prompt {
         inflight_at: Option<Slot>,
         chosen_index: Option<Slot>,
     ) -> Self {
-        let applied =
-            chosen_index.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let applied = narration::at(chosen_index);
         let expected = match (applied_at, inflight_at) {
             (Some(_), _) => "acked",
             (None, Some(_)) => "inflight",

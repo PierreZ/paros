@@ -22,11 +22,12 @@ use paros_core::{NodeId, QuorumSystem, Slot};
 use crate::action::{Action, ActionKind};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_AND_BEATS, TIMEOUT, all_but, applied, at, crash, fresh, is_phase2, propose_as,
+    CLIENT, REPLIES_AND_BEATS, TIMEOUT, all_but, applied, crash, fresh, is_phase2, propose_as,
     read_index_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, to};
 use crate::level::{GoalStatus, Level, WorldKind};
+use crate::narration::at;
 use crate::world::RetryAnswer;
 
 /// Act III's levels, in play order.

@@ -645,15 +645,20 @@ impl World {
     }
 
     fn position_of(&self, id: u64) -> Result<usize, ActionError> {
-        self.wire
-            .iter()
-            .position(|entry| entry.id == id)
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownMessage,
-                    format!("there is no message #{id} in flight"),
-                )
-            })
+        position_in(&self.wire, id)
+    }
+
+    fn client_position(&self, client: u64) -> Option<usize> {
+        self.clients.iter().position(|c| c.id == ClientId(client))
+    }
+
+    fn require_client(&self, client: u64) -> Result<usize, ActionError> {
+        self.client_position(client).ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownParty,
+                format!("there is no client {client} in this level"),
+            )
+        })
     }
 
     fn require_live(&self, id: NodeId) -> Result<usize, ActionError> {
@@ -668,14 +673,18 @@ impl World {
     }
 
     fn require_no_prompt(&self) -> Result<(), ActionError> {
-        if let Some(prompt) = &self.prompt {
-            return Err(ActionError::new(
-                ActionErrorCode::PromptOpen,
-                format!("answer the open question first: {}", prompt.question),
-            ));
-        }
-        Ok(())
+        crate::prompt::require_closed(self.prompt.as_ref())
     }
+}
+
+/// Where message `id` sits on `wire`.
+fn position_in(wire: &[InFlight], id: u64) -> Result<usize, ActionError> {
+    wire.iter().position(|entry| entry.id == id).ok_or_else(|| {
+        ActionError::new(
+            ActionErrorCode::UnknownMessage,
+            format!("there is no message #{id} in flight"),
+        )
+    })
 }
 
 /// How the game names one endpoint of the wire.

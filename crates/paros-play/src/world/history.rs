@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use paros_core::{ClientId, ClientSeq, NodeId, Slot};
 
+use crate::narration::prefix_at as at;
 use crate::world::World;
 
 /// One client's writes.
@@ -251,13 +252,4 @@ impl World {
             .filter_map(|proposal| proposal.slot)
             .max()
     }
-}
-
-/// "nothing", or "slot 3" — how the goals and the history judge name a
-/// watermark.
-fn at(slot: Option<Slot>) -> String {
-    slot.map_or_else(
-        || "the empty prefix".to_string(),
-        |s| format!("slot {}", s.0),
-    )
 }

@@ -25,11 +25,12 @@ use paros_core::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, QuorumSyst
 use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_ONLY, TIMEOUT, applied, at, config, crash, fresh, peers, propose,
-    read_index_as, restart, slot_traffic, start_election, tick,
+    CLIENT, REPLIES_ONLY, TIMEOUT, applied, config, crash, fresh, peers, propose, read_index_as,
+    restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
+use crate::narration::at;
 use crate::view::show_command;
 use crate::world::{Disk, World};
 

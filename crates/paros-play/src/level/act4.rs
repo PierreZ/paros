@@ -25,6 +25,7 @@ use crate::level::common::{
 };
 use crate::level::script::{Script, kind, kind_at, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
+use crate::narration::prefix_at;
 use crate::view::show_command;
 use crate::world::decree::DecreeWorld;
 use crate::world::matchmakers::MatchmakerProcess;
@@ -558,14 +559,8 @@ serve the read.",
                      for {}, and the answer is at or above that slot. The history is \
                      linearizable.",
                     node.0,
-                    index.map_or_else(
-                        || "the empty prefix".to_string(),
-                        |s| format!("slot {}", s.0)
-                    ),
-                    acked.map_or_else(
-                        || "the empty prefix".to_string(),
-                        |s| format!("slot {}", s.0)
-                    )
+                    prefix_at(*index),
+                    prefix_at(acked)
                 ))
             }
             Some((node, _)) if Some(*node) == leader => GoalStatus::Open(format!(
@@ -577,10 +572,7 @@ serve the read.",
                 "Node {} answered the read at {}, and the client holds no ack at or below that \
                  slot. Get a command chosen and acknowledged first. Then ask for the read.",
                 node.0,
-                index.map_or_else(
-                    || "the empty prefix".to_string(),
-                    |s| format!("slot {}", s.0)
-                )
+                prefix_at(*index)
             )),
             None => GoalStatus::Open(
                 "Ask a follower for a read. Then decide when the follower may answer it."

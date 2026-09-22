@@ -122,8 +122,16 @@ pub(crate) fn who(id: NodeId) -> String {
 }
 
 /// "nothing", or "slot 3" — the two ways a watermark reads.
-fn at(slot: Option<Slot>) -> String {
+pub(crate) fn at(slot: Option<Slot>) -> String {
     slot.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
+}
+
+/// "the empty prefix", or "slot 3" — the two ways a read index reads.
+pub(crate) fn prefix_at(slot: Option<Slot>) -> String {
+    slot.map_or_else(
+        || "the empty prefix".to_string(),
+        |s| format!("slot {}", s.0),
+    )
 }
 
 /// "1 record", "2 records" — the game says things out loud, so it counts out

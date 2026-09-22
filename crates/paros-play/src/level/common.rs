@@ -2,7 +2,7 @@
 //! the worlds they build, what a goal reads off them, and the action
 //! shorthands a reference is written in.
 
-use paros_core::{Command, Config, NodeId, QuorumSystem, Slot};
+use paros_core::{Command, Config, NodeId, QuorumSystem};
 
 use crate::action::Action;
 use crate::auto::AutomationFlag;
@@ -94,11 +94,6 @@ pub(super) fn applied(world: &WorldKind, node: u64) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// A watermark as the goals write it.
-pub(super) fn at(slot: Option<Slot>) -> String {
-    slot.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
 }
 
 /// The text inside a client command, for a goal that has to name a value.

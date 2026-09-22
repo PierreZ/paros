@@ -6,10 +6,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::{ClientId, Message, NodeId, ReadIndexResult, ReadState, Slot};
+use paros_core::{Message, NodeId, ReadIndexResult, ReadState, Slot};
 
 use crate::action::{ActionError, ActionErrorCode};
-use crate::narration::{NarrationKind, say, who};
+use crate::narration::{NarrationKind, prefix_at, say, who};
 use crate::world::World;
 use crate::world::history::PendingRead;
 
@@ -23,16 +23,7 @@ impl World {
     pub fn read_index(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
-        let slot = self
-            .clients
-            .iter()
-            .position(|c| c.id == ClientId(client))
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no client {client} in this level"),
-                )
-            })?;
+        let slot = self.require_client(client)?;
         let ctx = self.next_read_ctx;
         // The index a read-index round captures, recomputed here because
         // `ReadRound` exposes none of its fields: the applied watermark, or the
@@ -127,16 +118,7 @@ impl World {
     pub fn quorum_read(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
-        let position = self
-            .clients
-            .iter()
-            .position(|c| c.id == ClientId(client))
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no client {client} in this level"),
-                )
-            })?;
+        let position = self.require_client(client)?;
         let ctx = self.next_read_ctx;
         self.next_read_ctx += 1;
         let issued = self.take_event();
@@ -198,10 +180,7 @@ impl World {
             return;
         }
         self.next_event += 1;
-        let at = state.index.map_or_else(
-            || "the empty prefix".to_string(),
-            |s| format!("slot {}", s.0),
-        );
+        let at = prefix_at(state.index);
         let text = if leaderless {
             format!(
                 "The read at ctx {} is served at {at}, and no leader was asked. A Phase-1 quorum \
