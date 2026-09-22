@@ -7,7 +7,8 @@
 
 use super::{
     ClientId, ClientSeq, ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole,
-    Party, ProposeResult, Slot, TestStorage, cluster, deliver_all, drain, make_leader, ucmd, val,
+    Party, ProposeResult, Slot, TestStorage, campaign, cluster, deliver_all, drain, make_leader,
+    ucmd, val,
 };
 use crate::membership::ProxyId;
 use crate::message::Audience;
@@ -325,8 +326,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
     nodes[0].step_down();
     let _ = raw(&mut nodes[0]);
     // Node 1 campaigns: its own record seeds the recovery.
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     let q = drain(&mut nodes[1]);
     deliver_all(&mut nodes, q);
     assert!(nodes[1].is_leader());

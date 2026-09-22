@@ -803,6 +803,21 @@ mod tests {
         (writes, replies)
     }
 
+    /// Tell `mm` that `successor` was chosen to replace generation 0, and
+    /// drain what it did.
+    fn chosen(
+        mm: &mut Matchmaker,
+        from: u64,
+        successor: &MatchmakerSet,
+    ) -> (Vec<MatchmakerWriteOp>, Vec<ReconfigureReply>) {
+        mm.step_reconfigure(ReconfigureRequest::Chosen {
+            from: NodeId(from),
+            generation: G0,
+            successor: successor.clone(),
+        });
+        drain_reconfigure(mm)
+    }
+
     fn registered(reply: &MatchReply) -> (&BTreeMap<Ballot, Registration>, Ballot) {
         match &reply.outcome {
             MatchOutcome::Registered {
@@ -829,20 +844,10 @@ mod tests {
     fn a_chosen_contradicting_the_recorded_successor_is_refused() {
         let mut mm = fresh(0);
         let recorded = set(1, &[0, 1, 2]);
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(5),
-            generation: G0,
-            successor: recorded.clone(),
-        });
-        drain_reconfigure(&mut mm);
+        chosen(&mut mm, 5, &recorded);
         assert_eq!(mm.successor(), Some(&recorded));
         // The same publication again is idempotent.
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(5),
-            generation: G0,
-            successor: recorded.clone(),
-        });
-        let (writes, replies) = drain_reconfigure(&mut mm);
+        let (writes, replies) = chosen(&mut mm, 5, &recorded);
         assert!(matches!(
             &replies[0],
             ReconfigureReply::Learned {
@@ -852,12 +857,7 @@ mod tests {
         ));
         assert!(writes.is_empty(), "a duplicate publication writes nothing");
         // A contradicting one is not.
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(6),
-            generation: G0,
-            successor: set(1, &[0, 3, 4]),
-        });
-        let (writes, replies) = drain_reconfigure(&mut mm);
+        let (writes, replies) = chosen(&mut mm, 6, &set(1, &[0, 3, 4]));
         assert!(
             matches!(
                 &replies[0],
@@ -902,12 +902,7 @@ mod tests {
         assert_eq!(mm.hard_state().pending.len(), 1);
         // A different set wins generation 1, and this matchmaker is not in it.
         let winner = set(1, &[0, 1, 2]);
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(5),
-            generation: G0,
-            successor: winner.clone(),
-        });
-        let (writes, replies) = drain_reconfigure(&mut mm);
+        let (writes, replies) = chosen(&mut mm, 5, &winner);
         assert!(
             matches!(&replies[0], ReconfigureReply::Refused { .. }),
             "a spare outside the chosen set activates nothing"
@@ -1403,12 +1398,7 @@ mod tests {
         );
         // Chosen: the successor is recorded for generation 0 and, being a
         // member holding the bootstrap, this matchmaker activates it.
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(5),
-            generation: G0,
-            successor: successor.clone(),
-        });
-        let (writes, replies) = drain_reconfigure(&mut mm);
+        let (writes, replies) = chosen(&mut mm, 5, &successor);
         assert!(matches!(
             &replies[0],
             ReconfigureReply::Learned {
@@ -1457,12 +1447,7 @@ mod tests {
     fn a_departed_matchmaker_answers_with_its_successor() {
         let mut mm = fresh(2);
         let successor = set(1, &[0, 1, 3]);
-        mm.step_reconfigure(ReconfigureRequest::Chosen {
-            from: NodeId(5),
-            generation: G0,
-            successor: successor.clone(),
-        });
-        let (writes, replies) = drain_reconfigure(&mut mm);
+        let (writes, replies) = chosen(&mut mm, 5, &successor);
         assert!(matches!(
             &replies[0],
             ReconfigureReply::Learned {

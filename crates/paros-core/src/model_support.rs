@@ -4,6 +4,16 @@
 //! (`proxy_model.rs`) draw their schedules the same way and a reader of one
 //! can read the other.
 
+/// The environment variable `name` parsed as a `T`, or `default` when it is
+/// unset or does not parse — how a model's seed and step budgets are
+/// overridden for a long run.
+pub(crate) fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// A seeded `splitmix64`: deterministic, dependency-free. One per seed; a
 /// model draws every choice it makes from it, so a seed *is* its schedule.
 pub(crate) struct Rng(u64);

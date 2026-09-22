@@ -7,7 +7,7 @@
 use super::{
     ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
     LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot,
-    TestStorage, ballot, chosen_at, cluster, cluster_with_three_chosen, deliver_all,
+    TestStorage, ballot, campaign, chosen_at, cluster, cluster_with_three_chosen, deliver_all,
     deliver_filtered, drain, make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
@@ -231,8 +231,7 @@ fn a_restart_cannot_resurrect_a_relinquished_authority() {
     assert_eq!(rebooted.role(), NodeRole::Follower);
     assert_eq!(rebooted.leadership_origin(), LeadershipOrigin::Elected);
     nodes[0] = rebooted;
-    nodes[0].set_election_timeout(1);
-    nodes[0].tick();
+    campaign(&mut nodes[0]);
     assert!(
         nodes[0].ballot() > authority,
         "a restarted node can only ever campaign strictly above the ballot it gave away"
@@ -389,8 +388,7 @@ fn only_a_settled_leader_may_relinquish() {
 
     // A singleton has nobody to hand to.
     let mut solo = node(0, &[0]);
-    solo.set_election_timeout(1);
-    solo.tick();
+    campaign(&mut solo);
     assert!(solo.is_leader());
     assert!(!solo.can_relinquish());
 }

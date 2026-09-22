@@ -437,6 +437,35 @@ mod tests {
         )
     }
 
+    /// Fold an empty terminal `Promise` page from `from` at `ballot(1, 0)`.
+    fn fold_empty(p: &mut Proposer<NodeId, Command>, from: u64, from_slot: Slot) -> PromiseFold {
+        p.fold_promise(
+            NodeId(from),
+            ballot(1, 0),
+            from_slot,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            None,
+        )
+    }
+
+    /// Fold an empty terminal `Promise` page from `from` into the probe.
+    fn fold_empty_probe(
+        p: &mut Proposer<NodeId, Command>,
+        from: u64,
+        at: Ballot,
+        from_slot: Slot,
+    ) -> PromiseFold {
+        p.fold_probe_promise(
+            NodeId(from),
+            at,
+            from_slot,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        )
+    }
+
     fn opened(prior: Vec<AcceptorConfig>) -> Proposer<NodeId, Command> {
         let mut p = Proposer::new();
         let mut expected: Vec<NodeId> = prior
@@ -470,43 +499,13 @@ mod tests {
     #[test]
     fn phase1_needs_a_quorum_of_every_prior_configuration() {
         let mut p = opened(vec![config(&[0, 1, 2]), config(&[2, 3, 4])]);
-        assert_eq!(
-            p.fold_promise(
-                NodeId(1),
-                ballot(1, 0),
-                Slot(0),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None
-            ),
-            PromiseFold::Answered
-        );
+        assert_eq!(fold_empty(&mut p, 1, Slot(0)), PromiseFold::Answered);
         // {0, 1, 3} is a majority of the union's five members, yet the
         // second configuration holds only one promise (node 3): the union
         // rule would wrongly complete Phase 1 here.
-        assert_eq!(
-            p.fold_promise(
-                NodeId(3),
-                ballot(1, 0),
-                Slot(0),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None
-            ),
-            PromiseFold::Answered
-        );
+        assert_eq!(fold_empty(&mut p, 3, Slot(0)), PromiseFold::Answered);
         assert!(!p.phase1_won(ballot(1, 0)), "quorum(union) is not the rule");
-        assert_eq!(
-            p.fold_promise(
-                NodeId(4),
-                ballot(1, 0),
-                Slot(0),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None
-            ),
-            PromiseFold::Answered
-        );
+        assert_eq!(fold_empty(&mut p, 4, Slot(0)), PromiseFold::Answered);
         assert!(p.phase1_won(ballot(1, 0)));
         assert!(
             !p.phase1_won(ballot(2, 1)),
@@ -561,37 +560,16 @@ mod tests {
             PromiseFold::Continue(Slot(PROMISE_BATCH as u64))
         );
         assert_eq!(
-            p.fold_promise(
-                NodeId(1),
-                ballot(1, 0),
-                Slot(3),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None
-            ),
+            fold_empty(&mut p, 1, Slot(3)),
             PromiseFold::Ignored,
             "a page at the wrong cursor is ignored"
         );
         assert_eq!(
-            p.fold_promise(
-                NodeId(1),
-                ballot(1, 0),
-                Slot(PROMISE_BATCH as u64),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None,
-            ),
+            fold_empty(&mut p, 1, Slot(PROMISE_BATCH as u64)),
             PromiseFold::Answered
         );
         assert_eq!(
-            p.fold_promise(
-                NodeId(1),
-                ballot(1, 0),
-                Slot(0),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                None
-            ),
+            fold_empty(&mut p, 1, Slot(0)),
             PromiseFold::Ignored,
             "a counted sender is not merged twice"
         );
@@ -647,40 +625,19 @@ mod tests {
             "a straggler mid-suffix is still a straggler"
         );
         assert_eq!(
-            p.fold_probe_promise(
-                NodeId(2),
-                ballot(1, 0),
-                Slot(3),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            ),
+            fold_empty_probe(&mut p, 2, ballot(1, 0), Slot(3)),
             PromiseFold::Ignored,
             "a page at the wrong cursor is ignored"
         );
         assert_eq!(
-            p.fold_probe_promise(
-                NodeId(2),
-                ballot(2, 0),
-                Slot(PROMISE_BATCH as u64),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            ),
+            fold_empty_probe(&mut p, 2, ballot(2, 0), Slot(PROMISE_BATCH as u64)),
             PromiseFold::Ignored,
             "a page at another ballot is ignored"
         );
         // The terminal page decides the blocked slot from the first page's
         // `have` and closes the probe.
         assert_eq!(
-            p.fold_probe_promise(
-                NodeId(2),
-                ballot(1, 0),
-                Slot(PROMISE_BATCH as u64),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            ),
+            fold_empty_probe(&mut p, 2, ballot(1, 0), Slot(PROMISE_BATCH as u64)),
             PromiseFold::Answered
         );
         assert_eq!(

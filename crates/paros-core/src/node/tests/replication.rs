@@ -255,8 +255,7 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
 
     // Nodes 1 and 2 elect; neither ever saw slot 1, so `Election::recovered` holds
     // slot 2 alone and `next_slot` jumps over the hole.
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     let q = drain(&mut nodes[1]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
     assert!(nodes[1].is_leader());

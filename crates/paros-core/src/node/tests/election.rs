@@ -80,8 +80,7 @@ fn wedge_after_election() -> [ColocatedNode; 3] {
 
     // Node 0 dies. Node 1 campaigns; the promise quorum is {1,2}, neither of which
     // ever saw slot 1, so `Election::recovered` holds only slot 2.
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     let q = drain(&mut nodes[1]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
     assert!(nodes[1].is_leader(), "the survivors elected node 1");
@@ -159,8 +158,7 @@ fn new_leader_recovers_inflight_entry_under_its_ballot() {
     assert!(nodes[1].acceptor().records().contains_key(&Slot(0)));
 
     // Node 2 campaigns. Deliver only to node 1 (node 0 is partitioned).
-    nodes[2].set_election_timeout(1);
-    nodes[2].tick();
+    campaign(&mut nodes[2]);
     let q = drain(&mut nodes[2]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
 
@@ -189,8 +187,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     // different values for slot 0 at different ballots; the higher-ballot value
     // must win the recovery merge.
     let mut n = node(4, &[0, 1, 2, 3, 4]);
-    n.set_election_timeout(1);
-    n.tick(); // Candidate at ballot {1,4}, Prepare from_slot 0
+    campaign(&mut n); // Candidate at ballot {1,4}, Prepare from_slot 0
     let _ = drain(&mut n);
     let camp = n.ballot();
 
@@ -200,23 +197,9 @@ fn recovery_picks_highest_ballot_value_per_slot() {
     acc_low.insert(Slot(0), low);
     let mut acc_high = BTreeMap::new();
     acc_high.insert(Slot(0), high.clone());
-    n.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(0),
-        ballot: camp,
-        from_slot: Slot(0),
-        accepted: acc_low,
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(NodeId(0), camp, acc_low));
     assert!(!n.is_leader(), "one promise short of quorum");
-    n.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(3),
-        ballot: camp,
-        from_slot: Slot(0),
-        accepted: acc_high,
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(NodeId(3), camp, acc_high));
     assert!(n.is_leader(), "quorum reached");
     let (_, e) = n
         .acceptor()
@@ -232,8 +215,7 @@ fn recovery_picks_highest_ballot_value_per_slot() {
 #[test]
 fn nack_steps_a_candidate_down_instead_of_stalling() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick(); // Candidate
+    campaign(&mut n); // Candidate
     let _ = drain(&mut n);
     assert_eq!(n.role(), NodeRole::Candidate);
     let camp = n.ballot();
@@ -256,8 +238,7 @@ fn nack_steps_a_candidate_down_instead_of_stalling() {
 #[test]
 fn a_non_member_nack_cannot_depose_a_campaign() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
 
@@ -323,8 +304,7 @@ fn promise_suffix_is_served_in_bounded_pages() {
 #[test]
 fn a_partial_promise_page_does_not_count_toward_the_quorum() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
     let accepted = (0..PROMISE_BATCH as u64)
@@ -364,8 +344,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
 #[test]
 fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let stale_campaign = n.ballot();
     let _ = drain(&mut n);
     let learned = ballot(stale_campaign.round + 1, 1);
@@ -395,8 +374,7 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
 #[test]
 fn leader_recovery_is_split_across_ready_batches() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
 
@@ -475,8 +453,7 @@ fn leader_never_lowers_its_promise_on_self_accept() {
 #[test]
 fn single_node_cluster_elects_and_chooses_immediately() {
     let mut n = node(0, &[0]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     assert!(n.is_leader(), "a single node wins its own election");
     let r = n.propose(ClientId(1), ClientSeq(1), val(42));
     assert_eq!(r, ProposeResult::Accepted(Slot(0)));
@@ -525,8 +502,7 @@ fn truncated_quorum_refuses_a_blind_candidate() {
 
     // Node 2, blind to slot 2, campaigns: its Prepare's from_slot is 2, below the
     // quorum's floor (3).
-    nodes[2].set_election_timeout(1);
-    nodes[2].tick();
+    campaign(&mut nodes[2]);
     assert_eq!(nodes[2].role(), NodeRole::Candidate);
     let q = drain(&mut nodes[2]);
     assert!(
@@ -596,14 +572,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     // ballot X has since promised away. The quorum is there — the win is not.
     let mut reported = BTreeMap::new();
     reported.insert(Slot(3), (ballot(0, 1), ucmd(9, 9, 0xA0)));
-    x.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: b,
-        from_slot: Slot(0),
-        accepted: reported,
-        next_from_slot: None,
-    });
+    x.step(terminal_promise(NodeId(1), b, reported));
     assert_eq!(x.role, NodeRole::Candidate, "the stale win is refused");
     assert!(
         x.proposer.election().is_some(),
@@ -781,14 +750,7 @@ fn a_snapshot_raised_promise_blocks_the_stale_election_win() {
     // quorum for `b` — but `b < m`, and the win is refused.
     let mut reported = BTreeMap::new();
     reported.insert(Slot(8), (ballot(4, 1), ucmd(9, 9, 0xA0)));
-    x.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: b,
-        from_slot: Slot(0),
-        accepted: reported,
-        next_from_slot: None,
-    });
+    x.step(terminal_promise(NodeId(1), b, reported));
     assert_eq!(
         x.role,
         NodeRole::Candidate,

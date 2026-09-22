@@ -957,24 +957,7 @@ mod tests {
         pool: &mut [Matchmaker],
         drop: &[u64],
     ) -> Vec<ReconfigurerStep> {
-        let mut steps = Vec::new();
-        let ready = r.ready();
-        let requests = ready.requests().to_vec();
-        ready.advance();
-        for (to, request) in requests {
-            if drop.contains(&to.0) {
-                continue;
-            }
-            let mm = &mut pool[usize::try_from(to.0).expect("index")];
-            mm.step_reconfigure(request);
-            let ready = mm.ready();
-            let replies = ready.reconfigure_replies().to_vec();
-            ready.advance();
-            for reply in replies {
-                steps.push(r.on_reply(reply));
-            }
-        }
-        steps
+        route(r, pool, drop, &[])
     }
 
     fn set(g: u64, m: &[u64]) -> MatchmakerSet {
@@ -989,11 +972,25 @@ mod tests {
         pool: &mut [Matchmaker],
         mute: &[u64],
     ) -> Vec<ReconfigurerStep> {
+        route(r, pool, &[], mute)
+    }
+
+    /// [`deliver`] and [`deliver_muting`] in one: the requests to `drop`
+    /// are lost on the way out, the replies of `mute` on the way back.
+    fn route(
+        r: &mut MatchmakerReconfigurer,
+        pool: &mut [Matchmaker],
+        drop: &[u64],
+        mute: &[u64],
+    ) -> Vec<ReconfigurerStep> {
         let mut steps = Vec::new();
         let ready = r.ready();
         let requests = ready.requests().to_vec();
         ready.advance();
         for (to, request) in requests {
+            if drop.contains(&to.0) {
+                continue;
+            }
             let mm = &mut pool[usize::try_from(to.0).expect("index")];
             mm.step_reconfigure(request);
             let ready = mm.ready();

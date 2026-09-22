@@ -293,18 +293,10 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
 #[test]
 fn accepted_fingerprint_must_match_the_inflight_command() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
-    n.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: camp,
-        from_slot: Slot(0),
-        accepted: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(NodeId(1), camp, BTreeMap::new()));
     let _ = drain(&mut n);
 
     let ProposeResult::Accepted(slot) = n.propose(ClientId(4), ClientSeq(5), val(6)) else {

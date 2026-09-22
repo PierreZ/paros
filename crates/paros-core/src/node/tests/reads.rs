@@ -67,8 +67,7 @@ fn fresh_leader_read_waits_for_the_read_floor() {
     // Elect node 1 delivering Phase-1 traffic only: it recovers its accepted
     // slot 3 (read_floor) but the re-proposal Accepts stay undelivered, so its
     // chosen prefix still lags the floor.
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     let q = drain(&mut nodes[1]);
     deliver_filtered(&mut nodes, q, |_, m| {
         matches!(
@@ -137,8 +136,7 @@ fn fresh_leader_read_waits_for_the_read_floor() {
 #[test]
 fn single_node_read_confirms_in_the_same_batch() {
     let mut n = node(0, &[0]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     assert!(n.is_leader(), "a single node is its own quorum");
     let _ = n.propose(ClientId(1), ClientSeq(1), val(1));
     assert_eq!(n.hard_state().chosen_index, Some(Slot(0)));

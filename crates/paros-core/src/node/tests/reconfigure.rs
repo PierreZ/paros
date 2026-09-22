@@ -27,8 +27,7 @@ fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
         deployed_node(4, &[0, 1, 2], &pool, 1),
     ];
     let mut mms = registries(1);
-    nodes[0].set_election_timeout(1);
-    nodes[0].tick();
+    campaign(&mut nodes[0]);
     let requests = drain_match_requests(&mut nodes[0]);
     for reply in matchmake(&mut mms, requests) {
         nodes[0].on_match_reply(reply);
@@ -182,8 +181,7 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
     assert_eq!(nodes[0].role(), NodeRole::Follower);
     assert_eq!(nodes[0].membership_counters().1, 1);
     // ...and it never campaigns again as a non-member, while a member does.
-    nodes[0].set_election_timeout(1);
-    nodes[0].tick();
+    campaign(&mut nodes[0]);
     assert_eq!(nodes[0].role(), NodeRole::Follower);
     assert_eq!(nodes[0].membership_counters().0, 1);
     assert_eq!(
@@ -191,8 +189,7 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
         new,
         "members learned C_new from the Prepare"
     );
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     assert_eq!(nodes[1].role(), NodeRole::Candidate);
     assert!(
         drain_match_requests(&mut nodes[1])

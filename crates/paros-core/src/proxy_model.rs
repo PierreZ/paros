@@ -47,7 +47,7 @@ use std::fmt::Write as _;
 
 use crate::membership::{AcceptorConfig, ProxyId, QuorumSystem};
 use crate::message::{Message, Party};
-use crate::model_support::{Mailbox, Rng};
+use crate::model_support::{Mailbox, Rng, env_or};
 use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
 use crate::state::{Config, HardState};
@@ -985,19 +985,12 @@ impl ColocatedNode {
     }
 }
 
-fn env_or(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 /// The campaign: every seed, then the reach counters.
 #[test]
 fn proxy_leaders_are_safe_under_chaos_and_live_after_it() {
     let seeds = env_or("PROXY_MODEL_SEEDS", SEEDS);
     let from = env_or("PROXY_MODEL_FROM", 1);
-    let steps = usize::try_from(env_or("PROXY_MODEL_STEPS", CHAOS_STEPS as u64)).expect("steps");
+    let steps = env_or("PROXY_MODEL_STEPS", CHAOS_STEPS);
     let mut total = Reach::default();
     for seed in from..=seeds {
         let reach = World::new(seed).run(seed, steps);

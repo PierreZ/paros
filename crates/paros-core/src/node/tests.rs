@@ -113,6 +113,12 @@ fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> Co
     ColocatedNode::new(&storage)
 }
 
+/// Fire the election clock on `n`: its next tick opens a campaign.
+fn campaign(n: &mut ColocatedNode) {
+    n.set_election_timeout(1);
+    n.tick();
+}
+
 /// Drain a node's pending matchmaking requests and clear the batch.
 fn drain_match_requests(n: &mut ColocatedNode) -> Vec<(MatchmakerId, MatchRequest)> {
     drain_with(n, |ready| ready.match_requests().to_vec()).1
@@ -178,6 +184,23 @@ fn ballot(round: u64, node: u64) -> Ballot {
     Ballot {
         round,
         node: NodeId(node),
+    }
+}
+
+/// A one-page `Promise` from `from` at `ballot` covering the whole suffix
+/// from slot 0: `accepted` reported, nothing faulty.
+fn terminal_promise(
+    from: NodeId,
+    ballot: Ballot,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
+) -> Message {
+    Message::Promise {
+        from,
+        ballot,
+        from_slot: Slot(0),
+        accepted,
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
     }
 }
 
@@ -253,8 +276,7 @@ const NO_CHECK_QUORUM: u64 = 1_000_000;
 /// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
 /// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
 fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
-    nodes[idx].set_election_timeout(1);
-    nodes[idx].tick(); // election timeout -> Candidate, broadcasts Prepare
+    campaign(&mut nodes[idx]); // election timeout -> Candidate, broadcasts Prepare
     let q = drain(&mut nodes[idx]);
     deliver_all(nodes, q);
     assert!(
