@@ -59,8 +59,8 @@ use paros_core::{
     AcceptorConfig, Ballot, ClientId, ClientSeq, ColocatedNode, Control, Delegation, GcAck,
     MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, Message, NodeId,
     NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureRefusal,
-    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Slot, StartRefusal,
-    Value,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, ResendScope, Slot,
+    StartRefusal, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -73,7 +73,7 @@ use crate::grpc::{
     ParosServer, ProposeAck, ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck,
     RpcInbox, WireQuorumSystem, common, rpc_channel,
 };
-use crate::hooks::{DriverHooks, Reply};
+use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::NodeStorage;
 
 use boot::replay_boot_state;
@@ -83,7 +83,7 @@ use handover::HandoverDriver;
 use matchmaking::{
     MatchmakerLinks, report_match_step, send_outbox, send_reconfigure_requests, surface_matchmaking,
 };
-use ready::{ClientWaiters, drain_ready, storage_fault_crash};
+use ready::{ClientWaiters, crash_if, drain_ready, storage_fault_crash};
 use reply::{answer, maybe_duplicate};
 use report::{Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{
@@ -125,7 +125,14 @@ impl<P: Providers, H: DriverHooks, A: Audit + Clone + Send + 'static> NodeLoop<'
     ) -> Result<(), RunError> {
         let outbox = drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
         surface_matchmaking(node, &mut last.matchmaking, self.audit, self.self_id);
-        send_outbox(self.providers, self.links, self.audit, self.self_id, outbox);
+        send_outbox(
+            self.providers,
+            self.links,
+            self.hooks,
+            self.audit,
+            self.self_id,
+            outbox,
+        );
         maintain(
             node,
             self.providers,
@@ -282,10 +289,16 @@ where
                 .format()
                 .await
                 .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+            // The format's own durability seam: the marker is staged, not
+            // yet synced. A crash here must leave a store the next boot
+            // formats afresh — the provisioning claim is exactly as durable
+            // as the marker it is recorded with.
+            crash_if(true, hooks, audit, NodeId(boot_id), Seam::FormatBeforeSync)?;
             storage
                 .sync(paros_core::MustSync::Sync)
                 .await
                 .map_err(|e| storage_fault_crash(audit, boot_id, e))?;
+            audit.store_formatted(NodeId(boot_id));
             tracing::info!(node = boot_id, "store_formatted");
         }
         (BootKind::ExistingMember, false) => {
@@ -343,6 +356,9 @@ where
     // The sans-IO core, bootstrapped from durable storage (the same
     // `initial_state` the identity above was read from).
     let mut node = ColocatedNode::new(&storage);
+    // The core's liveness budgets are driver policy, handed over as data
+    // before the node takes its first step.
+    node.set_budgets(tunables.budgets());
 
     replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
 
@@ -1115,16 +1131,54 @@ where
                     tracing::info!(node = self_id, "retired");
                     return Ok(());
                 }
+                // The campaign's own give-up, taken early (#120): consulted
+                // only while a matchmaking phase is open — never on a plain
+                // deployment, which has none — and always safe, the
+                // transition a matchmaker's refusal already takes. Asked at
+                // the top of the beat, before `tick`, on a campaign the last
+                // settle already surfaced and drained: the abandonment then
+                // lands between two batches, never inside one (a tick's
+                // re-ask of the campaign it abandons would be a request for a
+                // ballot nobody runs).
+                if let Some((ballot, _, kind)) = node.matchmaking()
+                    && hooks.abandon_campaign(kind)
+                    && node.abandon_campaign()
+                {
+                    audit.campaign_abandoned(NodeId(self_id), ballot, kind);
+                    tracing::info!(
+                        node = self_id,
+                        round = ballot.round,
+                        reconfiguration = kind.is_reconfiguration(),
+                        "campaign_abandoned"
+                    );
+                }
                 node.tick();
                 // Consult each hook only when its decision can have an effect.
                 // Production's hooks are false; simulation gives each decision
                 // an independent BUGGIFY location.
                 if node.has_pending_accepts() {
-                    if hooks.skip_accept_resend() {
+                    // Two decisions, one per custody (#142): the colocated
+                    // rounds' re-send and the delegated rounds'
+                    // re-delegation walk different paths, and each is asked
+                    // only while a round of its custody is open. Skipping
+                    // either is always safe; a skipped re-delegation is not
+                    // counted toward the take-back budget.
+                    let skip_colocated = node.has_pending_of(ResendScope::Colocated)
+                        && hooks.skip_accept_resend();
+                    if skip_colocated {
                         audit.resend_skipped(NodeId(self_id));
                         tracing::info!(node = self_id, "accept_resend_skipped");
-                    } else {
-                        node.resend_pending();
+                    }
+                    let skip_delegated = node.has_pending_of(ResendScope::Delegated)
+                        && hooks.skip_redelegation();
+                    if skip_delegated {
+                        tracing::info!(node = self_id, "redelegation_skipped");
+                    }
+                    match (skip_colocated, skip_delegated) {
+                        (false, false) => node.resend_pending(),
+                        (false, true) => node.resend_pending_of(ResendScope::Colocated),
+                        (true, false) => node.resend_pending_of(ResendScope::Delegated),
+                        (true, true) => {}
                     }
                     // Liveness under a dead proxy (#142): a delegated round
                     // re-delegated the budget's worth of beats without its
@@ -1276,6 +1330,20 @@ where
                     audit.stepped_down(NodeId(self_id));
                     tracing::info!(node = self_id, "leadership_resigned");
                     node.step_down();
+                }
+                // An unprompted snapshot point (#101): a leader with no
+                // marker in flight may decide one although no compaction
+                // asked — an ordinary control command, always safe. Asked
+                // only where it can have an effect, and before the custody
+                // tick below so the marker's slot is tracked from its first
+                // beat.
+                if node.is_leader()
+                    && snap.marker_pending.is_none()
+                    && hooks.propose_unprompted_snap_marker()
+                    && let ProposeResult::Accepted(slot) = node.propose_snap_marker()
+                {
+                    snap.marker_pending = Some(slot);
+                    tracing::info!(node = self_id, at = slot.0, unprompted = true, "snap_marker_proposed");
                 }
                 // Snapshot-point repair upkeep (#101): custody advertisement,
                 // the leader's coupling tally, and the chunk-repair pull.

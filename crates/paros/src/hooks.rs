@@ -5,11 +5,14 @@
 //! yields part-way and process-granularity chaos (moonpool's attrition) can only
 //! crash a node *between* batches — never at the persist/send seam within one;
 //! [`Seam`] is how those points become reachable. [`DriverHooks`] also exposes
-//! the driver's optional policy decisions: delaying an `Accept` re-send,
-//! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
-//! choices (overtake the queue, evict across kinds, and — armed at enqueue,
-//! applied at the drain — hold a batch or reverse it), skipping a snapshot
-//! offer, and stretching a tick.
+//! the driver's optional policy decisions: delaying an `Accept` re-send or a
+//! proxy re-delegation, resigning leadership, choosing the shortest valid
+//! election timeout, the peer mailbox's choices (overtake the queue, evict
+//! across kinds, and — armed at enqueue, applied at the drain — hold a batch
+//! or reverse it), skipping a snapshot offer, stretching a node's or a
+//! proxy's tick, deferring a recovery page, deciding an unprompted snapshot
+//! point, dropping a matchmaker registration request, and abandoning a
+//! campaign mid-matchmaking.
 //! Production passes [`NoHooks`], whose defaults never perturb the driver.
 //!
 //! **Every hook is consulted from the driver's node loop, never from a spawned
@@ -19,7 +22,9 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
+use paros_core::{
+    MatchmakerId, Message, NodeId, Party, ProxyId, ReconfigurerPhase, RegistrationKind, Slot,
+};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +78,27 @@ pub enum Seam {
     /// then fsync) a crash here lets a `Registered` reply escape for a ballot
     /// the restarted matchmaker no longer holds — the registry's un-promise.
     MatchAfterSyncBeforeReply,
+    /// At a **first boot**, after the driver staged the store's format
+    /// marker (#147) but **before** its fsync. A crash here loses the
+    /// marker, and nothing else was ever durable on this store: the next
+    /// boot must be a first boot again — formatted afresh — never an
+    /// existing member refused as amnesiac. The operator's provisioning
+    /// claim is only as durable as the marker it is recorded with.
+    FormatBeforeSync,
+    /// A `Ready` batch carrying a peer's **snapshot install**
+    /// (`WriteOp::InstallSnapshot`) is staged but **before** the fsync — the
+    /// [`Seam::BeforeSync`] of a below-floor node's recovery, its own
+    /// location so a seed can crash installs without crashing every batch.
+    /// A crash here loses the install (the node is still below the floor
+    /// and re-asks), and nothing it implied was sent.
+    InstallSnapshotBeforeSync,
+    /// The batch's deferred **compaction floor** (`WriteOp::Truncate`,
+    /// flushed only after the application fsync) is staged but **before**
+    /// its fsync — the [`Seam::BeforeSync`] of a truncation, its own
+    /// location. A crash here loses the floor raise, which is pure space
+    /// reclamation the next decided `Truncate` re-raises; the application
+    /// state covering the dropped slots is already durable.
+    TruncateBeforeSync,
 }
 
 impl Seam {
@@ -88,6 +114,9 @@ impl Seam {
             Seam::AfterBootReplayBeforeSync => "after_boot_replay_before_sync",
             Seam::MatchBeforeSync => "match_before_sync",
             Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
+            Seam::FormatBeforeSync => "format_before_sync",
+            Seam::InstallSnapshotBeforeSync => "install_snapshot_before_sync",
+            Seam::TruncateBeforeSync => "truncate_before_sync",
         }
     }
 }
@@ -191,8 +220,94 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether to skip a re-send that has pending `Accept`s to send.
+    /// Whether to skip this beat's re-send of the leader's **colocated**
+    /// rounds' `Accept`s ([`paros_core::ColocatedNode::resend_pending_of`]
+    /// with [`paros_core::ResendScope::Colocated`]). Consulted only while a
+    /// colocated round is open. Always safe: the re-send is pure
+    /// optimization, and a round nobody re-sends stays undecided until a
+    /// later beat or the next leadership recovers it.
     fn skip_accept_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to skip this beat's **re-delegation** of the leader's
+    /// delegated rounds to their proxy leaders (#142,
+    /// [`paros_core::ResendScope::Delegated`]) — its own decision, apart from
+    /// the colocated re-send, because it walks a different path: the
+    /// re-delegation reaches one proxy, whose re-fan-out is P2b-idempotent,
+    /// and it is what the take-back budget counts. Consulted only while a
+    /// delegated round is open, so a `true` always costs a beat. Always safe:
+    /// a skipped re-delegation is not counted, so the leader's take-back
+    /// ([`paros_core::ColocatedNode::take_back_delegated`]) — the liveness
+    /// under a dead proxy — is delayed, never hastened, and a round nobody
+    /// re-delegates is recovered by the next leadership exactly as a
+    /// colocated one is.
+    fn skip_redelegation(&self) -> bool {
+        false
+    }
+
+    /// Whether to **defer** this batch's recovery continuation — the next
+    /// bounded page of the contiguous chosen-prefix walk or of a fresh
+    /// leader's recovery ([`paros_core::ColocatedNode::advance_recovery`]) —
+    /// to the end of the next drained batch instead of this one. Consulted
+    /// only while a continuation is pending
+    /// ([`paros_core::ColocatedNode::has_recovery_continuation`]), so a
+    /// `true` always delays a page. Always safe, and a delay rather than a
+    /// wedge: every drained batch ends at this same decision point and the
+    /// node loop drains one at least every tick, so the page is re-offered
+    /// on the next settle — the continuation is held in the core, not in the
+    /// driver — and a node whose walk pauses is exactly a slow node. What it
+    /// reaches is the window between two pages, stretched: a leader whose
+    /// recovery is half-started when the next election, handoff or
+    /// reconfiguration arrives.
+    fn defer_recovery_page(&self) -> bool {
+        false
+    }
+
+    /// Whether this leader should propose a **snapshot-point marker**
+    /// ([`paros_core::ColocatedNode::propose_snap_marker`]) on this beat
+    /// although no client asked for a compaction. Consulted only on a leader
+    /// with no marker already in flight. Always safe: a `Snap` marker is an
+    /// ordinary control command decided by ordinary consensus, whose only
+    /// effect at every node that applies it is to record a snapshot point it
+    /// may later serve and advertise — the core's contract binds its
+    /// `at_index` to its own slot by construction, and a point nobody
+    /// truncates to is only retained custody. What it reaches is a log with
+    /// decided points no compaction ever asked for: custody tallies and
+    /// chunk repairs of points below, above and between the ones the
+    /// compaction path seeds.
+    fn propose_unprompted_snap_marker(&self) -> bool {
+        false
+    }
+
+    /// Whether to **drop** this campaign's registration request to
+    /// `matchmaker` before it leaves the node loop — the decision is taken
+    /// on the loop, before the RPC task is spawned, never inside it.
+    /// Consulted per request, only on a matchmaker deployment. Always safe:
+    /// the RPC could be lost in flight at any time, and the campaign's
+    /// per-matchmaker re-send ([`paros_core::ColocatedNode::resend_matchmaking`])
+    /// re-asks exactly the matchmakers that have not answered. What it
+    /// reaches is a registration that lands at a strict subset of the
+    /// matchmaker set while the rest never hear the ballot — the shape the
+    /// intersection argument is made for.
+    fn drop_matchmaker_request(&self, _matchmaker: MatchmakerId) -> bool {
+        false
+    }
+
+    /// Whether to **abandon** the open campaign while it is still
+    /// matchmaking ([`paros_core::ColocatedNode::abandon_campaign`]); `kind`
+    /// says what it registers, so a simulation can select an ordinary
+    /// campaign's abandonment independently of a reconfiguration's.
+    /// Consulted on the matchmaking beat, only while a matchmaking phase is
+    /// open — never on a plain deployment, which has none. Always safe: it
+    /// is the transition a matchmaker's refusal already takes — no `Prepare`
+    /// has left, the raised promise stays durable, and whatever the request
+    /// registered stays in the matchmakers' histories for every later
+    /// Phase 1. A reconfiguration abandoned before its matchmaking reached a
+    /// quorum may be lost, the documented fate of such a change; one that
+    /// reached a quorum is the effective configuration regardless.
+    fn abandon_campaign(&self, kind: RegistrationKind) -> bool {
+        let _ = kind;
         false
     }
 
@@ -311,7 +426,12 @@ pub trait DriverHooks {
     /// connection-level faults, this reaches *per-message* loss — e.g. one
     /// isolated `Accept` for an earlier slot vanishing while later slots land,
     /// the interleaving behind a stranded chosen-gap wedge.
-    fn drop_outgoing(&self, _to: Party, _msg: &Message) -> bool {
+    ///
+    /// `from` is the sending party — a node, or a proxy leader fanning a
+    /// delegated round out (#142) — so a simulation can select a loss per
+    /// *path* (a delegation to a proxy, a proxy's fan-out, an acceptor's
+    /// `Accepted` to a proxy) independently of the colocated one.
+    fn drop_outgoing(&self, _from: Party, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -321,7 +441,9 @@ pub trait DriverHooks {
     /// harmless — this location exists to keep it that way (a quorum counter
     /// "optimized" into an integer would let a duplicated `Accepted` fabricate
     /// a quorum from a sub-quorum). Moonpool has no message-duplication fault.
-    fn duplicate_outgoing(&self, _to: Party, _msg: &Message) -> bool {
+    ///
+    /// `from` is the sending party, as for [`DriverHooks::drop_outgoing`].
+    fn duplicate_outgoing(&self, _from: Party, _to: Party, _msg: &Message) -> bool {
         false
     }
 
@@ -504,6 +626,18 @@ pub trait DriverHooks {
     /// re-accept idempotently, and a round the proxy never closes is taken
     /// back by its leader ([`paros_core::ColocatedNode::take_back_delegated`]).
     fn skip_proxy_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether a **proxy leader's** next tick should wait twice the normal
+    /// interval — the proxy driver's own [`DriverHooks::stretch_tick_interval`],
+    /// a separate decision because the proxy's beat paces different work (its
+    /// re-fan-out and its retention budget) on a different process. Always
+    /// safe: every budget the proxy keeps is counted in beats, so a proxy that
+    /// beats at half speed is a slow proxy, which the leader's take-back
+    /// already tolerates. Consulted once per proxy tick; a simulation is
+    /// expected to stop stretching after its chaos window.
+    fn stretch_proxy_tick(&self) -> bool {
         false
     }
 

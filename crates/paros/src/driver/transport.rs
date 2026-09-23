@@ -19,9 +19,7 @@ use crate::audit::Audit;
 use crate::grpc::{ParosInternalClient, internal, message_to_proto};
 use crate::hooks::DriverHooks;
 
-use super::config::{
-    DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES, grpc_channel_config,
-};
+use super::config::{DriverTunables, GRPC_DELIVERY_BATCH, grpc_channel_config};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
 /// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
@@ -503,7 +501,15 @@ pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
             }
         }
         let mut attempt_client = client.clone();
-        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, from, to);
+        let (batch, next) = delivery_batch(
+            first,
+            &messages,
+            batch_limit,
+            tunables.delivery_batch_bytes,
+            &audit,
+            from,
+            to,
+        );
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
@@ -529,6 +535,7 @@ fn delivery_batch<A: Audit>(
     mut first: internal::ConsensusMessage,
     messages: &PeerMailbox,
     batch_limit: usize,
+    byte_limit: usize,
     audit: &A,
     from: Party,
     to: Party,
@@ -569,7 +576,7 @@ fn delivery_batch<A: Audit>(
         let Some(message) = messages.try_pop() else {
             break;
         };
-        if batch_bytes.saturating_add(message.encoded_len()) > GRPC_DELIVERY_BATCH_BYTES {
+        if batch_bytes.saturating_add(message.encoded_len()) > byte_limit {
             carried = Some(message);
             break;
         }
@@ -623,12 +630,12 @@ pub(crate) fn send_messages<H, A>(
 {
     let from = out.sender;
     for (to, msg) in messages {
-        if hooks.drop_outgoing(to, &msg) {
+        if hooks.drop_outgoing(from, to, &msg) {
             trace_send_drop(audit, from, to, &msg);
             continue;
         }
         out.transmit(hooks, audit, to, &msg);
-        if hooks.duplicate_outgoing(to, &msg) {
+        if hooks.duplicate_outgoing(from, to, &msg) {
             audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
                 from = %from,

@@ -47,6 +47,12 @@ const SHAPE_KEY: &str = "paros-node-shapes";
 /// for why it is a floor and not a tunable.
 const ROUND_TRIP_FLOOR_MS: u64 = 250;
 
+/// The largest command-carrying protocol message the chain workload can
+/// produce, encoded: its knobbed large command's ceiling (16 KiB,
+/// `ChainConfig::large_command_bytes`) plus a generous envelope. Not a
+/// tunable — it is what the delivery byte budget's floor is measured in.
+const MAX_COMMAND_MESSAGE_BYTES: usize = 16 * 1024 + 1024;
+
 /// The default per-restart chance of a terminal storage loss — a wiped node
 /// disk (#124) or an unusable matchmaker registry (#125).
 const DEFAULT_LOSS_PCT: u32 = 35;
@@ -150,9 +156,10 @@ impl NodeShape {
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
+        let election_timeout_base = buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks);
         let tunables = DriverTunables {
             tick_interval: ms(tick_ms),
-            election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
+            election_timeout_base,
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
@@ -231,7 +238,55 @@ impl NodeShape {
             // round for a compacted slot is re-fanned-out; the tail
             // outlasts it.
             proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
+            // The core's CTRL repair-probe budget, in election timeouts
+            // (`paros_core::Budgets`). Floor 1: one timeout is time for a
+            // re-sent `Prepare` to be answered, and the resignation past it
+            // is a step down — always safe, another node campaigns. The
+            // extreme resigns blocked leaders eagerly (churn) or holds them
+            // long (a stalled prefix the tail still outlasts).
+            repair_timeout_elections: buggify_knob!(3_u64, 1_u64..10_u64),
+            // The handoff successor's uncovered-fence budget, its own
+            // location. Floor 1 timeout (catch-up of a fence its
+            // predecessor's quorum decided); the fallback past it is an
+            // ordinary election, so both extremes are winnable.
+            handoff_fence_elections: buggify_knob!(3_u64, 1_u64..10_u64),
+            // The core's read TTL, in ticks. Floor: one election-timeout
+            // base — a watermark raised by an accept that never decided
+            // needs the next leader's gap fill to be covered, and a shorter
+            // window drops reads that were about to confirm. Clamped to the
+            // floor whichever side the knob draws (a fast-tick seed raises
+            // the base past the default), and the drop is silent: the
+            // driver's own retry sweep answers the client either way.
+            read_ttl_ticks: buggify_knob!(20_u64, 1_u64..81_u64).max(election_timeout_base),
+            // The per-RPC byte budget of a delivery batch. Floor: two of the
+            // largest command-carrying messages (`MAX_COMMAND_MESSAGE_BYTES`),
+            // so ordinary traffic still packs behind one large command; a
+            // message above the budget still travels alone, so no budget is
+            // a lost message — but one that fits a single large command per
+            // RPC caps per-peer throughput on a large-command seed, the
+            // one-message-batch partition the doctrine forbids.
+            delivery_batch_bytes: buggify_knob!(
+                defaults.delivery_batch_bytes,
+                2 * MAX_COMMAND_MESSAGE_BYTES..256 * 1024 + 1
+            ),
         };
+        if tunables.repair_timeout_elections != 3 {
+            // BUGGIFY pairing: the repair-probe budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme repair-probe budget");
+        }
+        if tunables.handoff_fence_elections != 3 {
+            // BUGGIFY pairing: the handoff-fence budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme handoff-fence budget");
+        }
+        if tunables.read_ttl_ticks < 20 {
+            // BUGGIFY pairing: a short read TTL genuinely runs (the floor
+            // clamp makes the long side the default on fast-tick seeds).
+            assert_reachable!("a node runs with a short read TTL");
+        }
+        if tunables.delivery_batch_bytes != defaults.delivery_batch_bytes {
+            // BUGGIFY pairing: the delivery byte-budget extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme delivery byte budget");
+        }
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");

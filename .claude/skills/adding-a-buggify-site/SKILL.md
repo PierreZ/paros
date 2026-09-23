@@ -62,9 +62,10 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
 ## Seams
 
 Process-level attrition cannot crash between a write and its sync. The
-`Seam` enum in `crates/paros/src/hooks.rs` names the eight points the driver
-asks `crash_at(seam)` at (`BeforeSync`, `AfterSyncBeforeSend`,
-`AfterApplyBeforeSync`, `AfterBootReplayBeforeSync`, `BeforeChunkSync`,
+`Seam` enum in `crates/paros/src/hooks.rs` names the eleven points the driver
+asks `crash_at(seam)` at (`BeforeSync`, `InstallSnapshotBeforeSync`,
+`TruncateBeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync`,
+`AfterBootReplayBeforeSync`, `FormatBeforeSync`, `BeforeChunkSync`,
 `AfterChunkRestoreBeforeSync`, `MatchBeforeSync`, `MatchAfterSyncBeforeReply`).
 A new durability boundary gets a new variant and its own location in
 `BuggifyHooks`; sharing one location stops the sweep from selecting the

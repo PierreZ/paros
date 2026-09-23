@@ -274,6 +274,12 @@ pub(super) struct MatchmakerAudit {
     clock_reasked: bool,
     refloored: bool,
     campaign_stale: bool,
+    /// Reconfiguration campaigns the driver abandoned mid-matchmaking
+    /// (`DriverHooks::abandon_campaign`), by ballot: a later stale-belief
+    /// adoption naming one of them proves its registration had reached a
+    /// matchmaker quorum and survived its campaigner.
+    abandoned_reconfigurations: BTreeSet<Ballot>,
+    abandoned_reconfiguration_survived: bool,
     effective_checked: bool,
     ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
@@ -1589,6 +1595,42 @@ impl MatchmakerAudit {
             self.campaign_stale,
             "matchmaking: a candidate adopts the effective configuration and re-campaigns"
         );
+        // The adoption is the survival fact: the configuration an abandoned
+        // reconfiguration registered is the effective one a matchmaker
+        // quorum reported, so the operator's change outlived the campaign
+        // that carried it.
+        if self.abandoned_reconfigurations.contains(&newest) {
+            reach_once!(
+                self.abandoned_reconfiguration_survived,
+                "reconfiguration: a quorum-registered reconfiguration survives its campaigner's abandonment"
+            );
+        }
+    }
+
+    /// The driver abandoned this candidate's campaign mid-matchmaking
+    /// (`DriverHooks::abandon_campaign`): the campaign is dead, like a
+    /// refused one, and it can only ever have been open, never completed.
+    pub(super) fn campaign_abandoned(
+        &mut self,
+        node: NodeId,
+        ballot: Ballot,
+        kind: RegistrationKind,
+    ) {
+        let campaign = self.campaigns.entry((node.0, ballot)).or_default();
+        assert_always!(
+            campaign.config.is_some() && !campaign.completed && !campaign.refused,
+            "matchmaking: only an open campaign is abandoned mid-matchmaking",
+            { "node" => node.0, "round" => ballot.round }
+        );
+        assert_always!(
+            campaign.kind == kind,
+            "matchmaking: an abandoned campaign is the kind it registered",
+            { "node" => node.0, "round" => ballot.round }
+        );
+        campaign.refused = true;
+        if kind.is_reconfiguration() {
+            self.abandoned_reconfigurations.insert(ballot);
+        }
     }
 
     /// The candidate folded a refusal and abandoned the campaign.

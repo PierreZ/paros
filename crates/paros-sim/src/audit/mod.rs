@@ -1862,7 +1862,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
-    fn crashed(&self, _node: NodeId, seam: Seam) {
+    fn crashed(&self, node: NodeId, seam: Seam) {
         let mut st = self.state();
         st.crashed_any = true;
         match seam {
@@ -1902,14 +1902,86 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after the boot replay and before its sync"
                 );
             }
+            Seam::FormatBeforeSync => {
+                st.format_interrupted.insert(node.0);
+                reach_once!(
+                    st.crashed_before_format_sync,
+                    "the driver crashes after staging a first boot's format marker and before its sync"
+                );
+            }
+            Seam::InstallSnapshotBeforeSync => {
+                reach_once!(
+                    st.crashed_before_install_sync,
+                    "the driver crashes before syncing a staged snapshot install"
+                );
+            }
+            Seam::TruncateBeforeSync => {
+                reach_once!(
+                    st.crashed_before_truncate_sync,
+                    "the driver crashes before syncing a staged compaction floor"
+                );
+            }
             // The matchmaker's seams are reported through
             // `matchmaker_crashed`, in their own namespace.
             Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
         }
     }
 
-    fn dropped_at_send(&self, _from: Party, _to: Party, msg: &Message) {
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0))]
+    fn store_formatted(&self, node: NodeId) {
         let mut st = self.state();
+        // #147's provisioning claim, judged from the durable side: a marker
+        // that reached the disk makes the identity an existing member for
+        // the rest of the run, so it is formatted at most once. A second
+        // format is a provisioning ledger that forgot a durable marker — the
+        // two-identities-on-one-disk mistake from the other direction.
+        assert_always!(
+            !st.formatted.contains(&node.0),
+            "storage: an identity's store is formatted durably at most once",
+            { "node" => node.0 }
+        );
+        st.formatted.insert(node.0);
+        // The seam's recovery: a first boot the format seam interrupted
+        // came back as a first boot and formatted afresh — neither refused
+        // as amnesiac nor as already formatted.
+        if st.format_interrupted.remove(&node.0) {
+            reach_once!(
+                st.format_rebooted_fresh,
+                "storage: a first boot interrupted before its format sync boots fresh"
+            );
+        }
+    }
+
+    fn dropped_at_send(&self, from: Party, to: Party, msg: &Message) {
+        let mut st = self.state();
+        // The proxy paths (#142), one gate each beside the hook's own
+        // location: a delegation the leader must re-delegate or take back, a
+        // fan-out copy the proxy must re-fan-out, and the lost ack on a
+        // proxy's tally.
+        match (from, to, msg) {
+            (_, Party::Proxy(_), Message::Accept { .. }) => {
+                reach_once!(
+                    st.dropped_delegation,
+                    "proxy: the driver drops a delegation at the send seam"
+                );
+                return;
+            }
+            (Party::Proxy(_), _, Message::Accept { .. }) => {
+                reach_once!(
+                    st.dropped_fan_out,
+                    "proxy: the driver drops a proxy's fan-out copy at the send seam"
+                );
+                return;
+            }
+            (_, Party::Proxy(_), Message::Accepted { .. }) => {
+                reach_once!(
+                    st.dropped_accepted_to_proxy,
+                    "proxy: the driver drops an accepted ack to a proxy at the send seam"
+                );
+                return;
+            }
+            _ => {}
+        }
         match msg {
             Message::Accept { .. } => {
                 reach_once!(
@@ -1971,12 +2043,49 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn duplicated_at_send(&self, _from: Party, _to: Party, msg: &Message) {
+    fn duplicated_at_send(&self, from: Party, to: Party, msg: &Message) {
         let mut st = self.state();
         reach_once!(
             st.duplicated_any,
             "the driver duplicates a message at the send seam"
         );
+        // One gate per location the hook added for the Phase-1/Phase-2
+        // drivers of a round: a re-delivered delegation or fan-out copy
+        // (#142), a colocated `Accept`, a `Prepare`, a `Nack` — each an
+        // idempotency claim the `always` checks judge.
+        match (from, to, msg) {
+            (_, Party::Proxy(_), Message::Accept { .. }) => {
+                reach_once!(
+                    st.duplicated_delegation,
+                    "proxy: the driver duplicates a delegation at the send seam"
+                );
+            }
+            (Party::Proxy(_), _, Message::Accept { .. }) => {
+                reach_once!(
+                    st.duplicated_fan_out,
+                    "proxy: the driver duplicates a proxy's fan-out copy at the send seam"
+                );
+            }
+            (_, _, Message::Accept { .. }) => {
+                reach_once!(
+                    st.duplicated_accept,
+                    "the driver duplicates an accept at the send seam"
+                );
+            }
+            (_, _, Message::Prepare { .. }) => {
+                reach_once!(
+                    st.duplicated_prepare,
+                    "the driver duplicates a prepare at the send seam"
+                );
+            }
+            (_, _, Message::Nack { .. }) => {
+                reach_once!(
+                    st.duplicated_nack,
+                    "the driver duplicates a nack at the send seam"
+                );
+            }
+            _ => {}
+        }
         // The quorum-counting kinds are the point of the location: a
         // duplicate of one of these must never fabricate a quorum.
         if matches!(
@@ -2702,6 +2811,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {
         self.state().matchmaker.campaign_stale(node, ballot, newest);
+    }
+
+    fn campaign_abandoned(&self, node: NodeId, ballot: Ballot, kind: RegistrationKind) {
+        self.state()
+            .matchmaker
+            .campaign_abandoned(node, ballot, kind);
     }
 
     fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, _count: u64) {

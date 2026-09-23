@@ -23,6 +23,7 @@ use crate::grpc::{
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,
     wire_reconfigure_request,
 };
+use crate::hooks::DriverHooks;
 
 use super::ready::Outbox;
 
@@ -123,14 +124,22 @@ fn spawn_matchmaker_rpc<P, A, R, Fut>(
 }
 
 /// Send one batch's matchmaker-wire requests.
-pub(crate) fn send_outbox<P: Providers, A: Audit + Clone + Send + 'static>(
+pub(crate) fn send_outbox<P: Providers, H: DriverHooks, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
+    hooks: &H,
     audit: &A,
     self_id: u64,
     outbox: Outbox,
 ) {
-    send_match_requests(providers, links, audit, self_id, outbox.match_requests);
+    send_match_requests(
+        providers,
+        links,
+        hooks,
+        audit,
+        self_id,
+        outbox.match_requests,
+    );
     send_gc_requests(
         providers,
         links,
@@ -261,11 +270,14 @@ pub(crate) fn surface_matchmaking<A: Audit>(
 /// Send one batch of matchmaking requests, each as its own RPC task whose
 /// answer (if any) is fed back into the node loop through the reply inbox.
 /// The task draws no randomness and consults no hook — a lost or late reply
-/// is exactly what [`ColocatedNode::resend_matchmaking`] exists for.
+/// is exactly what [`ColocatedNode::resend_matchmaking`] exists for; the one
+/// hook this path asks ([`DriverHooks::drop_matchmaker_request`]) is asked
+/// here, on the node loop, before the task is spawned.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-fn send_match_requests<P: Providers, A: Audit + Clone + Send + 'static>(
+fn send_match_requests<P: Providers, H: DriverHooks, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
+    hooks: &H,
     audit: &A,
     self_id: u64,
     requests: Vec<(MatchmakerId, MatchRequest)>,
@@ -274,6 +286,19 @@ fn send_match_requests<P: Providers, A: Audit + Clone + Send + 'static>(
         let Some(mut client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
+        // The per-matchmaker loss, decided here on the node loop — before
+        // the RPC task exists, never inside it (a hook answer is a draw).
+        // Always safe: the campaign's re-send re-asks every matchmaker that
+        // has not answered, and a request that never left was never sent.
+        if hooks.drop_matchmaker_request(matchmaker) {
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = request.ballot.round,
+                "match_request_dropped"
+            );
+            continue;
+        }
         audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
         tracing::info!(
             node = self_id,

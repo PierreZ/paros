@@ -265,6 +265,13 @@ pub trait Audit {
     /// This node crashed at a durability `seam` inside a `Ready` batch.
     fn crashed(&self, node: NodeId, seam: Seam) {}
 
+    /// A first boot's format marker (#147) is fsync-durable on this node's
+    /// store: from here on the identity is provisioned, and every later boot
+    /// is an existing member's. Reported once per successful format — a
+    /// first boot interrupted before the format's sync
+    /// ([`Seam::FormatBeforeSync`]) reports nothing and formats again.
+    fn store_formatted(&self, node: NodeId) {}
+
     /// The driver refused to boot this identity (#147): the operator's
     /// [`BootKind`](crate::BootKind) claim and the store's format marker
     /// disagree. Reported at the instant of the decision, before the
@@ -603,6 +610,14 @@ pub trait Audit {
     /// at `newest` — the effective configuration — adopted as the node's
     /// belief (`ColocatedNode::on_match_reply`, `StaleConfiguration`).
     fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {}
+
+    /// The driver abandoned this candidate's open campaign for `ballot`
+    /// while it was still matchmaking
+    /// ([`DriverHooks::abandon_campaign`](crate::DriverHooks::abandon_campaign)
+    /// → `ColocatedNode::abandon_campaign`); `kind` is what it registered.
+    /// The node is a follower again; whatever the request already registered
+    /// stays in the matchmakers' histories.
+    fn campaign_abandoned(&self, node: NodeId, ballot: Ballot, kind: RegistrationKind) {}
 
     /// This candidate's election clock fired while its matchmaking was still
     /// open and re-asked the unanswered matchmakers instead of abandoning the

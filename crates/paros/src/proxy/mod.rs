@@ -351,7 +351,11 @@ where
                 drain(&mut proxy, &pool, &out, hooks, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
-                next_tick = time.now() + tunables.tick_interval;
+                // The proxy's own pacing location: a stretched beat is a
+                // slow proxy (every budget it keeps counts beats), which the
+                // leader's take-back already tolerates.
+                next_tick = time.now()
+                    + if hooks.stretch_proxy_tick() { tunables.tick_interval * 2 } else { tunables.tick_interval };
                 // Bounded retention first: a round re-fanned-out the
                 // budget's worth of beats without an answer is evicted (a
                 // compacted slot is never answered; an eviction decides

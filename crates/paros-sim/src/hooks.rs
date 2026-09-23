@@ -34,8 +34,8 @@
 //! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
 //! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
 //! | `shortest_election_timeout` / `longest_election_timeout` | audit `election_timeout_extreme` / inline | "a leader is elected" |
-//! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
-//! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
+//! | `drop_outgoing` (per kind, and per proxy path) | audit `dropped_at_send`, one per kind family and one per proxy path | catch-up, re-propose, dedup gates; "proxy: a leader takes a delegated round back" |
+//! | `duplicate_outgoing` (per kind, and per proxy path) | audit `duplicated_at_send`, one per family | idempotency `always` checks |
 //! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
 //! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
@@ -44,7 +44,13 @@
 //! | `proxy_for` / `skip_delegation` | inline, one each | "proxy: a slot is decided through a proxy leader" |
 //! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
-//! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
+//! | `abandon_campaign` (per kind) | inline, one per kind | audit "reconfiguration: a quorum-registered reconfiguration survives its campaigner's abandonment"; "a leader is elected" |
+//! | `skip_redelegation` | inline | "proxy: a leader takes a delegated round back" |
+//! | `defer_recovery_page` | inline | the slot is still applied (final convergence); "a leader is elected" |
+//! | `propose_unprompted_snap_marker` | inline | "a rotted snapshot chunk is repaired from a peer", the custody gates |
+//! | `drop_matchmaker_request` | inline | "matchmaking: a campaign closes with a matchmaker quorum" |
+//! | `crash_at(FormatBeforeSync)` | audit `crashed` | audit "storage: a first boot interrupted before its format sync boots fresh" |
+//! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `stretch_proxy_tick`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
 //!
 //! Message kinds keep their own gates where they walk different Paxos paths:
 //! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the
@@ -224,6 +230,24 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 Seam::MatchAfterSyncBeforeReply => {
                     buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9))
                 }
+                // A first boot's format marker, staged and not yet synced:
+                // consulted once per identity (the reboot formats afresh and
+                // is asked again), so a generous rate still interrupts only a
+                // handful of first boots per run. Not biased — it is the
+                // operator's write, not the protocol's write window.
+                Seam::FormatBeforeSync => buggify_with_prob!(0.25),
+                // The below-floor recovery's install and the deferred floor
+                // raise, split out of `BeforeSync` so each is its own
+                // location: both are rare batches (a snapshot install per
+                // recovery, a truncate per decided compaction), so their rate
+                // sits above the ordinary batch's and the bias still applies
+                // — both are write windows.
+                Seam::InstallSnapshotBeforeSync => {
+                    buggify_with_prob!((0.10 * self.seam_crash_bias).min(0.9))
+                }
+                Seam::TruncateBeforeSync => {
+                    buggify_with_prob!((0.10 * self.seam_crash_bias).min(0.9))
+                }
             };
         if fired && self.seam_crash_bias > 1.0 {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
@@ -234,9 +258,91 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn skip_accept_resend(&self) -> bool {
-        // Consulted only with accepts pending; gated in the audit
+        // Consulted only with colocated accepts pending; gated in the audit
         // (`resend_skipped`).
         self.active() && buggify_with_prob!(0.95)
+    }
+
+    fn skip_redelegation(&self) -> bool {
+        // Consulted only with a delegated round open (#142). Its own
+        // location, apart from the colocated re-send's: a seed that starves
+        // re-delegations while re-sending colocated rounds is where a proxy
+        // holds a round the leader has not yet taken back. Generous but not
+        // the colocated rate — a skipped re-delegation is not counted, so at
+        // 0.95 the take-back budget would be stretched twentyfold for the
+        // whole window.
+        fire_gate!(self, 0.5, "proxy: the driver skips a re-delegation beat")
+    }
+
+    fn defer_recovery_page(&self) -> bool {
+        // Consulted only while a recovery continuation is pending, once per
+        // drained batch. A deferral costs one settle (the next batch's end
+        // re-offers the page), so the rate can be generous: the state worth
+        // reaching is a recovery half-started when the next leadership
+        // change arrives.
+        fire_gate!(
+            self,
+            0.25,
+            "the driver defers a recovery page to the next batch"
+        )
+    }
+
+    fn propose_unprompted_snap_marker(&self) -> bool {
+        // Per leader beat with no marker in flight. Shy: every decided
+        // marker makes every node record a snapshot point, and a point per
+        // few beats would turn custody into the run's dominant traffic. At
+        // this rate a leadership decides a handful of unprompted points per
+        // window — enough for points no compaction asked for, above and
+        // between the ones it did.
+        fire_gate!(
+            self,
+            0.02,
+            "snapshot: a leader proposes an unprompted snapshot point"
+        )
+    }
+
+    fn drop_matchmaker_request(&self, _matchmaker: paros::MatchmakerId) -> bool {
+        // Per registration request, decided on the node loop before the RPC
+        // task is spawned. The per-matchmaker re-send re-asks exactly the
+        // ones that did not answer, so a lost request costs a re-send cadence
+        // and lands the registration at a strict subset of the set meanwhile.
+        fire_gate!(
+            self,
+            0.10,
+            "matchmaking: a registration request is dropped before it leaves"
+        )
+    }
+
+    fn abandon_campaign(&self, kind: paros::RegistrationKind) -> bool {
+        if !self.active() {
+            return false;
+        }
+        // Per matchmaking beat while a campaign is open, one location per
+        // kind: an ordinary campaign's abandonment is a stretched election,
+        // a reconfiguration's is the operator's change put down with its
+        // registration possibly already at a quorum — two different claims,
+        // selectable independently. Both shy: the phase is open for a few
+        // beats per campaign, and a rate that abandoned most campaigns would
+        // elect nobody for the whole window.
+        if kind.is_reconfiguration() {
+            let fired = buggify_with_prob!(0.05);
+            if fired {
+                // BUGGIFY pairing: this kind's location genuinely fires.
+                assert_reachable!(
+                    "reconfiguration: the driver abandons a reconfiguration campaign mid-matchmaking"
+                );
+            }
+            fired
+        } else {
+            let fired = buggify_with_prob!(0.03);
+            if fired {
+                // BUGGIFY pairing: this kind's location genuinely fires.
+                assert_reachable!(
+                    "matchmaking: the driver abandons an ordinary campaign mid-matchmaking"
+                );
+            }
+            fired
+        }
     }
 
     fn skip_matchmaking_resend(&self) -> bool {
@@ -477,9 +583,22 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn drop_outgoing(&self, _to: Party, msg: &Message) -> bool {
+    fn drop_outgoing(&self, from: Party, to: Party, msg: &Message) -> bool {
         if !self.active() {
             return false;
+        }
+        // The proxy paths first (#142), each its own location and each gated
+        // in the audit's `dropped_at_send`: a lost delegation is a round the
+        // leader must re-delegate or take back, a lost fan-out copy is one
+        // acceptor the proxy's re-fan-out must reach again, and a lost
+        // `Accepted` to a proxy is the lost-ack edge on the proxy's tally —
+        // three different recoveries a colocated-only location cannot select
+        // apart from the colocated loss.
+        match (from, to, msg) {
+            (_, Party::Proxy(_), Message::Accept { .. }) => return buggify_with_prob!(0.05),
+            (Party::Proxy(_), _, Message::Accept { .. }) => return buggify_with_prob!(0.05),
+            (_, Party::Proxy(_), Message::Accepted { .. }) => return buggify_with_prob!(0.05),
+            _ => {}
         }
         // Three locations, selected independently per seed: an isolated
         // `Accept` loss is the interleaving behind a stranded chosen-gap wedge
@@ -531,9 +650,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn duplicate_outgoing(&self, _to: Party, msg: &Message) -> bool {
+    fn duplicate_outgoing(&self, from: Party, to: Party, msg: &Message) -> bool {
         if !self.active() {
             return false;
+        }
+        // The proxy paths first (#142): a re-delivered delegation must be a
+        // no-op at its proxy (the same round at the same ballot), and a
+        // re-delivered fan-out copy a re-accept of the same `(slot, ballot,
+        // command)` — the P2b idempotency the delegation rests on. Each its
+        // own location, gated in the audit's `duplicated_at_send`.
+        match (from, to, msg) {
+            (_, Party::Proxy(_), Message::Accept { .. }) => return buggify_with_prob!(0.05),
+            (Party::Proxy(_), _, Message::Accept { .. }) => return buggify_with_prob!(0.05),
+            _ => {}
         }
         // Moonpool has no message-duplication fault, so this seam is the only
         // duplicate generator. The quorum-counting kinds are the point of the
@@ -545,6 +674,18 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 buggify_with_prob!(0.05)
             }
             Message::Commit { .. } => buggify_with_prob!(0.05),
+            // A re-delivered colocated `Accept`: the acceptor re-accepts the
+            // same `(slot, ballot, command)` and answers again — the
+            // duplicate `Accepted` the set-based tally above must absorb.
+            Message::Accept { .. } => buggify_with_prob!(0.05),
+            // A re-delivered `Prepare` must be answered from the same
+            // promise (a second `Promise` the candidate's set already
+            // holds), never a second promise raise.
+            Message::Prepare { .. } => buggify_with_prob!(0.05),
+            // A re-delivered `Nack` must depose at most once: the second
+            // copy meets a follower, or a campaign at a later ballot it does
+            // not supersede.
+            Message::Nack { .. } => buggify_with_prob!(0.10),
             Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
                 buggify_with_prob!(0.10)
             }
@@ -701,6 +842,15 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // reaching is the leader taking that round back while the proxy
         // still holds it — the two verdicts must agree.
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn stretch_proxy_tick(&self) -> bool {
+        // Per proxy tick, the proxy's own pacing location — the same shy
+        // rate and the same reasoning as `stretch_tick_interval`: a proxy
+        // that stretches most beats is a stalled proxy, and a handful per
+        // window is enough to put its re-fan-out and its retention budget
+        // out of step with the leader's take-back. Off after the cutoff.
+        fire_gate!(self, 0.05, "proxy: a proxy stretches its tick interval")
     }
 
     fn expire_parked_read_early(&self) -> bool {

@@ -452,6 +452,29 @@ pub(super) struct AuditState {
     pub(super) crashed_before_chunk_sync: bool,
     pub(super) crashed_after_chunk_restore: bool,
     pub(super) crashed_after_boot_replay: bool,
+    /// The three before-fsync seams split out of `BeforeSync`: a first
+    /// boot's format marker, a snapshot install, a deferred floor raise.
+    pub(super) crashed_before_format_sync: bool,
+    pub(super) crashed_before_install_sync: bool,
+    pub(super) crashed_before_truncate_sync: bool,
+    /// Identities whose first boot crashed at `FormatBeforeSync` and have not
+    /// formatted since: the next `store_formatted` for one of them is the
+    /// fresh first boot the seam must lead to.
+    pub(super) format_interrupted: BTreeSet<u64>,
+    /// Every identity whose store was formatted durably — once each, ever: a
+    /// second format means the provisioning ledger forgot a durable marker.
+    pub(super) formatted: BTreeSet<u64>,
+    pub(super) format_rebooted_fresh: bool,
+    /// The proxy paths of the send seam's drop and duplicate locations
+    /// (#142): a delegation, a proxy's fan-out copy, an `Accepted` to a proxy.
+    pub(super) dropped_delegation: bool,
+    pub(super) dropped_fan_out: bool,
+    pub(super) dropped_accepted_to_proxy: bool,
+    pub(super) duplicated_delegation: bool,
+    pub(super) duplicated_fan_out: bool,
+    pub(super) duplicated_accept: bool,
+    pub(super) duplicated_prepare: bool,
+    pub(super) duplicated_nack: bool,
     /// Transport tallies for the failure print: sends per message kind,
     /// failed delivery RPCs, edge rejections.
     pub(super) sent_kinds: BTreeMap<&'static str, u64>,

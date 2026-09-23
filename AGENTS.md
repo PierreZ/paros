@@ -577,9 +577,12 @@ separation; #81 removed the message-class nemesis, which mixed them):
   all, and say so where they are defined.
 
 The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
-attrition cannot reach — eight today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
+attrition cannot reach — eleven today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
 `BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync` and `AfterBootReplayBeforeSync`, the
-chunk-repair pair `BeforeChunkSync` / `AfterChunkRestoreBeforeSync`, and the matchmaker driver's
+before-fsync splits `InstallSnapshotBeforeSync` (a batch carrying a snapshot install) and
+`TruncateBeforeSync` (the deferred floor raise), a first boot's `FormatBeforeSync` (#147: the
+marker is staged, not synced — the reboot must be a first boot again), the chunk-repair pair
+`BeforeChunkSync` / `AfterChunkRestoreBeforeSync`, and the matchmaker driver's
 `MatchBeforeSync` / `MatchAfterSyncBeforeReply`. Give each seam its
 own BUGGIFY location; sharing one location prevents the sweep from independently selecting the
 distinct failure modes.
@@ -755,8 +758,10 @@ carry the safety:
 
 A handoff is refused while any Phase-1-shaped work is open (leader recovery, CTRL repair
 probe, local `faulty` records, application repair) and while the tail exceeds
-`HANDOFF_BATCH`. A successor whose inherited read fence stays uncovered for
-`HANDOFF_FENCE_ELECTIONS` election timeouts resigns: ordinary Phase 1 is always the
+`HANDOFF_BATCH`. A successor whose inherited read fence stays uncovered for its
+handoff-fence budget (`Budgets::handoff_fence_elections`, default `HANDOFF_FENCE_ELECTIONS`,
+driver data knobbed per seed like the repair-probe budget and the read TTL) of election
+timeouts resigns: ordinary Phase 1 is always the
 fallback, and a failed handoff costs availability, never safety. Design note:
 `docs/analysis/consensus/dpaxos-leader-handoff.md`.
 

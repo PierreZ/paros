@@ -15,6 +15,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
   `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
+  the core's liveness budgets `repair_timeout_elections` / `handoff_fence_elections` /
+  `read_ttl_ticks` (floor: the election base) and the delivery byte budget
+  `delivery_batch_bytes` (floor: two maximum command-carrying messages),
   the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once

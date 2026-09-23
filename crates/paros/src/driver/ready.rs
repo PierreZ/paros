@@ -288,7 +288,8 @@ where
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
     //    surface the persisted state for the safety + recovery oracles. The
-    //    `BeforeSync` crash seam lives inside `persist_writes`.
+    //    before-fsync crash seams (`BeforeSync`, and `InstallSnapshotBeforeSync`
+    //    for a batch carrying an install) live inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit).await?;
 
@@ -439,7 +440,8 @@ where
     // Only now that the application state covering the dropped slots is
     // fsync-durable may the compaction floor become durable (see the batch
     // split above). Runs through the same persist path, so the truncate keeps
-    // its `BeforeSync` crash location and its after-fsync audit report.
+    // a before-fsync crash location — its own, `TruncateBeforeSync` — and its
+    // after-fsync audit report.
     if !truncates.is_empty() {
         persist_writes(
             storage,
@@ -488,7 +490,17 @@ where
     // at this boundary may the core materialize the next bounded Ready page;
     // doing it inside `Ready::advance` would move single-node state ahead of the
     // I/O the async driver is still performing.
-    node.advance_recovery();
+    //
+    // Deferring the page to the next batch's end is always safe and never a
+    // wedge: the continuation is held in the core, every drained batch ends
+    // at this same point, and the loop drains at least once per tick. The
+    // hook is asked only while a continuation is pending, so a `true`
+    // always delays a page.
+    if node.has_recovery_continuation() && hooks.defer_recovery_page() {
+        tracing::info!(node = self_id, "recovery_page_deferred");
+    } else {
+        node.advance_recovery();
+    }
 
     Ok(Outbox {
         match_requests,
@@ -572,7 +584,7 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
         hooks,
         audit,
         NodeId(self_id),
-        Seam::BeforeSync,
+        before_sync_seam(writes),
     )?;
 
     if !writes.is_empty() {
@@ -593,6 +605,26 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
 
     surface_persisted(writes, promised, promise_changed, self_id, audit);
     Ok(())
+}
+
+/// Which before-fsync seam a staged batch crashes at: a snapshot install and
+/// a deferred truncation each have their own location (a seed can crash a
+/// below-floor node's recovery, or a floor raise, without crashing every
+/// batch), and every other batch is the ordinary [`Seam::BeforeSync`]. The
+/// driver never stages an install and a truncate together — the truncates are
+/// split out of the batch and flushed after the application fsync — so the
+/// order below only ranks an impossible tie.
+fn before_sync_seam(writes: &[WriteOp]) -> Seam {
+    if writes
+        .iter()
+        .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
+    {
+        Seam::InstallSnapshotBeforeSync
+    } else if writes.iter().any(|w| matches!(w, WriteOp::Truncate { .. })) {
+        Seam::TruncateBeforeSync
+    } else {
+        Seam::BeforeSync
+    }
 }
 
 /// Report a flushed batch's durable state — one audit callback and one tracing

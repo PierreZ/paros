@@ -30,7 +30,7 @@ const GRPC_SNAPSHOT_QUEUE_CAPACITY: usize = 4;
 /// Leave headroom below tonic's default 4 MiB decoded-message limit for the
 /// protobuf envelope. The retired transport capped a complete payload at 1 MiB;
 /// this preserves that per-message envelope while allowing compact batches.
-pub(crate) const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
+const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
 /// Maximum Paxos messages packed into one protobuf/gRPC request. This keeps
 /// a chatty heartbeat/catch-up round from creating one h2 frame per message.
 pub(crate) const GRPC_DELIVERY_BATCH: usize = 64;
@@ -170,6 +170,49 @@ pub struct DriverTunables {
     /// eviction reclaims only rounds the leader is done with. Meaningless
     /// on a proxy-less deployment, and read only by `run_proxy`.
     pub proxy_round_resends: u64,
+    /// Election timeouts a leader's blocked CTRL repair probe may stay open
+    /// before the leader resigns — handed to the core as
+    /// [`paros_core::Budgets::repair_timeout_elections`]. Driver policy, not
+    /// a protocol bound: the resignation is a step down, which is always
+    /// safe. Floor 1 election timeout — one re-sent `Prepare` has time to be
+    /// answered; the ceiling only stretches how long a blocked leader waits.
+    pub repair_timeout_elections: u64,
+    /// Election timeouts a handoff successor may hold an uncovered inherited
+    /// fence before resigning — handed to the core as
+    /// [`paros_core::Budgets::handoff_fence_elections`]. Floor 1 election
+    /// timeout (catch-up of a fence the predecessor's quorum decided); the
+    /// fallback past it is an ordinary election, so any value is safe.
+    pub handoff_fence_elections: u64,
+    /// Ticks a pending read may wait in the core before it is dropped —
+    /// handed to the core as [`paros_core::Budgets::read_ttl_ticks`]. Floor:
+    /// at least `election_timeout_base` ticks, because a watermark raised by
+    /// an accept that never decided needs the next leader's gap fill to be
+    /// covered; shorter drops reads that were about to complete. A drop is
+    /// silent and the driver owns the client reply
+    /// ([`DriverTunables::read_retry_ticks`]), so it is never wrong.
+    pub read_ttl_ticks: u64,
+    /// Encoded bytes one peer-delivery RPC may carry before the batcher
+    /// carries the next message over to the following RPC. A message larger
+    /// than the budget still travels alone (a batch always takes its first
+    /// message). Floor: two maximum-sized protocol messages (a large client
+    /// command's `Accept` plus its envelope), so a batch of ordinary traffic
+    /// behind one large command still packs; below that every large command
+    /// travels alone and a burst of them caps per-peer throughput, the
+    /// one-message-batch partition the knob doctrine forbids.
+    pub delivery_batch_bytes: usize,
+}
+
+impl DriverTunables {
+    /// The core's liveness budgets these tunables carry
+    /// ([`paros_core::ColocatedNode::set_budgets`]).
+    #[must_use]
+    pub fn budgets(&self) -> paros_core::Budgets {
+        paros_core::Budgets {
+            repair_timeout_elections: self.repair_timeout_elections,
+            handoff_fence_elections: self.handoff_fence_elections,
+            read_ttl_ticks: self.read_ttl_ticks,
+        }
+    }
 }
 
 impl Default for DriverTunables {
@@ -194,6 +237,10 @@ impl Default for DriverTunables {
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
             proxy_round_resends: PROXY_ROUND_RESENDS,
+            repair_timeout_elections: paros_core::REPAIR_TIMEOUT_ELECTIONS,
+            handoff_fence_elections: paros_core::HANDOFF_FENCE_ELECTIONS,
+            read_ttl_ticks: paros_core::READ_TTL_TICKS,
+            delivery_batch_bytes: GRPC_DELIVERY_BATCH_BYTES,
         }
     }
 }

@@ -21,7 +21,7 @@ the driver, never in a sim-only path.
   the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·
   `driver/config.rs` `DriverTunables` and its production defaults.
 - `hooks.rs` `DriverHooks` (the BUGGIFY prong-1 surface, every method
-  defaulting to inert, `NoHooks` for production), `Seam` (eight durability
+  defaulting to inert, `NoHooks` for production), `Seam` (eleven durability
   seams), `HandoffContext`, `Reply`. The `H: DriverHooks` bound on `run_node`
   is deliberately **not** `Send + 'static`: consulting a hook from a spawned
   task must not compile, because a hook answer is a randomness draw and a
