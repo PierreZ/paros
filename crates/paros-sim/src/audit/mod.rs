@@ -43,10 +43,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
-    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, DelegationOutcome, Deployment,
+    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
+    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
+    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
     SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
@@ -649,6 +649,23 @@ impl<T: TimeProvider> NodeAudit<T> {
             );
         }
     }
+    /// Fold one message `node` put on the wire, whoever it is addressed to:
+    /// a batch boundary for the Promise check, and the #147 claim that an
+    /// identity the library refused as amnesiac never speaks again. The
+    /// refusal is permanent in the harness (the provisioning ledger reboots
+    /// a wiped identity as an existing member every time, and every time
+    /// the library refuses it), so "after the refusal" is the rest of the
+    /// run — a send is only ever reported from a live incarnation's loop.
+    fn observe_node_send(&self, node: NodeId, msg: &Message) {
+        let mut st = self.state();
+        st.note_batch_send(node.0);
+        assert_always!(
+            !st.wiped.contains(&node.0),
+            "storage: an amnesia-refused identity never sends a protocol message",
+            { "node" => node.0, "kind" => message_kind(msg) }
+        );
+    }
+
     pub(crate) fn new(time: T, world: Arc<AuditWorld>) -> Self {
         Self { time, world }
     }
@@ -788,6 +805,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        st.note_durable_record(node.0, slot.0, ballot, vhash);
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
@@ -810,6 +828,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "was" => was, "reported" => first.0 }
         );
         st.truncate_watermark.insert(node.0, first.0.max(was));
+        st.drop_durable_log_below(node.0, first.0);
         st.floor.entry(node.0).or_default().raise(first.0, now);
         if first.0 > 0 {
             reach_once!(
@@ -974,6 +993,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .sent_kinds
             .entry(message_kind(msg))
             .or_default() += 1;
+        self.observe_node_send(node, msg);
         if let Message::Prepare { ballot, config, .. } = msg {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
             self.state().observe_prepare_send(node.0, to.0, *ballot);
@@ -1018,8 +1038,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 }
             );
         }
-        if let Message::Promise { ballot, .. } = msg {
-            self.state().observe_promise_send(node.0, *ballot);
+        if let Message::Promise {
+            ballot,
+            from_slot,
+            accepted,
+            faulty,
+            next_from_slot,
+            ..
+        } = msg
+        {
+            let mut st = self.state();
+            st.observe_promise_send(node.0, *ballot);
+            st.check_promise_complete(
+                node.0,
+                *ballot,
+                *from_slot,
+                accepted,
+                faulty,
+                *next_from_slot,
+            );
         }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
@@ -1054,6 +1091,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .sent_kinds
             .entry(message_kind(msg))
             .or_default() += 1;
+        self.observe_node_send(node, msg);
         // Persist-before-send at the accept seam, whoever the vote goes to:
         // an acceptor's `Accepted` to a proxy claims "I hold this durably"
         // exactly as one to a leader does, so the check `sent` runs is run
@@ -1067,18 +1105,41 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // *who* and *what*; *whom* it addresses is a proxy, which is judged
         // at the proxy's own fan-out.
         if let Message::Accept {
+            reply_to,
+            leader,
             ballot,
             slot,
             command,
             ..
         } = msg
         {
+            // The delegation's addressing: the proxy it is handed to is the
+            // reply party its acceptors answer, and the leader hint names
+            // the node exercising the authority — the sender itself (a
+            // handoff successor re-delegates with `leader` naming itself).
+            // A delegation naming another proxy would have its votes
+            // folded, and its `Commit` emitted, by a proxy that never
+            // opened the round.
+            assert_always!(
+                *reply_to == Party::Proxy(proxy),
+                "proxy: a delegation names the proxy it is sent to",
+                {
+                    "node" => node.0,
+                    "proxy" => proxy.0,
+                    "reply_to" => reply_to.to_string(),
+                    "slot" => slot.0
+                }
+            );
+            assert_always!(
+                *leader == node,
+                "proxy: a delegation names its sender as the leader",
+                { "node" => node.0, "leader" => leader.0, "slot" => slot.0 }
+            );
             let vhash = command_hash(command);
             let mut st = self.state();
             st.observe_authority_use(node.0, *ballot);
             st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
         }
-        let _ = proxy;
     }
 
     fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {
@@ -1114,9 +1175,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     // The proxy's own paths — a reboot, a re-fan-out, an ignored or
-    // superseded delegation, a relayed `Nack` — are reported through the
-    // port but not gated here: the model checker proves each in-core, and
-    // the slot budget (2048 per campaign process) is spent on outcomes.
+    // superseded delegation, a relayed `Nack` — carry no `sometimes` or
+    // `reachable` gate here: the model checker proves each in-core, and the
+    // slot budget (2048 per campaign process) is spent on outcomes. The
+    // claims they make that the rest of the fold can judge are `always`
+    // checks: a boot over the bootstrap configuration, a delegation ballot
+    // that never steps back within an incarnation, a relayed `Nack` that
+    // reaches a leader that delegated the round. A superseded count has no
+    // such claim of its own (it is the proxy's internal bookkeeping of the
+    // same ballot rule the delegation check already judges).
 
     fn proxy_fanned_out(
         &self,
@@ -1135,6 +1202,75 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .entry((slot.0, ballot.round, ballot.node.0))
             .or_default()
             .insert(leader.0);
+    }
+
+    fn proxy_booted(&self, proxy: ProxyId, acceptors: &AcceptorConfig) {
+        let mut st = self.state();
+        // A proxy holds nothing durable: every boot is a first boot over the
+        // deployment's bootstrap configuration (a later one is taught by a
+        // delegation), and its incarnation's leadership starts over.
+        assert_always!(
+            st.bootstrap.as_ref().is_none_or(|b| b == acceptors),
+            "proxy: a proxy boots over the bootstrap configuration",
+            { "proxy" => proxy.0, "members" => acceptors.members().len() }
+        );
+        st.proxy_works_for.remove(&proxy.0);
+    }
+
+    fn proxy_delegated(
+        &self,
+        proxy: ProxyId,
+        leader: NodeId,
+        slot: Slot,
+        ballot: Ballot,
+        _vhash: u64,
+        outcome: DelegationOutcome,
+    ) {
+        // A proxy works for the highest ballot it was handed: a delegation
+        // below it is ignored, and one at or above it moves it there. So
+        // within one incarnation the ballots it opens or re-fans-out rounds
+        // for never step back — a proxy that acted on a lower one would be
+        // folding votes for a leadership a newer one already superseded.
+        if outcome == DelegationOutcome::Ignored {
+            return;
+        }
+        let mut st = self.state();
+        let works_for = st.proxy_works_for.get(&proxy.0).copied();
+        assert_always!(
+            works_for.is_none_or(|w| ballot >= w),
+            "proxy: a proxy acts only for the highest ballot it was handed",
+            {
+                "proxy" => proxy.0,
+                "leader" => leader.0,
+                "slot" => slot.0,
+                "round" => ballot.round,
+                "works_for_round" => works_for.map_or(0, |w| w.round)
+            }
+        );
+        if works_for.is_none_or(|w| ballot > w) {
+            st.proxy_works_for.insert(proxy.0, ballot);
+        }
+    }
+
+    fn proxy_nack_relayed(&self, proxy: ProxyId, leader: NodeId, slot: Slot, ballot: Ballot) {
+        // The relayed refusal reaches the leader whose delegation the round
+        // was opened (or last refreshed) by — a hint some fan-out of this
+        // very round named, which the fan-out fold has already seen.
+        let st = self.state();
+        let delegated = st
+            .fanout_leaders
+            .get(&(slot.0, ballot.round, ballot.node.0))
+            .is_some_and(|leaders| leaders.contains(&leader.0));
+        assert_always!(
+            delegated,
+            "proxy: a relayed Nack reaches a leader that delegated the round",
+            {
+                "proxy" => proxy.0,
+                "leader" => leader.0,
+                "slot" => slot.0,
+                "round" => ballot.round
+            }
+        );
     }
 
     fn proxy_decided(&self, proxy: ProxyId, slot: Slot, ballot: Ballot, vhash: u64) {
@@ -1196,6 +1332,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.bind_config(won, config);
         if st.bootstrap.as_ref().is_some_and(|b| b != config) {
             st.reconfiguration_completed = true;
+        }
+        // #124's healing path, proven taken rather than merely possible: a
+        // leadership runs under a configuration that no longer names an
+        // identity the library refused as amnesiac, although some earlier
+        // configuration (the bootstrap, or one a ballot was bound to) did.
+        if !st.wiped_replaced
+            && st.wiped.iter().any(|w| {
+                let wiped = NodeId(*w);
+                !config.contains(wiped)
+                    && (st.bootstrap.as_ref().is_some_and(|b| b.contains(wiped))
+                        || st.configs.values().any(|c| c.contains(wiped)))
+            })
+        {
+            reach_once!(
+                st.wiped_replaced,
+                "storage: a reconfiguration moves a wiped identity out of the configuration in force"
+            );
         }
         // The #140 outcome: a leadership genuinely ran under a flexible
         // split (the draw is a `reachable` in `shape::quorum_policy`).
@@ -1636,6 +1789,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 { "node" => node.0, "slot" => slot }
             );
         }
+        st.reset_durable_log(node.0, accepted);
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, decision = ?decision))]
@@ -1994,6 +2148,43 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn encode_failed(&self, from: Party, to: Party, msg: &Message) {
+        // Every message the core builds has a wire form: an encode failure
+        // is a message the protocol believes it sent and nobody can ever
+        // receive — a silent loss the re-sends would hide.
+        assert_always!(
+            false,
+            "every protocol message the driver sends encodes",
+            {
+                "from" => from.to_string(),
+                "to" => to.to_string(),
+                "kind" => message_kind(msg)
+            }
+        );
+    }
+
+    fn matchmaker_reply_undecodable(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        kind: &'static str,
+        error: &'static str,
+    ) {
+        // A matchmaker answers in the same wire contract the node decodes:
+        // an answer that does not decode is a registration, an ack or a
+        // handover step silently lost between two correct processes.
+        assert_always!(
+            false,
+            "every matchmaker reply decodes",
+            {
+                "node" => node.0,
+                "matchmaker" => matchmaker.0,
+                "kind" => kind,
+                "error" => error
+            }
+        );
+    }
+
     fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
         let mut st = self.state();
         st.edge_rejections += 1;
@@ -2020,7 +2211,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn ticked(&self, node: NodeId) {
-        self.state().observe_tick(node.0);
+        let mut st = self.state();
+        st.observe_tick(node.0);
+        // The loop ticks between drains, never inside one: a batch boundary.
+        st.bump_batch_epoch(node.0);
     }
 
     fn election_timeout_extreme(&self, _node: NodeId, _ticks: u64) {
@@ -2563,6 +2757,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         st.matchmaker
             .completed(node, ballot, prior, watermark, registered_by, disagreements);
+        st.check_prior_covers_phase2(node.0, ballot, prior, watermark);
         st.note_prior(node.0, ballot, prior);
     }
 

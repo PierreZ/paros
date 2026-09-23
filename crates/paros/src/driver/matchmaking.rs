@@ -73,23 +73,30 @@ fn link_to<P: Providers>(
 /// The task draws no randomness and consults no hook (AGENTS.md: a hook answer
 /// is a randomness draw, and a detached task is not where the simulation steps
 /// deterministically). A lost, late or undecodable answer is simply not fed
-/// back — which is exactly what each kind's per-tick re-send exists for.
-fn spawn_matchmaker_rpc<P, R, Fut>(
+/// back — which is exactly what each kind's per-tick re-send exists for — but
+/// an undecodable one is reported through the audit (a clone rides the task:
+/// an audit draws nothing, so reporting from a detached task is safe).
+#[allow(clippy::too_many_arguments)]
+fn spawn_matchmaker_rpc<P, A, R, Fut>(
     providers: &P,
     links: &MatchmakerLinks<P>,
+    audit: &A,
     self_id: u64,
+    matchmaker: MatchmakerId,
     kind: &'static str,
     task: &'static str,
     sink: mpsc::Sender<R>,
     rpc: Fut,
 ) where
     P: Providers,
+    A: Audit + Clone + Send + 'static,
     R: Send + 'static,
     Fut: Future<Output = Result<Result<R, &'static str>, tonic::Status>> + Send + 'static,
 {
     let time = providers.time().clone();
     let timeout = links.timeout;
     let shutdown = links.shutdown.clone();
+    let audit = audit.clone();
     providers
         .task()
         .spawn_task(task, async move {
@@ -103,6 +110,7 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
                     let _ = sink.send(reply).await;
                 }
                 Ok(Ok(Err(error))) => {
+                    audit.matchmaker_reply_undecodable(NodeId(self_id), matchmaker, kind, error);
                     tracing::warn!(node = self_id, kind, error, "bad matchmaker reply");
                 }
                 Ok(Err(status)) => {
@@ -115,7 +123,7 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
 }
 
 /// Send one batch's matchmaker-wire requests.
-pub(crate) fn send_outbox<P: Providers, A: Audit>(
+pub(crate) fn send_outbox<P: Providers, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -136,7 +144,7 @@ pub(crate) fn send_outbox<P: Providers, A: Audit>(
 /// Send one batch of garbage-collection requests (#123), each as its own RPC
 /// task whose ack is fed back into the node loop through the ack inbox.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-fn send_gc_requests<P: Providers, A: Audit>(
+fn send_gc_requests<P: Providers, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -167,7 +175,9 @@ fn send_gc_requests<P: Providers, A: Audit>(
         spawn_matchmaker_rpc(
             providers,
             links,
+            audit,
             self_id,
+            matchmaker,
             "gc",
             "paros-gc-request",
             links.gc_acks.clone(),
@@ -184,7 +194,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
 /// Send one batch of matchmaker-reconfiguration requests (#125), each as its
 /// own RPC task whose reply is fed back into the node loop.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
+pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -206,7 +216,9 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
         spawn_matchmaker_rpc(
             providers,
             links,
+            audit,
             self_id,
+            matchmaker,
             "reconfigure",
             "paros-reconfigure-request",
             links.reconfigure_replies.clone(),
@@ -251,7 +263,7 @@ pub(crate) fn surface_matchmaking<A: Audit>(
 /// The task draws no randomness and consults no hook — a lost or late reply
 /// is exactly what [`ColocatedNode::resend_matchmaking`] exists for.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, requests = requests.len()))]
-fn send_match_requests<P: Providers, A: Audit>(
+fn send_match_requests<P: Providers, A: Audit + Clone + Send + 'static>(
     providers: &P,
     links: &MatchmakerLinks<P>,
     audit: &A,
@@ -273,7 +285,9 @@ fn send_match_requests<P: Providers, A: Audit>(
         spawn_matchmaker_rpc(
             providers,
             links,
+            audit,
             self_id,
+            matchmaker,
             "matchmaking",
             "paros-matchmaking-request",
             links.replies.clone(),

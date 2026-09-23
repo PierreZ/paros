@@ -444,6 +444,13 @@ pub trait Audit {
     /// ran out.
     fn read_expired(&self, node: NodeId, early: bool) {}
 
+    /// `from` (a node, or a proxy leader) could not encode `msg` into its
+    /// wire form on the way to `to`, so the message never entered the
+    /// mailbox: a silent loss the protocol's re-sends would paper over.
+    /// Reported at the instant the encode failed, after [`Audit::sent`] (or
+    /// its proxy siblings) already reported the send it was meant to be.
+    fn encode_failed(&self, from: Party, to: Party, msg: &Message) {}
+
     /// `from` (a node, or a proxy leader) dropped one outbound message at a
     /// bounded in-process mailbox (the lossy per-peer transport handoff):
     /// either the enqueue found the peer queue full, or the delivery task
@@ -571,6 +578,20 @@ pub trait Audit {
     /// This candidate handed a matchmaking request for `ballot` to the
     /// transport, addressed to `matchmaker` (the first send or a re-send).
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {}
+
+    /// This node received an answer from `matchmaker` to a matchmaker-wire
+    /// request of `kind` (`"matchmaking"`, `"gc"` or `"reconfigure"`) that
+    /// did not decode into its domain type (`error` names what was wrong),
+    /// so the answer was dropped rather than folded. Reported from the RPC
+    /// task that carried the request, at the instant the decode failed.
+    fn matchmaker_reply_undecodable(
+        &self,
+        node: NodeId,
+        matchmaker: MatchmakerId,
+        kind: &'static str,
+        error: &'static str,
+    ) {
+    }
 
     /// This candidate deliberately skipped re-sending its open matchmaking
     /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).

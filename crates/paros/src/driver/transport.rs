@@ -316,6 +316,7 @@ impl Outbound {
         }
         if let Some(queue) = self.mailbox_for(to, msg) {
             let Ok(message) = message_to_proto(msg) else {
+                audit.encode_failed(self.sender, to, msg);
                 tracing::warn!(
                     from = %self.sender,
                     to = %to,

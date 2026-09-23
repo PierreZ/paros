@@ -25,7 +25,7 @@ use super::{
 use crate::audit::AuditWorld;
 use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, MemStorage,
+    Ballot, Command, Config, Control, CorruptionVerdict, HardState, IntegrityFault, MemStorage,
     MetadataFault, MustSync, NodeStorage, RecoveryCase, SNAP_CHUNK_BYTES, SessionEntry, Slot,
     SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log,
     command_hash, snap_chunk_count,
@@ -1456,6 +1456,19 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
             slot <= chosen_index,
             "chain: apply does not outrun chosen prefix"
         );
+        // A decided snapshot marker (#101) is minted by the leader for the
+        // slot it proposes it at, and the point is recorded at the marker's
+        // *own slot*: a marker naming another index would advertise custody
+        // of a boundary state the store never captured (the driver only
+        // notes the mismatch; the claim is judged here, where the marker is
+        // applied).
+        if let Command::Control(Control::Snap { at_index }) = command {
+            assert_always!(
+                *at_index == slot,
+                "storage: a decided snapshot marker names its own slot",
+                { "slot" => slot.0, "at_index" => at_index.0 }
+            );
+        }
         if self
             .application
             .applied_slot()

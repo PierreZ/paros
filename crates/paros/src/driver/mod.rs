@@ -104,7 +104,7 @@ struct NodeLoop<'a, P: Providers, H: DriverHooks, A: Audit> {
     election_base: u64,
 }
 
-impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
+impl<P: Providers, H: DriverHooks, A: Audit + Clone + Send + 'static> NodeLoop<'_, P, H, A> {
     /// The **settle tail**: every arm that feeds the core ends here, in this
     /// order — drain the `Ready` batch (persist → send → apply), surface a
     /// matchmaking phase it opened *before* the requests leave, put the

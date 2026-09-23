@@ -52,6 +52,25 @@ pub(super) struct DeposedStreak {
     pub(super) timeout: u64,
 }
 
+/// One node's `Ready`-batch counter, as the audit can see batch boundaries.
+///
+/// A `Promise` is built at the step that promised, but its batch's durable
+/// writes are reported *before* it leaves — including records the same
+/// batch accepted or learned **after** the Promise was built (a `Commit`
+/// stepped behind the `Prepare` records a lower-ballot value the page could
+/// not have shown). So a record is only held against a Promise when it
+/// became durable in an **earlier** batch, which was in memory before any
+/// step of this one. The epoch moves strictly between batches: at the first
+/// durable report after a send (a drain persists everything before it sends
+/// anything), and at every tick (the loop ticks between drains, never inside
+/// one). Missing a boundary only makes the check skip more; it never makes
+/// it judge a record the Promise could not have seen.
+#[derive(Clone, Copy, Default)]
+pub(super) struct BatchEpoch {
+    pub(super) epoch: u64,
+    pub(super) sent_since_write: bool,
+}
+
 /// Who is exercising one logical Phase-2 authority (one ballot), reconstructed
 /// **from semantic events only** — the `Accept`s actually put on the wire, and
 /// the relinquish/install transitions — never from any node's `role` field.
@@ -187,6 +206,17 @@ pub(super) struct AuditState {
     /// below-floor pruning of `decided` never lowers, so the cross-restart
     /// frontier check stays sound after the whole prefix compacts away.
     pub(super) decided_max: Option<u64>,
+    /// Per `(node, slot)`: the accepted record the node holds durably *in its
+    /// current incarnation* — `(ballot, vhash, batch epoch)`. Unlike
+    /// `persisted` it is reset to exactly the read-back at every boot
+    /// report (a record lost to a torn tail or a detected corruption is not
+    /// something a later Promise can be asked for) and pruned at every
+    /// truncation, so it is the ground truth a `Promise` page is judged
+    /// against. The epoch says which `Ready` batch made it durable (see
+    /// [`BatchEpoch`]).
+    pub(super) durable_log: BTreeMap<(u64, u64), (Ballot, u64, u64)>,
+    /// Per node: the batch-epoch counter [`Self::durable_log`] stamps with.
+    pub(super) batch_epochs: BTreeMap<u64, BatchEpoch>,
     /// Per node: the last durably reported chosen index, reset each boot
     /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
     /// across incarnations — within one it only advances).
@@ -497,6 +527,18 @@ pub(super) struct AuditState {
     pub(super) proxied_round_survived_handoff: bool,
     pub(super) proxy_resend_skipped: bool,
     pub(super) proxy_round_expired: bool,
+    /// Per proxy, over its current incarnation (reset at every boot): the
+    /// highest ballot a delegation it acted on (opened or re-fanned-out)
+    /// carried — the leadership it works for.
+    pub(super) proxy_works_for: BTreeMap<u64, Ballot>,
+    /// A leadership ran under a configuration that no longer names an
+    /// identity the library refused as amnesiac (#124, #147): the wiped
+    /// member was genuinely moved out by a reconfiguration.
+    pub(super) wiped_replaced: bool,
+    /// A completed matchmaking was judged against a lower ballot that had
+    /// already put an `Accept` on the wire above the campaign's watermark —
+    /// the ground-truth `H_b` check was not vacuous.
+    pub(super) prior_ground_truth_checked: bool,
 }
 
 impl AuditState {
@@ -533,6 +575,75 @@ impl AuditState {
         self.prior
             .get(&(ballot.node.0, ballot.round, ballot.node.0))
             .map(Vec::as_slice)
+    }
+
+    /// **`H_b` is complete against ground truth** (#120, #122), judged at the
+    /// matchmaking → Phase 1 boundary: every ballot `b'` in
+    /// `[watermark, ballot)` that has already put an `Accept` on the wire —
+    /// the ballots whose Phase-2 quorums may have chosen something — has its
+    /// configuration among the priors the campaign closed with. The
+    /// reply-side check (`check_folded_union`) proves the priors are the
+    /// union of what the candidate *was told*; this one proves what it was
+    /// told is what is *true*.
+    ///
+    /// Why it must hold: `b'` exercised Phase 2 only after its own
+    /// matchmaking closed at a quorum of durable registrations, and any
+    /// quorum this campaign folded intersects it at a matchmaker that
+    /// either registered `b'` before answering this campaign (so the answer
+    /// names it, being at or above the maximum watermark the campaign
+    /// filters by) or registered this larger ballot first and refused `b'`
+    /// (registration is monotone) — impossible, since `b'` closed. Across a
+    /// generation change the freeze quorum intersects `b'`'s registration
+    /// quorum the same way (a frozen matchmaker registers nothing), and the
+    /// reconstruction carries it. "Above the watermark" is exactly the
+    /// protocol's filter: `b' >= watermark`, the maximum GC watermark the
+    /// folded replies reported.
+    pub(super) fn check_prior_covers_phase2(
+        &mut self,
+        node: u64,
+        ballot: Ballot,
+        prior: &[AcceptorConfig],
+        watermark: Ballot,
+    ) {
+        let lo = (watermark.round, watermark.node.0);
+        let hi = (ballot.round, ballot.node.0);
+        if lo >= hi {
+            return;
+        }
+        let mut judged: u64 = 0;
+        let mut uncovered: u64 = 0;
+        let mut first_uncovered = (0, 0);
+        for key in self.authorities.range(lo..hi).map(|(k, _)| *k) {
+            let Some(config) = self.configs.get(&key) else {
+                continue;
+            };
+            judged += 1;
+            if !prior.contains(config) {
+                if uncovered == 0 {
+                    first_uncovered = key;
+                }
+                uncovered += 1;
+            }
+        }
+        assert_always!(
+            uncovered == 0,
+            "matchmaking: H_b covers every lower ballot that ran Phase 2 above the watermark",
+            {
+                "node" => node,
+                "round" => ballot.round,
+                "watermark_round" => watermark.round,
+                "judged" => judged,
+                "uncovered" => uncovered,
+                "first_uncovered_round" => first_uncovered.0,
+                "first_uncovered_bnode" => first_uncovered.1
+            }
+        );
+        if judged > 0 {
+            reach_once!(
+                self.prior_ground_truth_checked,
+                "matchmaking: H_b is checked against a lower ballot that ran Phase 2"
+            );
+        }
     }
 
     /// Fold one `Prepare` leaving `node` for `to` at `ballot` (#122): Phase 1
@@ -955,6 +1066,125 @@ impl AuditState {
 
     /// The lowest compaction floor across the cluster: everything below it is
     /// truncated *everywhere*, so the per-slot safety tallies can be pruned.
+    /// The epoch a durable report from `node` is stamped with: the first
+    /// report after a send opens a new batch (see [`BatchEpoch`]).
+    fn batch_epoch_for_write(&mut self, node: u64) -> u64 {
+        let e = self.batch_epochs.entry(node).or_default();
+        if e.sent_since_write {
+            e.epoch += 1;
+            e.sent_since_write = false;
+        }
+        e.epoch
+    }
+
+    /// `node` put a message on the wire: the next durable report is a new
+    /// batch's.
+    pub(super) fn note_batch_send(&mut self, node: u64) {
+        self.batch_epochs.entry(node).or_default().sent_since_write = true;
+    }
+
+    /// A boundary strictly between two of `node`'s batches (a tick, a boot).
+    pub(super) fn bump_batch_epoch(&mut self, node: u64) {
+        let e = self.batch_epochs.entry(node).or_default();
+        e.epoch += 1;
+        e.sent_since_write = false;
+    }
+
+    /// Fold one durable accepted record of `node` into its current
+    /// incarnation's durable log.
+    pub(super) fn note_durable_record(&mut self, node: u64, slot: u64, ballot: Ballot, vhash: u64) {
+        let epoch = self.batch_epoch_for_write(node);
+        self.durable_log
+            .insert((node, slot), (ballot, vhash, epoch));
+    }
+
+    /// The boot report is the incarnation edge: `node`'s durable log is
+    /// exactly what this boot read back — a record a torn tail or a detected
+    /// corruption took is not one the node can be asked for — and every
+    /// record of it predates every batch this incarnation will run.
+    pub(super) fn reset_durable_log(&mut self, node: u64, records: &[(Slot, Ballot, u64)]) {
+        // Split this node's records out and drop them (keys sort by node).
+        let mut own = self.durable_log.split_off(&(node, 0));
+        let later = own.split_off(&(node.saturating_add(1), 0));
+        self.durable_log.extend(later);
+        let epoch = self.batch_epochs.get(&node).map_or(0, |e| e.epoch);
+        for &(slot, ballot, vhash) in records {
+            self.durable_log
+                .insert((node, slot.0), (ballot, vhash, epoch));
+        }
+        self.bump_batch_epoch(node);
+    }
+
+    /// `node` compacted its log below `first`: those records are gone.
+    pub(super) fn drop_durable_log_below(&mut self, node: u64, first: u64) {
+        let doomed: Vec<(u64, u64)> = self
+            .durable_log
+            .range((node, 0)..(node, first))
+            .map(|(k, _)| *k)
+            .collect();
+        for key in doomed {
+            self.durable_log.remove(&key);
+        }
+    }
+
+    /// **A Promise never under-reports** (the acceptor's half of P2c,
+    /// judged against the disk rather than the acceptor's own memory): every
+    /// record `node` holds durably inside the page's window
+    /// `[from_slot, next_from_slot)` appears in the page — readable with the
+    /// very ballot and value the disk holds, or as a faulty identity. A
+    /// record missing from a Promise is a vote the candidate's P2c selection
+    /// never sees, which is how a new leader overwrites a chosen value.
+    /// Records the Promise's own batch made durable are skipped (see
+    /// [`BatchEpoch`]); below the window's start nothing is judged — a
+    /// `Prepare` below the acceptor's floor is refused, so the window always
+    /// starts inside the retained log. O(page).
+    pub(super) fn check_promise_complete(
+        &self,
+        node: u64,
+        ballot: Ballot,
+        from_slot: Slot,
+        accepted: &BTreeMap<Slot, (Ballot, paros::Command)>,
+        faulty: &BTreeMap<Slot, Ballot>,
+        next_from_slot: Option<Slot>,
+    ) {
+        let epoch = self.batch_epochs.get(&node).map_or(0, |e| e.epoch);
+        // Bounded inside this node's keys either way: an unbounded upper
+        // end would run on into the next node's records.
+        let upper = next_from_slot.map_or(std::ops::Bound::Included((node, u64::MAX)), |s| {
+            std::ops::Bound::Excluded((node, s.0))
+        });
+        let window = (std::ops::Bound::Included((node, from_slot.0)), upper);
+        let mut judged: u64 = 0;
+        let mut missing: u64 = 0;
+        let mut first_missing: Option<u64> = None;
+        for (&(_, slot), &(record_ballot, vhash, stamp)) in self.durable_log.range(window) {
+            if stamp >= epoch {
+                continue;
+            }
+            judged += 1;
+            let reported = accepted
+                .get(&Slot(slot))
+                .is_some_and(|(b, c)| *b == record_ballot && paros::command_hash(c) == vhash)
+                || faulty.contains_key(&Slot(slot));
+            if !reported {
+                missing += 1;
+                first_missing.get_or_insert(slot);
+            }
+        }
+        assert_always!(
+            missing == 0,
+            "a Promise reports every durable accept in its window",
+            {
+                "node" => node,
+                "round" => ballot.round,
+                "from_slot" => from_slot.0,
+                "judged" => judged,
+                "missing" => missing,
+                "first_missing" => first_missing.unwrap_or(u64::MAX)
+            }
+        );
+    }
+
     pub(super) fn cluster_min_floor(&self) -> u64 {
         self.booted
             .iter()
@@ -1187,11 +1417,27 @@ impl AuditState {
                 }
             );
         } else {
-            let decided = self.decided_below_floor.get(&slot).copied();
+            // The witness wherever it stands: pruned into
+            // `decided_below_floor`, or still in the live tally when the
+            // cluster's minimum floor rose without a driver-audited
+            // truncation to prune on (an install or a ground-truth flush
+            // raises the folded floor too) — hunt seed 5625748798251412727
+            // at 13b44b3: slot 4 below a minimum floor of 5 with nothing
+            // pruned yet, judged against an empty witness map.
+            let decided = self.decided_vhash(slot);
             assert_always!(
                 decided == Some(vhash),
                 "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",
-                { "proxy" => proxy, "slot" => slot, "round" => ballot.round, "below_floor" => true }
+                {
+                    "proxy" => proxy,
+                    "slot" => slot,
+                    "round" => ballot.round,
+                    "below_floor" => true,
+                    "min_floor" => self.cluster_min_floor(),
+                    "witness_known" => decided.is_some(),
+                    "witness_matches" => decided == Some(vhash),
+                    "pruned_slots" => self.decided_below_floor.len()
+                }
             );
         }
         let proposed = self
