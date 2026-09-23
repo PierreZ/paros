@@ -69,7 +69,7 @@ Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
 
 - moonpool macros only (`assert_always!` with a detail map, `assert_sometimes!`
   for outcomes, `reach_once!` for causes); never plain `assert!`; never reword
-  a message; 512 slots and 256 buckets per campaign process; no slot, ballot,
+  a message; 2048 slots and 256 buckets per campaign process; no slot, ballot,
   id, seed or hash as an identity.
 - No seed constants, seed lists or seed-replay tests. `tests/sim.rs` is the
   smoke (a single seed converging, the storage contract, a same-seed digest
