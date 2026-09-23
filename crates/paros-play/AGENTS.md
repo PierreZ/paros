@@ -162,23 +162,10 @@ Part two's four: `Phase1Complete` (a `Proposer` clone folded with the arriving
 over the union), `MayRetire` (`ColocatedNode::may_retire` on the target itself; it
 takes `&self` and the evidence the operator shows is checked before it),
 `GenerationFence` (a `Matchmaker` clone stepped with the very request, and its own
-reply read back) and `StaleConfiguration` — the one prompt whose oracle is **not**
-read off the node. `ColocatedNode` hands out no reference to its own `Matchmaking`,
-so the world drives a second instance of the same core role with the same answers
-(`World::matchmaking_shadow`, synced in `settle`, folded in `fold_match_reply` before
-the node is).
-
-**The shadow is a liability, and it is the only one.** A second instance is only the
-node's own tally while it is fed *exactly* what the node is fed, guards included:
-`ColocatedNode::on_match_reply` ignores a reply addressed to another node, one from a
-matchmaker outside the set this node believes authoritative, and one for another
-generation, so `fold_match_reply` applies the same three before it folds the shadow.
-Every guard the core adds must be copied here, and a copied guard is a guard that can
-fall out of step. The fix is upstream, not here: a `ColocatedNode::matchmaking_role()`
-accessor that hands the role out read-only — the way `acceptor()`, `proposer()` and
-`replica()` already do — would let this prompt clone the node's own tally like every
-other prompt, and the shadow, its `settle` sync, its guards and its field would all be
-deleted in the same change.
+reply read back) and `StaleConfiguration` (a clone of the node's own `Matchmaking`
+role, `ColocatedNode::matchmaking_role`, folded with the very reply — the node's three
+guards, another node's answer, a matchmaker outside the believed set and another
+generation, are checked first so the clone never counts an answer the node ignores).
 
 ## Narration is derived, never scripted
 

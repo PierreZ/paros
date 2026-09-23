@@ -146,7 +146,6 @@ impl World {
             );
             return Ok(());
         }
-        self.note_ack(to, &message);
         if let Some(prompt) = self.prompt_for(to, &message) {
             self.narrate(
                 NarrationKind::Info,

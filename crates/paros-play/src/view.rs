@@ -400,6 +400,10 @@ pub struct GapView {
 pub struct ElectionView {
     /// The timeout in ticks.
     pub timeout: u64,
+    /// Ticks since the clock last reset, read off the core
+    /// (`ColocatedNode::election_elapsed`): how far toward `timeout` it has
+    /// run.
+    pub elapsed: u64,
     /// Whether the timeout is the no-check-quorum sentinel a hand-stepped
     /// leader holds (see [`crate::world::NO_CHECK_QUORUM`]).
     pub held: bool,

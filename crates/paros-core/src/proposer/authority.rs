@@ -38,11 +38,34 @@ pub struct ReadRound<Id> {
 }
 
 impl<Id> ReadRound<Id> {
+    /// The driver-supplied correlation token the round was opened with.
+    #[must_use]
+    pub fn ctx(&self) -> u64 {
+        self.ctx
+    }
+
+    /// The read index the round captured when it opened:
+    /// `max(chosen_index, read_floor)` at that instant. `None` is the empty
+    /// prefix.
+    #[must_use]
+    pub fn index(&self) -> Option<Slot> {
+        self.index
+    }
+
     /// The beat sequence an ack must answer (at or after) to credit this
     /// round.
     #[must_use]
     pub fn required_seq(&self) -> u64 {
         self.required_seq
+    }
+
+    /// The acceptors credited so far — the leader's own vote when it is a
+    /// member, plus every peer that acked a qualifying beat at the round's
+    /// ballot. Confirmation is [`Authority::confirm_reads`]'s question, not
+    /// a count of this set.
+    #[must_use]
+    pub fn acked(&self) -> &BTreeSet<Id> {
+        &self.acked_by
     }
 }
 

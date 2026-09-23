@@ -59,6 +59,33 @@ impl<V> Recovery<V> {
     pub fn remaining(&self) -> usize {
         usize::try_from(self.end.0.saturating_sub(self.cursor.0)).unwrap_or(usize::MAX)
     }
+
+    /// The commands still to re-propose, per slot: what the Phase-1 quorum
+    /// (or the handoff) reported for the slots the cursor has not reached
+    /// yet. An entry leaves this map as [`Proposer::recovery_next`] passes
+    /// it, so the map is the *remaining* plan, never the whole one.
+    #[must_use]
+    pub fn recovered(&self) -> &BTreeMap<Slot, V> {
+        &self.recovered
+    }
+
+    /// The slots blocked on the repair probe (Case 3: wait).
+    #[must_use]
+    pub fn blocked(&self) -> &BTreeSet<Slot> {
+        &self.blocked
+    }
+
+    /// The next slot the cursor hands out.
+    #[must_use]
+    pub fn cursor(&self) -> Slot {
+        self.cursor
+    }
+
+    /// One past the highest slot the recovery covers.
+    #[must_use]
+    pub fn end(&self) -> Slot {
+        self.end
+    }
 }
 
 /// One step of a recovery pump ([`Proposer::recovery_next`]).

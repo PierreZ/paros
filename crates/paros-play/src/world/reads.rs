@@ -4,9 +4,7 @@
 //! They are served through the same `ReadState`, and only the client knows
 //! which of the two it asked for.
 
-use std::collections::BTreeSet;
-
-use paros_core::{Message, NodeId, ReadIndexResult, ReadState, Slot};
+use paros_core::{NodeId, ReadIndexResult, ReadState, Slot};
 
 use crate::action::{ActionError, ActionErrorCode};
 use crate::narration::{NarrationKind, prefix_at, say, who};
@@ -25,20 +23,25 @@ impl World {
         let index = self.require_live(id)?;
         let slot = self.require_client(client)?;
         let ctx = self.next_read_ctx;
-        // The index a read-index round captures, recomputed here because
-        // `ReadRound` exposes none of its fields: the applied watermark, or the
-        // fresh-leader fence when that sits higher.
-        let captured = self.nodes[index].as_ref().and_then(|node| {
-            let fence = node.proposer().read_floor();
-            node.replica().chosen_index().max(fence)
-        });
         let mark = self.narration.len();
+        // The index the round captured is read off the round itself, right
+        // after it opens and before the pump can confirm it away.
         let outcome = self.observe(id, move |world| {
-            let out = world.nodes[index].as_mut().map(|node| node.read_index(ctx));
+            let out = world.nodes[index].as_mut().map(|node| {
+                let result = node.read_index(ctx);
+                let captured = node
+                    .proposer()
+                    .read_rounds()
+                    .iter()
+                    .find(|round| round.ctx() == ctx)
+                    .and_then(paros_core::proposer::ReadRound::index);
+                (result, captured)
+            });
             world.pump(id);
             out
         });
-        match outcome {
+        let captured = outcome.as_ref().and_then(|(_, captured)| *captured);
+        match outcome.map(|(result, _)| result) {
             Some(ReadIndexResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
                 return Err(ActionError::new(
@@ -63,21 +66,10 @@ impl World {
         // reproduce.
         let issued = self.take_event();
         self.next_read_ctx += 1;
-        let required_seq = self.nodes[index]
-            .as_ref()
-            .and_then(|node| {
-                node.proposer()
-                    .read_rounds()
-                    .last()
-                    .map(paros_core::proposer::ReadRound::required_seq)
-            })
-            .unwrap_or(0);
         self.clients[slot].reads.push(PendingRead {
             ctx,
             node: id,
             index: captured,
-            required_seq,
-            acks: BTreeSet::new(),
             leaderless: false,
             served: false,
             issued,
@@ -133,8 +125,6 @@ impl World {
             // maximum watermark the row reports, and the row has not answered
             // yet. `serve_read` fills it in.
             index: None,
-            required_seq: 0,
-            acks: BTreeSet::new(),
             leaderless: true,
             served: false,
             issued,
@@ -199,21 +189,6 @@ impl World {
             )
         };
         self.narrate(NarrationKind::Read, text);
-    }
-
-    /// Note a heartbeat ack against the read rounds it qualifies for — display
-    /// only (see [`PendingRead::acks`]).
-    pub(super) fn note_ack(&mut self, to: NodeId, message: &Message) {
-        let Message::HeartbeatAck { from, seq, .. } = message else {
-            return;
-        };
-        for client in &mut self.clients {
-            for read in &mut client.reads {
-                if read.node == to && !read.served && *seq >= read.required_seq {
-                    read.acks.insert(*from);
-                }
-            }
-        }
     }
 
     /// Every read a client asked for that has been served, as

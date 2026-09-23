@@ -78,34 +78,20 @@ impl World {
         );
     }
 
-    /// Keep the shadow matchmaking phase in step with the node's own.
+    /// Drop the prior configurations a node's last campaign reported once it
+    /// is registering again.
     ///
-    /// A candidate that opens a campaign gets a fresh instance of the core's
-    /// [`paros_core::matchmaking::Matchmaking`] role, built from the very
-    /// ballot, configuration and kind the node reports. A campaign that closed
-    /// takes its shadow with it.
-    ///
-    /// A **fresh** campaign also drops the prior configurations the last one
-    /// reported: `H_b` belongs to the campaign that completed, and a node that
-    /// is registering again has not been told anything yet.
-    pub(in crate::world) fn sync_matchmaking_shadow(&mut self, index: usize) {
-        let open = self.nodes[index]
+    /// `H_b` belongs to the campaign that completed, and a node whose
+    /// matchmaking phase is open has not been told anything yet: the phase
+    /// closes at the very step that hands `H_b` over
+    /// ([`MatchStep::Completed`]), so an open one is always a fresh campaign.
+    pub(in crate::world) fn forget_superseded_prior(&mut self, index: usize) {
+        if self.nodes[index]
             .as_ref()
-            .and_then(ColocatedNode::matchmaking)
-            .map(|(ballot, config, kind)| (ballot, config.clone(), kind));
-        match open {
-            None => self.matchmaking_shadow[index] = None,
-            Some((ballot, config, kind)) => {
-                let stale = self.matchmaking_shadow[index]
-                    .as_ref()
-                    .is_none_or(|shadow| shadow.ballot() != ballot);
-                if stale {
-                    self.matchmaking_shadow[index] = Some(
-                        paros_core::matchmaking::Matchmaking::new(ballot, config, kind),
-                    );
-                    self.campaign_prior[index].clear();
-                }
-            }
+            .and_then(ColocatedNode::matchmaking_role)
+            .is_some()
+        {
+            self.campaign_prior[index].clear();
         }
     }
 
@@ -318,31 +304,6 @@ impl World {
         index: usize,
         reply: MatchReply,
     ) {
-        // The shadow is fed exactly what the node is fed, and in the same
-        // order, so the `StaleConfiguration` oracle sees the union the node
-        // sees. "Exactly" includes the guards `ColocatedNode::on_match_reply`
-        // applies before it folds anything: an answer addressed to another
-        // node, an answer from a matchmaker outside the set this node believes
-        // authoritative, and an answer for another generation are all
-        // `Ignored` there, so the shadow must ignore them too. A shadow that
-        // counted one of them would report a quorum the node does not hold.
-        let addressed = reply.to == to
-            && self.nodes[index]
-                .as_ref()
-                .and_then(ColocatedNode::matchmaker_set)
-                .is_some_and(|set| {
-                    set.contains(reply.matchmaker) && set.generation == reply.generation
-                });
-        if addressed
-            && let Some(shadow) = self.matchmaking_shadow[index].as_mut()
-            && shadow.ballot() == reply.ballot
-        {
-            let (matchmaker, answer) =
-                paros_core::matchmaking::RegisteredPage::from_reply(reply.clone());
-            if let Ok(page) = answer {
-                shadow.fold(matchmaker, page);
-            }
-        }
         let step = self.observe(to, move |world| {
             let out = world.nodes[index]
                 .as_mut()

@@ -322,18 +322,31 @@ function electionRing(node: NodeView, nodeRadius: number): SVGElement | null {
     });
   }
   if (election.timeout <= 0) return null;
-  // No `elapsed` in the view contract yet: the ring shows the timeout's size,
-  // one dash per tick, rather than pretending to know how far it has run.
+  // The faint dashed ring is the timeout's size, one dash per tick; the arc
+  // over it is how far the clock has run (`elapsed`, read off the core).
   const radius = nodeRadius + 7;
   const circumference = 2 * Math.PI * radius;
   const dash = Math.max(2, circumference / (election.timeout * 2));
-  return svg('circle', {
+  const ring = svg('circle', {
     class: 'election armed',
     r: radius,
     cx: 0,
     cy: 0,
     'stroke-dasharray': `${dash.toFixed(2)} ${dash.toFixed(2)}`,
   });
+  const fraction = Math.min(1, election.elapsed / election.timeout);
+  if (fraction <= 0) return ring;
+  const run = circumference * fraction;
+  const arc = svg('circle', {
+    class: 'election elapsed',
+    r: radius,
+    cx: 0,
+    cy: 0,
+    // Start at twelve o'clock and fill clockwise.
+    transform: 'rotate(-90)',
+    'stroke-dasharray': `${run.toFixed(2)} ${circumference.toFixed(2)}`,
+  });
+  return svg('g', { class: 'election-clock' }, ring, arc);
 }
 
 /**

@@ -51,12 +51,12 @@ impl World {
     /// The question a matchmaker quorum's answer raises at a candidate whose
     /// belief is out of date: abandon the campaign, or carry on?
     ///
-    /// Judged on a **clone of the candidate's own matchmaking phase**. The
-    /// world drives a second [`paros_core::Matchmaking`] with the same
-    /// answers the node is given — the role is the core's, but `ColocatedNode`
-    /// hands no reference to its own, so this is a shadow rather than a clone
-    /// of the node's. See the crate's report: it is the one prompt whose oracle
-    /// is not read straight off the node.
+    /// Judged on a **clone of the candidate's own matchmaking phase**
+    /// ([`ColocatedNode::matchmaking_role`](paros_core::ColocatedNode::matchmaking_role)),
+    /// folded with this very reply. The node's guards — another node's
+    /// answer, a matchmaker outside the believed set, another generation —
+    /// are checked first, exactly as `on_match_reply` checks them before it
+    /// folds anything, so the clone never counts an answer the node ignores.
     pub(super) fn stale_configuration_prompt(
         &mut self,
         to: NodeId,
@@ -68,14 +68,18 @@ impl World {
         }
         let node = self.nodes[index].as_ref()?;
         let matchmakers = node.matchmaker_set()?.clone();
-        let (ballot, believed, kind) = node
-            .matchmaking()
-            .map(|(ballot, config, kind)| (ballot, config.clone(), kind))?;
-        if reply.ballot != ballot || kind == RegistrationKind::Reconfiguration {
+        let role = node.matchmaking_role()?;
+        let (ballot, believed) = (role.ballot(), role.config().clone());
+        if reply.ballot != ballot || role.kind() == RegistrationKind::Reconfiguration {
             return None;
         }
-        let shadow = self.matchmaking_shadow[index].as_mut()?;
-        let mut clone = shadow.clone();
+        let addressed = reply.to == to
+            && matchmakers.contains(reply.matchmaker)
+            && matchmakers.generation == reply.generation;
+        if !addressed {
+            return None;
+        }
+        let mut clone = role.clone();
         let (matchmaker, answer) =
             paros_core::matchmaking::RegisteredPage::from_reply(reply.clone());
         let Ok(page) = answer else {

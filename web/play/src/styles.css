@@ -238,7 +238,15 @@ code,
   fill: none;
   stroke: var(--shared);
   stroke-width: 2;
-  opacity: 0.75;
+  opacity: 0.35;
+}
+
+.election.elapsed {
+  fill: none;
+  stroke: var(--shared);
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.9;
 }
 
 .link {

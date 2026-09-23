@@ -128,6 +128,7 @@ impl World {
             floor: Some(node.acceptor().first_slot().0),
             election: Some(ElectionView {
                 timeout,
+                elapsed: node.election_elapsed(),
                 held: timeout == NO_CHECK_QUORUM,
             }),
             open_rounds: node.proposer().rounds().keys().map(|s| s.0).collect(),
@@ -150,23 +151,13 @@ impl World {
             armed_seam: self.armed_seams[index],
             acceptors_since: Some(show_ballot(node.acceptors_since())),
             matchmakers: node.matchmaker_set().map(matchmaker_set_view),
-            // How many more matchmakers must answer is the role's own count,
-            // and the role is not handed out: the shadow the world drives with
-            // the same answers reports it.
-            matchmaking: node
-                .matchmaking()
-                .map(|(ballot, config, kind)| MatchmakingView {
-                    ballot: show_ballot(ballot),
-                    config: config.members().iter().map(|n| n.0).collect(),
-                    kind: registration_kind_view(kind),
-                    remaining: match (
-                        self.matchmaking_shadow[index].as_ref(),
-                        node.matchmaker_set(),
-                    ) {
-                        (Some(shadow), Some(set)) => shadow.remaining(set),
-                        _ => 0,
-                    },
-                }),
+            // How many more matchmakers must answer is the role's own count.
+            matchmaking: node.matchmaking_role().map(|role| MatchmakingView {
+                ballot: show_ballot(role.ballot()),
+                config: role.config().members().iter().map(|n| n.0).collect(),
+                kind: registration_kind_view(role.kind()),
+                remaining: node.matchmaker_set().map_or(0, |set| role.remaining(set)),
+            }),
             gc: node.gc_effective().map(|(watermark, retired)| GcView {
                 effective_watermark: show_ballot(watermark),
                 retirable: retired.iter().map(|n| n.0).collect(),
@@ -178,6 +169,10 @@ impl World {
     }
 
     fn read_round_views(&self, id: NodeId) -> Vec<ReadRoundView> {
+        let rounds = self
+            .node(id)
+            .map(|node| node.proposer().read_rounds())
+            .unwrap_or_default();
         self.clients
             .iter()
             .flat_map(|c| c.reads.iter())
@@ -185,7 +180,12 @@ impl World {
             .map(|r| ReadRoundView {
                 ctx: r.ctx,
                 index: r.index.map(|s| s.0),
-                acks: r.acks.len(),
+                // The round's own credited acks, the leader's vote included;
+                // a leaderless read has no round and counts none.
+                acks: rounds
+                    .iter()
+                    .find(|round| !r.leaderless && round.ctx() == r.ctx)
+                    .map_or(0, |round| round.acked().len()),
             })
             .collect()
     }

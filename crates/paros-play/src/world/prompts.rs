@@ -67,12 +67,19 @@ impl World {
         if election.ballot() != *ballot {
             return None;
         }
-        let prior = self.campaign_prior[index].clone();
+        // A plain deployment's `prior` is its one static configuration, and
+        // Act II already taught that question.
+        node.matchmaker_set()?;
+        let prior = election.prior();
         if prior.is_empty() {
             // `H_b` is empty: the matchmakers alone proved nothing came
             // before, and there is no configuration to be short of.
             return None;
         }
+        let members: Vec<Vec<NodeId>> = prior
+            .iter()
+            .map(|config| config.members().to_vec())
+            .collect();
         let mut clone = node.proposer().clone();
         clone.fold_promise(
             *from,
@@ -87,10 +94,6 @@ impl World {
             .election()
             .map(|election| election.promised().iter().copied().collect())
             .unwrap_or_default();
-        let members: Vec<Vec<NodeId>> = prior
-            .iter()
-            .map(|config| config.members().to_vec())
-            .collect();
         let id = self.take_prompt_id();
         Some(Prompt::phase1_complete(
             id, to, *ballot, &promised, &members, complete,
@@ -469,21 +472,25 @@ impl World {
         if node.proposer().read_rounds().is_empty() {
             return None;
         }
-        let mut clone = node.proposer().clone();
-        clone.credit_read_ack(*from, *seq);
-        let confirmed = !clone
-            .confirm_reads(node.acceptors(), node.replica().chosen_index())
-            .is_empty();
-        let chosen_index = node.replica().chosen_index();
         let read = self
             .clients
             .iter()
             .flat_map(|client| client.reads.iter())
-            .find(|read| read.node == to && !read.served)?;
-        let (ctx, captured, acks) = (read.ctx, read.index, read.acks.len());
-        // The round is seeded with the leader's own vote, so the card counts
-        // it: the world only sees the acks that arrive on the wire.
-        let acks = acks + usize::from(node.is_acceptor());
+            .find(|read| read.node == to && !read.served && !read.leaderless)?;
+        let (ctx, captured) = (read.ctx, read.index);
+        let mut clone = node.proposer().clone();
+        clone.credit_read_ack(*from, *seq);
+        // The acks the round would hold with this one credited — the leader's
+        // own vote included, which the round is seeded with.
+        let acks = clone
+            .read_rounds()
+            .iter()
+            .find(|round| round.ctx() == ctx)
+            .map_or(0, |round| round.acked().len());
+        let confirmed = !clone
+            .confirm_reads(node.acceptors(), node.replica().chosen_index())
+            .is_empty();
+        let chosen_index = node.replica().chosen_index();
         let members = node.acceptors().members().len();
         let id = self.take_prompt_id();
         Some(Prompt::read_serve(
