@@ -497,13 +497,44 @@ fn describe_replicas(replicas: &[(usize, ChainState)]) -> String {
 }
 
 /// The run's shared tail bookkeeping, one per iteration: how many clients the
-/// run has and how many have finished proposing. Convergence is only called
-/// once *every* client is quiet — the first client to see it ends the run, and
-/// its siblings, cut short by that shutdown, defer to the audit's final claim.
+/// run has, how many have reached the tail and when the last one did, and how
+/// many have finished proposing. Convergence is only called once *every*
+/// client is quiet — the first client to see it ends the run, and its
+/// siblings, cut short by that shutdown, defer to the audit's final claim.
+///
+/// **The tail begins when the whole workload is in it** ([`Tail::judged_by`]).
+/// A client reaches its tail when its own operation phase ends, but a sibling
+/// whose knobs drew a long phase (`steps` near 64, a storm-heavy weight
+/// table, `compact_storm_attempts` and `compact_beat_ms` at their ceilings —
+/// a few seconds per storm step) keeps operating long after the chaos
+/// cutoff, and until it is done the convergence claim is not even allowed to
+/// judge (`done_proposing == registered`). Counting that time against the
+/// early client's `recovery_budget_ms` made the verdict a function of a
+/// sibling's knob draw rather than of the protocol: seed
+/// 2585377267143030814 at b14d315 had one leader from t=4.3 s to the end, no
+/// matchmaking after it, and every node applying — 73 commands at t=9 s, 184
+/// at t=68 s — yet client 2, in its tail from t=8.4 s, missed its 68.4 s
+/// deadline while client 1 was still in its storm steps (tail at t=69.8 s).
+/// The budget is recovery time, so it is spent only once no client is still
+/// in its operation phase; the operation phase itself is bounded (every
+/// operation is timeout-bounded), so the wait for it is too.
 #[derive(Default)]
 struct Tail {
     registered: usize,
+    entered: usize,
+    last_entered: Duration,
     done_proposing: usize,
+}
+
+impl Tail {
+    /// The instant a client that entered the tail at `own_deadline -
+    /// budget` must have seen convergence by: its own deadline, pushed back
+    /// to `budget` past the last client's entry into the tail. `None` while
+    /// some client is still in its operation phase — the deadline has not
+    /// started running.
+    fn judged_by(&self, own_deadline: Duration, budget: Duration) -> Option<Duration> {
+        (self.entered == self.registered).then(|| own_deadline.max(self.last_entered + budget))
+    }
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -2273,7 +2304,14 @@ impl Workload for ChainWorkload {
         // A small recovery batch proves post-chaos forward progress and gives
         // the state frontier useful depth even when the swarmed operation mask
         // suppressed proposals during the turbulent prefix.
-        let recovery_deadline = time.now() + Duration::from_millis(config.recovery_budget_ms);
+        let recovery_budget = Duration::from_millis(config.recovery_budget_ms);
+        let recovery_deadline = time.now() + recovery_budget;
+        let tail = tail(ctx.state());
+        {
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.entered += 1;
+            guard.last_entered = guard.last_entered.max(time.now());
+        }
         let mut recovery_acked = 0_u64;
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
         let mut target = leader_hint.unwrap_or(first) % server_count;
@@ -2341,7 +2379,6 @@ impl Workload for ChainWorkload {
                 break;
             }
         }
-        let tail = tail(ctx.state());
         tail.lock()
             .unwrap_or_else(PoisonError::into_inner)
             .done_proposing += 1;
@@ -2355,7 +2392,15 @@ impl Workload for ChainWorkload {
         // `(since, state)`: when the cluster was first seen converged at
         // `state`, reset whenever a probe disagrees.
         let mut stable: Option<(Duration, ChainState)> = None;
-        while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+        // The judgement deadline: `recovery_budget` past the whole workload's
+        // entry into the tail (see [`Tail`]), unset while a sibling is still
+        // in its operation phase.
+        let mut judged_by = None;
+        while judged_by.is_none_or(|deadline| time.now() < deadline) && !shutdown.is_cancelled() {
+            judged_by = tail
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .judged_by(recovery_deadline, recovery_budget);
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
             // cost the dead-node budget bounds. Convergence is demanded of
@@ -2493,7 +2538,7 @@ impl Workload for ChainWorkload {
             eprintln!(
                 "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node states = {:?}",
                 time.now().as_millis(),
-                recovery_deadline.as_millis(),
+                judged_by.unwrap_or(recovery_deadline).as_millis(),
                 pre_tail_count,
                 last_probe,
             );
