@@ -1,4 +1,4 @@
-use super::{Audience, Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
+use super::{Ballot, ColocatedNode, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 
 /// The leader's heartbeat cadence, in ticks: a leader beats on **every**
@@ -91,15 +91,15 @@ impl ColocatedNode {
                 .has_matchmakers()
                 .then_some(self.replica.chosen_index())
                 .flatten();
-            self.pending_messages.push((
-                Audience::Node(from),
+            self.send(
+                from,
                 Message::HeartbeatAck {
                     from: me,
                     ballot,
                     seq,
                     chosen,
                 },
-            ));
+            );
         }
         // Commit-replay catch-up reconciles the sender's advertised contiguous
         // chosen prefix (`commit`) against ours, in **both** directions. It is
@@ -120,14 +120,7 @@ impl ColocatedNode {
             // reached us — the leader only re-sends `Accept`s for still-*pending*
             // slots, so that hole would be permanent. Pull the decided range from
             // our first unchosen slot.
-            let from_slot = self.first_unchosen();
-            self.pending_messages.push((
-                Audience::Node(from),
-                Message::CatchUpRequest {
-                    from: me,
-                    from_slot,
-                },
-            ));
+            self.send(from, self.catch_up_request(self.first_unchosen()));
         } else if commit < ci {
             // We are ahead of the sender: push what it is missing. This is what
             // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a

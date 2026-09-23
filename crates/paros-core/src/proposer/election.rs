@@ -169,12 +169,8 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
                 faulty_reports.entry(*slot).or_default().insert(me, *ballot);
             }
         }
-        let mut promised_by = BTreeSet::new();
-        if let Some(me) = me {
-            promised_by.insert(me);
-        }
         let election = Election {
-            promises: PromiseTally::new(ballot, from_slot, promised_by),
+            promises: PromiseTally::new(ballot, from_slot, me.into_iter().collect()),
             config,
             prior,
             recovered,

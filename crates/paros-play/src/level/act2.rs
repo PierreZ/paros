@@ -20,15 +20,18 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Config, Entry, NodeId, QuorumSystem, Slot, Value,
-};
+use paros_core::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, QuorumSystem, Slot, Value};
 
 use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
+use crate::level::common::{
+    CLIENT, REPLIES_ONLY, TIMEOUT, applied, config, crash, fresh, peers, propose, read_index_as,
+    restart, slot_traffic, start_election, tick,
+};
 use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
-use crate::view::{MessageView, show_command};
+use crate::narration::at;
+use crate::view::show_command;
 use crate::world::{Disk, World};
 
 /// Act II's levels, in play order.
@@ -45,14 +48,6 @@ pub fn levels() -> Vec<&'static Level> {
     ]
 }
 
-/// The one client every Act II level gives the player.
-const CLIENT: u64 = 7;
-
-/// The election timeout every Act II node starts with, in ticks. Long enough
-/// that a level's own ticks are deliberate, short enough that
-/// [`Action::StartElection`] is not the only way to campaign.
-const TIMEOUT: u64 = 5;
-
 /// Every role answered for the player. A level removes exactly the one it
 /// teaches.
 const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
@@ -65,33 +60,7 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::ReadServe,
 ];
 
-/// The convenience toggle every Act II level offers.
-const TOGGLES: &[AutomationFlag] = &[AutomationFlag::DeliverReplies];
-
 // ---- worlds -----------------------------------------------------------------
-
-/// The configuration of a `size`-node cluster under a majority.
-fn peers(size: u64) -> Vec<NodeId> {
-    (0..size).map(NodeId).collect()
-}
-
-fn config(id: NodeId, size: u64) -> Config {
-    Config {
-        id,
-        peers: peers(size),
-        quorum_system: QuorumSystem::Majority,
-        ..Config::default()
-    }
-}
-
-/// A cluster of `size` fresh nodes.
-fn fresh(size: u64) -> WorldKind {
-    let disks = peers(size)
-        .into_iter()
-        .map(|id| Disk::new(config(id, size)))
-        .collect();
-    WorldKind::Log(Box::new(World::from_disks(disks, &[CLIENT], TIMEOUT)))
-}
 
 /// A cluster whose disks already carry a history: every node promised
 /// `promised`, and `records` says what each one accepted.
@@ -104,7 +73,7 @@ fn with_history(
         .into_iter()
         .map(|id| {
             Disk::seeded(
-                config(id, size),
+                config(id, size, QuorumSystem::Majority),
                 promised,
                 records.get(&id.0).cloned().unwrap_or_default(),
                 None,
@@ -133,11 +102,6 @@ fn one_record(slot: u64, ballot: Ballot, text: &str) -> BTreeMap<Slot, (Ballot, 
     records
 }
 
-/// A watermark as the goals write it.
-fn at(slot: Option<Slot>) -> String {
-    slot.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
-}
-
 /// The ballot an earlier leadership ran at: `round`, minted by node `node`.
 fn ballot(round: u64, node: u64) -> Ballot {
     Ballot {
@@ -148,33 +112,16 @@ fn ballot(round: u64, node: u64) -> Ballot {
 
 // ---- reading the world for a goal -------------------------------------------
 
-fn log_world(world: &WorldKind) -> Option<&World> {
-    world.log()
-}
-
-/// What a node's application has executed, in order.
-fn applied(world: &WorldKind, node: u64) -> Vec<String> {
-    log_world(world)
-        .and_then(|world| world.disk(NodeId(node)))
-        .map(|disk| {
-            disk.applied()
-                .iter()
-                .map(|(_, command)| show_command(command))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Every node's id, whether it is running or not.
 fn pool(world: &WorldKind) -> Vec<u64> {
-    log_world(world).map_or_else(Vec::new, |world| {
+    world.log().map_or_else(Vec::new, |world| {
         world.pool().iter().map(|id| id.0).collect()
     })
 }
 
 /// The nodes that are not running.
 fn crashed(world: &WorldKind) -> Vec<u64> {
-    let Some(log) = log_world(world) else {
+    let Some(log) = world.log() else {
         return Vec::new();
     };
     log.pool()
@@ -201,7 +148,7 @@ fn everyone_applied(world: &WorldKind, expected: &[&str]) -> Result<(), String> 
 /// Whether some node is holding accepted records it has executed none of — the
 /// shape of a cluster that voted for everything and was told about nothing.
 fn holding_undecided(world: &WorldKind) -> bool {
-    let Some(log) = log_world(world) else {
+    let Some(log) = world.log() else {
         return false;
     };
     log.pool().iter().any(|id| {
@@ -212,7 +159,7 @@ fn holding_undecided(world: &WorldKind) -> bool {
 
 /// Both durability seams, and which nodes they cut.
 fn seams(world: &WorldKind) -> (bool, bool) {
-    let Some(log) = log_world(world) else {
+    let Some(log) = world.log() else {
         return (false, false);
     };
     (
@@ -227,50 +174,8 @@ fn seams(world: &WorldKind) -> (bool, bool) {
 
 // ---- action shorthands ------------------------------------------------------
 
-fn start_election(node: u64) -> Action {
-    Action::StartElection { node }
-}
-
-fn propose(node: u64, value: &str) -> Action {
-    Action::Propose {
-        node,
-        client: CLIENT,
-        value: value.to_string(),
-        column: None,
-    }
-}
-
-fn crash(node: u64) -> Action {
-    Action::Crash { node }
-}
-
-fn restart(node: u64) -> Action {
-    Action::Restart { node }
-}
-
 fn crash_at(node: u64, seam: Seam) -> Action {
     Action::CrashAt { node, seam }
-}
-
-fn tick(node: u64) -> Action {
-    Action::Tick { node }
-}
-
-fn read_index(node: u64) -> Action {
-    Action::ReadIndex {
-        node,
-        client: Some(CLIENT),
-    }
-}
-
-/// The Phase-2 traffic of one slot: its `Accept`s, its `Accepted`s and the
-/// `Commit`s that report the decision. Deliberately not "everything naming this
-/// slot": a `Heartbeat`'s slot is its commit watermark, not a proposal.
-fn slot_traffic(slot: u64) -> impl Fn(&MessageView) -> bool {
-    move |message| {
-        matches!(message.kind.as_str(), "Accept" | "Accepted" | "Commit")
-            && message.slot == Some(slot)
-    }
 }
 
 // ---- 7. persist before send -------------------------------------------------
@@ -324,12 +229,12 @@ promise, so restart both nodes and make sure that no promise goes down.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::PersistOrder],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::PersistOrder],
     allowed_actions: SEAM_ACTIONS,
-    setup: || fresh(3),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Some(node) = log.promise_regressed() {
@@ -464,10 +369,10 @@ application already ran the command.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::ReplicaApply],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::ReplicaApply],
     allowed_actions: LOG_ACTIONS,
-    setup: || fresh(3),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| match everyone_applied(world, &["alpha", "bravo", "charlie"]) {
         Ok(()) => GoalStatus::Reached(
             "Every node executed the same three commands in the same order. One command was \
@@ -563,7 +468,7 @@ cluster a fresh command, and look at the cost: one round trip, not two.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::LeaderRecovery],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::LeaderRecovery],
     allowed_actions: ELECTION_ACTIONS,
     setup: || {
@@ -664,10 +569,10 @@ later level uses it.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::DeliverHeartbeats],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::DeliverHeartbeats],
     allowed_actions: STREAM_ACTIONS,
-    setup: || fresh(3),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| match everyone_applied(world, &["alpha", "bravo", "charlie"]) {
         Ok(()) => GoalStatus::Reached(
             "Three commands took three round trips. The followers learned the result from a \
@@ -763,12 +668,12 @@ permission to fill the slot.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::LeaderRecovery],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[],
     allowed_actions: GAP_ACTIONS,
-    setup: || fresh(3),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Some((hole, highest)) = log
@@ -893,7 +798,7 @@ the disagreement arrives, decide which record the disk keeps.",
         AutomationFlag::ReadServe,
     ],
     pinned_off: &[AutomationFlag::CommitOverwrite],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::CommitOverwrite],
     allowed_actions: RESTART_ACTIONS,
     setup: || {
@@ -902,7 +807,7 @@ the disagreement arrives, decide which record the disk keeps.",
         with_history(3, ballot(1, 2), &records)
     },
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Some(node) = log.promise_regressed() {
@@ -1041,12 +946,12 @@ cluster already acknowledged.",
         AutomationFlag::PersistOrder,
     ],
     pinned_off: &[AutomationFlag::ReadServe],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::ReadServe],
     allowed_actions: READ_ACTIONS,
-    setup: || fresh(5),
+    setup: || fresh(5, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let reads = log.reads();
@@ -1115,13 +1020,13 @@ cluster already acknowledged.",
         script.drop_all(to(0));
         // The deposed leader is asked for a read, and collects one ack.
         script
-            .play(read_index(0))
+            .play(read_index_as(CLIENT, 0))
             .settle(|message| message.kind == "Heartbeat" && message.to == 4)
             .settle(|message| message.kind == "HeartbeatAck" && message.to == 0);
         script.answer_all().drop_all(to(0));
         // The leader that really leads is asked the same question.
         script
-            .play(read_index(1))
+            .play(read_index_as(CLIENT, 1))
             .settle(|message| message.kind == "Heartbeat" && (message.to == 2 || message.to == 3))
             .settle(|message| message.kind == "HeartbeatAck" && message.to == 1);
         script.answer_all();

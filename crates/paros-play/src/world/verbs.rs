@@ -281,6 +281,39 @@ impl World {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.clock += 1;
+        self.tick_node(id, index);
+        Ok(())
+    }
+
+    /// Advance every live node's clock by one tick, in id order. Stops at the
+    /// first prompt a tick raises.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available; see
+    /// [`ActionErrorCode`].
+    pub fn tick_all(&mut self) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        self.clock += 1;
+        let pool = self.pool.clone();
+        for id in pool {
+            if self.prompt.is_some() {
+                break;
+            }
+            let Some(index) = self.index_of(id) else {
+                continue;
+            };
+            if self.nodes[index].is_none() {
+                continue;
+            }
+            self.tick_node(id, index);
+        }
+        Ok(())
+    }
+
+    /// One tick of the live node `id`, at `index`, on the clock already
+    /// advanced.
+    fn tick_node(&mut self, id: NodeId, index: usize) {
         let resend = self.policy.auto_resend;
         self.narrate_tick(id, index);
         self.observe(id, move |world| {
@@ -296,44 +329,6 @@ impl World {
         // stall clock advances, a freeze whose quorum answered is closed, and
         // a phase that has stopped moving is given up.
         self.beat_reconfigurer(index);
-        Ok(())
-    }
-
-    /// Advance every live node's clock by one tick, in id order. Stops at the
-    /// first prompt a tick raises.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
-    pub fn tick_all(&mut self) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
-        self.clock += 1;
-        let resend = self.policy.auto_resend;
-        let pool = self.pool.clone();
-        for id in pool {
-            if self.prompt.is_some() {
-                break;
-            }
-            let Some(index) = self.index_of(id) else {
-                continue;
-            };
-            if self.nodes[index].is_none() {
-                continue;
-            }
-            self.narrate_tick(id, index);
-            self.observe(id, move |world| {
-                if let Some(node) = world.nodes[index].as_mut() {
-                    node.tick();
-                    if resend {
-                        node.resend_pending();
-                    }
-                }
-                world.pump(id);
-            });
-            self.beat_reconfigurer(index);
-        }
-        Ok(())
     }
 
     /// The line a tick gets, before anything is stepped.
@@ -518,16 +513,7 @@ impl World {
         value: &str,
         column: Option<usize>,
     ) -> Result<(), ActionError> {
-        let slot = self
-            .clients
-            .iter()
-            .position(|c| c.id == ClientId(client))
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no client {client} in this level"),
-                )
-            })?;
+        let slot = self.require_client(client)?;
         let seq = ClientSeq(self.clients[slot].next_seq);
         let mark = self.narration.len();
         let bytes = Value(value.as_bytes().to_vec());
@@ -664,16 +650,7 @@ impl World {
     pub fn retry(&mut self, id: NodeId, client: u64, seq: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
-        let position = self
-            .clients
-            .iter()
-            .position(|c| c.id == ClientId(client))
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no client {client} in this level"),
-                )
-            })?;
+        let position = self.require_client(client)?;
         if !self.clients[position]
             .proposals
             .iter()
@@ -711,7 +688,7 @@ impl World {
         let Some(index) = self.index_of(id) else {
             return;
         };
-        let Some(position) = self.clients.iter().position(|c| c.id == ClientId(client)) else {
+        let Some(position) = self.client_position(client) else {
             return;
         };
         let Some(bytes) = self.clients[position]
@@ -1082,39 +1059,11 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn answer(&mut self, prompt_id: u64, choice: &str) -> Result<Verdict, ActionError> {
-        let Some(prompt) = self.prompt.as_mut() else {
-            return Err(ActionError::new(
-                ActionErrorCode::NoPrompt,
-                "no prompt is open",
-            ));
-        };
-        if prompt.id != prompt_id {
-            return Err(ActionError::new(
-                ActionErrorCode::NoPrompt,
-                format!("prompt {prompt_id} is not the open one"),
-            ));
-        }
-        if !prompt.offers(choice) {
-            return Err(ActionError::new(
-                ActionErrorCode::UnknownChoice,
-                format!("this prompt has no choice {choice:?}"),
-            ));
-        }
-        let verdict = prompt.judge(choice);
-        let (kind, node) = (prompt.kind, prompt.node);
+        let (verdict, line) = crate::prompt::answer(&mut self.prompt, prompt_id, choice)?;
+        self.narration.push(line);
         if verdict == Verdict::Wrong {
-            let feedback = prompt.feedback.clone().unwrap_or_default();
-            self.narrate(NarrationKind::Violation, feedback);
             return Ok(Verdict::Wrong);
         }
-        self.prompt = None;
-        self.narrate(
-            NarrationKind::Info,
-            format!(
-                "That is what the protocol does here, so node {node} really does it: {}",
-                crate::prompt::confirmation(kind)
-            ),
-        );
         if let Some(paused) = self.paused.take() {
             self.resume(paused);
         }

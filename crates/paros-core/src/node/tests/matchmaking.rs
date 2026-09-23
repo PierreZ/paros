@@ -16,12 +16,6 @@ fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchSt
         .collect()
 }
 
-/// Fire the election clock on `n`.
-fn campaign(n: &mut ColocatedNode) {
-    n.set_election_timeout(1);
-    n.tick();
-}
-
 fn prepares(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
     msgs.iter()
         .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
@@ -64,19 +58,17 @@ fn registered_effective(
     wm: Ballot,
     effective: Option<(Ballot, AcceptorConfig)>,
 ) -> MatchReply {
-    MatchReply {
-        matchmaker: MatchmakerId(mm),
-        to: ballot.node,
+    registered_reply(
+        mm,
         ballot,
-        generation: MatchmakerGeneration(0),
-        outcome: MatchOutcome::Registered {
+        MatchOutcome::Registered {
             from_ballot: wm,
             history,
             next_from_ballot: None,
             gc_watermark: wm,
             effective,
         },
-    }
+    )
 }
 
 /// One page of a paged answer: it starts at `from`, and `next` is the cursor
@@ -88,18 +80,28 @@ fn registered_page(
     history: BTreeMap<Ballot, Registration>,
     next: Option<Ballot>,
 ) -> MatchReply {
-    MatchReply {
-        matchmaker: MatchmakerId(mm),
-        to: ballot.node,
+    registered_reply(
+        mm,
         ballot,
-        generation: MatchmakerGeneration(0),
-        outcome: MatchOutcome::Registered {
+        MatchOutcome::Registered {
             from_ballot: from,
             history,
             next_from_ballot: next,
             gc_watermark: Ballot::zero(),
             effective: None,
         },
+    )
+}
+
+/// The generation-0 reply from `mm` to `ballot`'s candidate carrying
+/// `outcome`.
+fn registered_reply(mm: u64, ballot: Ballot, outcome: MatchOutcome) -> MatchReply {
+    MatchReply {
+        matchmaker: MatchmakerId(mm),
+        to: ballot.node,
+        ballot,
+        generation: MatchmakerGeneration(0),
+        outcome,
     }
 }
 
@@ -114,14 +116,7 @@ fn reconfigured(ballot: Ballot, members: &[u64]) -> (Ballot, Registration) {
 }
 
 fn promise(from: u64, ballot: Ballot) -> Message {
-    Message::Promise {
-        from: NodeId(from),
-        ballot,
-        from_slot: Slot(0),
-        accepted: BTreeMap::new(),
-        faulty: BTreeMap::new(),
-        next_from_slot: None,
-    }
+    terminal_promise(NodeId(from), ballot, BTreeMap::new())
 }
 
 /// Invariant 1 (#120): on a matchmaker deployment a campaign sends its
@@ -135,12 +130,7 @@ fn a_campaign_registers_before_it_prepares() {
     assert!(n.matchmaking_pending());
     let msgs = drain(&mut n);
     assert!(prepares(&msgs).is_empty(), "no Prepare before the quorum");
-    let requests = {
-        let ready = n.ready();
-        let r = ready.match_requests().to_vec();
-        ready.advance();
-        r
-    };
+    let requests = drain_match_requests(&mut n);
     // The batch was drained above; re-run to see the requests were queued
     // with the campaign (one per matchmaker, all at the campaign ballot).
     assert!(requests.is_empty(), "drained with the batch");
@@ -505,14 +495,11 @@ fn a_value_held_only_by_an_old_configuration_is_re_proposed() {
     open_phase1(&mut n, &[cfg(&[0, 1, 2]), cfg(&[3, 4])]);
     n.step(promise(1, n.ballot()));
     let old = ballot(2, 9);
-    n.step(Message::Promise {
-        from: NodeId(3),
-        ballot: n.ballot(),
-        from_slot: Slot(0),
-        accepted: BTreeMap::from([(Slot(0), (old, ucmd(7, 1, 42)))]),
-        faulty: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(
+        NodeId(3),
+        n.ballot(),
+        BTreeMap::from([(Slot(0), (old, ucmd(7, 1, 42)))]),
+    ));
     assert!(!n.is_leader(), "{{3,4}} needs both");
     n.step(promise(4, n.ballot()));
     assert!(n.is_leader());
@@ -532,14 +519,11 @@ fn gap_fill_waits_for_every_configuration() {
     open_phase1(&mut n, &[cfg(&[0, 1, 2]), cfg(&[3, 4])]);
     n.step(promise(1, n.ballot()));
     // A record at slot 1 and nothing at slot 0: slot 0 is the hole.
-    n.step(Message::Promise {
-        from: NodeId(3),
-        ballot: n.ballot(),
-        from_slot: Slot(0),
-        accepted: BTreeMap::from([(Slot(1), (ballot(2, 9), ucmd(7, 2, 43)))]),
-        faulty: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(
+        NodeId(3),
+        n.ballot(),
+        BTreeMap::from([(Slot(1), (ballot(2, 9), ucmd(7, 2, 43)))]),
+    ));
     assert!(!n.is_leader());
     assert!(
         drain(&mut n)

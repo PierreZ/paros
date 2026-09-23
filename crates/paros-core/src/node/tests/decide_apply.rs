@@ -3,11 +3,7 @@ use super::*;
 
 #[test]
 fn leader_streams_multiple_slots_and_all_nodes_agree() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
@@ -83,11 +79,7 @@ fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
 
 #[test]
 fn non_leader_propose_redirects() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // node 1 learned the leader via the election traffic.
     let r = nodes[1].propose(ClientId(1), ClientSeq(1), val(7));
@@ -100,11 +92,7 @@ fn non_leader_propose_redirects() {
 
 #[test]
 fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     let r1 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
@@ -145,11 +133,7 @@ fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
     // *chosen* but not *applied*, and `propose` must not answer the client's
     // retry with `Chosen` — that is an immediate `committed: true` for a write
     // outside the applied prefix, which a read at the same node would not see.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0 is proposed but its round never leaves the leader (the batch is
@@ -214,11 +198,7 @@ fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
     // its own hole records it as *in flight at that slot*, never as applied. The
     // hand-off to `applied_seq` happens in the contiguous walk, so the two
     // tables are checked on both sides of it.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
@@ -313,18 +293,10 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
 #[test]
 fn accepted_fingerprint_must_match_the_inflight_command() {
     let mut n = node(0, &[0, 1, 2]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
-    n.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: camp,
-        from_slot: Slot(0),
-        accepted: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    n.step(terminal_promise(NodeId(1), camp, BTreeMap::new()));
     let _ = drain(&mut n);
 
     let ProposeResult::Accepted(slot) = n.propose(ClientId(4), ClientSeq(5), val(6)) else {
@@ -363,17 +335,7 @@ fn restart_rebuilds_state_from_hard_state() {
     let storage = TestStorage {
         hard_state,
         accepted,
-        config: Config {
-            id: NodeId(1),
-            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
-            quorum_system: crate::membership::QuorumSystem::Majority,
-            nodes: Vec::new(),
-            matchmakers: Vec::new(),
-            matchmaker_pool: Vec::new(),
-            proxy_count: 0,
-        },
-        first_slot: Slot(0),
-        faulty: Vec::new(),
+        ..TestStorage::new(1, &[0, 1, 2])
     };
     let n = ColocatedNode::new(&storage);
     assert_eq!(n.ballot(), ballot(2, 0), "resumes the promised ballot");
@@ -446,11 +408,7 @@ fn commit_below_floor_is_not_relearned() {
 /// for real.
 #[test]
 fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
-    let mut nodes = vec![
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = Vec::from(cluster::<3>());
     make_leader(&mut nodes, 0);
 
     // Seq 4 executes (seqs 0..=3 never reached this cluster: they died in a

@@ -54,15 +54,6 @@ impl DecreeWorld {
             .as_ref()
             .is_some_and(|(at, _)| acceptor.role.record(DECREE).is_some_and(|(b, _)| *b >= *at));
         NodeView {
-            id: acceptor.id.0,
-            flavour: NodeFlavour::Acceptor,
-            alive: true,
-            // An Act I acceptor holds no log role: `flavour` already says what
-            // it is, and it is never anything else.
-            role: None,
-            attempt: None::<AttemptView>,
-            ballot: None,
-            leader: None,
             promised: Some(show_ballot(acceptor.role.promised())),
             accepted: acceptor
                 .role
@@ -77,33 +68,8 @@ impl DecreeWorld {
                     )]
                 })
                 .unwrap_or_default(),
-            chosen_index: None,
-            first_unchosen: None,
-            next_slot: None,
-            chosen_gap: None,
             floor: Some(acceptor.role.first_slot().0),
-            election: None,
-            open_rounds: Vec::new(),
-            pending_accepts: false,
-            read_rounds: Vec::new(),
-            recovery_remaining: 0,
-            acceptors: self.config.members().iter().map(|n| n.0).collect(),
-            quorum_system: quorum_name(self.config.quorum_system()),
-            quorum: quorum_view(self.config.quorum_system()),
-            // The single-decree world lays out no grid: its levels teach the
-            // counting systems, and a grid is a log-world deployment.
-            grid_cell: None::<GridCellView>,
-            applied: Vec::new(),
-            armed_seam: None,
-            // The single-decree world runs bare roles: no configuration
-            // ballot, no matchmakers, no floor, no retirement.
-            acceptors_since: None,
-            matchmakers: None,
-            matchmaking: None,
-            gc: None,
-            handover: None,
-            retired: false,
-            wiped: false,
+            ..self.bare_node(acceptor.id.0, NodeFlavour::Acceptor)
         }
     }
 
@@ -129,23 +95,38 @@ impl DecreeWorld {
                 )
             });
         NodeView {
-            id: proposer.id.0,
-            flavour: NodeFlavour::Proposer,
-            alive: true,
-            role: None,
             attempt: Some(attempt),
             ballot: proposer.ballot.map(show_ballot),
+            accepted: proposing.into_iter().collect(),
+            open_rounds: proposer.role.rounds().keys().map(|s| s.0).collect(),
+            pending_accepts: !proposer.role.rounds().is_empty(),
+            ..self.bare_node(proposer.id.0, NodeFlavour::Proposer)
+        }
+    }
+
+    /// A node of this world with nothing on it: everything the log world's
+    /// `NodeView` has and this world does not is `None`.
+    fn bare_node(&self, id: u64, flavour: NodeFlavour) -> NodeView {
+        NodeView {
+            id,
+            flavour,
+            alive: true,
+            // An Act I node holds no log role: `flavour` already says what
+            // it is, and it is never anything else.
+            role: None,
+            attempt: None::<AttemptView>,
+            ballot: None,
             leader: None,
             promised: None,
-            accepted: proposing.into_iter().collect(),
+            accepted: Vec::new(),
             chosen_index: None,
             first_unchosen: None,
             next_slot: None,
             chosen_gap: None,
             floor: None,
             election: None,
-            open_rounds: proposer.role.rounds().keys().map(|s| s.0).collect(),
-            pending_accepts: !proposer.role.rounds().is_empty(),
+            open_rounds: Vec::new(),
+            pending_accepts: false,
             read_rounds: Vec::new(),
             recovery_remaining: 0,
             acceptors: self.config.members().iter().map(|n| n.0).collect(),

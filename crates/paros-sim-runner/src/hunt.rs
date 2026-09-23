@@ -27,53 +27,51 @@
 //!        snapshot-lifecycle compound; `replay-departed <seed>` — the
 //!        departed-straggler case (#124).
 
+mod common;
+
+use common::{arg, is_clean, print_never_fired, print_seed_counts};
 use paros_sim::{
-    ChunkLiveCase, EXPLORATION_TIMELINES_PER_SEED, chain_canary_hunt, chain_seed_canary,
-    chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed, run_bare_quorum_case,
-    run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask, run_corpus_seed,
-    run_departed_straggler_case, run_snapshot_lifecycle_case,
+    ChunkLiveCase, EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt,
+    chain_seed_canary, chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed,
+    run_bare_quorum_case, run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask,
+    run_corpus_seed, run_departed_straggler_case, run_snapshot_lifecycle_case,
 };
+
+/// The chunk-corpus mask a replay argument names (its low 15 bits).
+fn chunk_mask(seed: u64) -> u32 {
+    u32::try_from(seed & 0x7FFF).unwrap_or_default()
+}
+
+/// The single-seed replay a `replay-*` / `explore-main` axis names, if any.
+fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
+    Some(match axis {
+        "replay-main" => run_chain_seed,
+        "replay-canary" => chain_seed_canary,
+        "explore-main" => |seed| explore_chain_seed(seed, EXPLORATION_TIMELINES_PER_SEED),
+        "replay-corpus" => run_corpus_seed,
+        "replay-corpus-mask" => {
+            |seed| run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default())
+        }
+        "replay-bare-quorum" => run_bare_quorum_case,
+        "replay-lifecycle" => run_snapshot_lifecycle_case,
+        "replay-departed" => run_departed_straggler_case,
+        "replay-chunk-mask" => |seed| run_chunk_mask(chunk_mask(seed), ChunkLiveCase::Intact),
+        "replay-chunk-restore-crash" => {
+            |seed| run_chunk_mask(chunk_mask(seed), ChunkLiveCase::LostThenRestoreCrash)
+        }
+        "replay-chunk-seed" => run_chunk_corpus_seed,
+        _ => return None,
+    })
+}
 
 fn main() {
     let axis = std::env::args().nth(1).unwrap_or_else(|| "main".into());
 
-    if let "replay-main"
-    | "replay-canary"
-    | "explore-main"
-    | "replay-corpus"
-    | "replay-corpus-mask"
-    | "replay-bare-quorum"
-    | "replay-lifecycle"
-    | "replay-departed"
-    | "replay-chunk-mask"
-    | "replay-chunk-seed"
-    | "replay-chunk-restore-crash" = axis.as_str()
-    {
-        let seed = std::env::args()
-            .nth(2)
-            .and_then(|s| s.parse::<u64>().ok())
-            .expect("replay needs a seed");
+    if let Some(replay) = replay_for(&axis) {
+        let seed: u64 = arg(2).expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
-        let report = match axis.as_str() {
-            "replay-canary" => chain_seed_canary(seed),
-            "explore-main" => explore_chain_seed(seed, EXPLORATION_TIMELINES_PER_SEED),
-            "replay-corpus" => run_corpus_seed(seed),
-            "replay-corpus-mask" => run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default()),
-            "replay-bare-quorum" => run_bare_quorum_case(seed),
-            "replay-lifecycle" => run_snapshot_lifecycle_case(seed),
-            "replay-departed" => run_departed_straggler_case(seed),
-            "replay-chunk-mask" => run_chunk_mask(
-                u32::try_from(seed & 0x7FFF).unwrap_or_default(),
-                ChunkLiveCase::Intact,
-            ),
-            "replay-chunk-restore-crash" => run_chunk_mask(
-                u32::try_from(seed & 0x7FFF).unwrap_or_default(),
-                ChunkLiveCase::LostThenRestoreCrash,
-            ),
-            "replay-chunk-seed" => run_chunk_corpus_seed(seed),
-            _ => run_chain_seed(seed),
-        };
-        if report.assertion_violations.is_empty() && report.failed_runs == 0 {
+        let report = replay(seed);
+        if is_clean(&report) {
             println!("seed {seed}: GREEN");
             return;
         }
@@ -85,10 +83,7 @@ fn main() {
     // AGENTS.md, *Raw hunt budget*: 2,000-3,000 ordinary seeds is the normal
     // evidence target for this binary, so that is what it does with no
     // argument. A larger hunt is an explicit request.
-    let iterations = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(2000);
+    let iterations = arg(2).unwrap_or(2000);
 
     println!("--- hunt: {axis} axis, {iterations} seeds ---");
     let report = match axis.as_str() {
@@ -104,10 +99,7 @@ fn main() {
         }
     };
 
-    println!(
-        "{} seeds: {} ok, {} failed",
-        report.iterations, report.successful_runs, report.failed_runs,
-    );
+    print_seed_counts(&report, "");
     // The assertion-slot budget (AGENTS.md, *Assertion doctrine*): 512
     // slots per campaign process, shared with moonpool's own internals.
     // Printed on every hunt so "count before adding" has a number to read,
@@ -122,13 +114,8 @@ fn main() {
     // status — but a gate that never fired across the whole hunt is exactly what
     // a starved `sometimes` looks like in the CI sweep, and finding it here is
     // far cheaper than re-running the full coverage campaign to see it.
-    if !report.coverage_violations.is_empty() {
-        println!("coverage gates that never fired:");
-        for gate in &report.coverage_violations {
-            println!("  - {gate}");
-        }
-    }
-    if report.assertion_violations.is_empty() && report.failed_runs == 0 {
+    print_never_fired(&report, "");
+    if is_clean(&report) {
         println!("no violations — the hunt came back empty");
         return;
     }

@@ -17,14 +17,18 @@
 //! `Script` plays the level, choosing messages by what they are rather than by
 //! id and answering every prompt with the answer `paros-core` itself gives.
 
-use paros_core::{Config, NodeId, QuorumSystem, Slot};
+use paros_core::{NodeId, QuorumSystem, Slot};
 
 use crate::action::{Action, ActionKind};
 use crate::auto::AutomationFlag;
+use crate::level::common::{
+    CLIENT, REPLIES_AND_BEATS, TIMEOUT, all_but, applied, crash, fresh, is_phase2, propose_as,
+    read_index_as, restart, slot_traffic, start_election, tick,
+};
 use crate::level::script::{Script, kind, to};
 use crate::level::{GoalStatus, Level, WorldKind};
-use crate::view::{MessageView, show_command};
-use crate::world::{Disk, RetryAnswer, World};
+use crate::narration::at;
+use crate::world::RetryAnswer;
 
 /// Act III's levels, in play order.
 #[must_use]
@@ -39,16 +43,10 @@ pub fn levels() -> Vec<&'static Level> {
     ]
 }
 
-/// The client every single-client Act III level gives the player.
-const CLIENT: u64 = 7;
-
 /// The second client, for the linearizability level. Two clients is the
 /// smallest history in which "before" and "after" are not the same party's
 /// program order.
 const OTHER: u64 = 8;
-
-/// The election timeout every Act III node starts with, in ticks.
-const TIMEOUT: u64 = 5;
 
 /// Every role answered for the player. A level removes exactly the one it
 /// teaches.
@@ -64,102 +62,24 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::AckWrite,
 ];
 
-/// Every role but the one a level teaches. Spelled out per level, as Act II
-/// does: a helper that removed one entry could not be a `const`, and a level's
-/// automation set is data.
-const NO_SNAPSHOT_PROMISE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::AckWrite,
-];
+/// Every role but the promise a snapshot install keeps.
+const NO_SNAPSHOT_PROMISE: &[AutomationFlag] =
+    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::SnapshotPromise]);
 
 /// Every role but serving a read.
-const NO_READ_SERVE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-];
+const NO_READ_SERVE: &[AutomationFlag] =
+    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::ReadServe]);
 
 /// Every role but answering a client's retry.
-const NO_ACK_WRITE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-];
-
-/// The convenience toggles every Act III level offers.
-const TOGGLES: &[AutomationFlag] = &[
-    AutomationFlag::DeliverReplies,
-    AutomationFlag::DeliverHeartbeats,
-];
-
-// ---- worlds -----------------------------------------------------------------
-
-fn peers(size: u64) -> Vec<NodeId> {
-    (0..size).map(NodeId).collect()
-}
-
-fn config(id: NodeId, size: u64) -> Config {
-    Config {
-        id,
-        peers: peers(size),
-        quorum_system: QuorumSystem::Majority,
-        ..Config::default()
-    }
-}
-
-/// A cluster of `size` fresh nodes with `clients` clients.
-fn fresh(size: u64, clients: &[u64]) -> WorldKind {
-    let disks = peers(size)
-        .into_iter()
-        .map(|id| Disk::new(config(id, size)))
-        .collect();
-    WorldKind::Log(Box::new(World::from_disks(disks, clients, TIMEOUT)))
-}
+const NO_ACK_WRITE: &[AutomationFlag] =
+    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::AckWrite]);
 
 // ---- reading the world for a goal -------------------------------------------
-
-fn log_world(world: &WorldKind) -> Option<&World> {
-    world.log()
-}
-
-/// What a node's application has executed, in order.
-fn applied(world: &WorldKind, node: u64) -> Vec<String> {
-    log_world(world)
-        .and_then(|world| world.disk(NodeId(node)))
-        .map(|disk| {
-            disk.applied()
-                .iter()
-                .map(|(_, command)| show_command(command))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// A watermark as the goals write it.
-fn at(slot: Option<Slot>) -> String {
-    slot.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0))
-}
 
 /// Every node's compaction floor, deduplicated — one entry means one
 /// cluster-wide floor.
 fn distinct_floors(world: &WorldKind) -> Vec<u64> {
-    let Some(log) = log_world(world) else {
+    let Some(log) = world.log() else {
         return Vec::new();
     };
     let mut floors: Vec<u64> = log.floors().iter().map(|(_, first)| first.0).collect();
@@ -170,59 +90,12 @@ fn distinct_floors(world: &WorldKind) -> Vec<u64> {
 
 // ---- action shorthands ------------------------------------------------------
 
-fn start_election(node: u64) -> Action {
-    Action::StartElection { node }
-}
-
-fn propose(client: u64, node: u64, value: &str) -> Action {
-    Action::Propose {
-        node,
-        client,
-        value: value.to_string(),
-        column: None,
-    }
-}
-
 fn compact(node: u64, up_to: u64) -> Action {
     Action::Compact { node, up_to }
 }
 
-fn read_index(client: u64, node: u64) -> Action {
-    Action::ReadIndex {
-        node,
-        client: Some(client),
-    }
-}
-
 fn retry(client: u64, node: u64, seq: u64) -> Action {
     Action::Retry { node, client, seq }
-}
-
-fn crash(node: u64) -> Action {
-    Action::Crash { node }
-}
-
-fn restart(node: u64) -> Action {
-    Action::Restart { node }
-}
-
-fn tick(node: u64) -> Action {
-    Action::Tick { node }
-}
-
-/// The Phase-2 traffic of one slot: its `Accept`s, its `Accepted`s and the
-/// `Commit`s that report the decision.
-fn slot_traffic(slot: u64) -> impl Fn(&MessageView) -> bool {
-    move |message| {
-        matches!(message.kind.as_str(), "Accept" | "Accepted" | "Commit")
-            && message.slot == Some(slot)
-    }
-}
-
-/// Everything that is not Phase-2 traffic — the elections, the beats, the
-/// catch-up, the snapshots.
-fn not_phase2(message: &MessageView) -> bool {
-    !matches!(message.kind.as_str(), "Accept" | "Accepted" | "Commit")
 }
 
 // ---- 14. truncate by consensus ----------------------------------------------
@@ -277,12 +150,12 @@ floor moves when that node applies the decision.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: TRUNCATE_ACTIONS,
-    setup: || fresh(3, &[CLIENT]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let refused = log.compacts().iter().any(|outcome| !outcome.accepted);
@@ -317,7 +190,8 @@ floor moves when that node applies the decision.",
         }
     },
     hint: |world, mistakes| {
-        let refused = log_world(world)
+        let refused = world
+            .log()
             .is_some_and(|log| log.compacts().iter().any(|outcome| !outcome.accepted));
         (mistakes > 0 || refused).then(|| {
             "A refusal is not a failure here. The leader does not drop a prefix that no \
@@ -330,8 +204,8 @@ floor moves when that node applies the decision.",
         let mut script = Script::new("act3/truncate-by-consensus");
         script.play(start_election(0)).settle_all();
         script
-            .play(propose(CLIENT, 0, "alpha"))
-            .play(propose(CLIENT, 0, "bravo"))
+            .play(propose_as(CLIENT, 0, "alpha"))
+            .play(propose_as(CLIENT, 0, "bravo"))
             .settle_all();
         // No decided snapshot point exists yet, so this is refused — and the
         // refusal seeds the marker that makes the retry work.
@@ -394,12 +268,12 @@ lets the node vote for a ballot that it refused.",
     ],
     automation_on: NO_SNAPSHOT_PROMISE,
     pinned_off: &[AutomationFlag::SnapshotPromise],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::SnapshotPromise],
     allowed_actions: STRANDED_ACTIONS,
-    setup: || fresh(3, &[CLIENT]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Some(node) = log.promise_regressed() {
@@ -457,8 +331,8 @@ lets the node vote for a ballot that it refused.",
         script.play(crash(2));
         script.play(start_election(0)).settle_all();
         script
-            .play(propose(CLIENT, 0, "alpha"))
-            .play(propose(CLIENT, 0, "bravo"))
+            .play(propose_as(CLIENT, 0, "alpha"))
+            .play(propose_as(CLIENT, 0, "bravo"))
             .settle_all();
         // Seed a snapshot point, then truncate past node 2's position.
         script.play(compact(0, 8)).settle_all();
@@ -532,9 +406,9 @@ whether it is proof.",
     unlocked: &[AutomationFlag::DeliverReplies],
     unlocks: &[AutomationFlag::ReadServe],
     allowed_actions: READ_ACTIONS,
-    setup: || fresh(3, &[CLIENT]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Err(detail) = log.linearizable() {
@@ -582,12 +456,12 @@ whether it is proof.",
     reference: || {
         let mut script = Script::new("act3/read-index");
         script.play(start_election(0)).settle_all();
-        script.play(propose(CLIENT, 0, "alpha")).settle_all();
+        script.play(propose_as(CLIENT, 0, "alpha")).settle_all();
         // A beat *before* the read: its ack is the stale one.
         script.play(tick(0));
         script.settle(|message| message.kind == "Heartbeat");
         // The read captures the watermark and beats again.
-        script.play(read_index(CLIENT, 0));
+        script.play(read_index_as(CLIENT, 0));
         // The stale ack lands first and proves nothing.
         script.settle(|message| message.kind == "HeartbeatAck" && message.sent_at == 1);
         script.answer_all();
@@ -649,12 +523,12 @@ completes on its own, in the batch that applied the slot.",
     ],
     automation_on: NO_READ_SERVE,
     pinned_off: &[AutomationFlag::ReadServe],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: TRAP_ACTIONS,
-    setup: || fresh(3, &[CLIENT]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Err(detail) = log.linearizable() {
@@ -708,7 +582,7 @@ completes on its own, in the batch that applied the slot.",
         script.play(start_election(0)).settle_all();
         // One command reaches exactly one other node, and its Accepted never
         // comes back: accepted somewhere, chosen nowhere.
-        script.play(propose(CLIENT, 0, "alpha"));
+        script.play(propose_as(CLIENT, 0, "alpha"));
         script.settle(|message| message.kind == "Accept" && message.to == 1);
         script.drop_all(|message| matches!(message.kind.as_str(), "Accept" | "Accepted"));
         // The leadership dies with the round that would have re-sent it.
@@ -716,9 +590,9 @@ completes on its own, in the batch that applied the slot.",
         // Node 1 campaigns with node 2. Its Phase 1 finds the value at node 1
         // itself, so its read floor sits above everything it has applied.
         script.play(start_election(1));
-        script.settle(not_phase2);
+        script.settle(|message| !is_phase2(message));
         // The read: quorum in hand, applied prefix still empty.
-        script.play(read_index(CLIENT, 1));
+        script.play(read_index_as(CLIENT, 1));
         script.settle(|message| matches!(message.kind.as_str(), "Heartbeat" | "HeartbeatAck"));
         script.answer_all();
         // Now let the recovered slot decide; the read fires with the batch that
@@ -778,12 +652,12 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: HISTORY_ACTIONS,
-    setup: || fresh(3, &[CLIENT, OTHER]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT, OTHER]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Err(detail) = log.linearizable() {
@@ -845,7 +719,7 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
         let mut script = Script::new("act3/linearizable-or-not");
         script.play(start_election(0)).settle_all();
         // Client 7's write is acknowledged under the old leadership.
-        script.play(propose(CLIENT, 0, "alpha")).settle_all();
+        script.play(propose_as(CLIENT, 0, "alpha")).settle_all();
         // Node 1 takes the leadership with node 2; node 0 hears none of it and
         // goes on believing it leads.
         script.play(start_election(1));
@@ -853,15 +727,15 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
         script.settle(|message| message.to == 1);
         script.drop_all(to(0));
         // The deposed leader is asked for a read it will never be able to prove.
-        script.play(read_index(CLIENT, 0));
+        script.play(read_index_as(CLIENT, 0));
         script.drop_all(to(0));
         script.settle(to(2));
         script.drop_all(to(0));
         // Client 8 writes and then reads at the leader that really leads.
-        script.play(propose(OTHER, 1, "bravo"));
+        script.play(propose_as(OTHER, 1, "bravo"));
         script.settle(|message| message.to != 0);
         script.drop_all(to(0));
-        script.play(read_index(OTHER, 1));
+        script.play(read_index_as(OTHER, 1));
         script.settle(|message| message.to != 0);
         script.drop_all(to(0));
         script.finish()
@@ -921,12 +795,12 @@ the leader both times.",
     ],
     automation_on: NO_ACK_WRITE,
     pinned_off: &[AutomationFlag::AckWrite],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::AckWrite],
     allowed_actions: RETRY_ACTIONS,
-    setup: || fresh(3, &[CLIENT]),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let executed = applied(world, 0);
@@ -1008,8 +882,8 @@ the leader both times.",
         let mut script = Script::new("act3/chosen-is-not-applied");
         script.play(start_election(0)).settle_all();
         script
-            .play(propose(CLIENT, 0, "alpha"))
-            .play(propose(CLIENT, 0, "bravo"));
+            .play(propose_as(CLIENT, 0, "alpha"))
+            .play(propose_as(CLIENT, 0, "bravo"));
         // Slot 1 decides while slot 0 is still open: chosen above a hole.
         script.settle(slot_traffic(1));
         // The retry lands in the window. Chosen, not applied.

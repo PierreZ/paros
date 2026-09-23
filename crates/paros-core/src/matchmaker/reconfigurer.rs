@@ -343,15 +343,7 @@ impl MatchmakerReconfigurer {
         let target = MatchmakerSet::new(current.generation.next(), target)
             .members()
             .to_vec();
-        self.phase = ReconfigurerPhase::Stopping {
-            old: current.clone(),
-            target: Some(target),
-            acks: BTreeMap::new(),
-            decree_floor: Ballot::zero(),
-            effective: None,
-        };
-        self.elapsed = 0;
-        self.resend();
+        self.begin_stopping(current, Some(target));
         Ok(())
     }
 
@@ -371,16 +363,23 @@ impl MatchmakerReconfigurer {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
         }
+        self.begin_stopping(current, None);
+        Ok(())
+    }
+
+    /// Enter the freeze of `current` toward `target` (`None`: the members
+    /// that answer it) and send its first requests — the opening
+    /// [`Self::start`] and [`Self::finish`] share.
+    fn begin_stopping(&mut self, current: &MatchmakerSet, target: Option<Vec<MatchmakerId>>) {
         self.phase = ReconfigurerPhase::Stopping {
             old: current.clone(),
-            target: None,
+            target,
             acks: BTreeMap::new(),
             decree_floor: Ballot::zero(),
             effective: None,
         };
         self.elapsed = 0;
         self.resend();
-        Ok(())
     }
 
     /// One driver tick while a handover runs: the running phase's stall
@@ -958,24 +957,7 @@ mod tests {
         pool: &mut [Matchmaker],
         drop: &[u64],
     ) -> Vec<ReconfigurerStep> {
-        let mut steps = Vec::new();
-        let ready = r.ready();
-        let requests = ready.requests().to_vec();
-        ready.advance();
-        for (to, request) in requests {
-            if drop.contains(&to.0) {
-                continue;
-            }
-            let mm = &mut pool[usize::try_from(to.0).expect("index")];
-            mm.step_reconfigure(request);
-            let ready = mm.ready();
-            let replies = ready.reconfigure_replies().to_vec();
-            ready.advance();
-            for reply in replies {
-                steps.push(r.on_reply(reply));
-            }
-        }
-        steps
+        route(r, pool, drop, &[])
     }
 
     fn set(g: u64, m: &[u64]) -> MatchmakerSet {
@@ -990,11 +972,25 @@ mod tests {
         pool: &mut [Matchmaker],
         mute: &[u64],
     ) -> Vec<ReconfigurerStep> {
+        route(r, pool, &[], mute)
+    }
+
+    /// [`deliver`] and [`deliver_muting`] in one: the requests to `drop`
+    /// are lost on the way out, the replies of `mute` on the way back.
+    fn route(
+        r: &mut MatchmakerReconfigurer,
+        pool: &mut [Matchmaker],
+        drop: &[u64],
+        mute: &[u64],
+    ) -> Vec<ReconfigurerStep> {
         let mut steps = Vec::new();
         let ready = r.ready();
         let requests = ready.requests().to_vec();
         ready.advance();
         for (to, request) in requests {
+            if drop.contains(&to.0) {
+                continue;
+            }
             let mm = &mut pool[usize::try_from(to.0).expect("index")];
             mm.step_reconfigure(request);
             let ready = mm.ready();

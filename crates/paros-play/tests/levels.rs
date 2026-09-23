@@ -60,6 +60,24 @@ fn play_reference(level: &Level) -> Game {
     game
 }
 
+/// Every prompt the reference runs into, with the answer `paros-core` gives
+/// it, in the order they open.
+fn asked(level: &Level) -> Vec<(PromptKind, String)> {
+    let mut game = Game::new(level.id).expect("a registered level");
+    let mut asked = Vec::new();
+    let mut note = |game: &Game| {
+        if let Some(prompt) = game.world().prompt() {
+            asked.push((prompt.kind, prompt.expected().to_string()));
+        }
+    };
+    for action in (level.reference)() {
+        note(&game);
+        game.act(action).expect("the reference replays");
+    }
+    note(&game);
+    asked
+}
+
 #[test]
 fn level_ids_are_unique() {
     let mut seen = BTreeSet::new();
@@ -192,17 +210,7 @@ fn every_reference_asks_the_question_its_level_teaches() {
         if taught.is_empty() {
             continue;
         }
-        let mut game = Game::new(level.id).expect("a registered level");
-        let mut seen: BTreeSet<PromptKind> = BTreeSet::new();
-        for action in (level.reference)() {
-            if let Some(prompt) = game.view().prompt {
-                seen.insert(prompt.kind);
-            }
-            game.act(action).expect("the reference replays");
-        }
-        if let Some(prompt) = game.view().prompt {
-            seen.insert(prompt.kind);
-        }
+        let seen: BTreeSet<PromptKind> = asked(level).into_iter().map(|(kind, _)| kind).collect();
         for kind in taught {
             assert!(
                 seen.contains(&kind),
@@ -330,17 +338,7 @@ fn the_act_four_levels_ask_their_question_the_hard_way() {
         ),
     ] {
         let level = paros_play::level::level(id).expect("a registered level");
-        let mut game = Game::new(id).expect("a registered level");
-        let mut seen = false;
-        for action in (level.reference)() {
-            if let Some(prompt) = game.world().prompt()
-                && prompt.kind == kind
-                && prompt.expected() == wanted
-            {
-                seen = true;
-            }
-            game.act(action).expect("the reference replays");
-        }
+        let seen = asked(level).contains(&(kind, wanted.to_string()));
         assert!(seen, "{id}: no {kind:?} prompt ever expected {wanted:?}");
     }
 }
@@ -350,18 +348,10 @@ fn the_retire_refusal_is_played_before_the_retirement() {
     // The level's whole point is that an installed successor set is not a
     // collected predecessor, so the reference must be refused once.
     let level = paros_play::level::level("act4/garbage-collection").expect("registered");
-    let mut game = Game::new(level.id).expect("registered");
-    let mut refusals = 0;
-    for action in (level.reference)() {
-        if let Some(prompt) = game.world().prompt()
-            && prompt.kind == PromptKind::MayRetire
-            && prompt.expected() == "refuse"
-        {
-            refusals += 1;
-        }
-        game.act(action).expect("the reference replays");
-    }
-    assert!(refusals > 0, "the refusal leg is never played");
+    assert!(
+        asked(level).contains(&(PromptKind::MayRetire, "refuse".to_string())),
+        "the refusal leg is never played"
+    );
 }
 
 #[test]

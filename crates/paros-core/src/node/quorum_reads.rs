@@ -18,7 +18,7 @@
 //! [`Ready::read_states`]: crate::Ready::read_states
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
-use super::{Audience, ColocatedNode, Message, NodeId, Slot};
+use super::{ColocatedNode, Message, NodeId, Slot};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
 
@@ -70,8 +70,7 @@ impl ColocatedNode {
             own,
         );
         for to in addressees {
-            self.pending_messages
-                .push((Audience::Node(to), Message::PreRead { reply_to: me, ctx }));
+            self.send(to, Message::PreRead { reply_to: me, ctx });
         }
         // A one-node row (a single-node cluster) is its own quorum: serve in
         // this same batch.
@@ -92,15 +91,15 @@ impl ColocatedNode {
         }
         let writes_at_entry = self.pending_writes.len();
         let config_since = self.wire_config_since();
-        self.pending_messages.push((
-            Audience::Node(reply_to),
+        self.send(
+            reply_to,
             Message::PreReadAck {
                 from: self.config.id,
                 ctx,
                 watermark: self.acceptor.vote_watermark(),
                 config_since,
             },
-        ));
+        );
         // Negative space: a watermark answer is a pure reply.
         assert!(
             self.pending_writes.len() == writes_at_entry,

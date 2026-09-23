@@ -9,13 +9,14 @@ the driver, never in a sim-only path.
 ## Map
 
 - `driver/mod.rs` `run_node<P, S, H, A>` (the etcd-raft `Node` layer) ·
-  `driver/{boot,ready,report,transport,snap_repair,matchmaking,handover,events}.rs`
+  `driver/{boot,ready,report,transport,snap_repair,matchmaking,handover,operator,events}.rs`
   by stage: boot replay, the `Ready` handshake's I/O side in
   persist-before-send order, post-batch upkeep, the bounded keep-newest
   `PeerMailbox` (with `Channels` and `LaneOpener`, the connect-and-lane
   wiring every driver opens its peers through), the chunk-repair plane
   (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never enter
-  `ColocatedNode`), the matchmaker wire, the matchmaker-set handover ·
+  `ColocatedNode`), the matchmaker wire, the matchmaker-set handover, the operator RPCs
+  (compact, reconfigure, retire, inspect) ·
   `driver/edge.rs` `GrpcEdge` (the inbound edge all three drivers serve
   from: listener, h2 server, the persistent accept) · `driver/reply.rs`
   the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·

@@ -171,8 +171,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     // Node 0 campaigns; node 2 answers (none at slot 3), node 1's promise is
     // withheld. Tally at slot 3: self faulty(b), node 2 none — one qualifying
     // answer short of a quorum that excludes the faulty reporter.
-    nodes[0].set_election_timeout(1);
-    nodes[0].tick();
+    campaign(&mut nodes[0]);
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, _m| to != NodeId(1));
     assert!(nodes[0].is_leader(), "the campaign still wins");
@@ -210,8 +209,7 @@ fn recovery_timeout_steps_the_leader_down() {
     let mut s0 = TestStorage::from_node(&nodes[0]);
     s0.rot(Slot(3));
     nodes[0] = ColocatedNode::new(&s0);
-    nodes[0].set_election_timeout(1);
-    nodes[0].tick();
+    campaign(&mut nodes[0]);
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, _m| to != NodeId(1));
     assert!(nodes[0].is_leader());

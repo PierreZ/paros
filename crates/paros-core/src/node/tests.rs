@@ -14,6 +14,7 @@ use crate::matchmaker::{
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId};
 use crate::message::{Message, Party};
+use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
@@ -96,6 +97,12 @@ fn node(id: u64, members: &[u64]) -> ColocatedNode {
     ColocatedNode::new(&TestStorage::new(id, members))
 }
 
+/// A fresh `N`-node cluster `node(0..N)` over the membership `0..N`.
+fn cluster<const N: usize>() -> [ColocatedNode; N] {
+    let members: Vec<u64> = (0..N as u64).collect();
+    std::array::from_fn(|i| node(i as u64, &members))
+}
+
 /// A node of a **matchmaker deployment**: bootstrap membership `members`,
 /// addressable pool `pool` (a superset holding the spares), and `matchmakers`
 /// matchmakers.
@@ -106,12 +113,15 @@ fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> Co
     ColocatedNode::new(&storage)
 }
 
+/// Fire the election clock on `n`: its next tick opens a campaign.
+fn campaign(n: &mut ColocatedNode) {
+    n.set_election_timeout(1);
+    n.tick();
+}
+
 /// Drain a node's pending matchmaking requests and clear the batch.
 fn drain_match_requests(n: &mut ColocatedNode) -> Vec<(MatchmakerId, MatchRequest)> {
-    let ready = n.ready();
-    let requests = ready.match_requests().to_vec();
-    ready.advance();
-    requests
+    drain_with(n, |ready| ready.match_requests().to_vec()).1
 }
 
 /// Answer `requests` from the given registries, returning every reply.
@@ -177,9 +187,34 @@ fn ballot(round: u64, node: u64) -> Ballot {
     }
 }
 
+/// A one-page `Promise` from `from` at `ballot` covering the whole suffix
+/// from slot 0: `accepted` reported, nothing faulty.
+fn terminal_promise(
+    from: NodeId,
+    ballot: Ballot,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
+) -> Message {
+    Message::Promise {
+        from,
+        ballot,
+        from_slot: Slot(0),
+        accepted,
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
+    }
+}
+
 /// Drain a node's pending messages and clear the batch, resolving each
 /// audience against this node's own pool exactly as the driver does.
 fn drain(n: &mut ColocatedNode) -> Vec<(NodeId, Message)> {
+    drain_with(n, |_| ()).0
+}
+
+/// [`drain`], also reading `extra` off the batch before it is cleared.
+fn drain_with<'n, T>(
+    n: &'n mut ColocatedNode,
+    extra: impl FnOnce(&Ready<'n>) -> T,
+) -> (Vec<(NodeId, Message)>, T) {
     let pool: Vec<NodeId> = n.config().pool().to_vec();
     let me = n.config().id;
     let ready = n.ready();
@@ -193,8 +228,9 @@ fn drain(n: &mut ColocatedNode) -> Vec<(NodeId, Message)> {
                 .map(move |to| (to, msg.clone()))
         })
         .collect();
+    let extra = extra(&ready);
     ready.advance();
-    msgs
+    (msgs, extra)
 }
 
 /// The chosen client value at `slot` on this node, if any (a control command has
@@ -219,12 +255,9 @@ fn deliver_filtered(
         if !keep(to, &msg) {
             continue;
         }
-        let idx = nodes
-            .iter()
-            .position(|n| n.config().id == to)
-            .expect("message addressed to a cluster member");
-        nodes[idx].step(msg);
-        queue.extend(drain(&mut nodes[idx]));
+        let n = node_at(nodes, to);
+        n.step(msg);
+        queue.extend(drain(n));
     }
 }
 
@@ -243,8 +276,7 @@ const NO_CHECK_QUORUM: u64 = 1_000_000;
 /// `Accept`/`Heartbeat`, never on Phase 1). Leaves the leader with an
 /// effectively infinite `CheckQuorum` window (see [`NO_CHECK_QUORUM`]).
 fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
-    nodes[idx].set_election_timeout(1);
-    nodes[idx].tick(); // election timeout -> Candidate, broadcasts Prepare
+    campaign(&mut nodes[idx]); // election timeout -> Candidate, broadcasts Prepare
     let q = drain(&mut nodes[idx]);
     deliver_all(nodes, q);
     assert!(
@@ -260,11 +292,7 @@ fn make_leader(nodes: &mut [ColocatedNode], idx: usize) {
 /// Drive a fresh 3-node cluster with node 0 as leader and get slots 0..=2 chosen
 /// everywhere, then return the cluster (`chosen_index` is `Some(Slot(2))`).
 fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
         let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
@@ -276,15 +304,20 @@ fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
 
 // ---- linearizable reads (read-index) ---------------------------------------
 
+/// The node of `nodes` whose id is `to`. Panics if `to` is not a cluster
+/// member.
+fn node_at(nodes: &mut [ColocatedNode], to: NodeId) -> &mut ColocatedNode {
+    nodes
+        .iter_mut()
+        .find(|n| n.config().id == to)
+        .expect("message addressed to a cluster member")
+}
+
 /// Step `msg` into whichever node it is addressed to, without draining it (so
 /// its pending buckets stay observable), returning nothing. Panics if `to` is
 /// not a cluster member.
 fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
-    let idx = nodes
-        .iter()
-        .position(|n| n.config().id == to)
-        .expect("message addressed to a cluster member");
-    nodes[idx].step(msg);
+    node_at(nodes, to).step(msg);
 }
 
 // ---- #67/#88: the stale-ballot election --------------------------------------

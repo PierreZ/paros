@@ -8,6 +8,8 @@ use paros_core::{
     StartRefusal,
 };
 
+use super::report::Cadence;
+
 /// The node driver's handover state: the sans-IO
 /// [`MatchmakerReconfigurer`] plus the two clocks the core deliberately does
 /// not own — how long since the running phase's step was last re-sent, and how
@@ -23,7 +25,7 @@ use paros_core::{
 pub(crate) struct HandoverDriver {
     reconfigurer: MatchmakerReconfigurer,
     /// Ticks since the running phase's step was last (re-)sent.
-    resend_elapsed: u64,
+    resend: Cadence,
     /// Ticks this node's preempted successor decree waits before reopening at
     /// a higher ballot: a jittered draw, so dueling reconfigurers (every node
     /// that met the same frozen generation finishes it) fall out of lockstep
@@ -37,7 +39,7 @@ impl HandoverDriver {
     pub(crate) fn new(node: NodeId) -> Self {
         Self {
             reconfigurer: MatchmakerReconfigurer::new(node),
-            resend_elapsed: 0,
+            resend: Cadence::default(),
             backoff: 0,
         }
     }
@@ -153,7 +155,7 @@ impl HandoverDriver {
     /// [`HandoverDriver::resend`].
     pub(crate) fn resend_due(&mut self, cadence: u64) -> bool {
         if !self.reconfigurer.is_busy() {
-            self.resend_elapsed = 0;
+            self.resend.reset();
             return false;
         }
         if self.backoff > 0 {
@@ -161,12 +163,7 @@ impl HandoverDriver {
             self.backoff -= 1;
             return false;
         }
-        self.resend_elapsed += 1;
-        if self.resend_elapsed >= cadence.max(1) {
-            self.resend_elapsed = 0;
-            return true;
-        }
-        false
+        self.resend.tick(cadence)
     }
 
     /// Re-issue the running phase's step (a preempted decree reopens above the
@@ -176,7 +173,7 @@ impl HandoverDriver {
     }
 
     fn clear_pacing(&mut self) {
-        self.resend_elapsed = 0;
+        self.resend.reset();
         self.backoff = 0;
     }
 }

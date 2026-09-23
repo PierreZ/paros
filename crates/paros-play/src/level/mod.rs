@@ -14,6 +14,7 @@ pub mod act1;
 pub mod act2;
 pub mod act3;
 pub mod act4;
+mod common;
 mod script;
 
 use crate::action::{Action, ActionError, ActionKind};
@@ -23,6 +24,16 @@ use crate::prompt::{Prompt, Verdict};
 use crate::view::{GoalView, LevelSummary, WorldView};
 use crate::world::decree::DecreeWorld;
 use crate::world::{World, WorldPolicy};
+
+/// `$body` on whichever world `$kind` holds, bound as `$world`.
+macro_rules! either {
+    ($kind:expr, $world:ident => $body:expr) => {
+        match $kind {
+            WorldKind::Decree($world) => $body,
+            WorldKind::Log($world) => $body,
+        }
+    };
+}
 
 /// Which world a level runs in.
 pub enum WorldKind {
@@ -36,10 +47,7 @@ impl WorldKind {
     /// The open prompt, if any.
     #[must_use]
     pub fn prompt(&self) -> Option<&Prompt> {
-        match self {
-            WorldKind::Decree(world) => world.prompt(),
-            WorldKind::Log(world) => world.prompt(),
-        }
+        either!(self, world => world.prompt())
     }
 
     /// A safety violation the world has been asked to enact — today only the
@@ -56,34 +64,22 @@ impl WorldKind {
     /// Render the world.
     #[must_use]
     pub fn view(&self) -> WorldView {
-        match self {
-            WorldKind::Decree(world) => world.view(),
-            WorldKind::Log(world) => world.view(),
-        }
+        either!(self, world => world.view())
     }
 
     /// Install the policy the automation flags imply.
     pub fn set_policy(&mut self, policy: WorldPolicy) {
-        match self {
-            WorldKind::Decree(world) => world.set_policy(policy),
-            WorldKind::Log(world) => world.set_policy(policy),
-        }
+        either!(self, world => world.set_policy(policy));
     }
 
     /// Start a fresh action's narration.
     pub fn clear_narration(&mut self) {
-        match self {
-            WorldKind::Decree(world) => world.clear_narration(),
-            WorldKind::Log(world) => world.clear_narration(),
-        }
+        either!(self, world => world.clear_narration());
     }
 
     /// Take the narration the action just produced.
     pub fn take_narration(&mut self) -> Vec<NarrationEvent> {
-        match self {
-            WorldKind::Decree(world) => world.take_narration(),
-            WorldKind::Log(world) => world.take_narration(),
-        }
+        either!(self, world => world.take_narration())
     }
 
     /// Deliver the in-flight message `id`.
@@ -93,10 +89,7 @@ impl WorldKind {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`crate::action::ActionErrorCode`].
     pub fn deliver(&mut self, id: u64) -> Result<(), ActionError> {
-        match self {
-            WorldKind::Decree(world) => world.deliver(id),
-            WorldKind::Log(world) => world.deliver(id),
-        }
+        either!(self, world => world.deliver(id))
     }
 
     /// Drop the in-flight message `id`.
@@ -106,10 +99,7 @@ impl WorldKind {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`crate::action::ActionErrorCode`].
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
-        match self {
-            WorldKind::Decree(world) => world.drop_message(id),
-            WorldKind::Log(world) => world.drop_message(id),
-        }
+        either!(self, world => world.drop_message(id))
     }
 
     /// Put a second copy of the in-flight message `id` on the wire.
@@ -119,10 +109,7 @@ impl WorldKind {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`crate::action::ActionErrorCode`].
     pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
-        match self {
-            WorldKind::Decree(world) => world.duplicate(id, to),
-            WorldKind::Log(world) => world.duplicate(id, to),
-        }
+        either!(self, world => world.duplicate(id, to))
     }
 
     /// Answer the open prompt.
@@ -132,10 +119,7 @@ impl WorldKind {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`crate::action::ActionErrorCode`].
     pub fn answer(&mut self, prompt: u64, choice: &str) -> Result<Verdict, ActionError> {
-        match self {
-            WorldKind::Decree(world) => world.answer(prompt, choice),
-            WorldKind::Log(world) => world.answer(prompt, choice),
-        }
+        either!(self, world => world.answer(prompt, choice))
     }
 
     /// The next message an automation pump would deliver.

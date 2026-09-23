@@ -45,6 +45,87 @@ pub(crate) struct SnapRepair {
     pub(crate) marker_pending: Option<Slot>,
 }
 
+impl SnapRepair {
+    /// The repair layer at boot: the scan's rotted-chunk classification arms
+    /// the chunk pull (reported per point); everything else fills in per tick.
+    pub(crate) fn from_boot_scan<S: NodeStorage, A: Audit>(
+        storage: &S,
+        audit: &A,
+        self_id: u64,
+    ) -> Self {
+        let mut snap = Self::default();
+        for (at, chunk) in storage.faulty_snap_chunks() {
+            snap.pending.entry(at.0).or_default().insert(chunk);
+        }
+        for (&at, chunks) in &snap.pending {
+            let count = u64::try_from(chunks.len()).unwrap_or(u64::MAX);
+            audit.snap_chunks_reported(NodeId(self_id), Slot(at), count);
+            tracing::info!(node = self_id, at, chunks = count, "snap_chunks_reported");
+        }
+        snap
+    }
+}
+
+/// Snapshot-repair traffic is driver-terminal (#101): handle `msg` here when
+/// it is one of the repair plane's three kinds and answer `true`, or answer
+/// `false` for the loop to step it into the core — consensus state must not
+/// depend on snapshot custody.
+///
+/// # Errors
+///
+/// A chunk install's typed exit ([`RunError`]): its crash seams or a storage
+/// fault.
+pub(crate) async fn route_snap_message<S, H, A>(
+    node: &mut ColocatedNode,
+    storage: &mut S,
+    snap: &mut SnapRepair,
+    out: &Outbound,
+    hooks: &H,
+    audit: &A,
+    msg: &Message,
+) -> Result<bool, RunError>
+where
+    S: NodeStorage,
+    H: DriverHooks,
+    A: Audit,
+{
+    match msg {
+        Message::SnapAck { from, at_index } => {
+            // Custody counts toward the coupling quorum only from members of
+            // the active configuration.
+            if node.is_leader() && node.acceptors().contains(*from) {
+                snap.acks.entry(*at_index).or_default().insert(*from);
+            }
+        }
+        Message::SnapChunkRequest {
+            from,
+            at_index,
+            chunks,
+        } => {
+            handle_snap_chunk_request(node, storage, out, hooks, audit, *from, *at_index, chunks)
+                .await;
+        }
+        Message::SnapChunkResponse {
+            from,
+            at_index,
+            chunks,
+        } => {
+            // Pool-checked: only a pooled node's chunk bytes are installed (a
+            // replica outside the active configuration holds the same decided
+            // point).
+            if node.config().pool().contains(from) {
+                let self_id = out.self_node().0;
+                handle_snap_chunk_response(
+                    node, storage, snap, hooks, audit, self_id, *at_index, chunks,
+                )
+                .await?;
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Answer one peer's chunk request (see [`SnapRepair`]): chunks of the shared
 /// point, silence for what this node lacks, or the whole-blob advanced
 /// fallback — guarded exactly like a snapshot offer (the served state must

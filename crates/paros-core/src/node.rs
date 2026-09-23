@@ -936,17 +936,7 @@ impl ColocatedNode {
                     )
                 };
                 let config = self.phase1_wire_config();
-                for to in unanswered {
-                    self.pending_messages.push((
-                        Audience::Node(to),
-                        Message::Prepare {
-                            reply_to: self.config.id,
-                            ballot,
-                            from_slot,
-                            config: config.clone(),
-                        },
-                    ));
-                }
+                self.send_prepare(unanswered, ballot, from_slot, config);
             }
         }
         // The application repair pull: ask every peer for the decided range
@@ -954,10 +944,7 @@ impl ColocatedNode {
         // catch-up replay; one that truncated past them offers a snapshot.
         // Once per tick — the same cadence heartbeat-driven catch-up uses.
         if let Some(from_slot) = self.replica.app_repair() {
-            self.broadcast(&Message::CatchUpRequest {
-                from: self.config.id,
-                from_slot,
-            });
+            self.broadcast(&self.catch_up_request(from_slot));
         } else if let Some(first_faulty) = self
             .acceptor
             .first_faulty()
@@ -969,10 +956,7 @@ impl ColocatedNode {
             // peers so the record itself heals; a peer that has it chosen
             // serves it, and this node's own next election covers it either
             // way (the campaign range starts at the first faulty slot).
-            self.broadcast(&Message::CatchUpRequest {
-                from: self.config.id,
-                from_slot: first_faulty,
-            });
+            self.broadcast(&self.catch_up_request(first_faulty));
         }
     }
 

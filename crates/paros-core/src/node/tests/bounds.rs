@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use super::{
     Ballot, ClientId, ClientSeq, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH,
-    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Slot, TestStorage, Value,
-    command_fingerprint,
+    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Slot, TestStorage,
+    Value, campaign, command_fingerprint, drain_with, terminal_promise,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
@@ -25,28 +25,12 @@ fn command(slot: u64) -> Command {
 type ReadyOutput = (Vec<(NodeId, Message)>, Option<(usize, usize, usize)>);
 
 fn take_ready(node: &mut ColocatedNode) -> ReadyOutput {
-    let pool: Vec<NodeId> = node.config().pool().to_vec();
-    let me = node.config().id;
-    let ready = node.ready();
-    let messages: Vec<(NodeId, Message)> = ready
-        .messages()
-        .iter()
-        .flat_map(|(audience, msg)| {
-            audience
-                .resolve(&pool, me)
-                .into_iter()
-                .map(move |to| (to, msg.clone()))
-        })
-        .collect();
-    let recovery = ready.recovery_batch();
-    ready.advance();
-    (messages, recovery)
+    drain_with(node, Ready::recovery_batch)
 }
 
 fn candidate(id: u64) -> (ColocatedNode, Ballot) {
     let mut node = ColocatedNode::new(&TestStorage::new(id, &[0, 1, 2]));
-    node.set_election_timeout(1);
-    node.tick();
+    campaign(&mut node);
     let ballot = node.ballot();
     let _ = take_ready(&mut node);
     (node, ballot)
@@ -189,18 +173,10 @@ fn gap_fill_releases_the_chosen_prefix_in_bounded_chunks() {
         });
         let _ = take_ready(&mut gapped);
     }
-    gapped.set_election_timeout(1);
-    gapped.tick();
+    campaign(&mut gapped);
     let gap_ballot = gapped.ballot();
     let _ = take_ready(&mut gapped);
-    gapped.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: gap_ballot,
-        from_slot: Slot(0),
-        accepted: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    gapped.step(terminal_promise(NodeId(1), gap_ballot, BTreeMap::new()));
     let _ = take_ready(&mut gapped);
     let noop = Command::Control(Control::Noop);
     gapped.step(Message::Accepted {
@@ -263,14 +239,11 @@ fn a_same_ballot_continuation_closes_a_stale_campaign() {
 #[test]
 fn accepted_fingerprints_include_identity() {
     let (mut proposer, proposal_ballot) = candidate(0);
-    proposer.step(Message::Promise {
-        faulty: BTreeMap::new(),
-        from: NodeId(1),
-        ballot: proposal_ballot,
-        from_slot: Slot(0),
-        accepted: BTreeMap::new(),
-        next_from_slot: None,
-    });
+    proposer.step(terminal_promise(
+        NodeId(1),
+        proposal_ballot,
+        BTreeMap::new(),
+    ));
     let _ = take_ready(&mut proposer);
     let ProposeResult::Accepted(slot) =
         proposer.propose(ClientId(9), ClientSeq(1), Value(vec![1, 2, 3]))

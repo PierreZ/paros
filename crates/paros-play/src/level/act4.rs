@@ -15,13 +15,18 @@
 //! plays the level and answers every prompt with the answer `paros-core`
 //! itself gives.
 
-use paros_core::{Command, Config, MatchmakerId, NodeId, QuorumSystem, Slot};
+use paros_core::{Config, MatchmakerId, NodeId, QuorumSystem, Slot};
 
 use crate::action::{Action, ActionKind, BallotSpec, Phase};
 use crate::auto::AutomationFlag;
-use crate::level::script::{Script, kind, kind_at, phase};
+use crate::level::common::{
+    CLIENT, REPLIES_AND_BEATS, REPLIES_ONLY, TIMEOUT, all_but, applied, chosen_text, crash, fresh,
+    is_phase2, open, propose, restart, start_election, text, tick,
+};
+use crate::level::script::{Script, kind, kind_at, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
-use crate::view::{MessageView, show_command};
+use crate::narration::prefix_at;
+use crate::view::show_command;
 use crate::world::decree::DecreeWorld;
 use crate::world::matchmakers::MatchmakerProcess;
 use crate::world::{Disk, World};
@@ -45,9 +50,6 @@ pub fn levels() -> Vec<&'static Level> {
     ]
 }
 
-/// The client every Act IV level gives the player.
-const CLIENT: u64 = 7;
-
 /// How many beats a matchmaker-set handover may make no progress for before
 /// the node driving it gives it up, on the level that teaches the handover.
 ///
@@ -55,9 +57,6 @@ const CLIENT: u64 = 7;
 /// needs, or a handover that is merely slow is given up every time. Four is
 /// three beats above the one beat a freeze or a bootstrap answer takes here.
 const HANDOVER_STALL: u64 = 4;
-
-/// The election timeout every Act IV node starts with, in ticks.
-const TIMEOUT: u64 = 5;
 
 /// The four acceptors of the flexible-quorum level, and the two proposers that
 /// compete over them.
@@ -88,173 +87,42 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
 ];
 
 /// Every role but the column a grid slot goes to.
-const NO_GRID_COLUMN: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
+const NO_GRID_COLUMN: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::GridColumn]);
 
 /// Every role but serving a leaderless read.
-const NO_QUORUM_READ_SERVE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
+const NO_QUORUM_READ_SERVE: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::QuorumReadServe]);
 
 /// Every role but settling a damaged slot.
-const NO_REPAIR_VERDICT: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
+const NO_REPAIR_VERDICT: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::RepairVerdict]);
 
 /// Every role but the answer a wiped node's boot gets.
-const NO_WIPED_REJOIN: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
+const NO_WIPED_REJOIN: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::WipedRejoin]);
 
 /// Every role but judging a cross-configuration Phase 1.
-const NO_PHASE1_COMPLETE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
+const NO_PHASE1_COMPLETE: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::Phase1Complete]);
 
 /// Every role but fencing a matchmaker generation.
-const NO_GENERATION_FENCE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::MayRetire,
-];
+const NO_GENERATION_FENCE: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::GenerationFence]);
 
 /// Every role but answering a retire request.
-const NO_MAY_RETIRE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-];
+const NO_MAY_RETIRE: &[AutomationFlag] =
+    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::MayRetire]);
 
 /// Every role but the two a reconfiguration teaches: judging a
 /// cross-configuration Phase 1, and abandoning a stale belief.
-const NO_PHASE1_NOR_STALE: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
-
-/// The convenience toggles the log-world levels offer.
-const TOGGLES: &[AutomationFlag] = &[
-    AutomationFlag::DeliverReplies,
-    AutomationFlag::DeliverHeartbeats,
-];
-
-/// The one toggle a level that pins beats off may still offer.
-const REPLIES_ONLY: &[AutomationFlag] = &[AutomationFlag::DeliverReplies];
+const NO_PHASE1_NOR_STALE: &[AutomationFlag] = &all_but::<15>(
+    ALL_ROLES_AUTOMATIC,
+    &[
+        AutomationFlag::Phase1Complete,
+        AutomationFlag::StaleConfiguration,
+    ],
+);
 
 /// The toggles a matchmaker level offers once the player has earned the
 /// matchmaker pump.
@@ -265,28 +133,6 @@ const MATCHMAKER_TOGGLES: &[AutomationFlag] = &[
 ];
 
 // ---- worlds -----------------------------------------------------------------
-
-fn peers(size: u64) -> Vec<NodeId> {
-    (0..size).map(NodeId).collect()
-}
-
-fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
-    Config {
-        id,
-        peers: peers(size),
-        quorum_system: system,
-        ..Config::default()
-    }
-}
-
-/// A cluster of `size` fresh nodes under `system`, with one client.
-fn fresh(size: u64, system: QuorumSystem) -> WorldKind {
-    let disks = peers(size)
-        .into_iter()
-        .map(|id| Disk::new(config(id, size, system)))
-        .collect();
-    WorldKind::Log(Box::new(World::from_disks(disks, &[CLIENT], TIMEOUT)))
-}
 
 /// A cluster that **names matchmakers**: `pool` is every node that may ever be
 /// an acceptor, `bootstrap` the acceptor set in force before any ballot was
@@ -355,64 +201,12 @@ fn commands(world: &WorldKind, node: u64) -> Vec<String> {
 
 // ---- reading the world for a goal -------------------------------------------
 
-fn log_world(world: &WorldKind) -> Option<&World> {
-    world.log()
-}
-
-/// What a node's application has executed, in order.
-fn applied(world: &WorldKind, node: u64) -> Vec<String> {
-    log_world(world)
-        .and_then(|world| world.disk(NodeId(node)))
-        .map(|disk| {
-            disk.applied()
-                .iter()
-                .map(|(_, command)| show_command(command))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The text inside a client command, for a goal that has to name a value.
-fn text(command: &Command) -> String {
-    command
-        .user()
-        .map(|entry| String::from_utf8_lossy(&entry.value.0).into_owned())
-        .unwrap_or_default()
-}
-
-/// The value the single-decree world holds, if it holds one.
-fn chosen_text(world: &WorldKind) -> Option<String> {
-    world
-        .decree()
-        .and_then(|decree| decree.chosen().map(|(_, command)| text(command)))
-}
-
 // ---- action shorthands ------------------------------------------------------
-
-fn open(proposer: u64, value: &str) -> Action {
-    Action::OpenBallot {
-        proposer,
-        value: value.to_string(),
-    }
-}
 
 fn reach(phase: Phase, nodes: &[u64]) -> Action {
     Action::SetReach {
         phase,
         nodes: nodes.to_vec(),
-    }
-}
-
-fn start_election(node: u64) -> Action {
-    Action::StartElection { node }
-}
-
-fn propose(node: u64, value: &str) -> Action {
-    Action::Propose {
-        node,
-        client: CLIENT,
-        value: value.to_string(),
-        column: None,
     }
 }
 
@@ -427,25 +221,8 @@ fn relinquish(node: u64, to: u64) -> Action {
     Action::Relinquish { node, to }
 }
 
-fn crash(node: u64) -> Action {
-    Action::Crash { node }
-}
-
-fn restart(node: u64) -> Action {
-    Action::Restart { node }
-}
-
-fn tick(node: u64) -> Action {
-    Action::Tick { node }
-}
-
 fn resend(node: u64) -> Action {
     Action::ResendPending { node }
-}
-
-/// Everything addressed to `node`.
-fn to(node: u64) -> impl Fn(&MessageView) -> bool {
-    move |message| message.to == node
 }
 
 // ---- 20. flexible quorums ---------------------------------------------------
@@ -610,12 +387,12 @@ another column.",
     ],
     automation_on: NO_GRID_COLUMN,
     pinned_off: &[AutomationFlag::GridColumn],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::GridColumn],
     allowed_actions: GRID_ACTIONS,
-    setup: || fresh(6, GRID),
+    setup: || fresh(6, GRID, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let Some(leader) = log.leader() else {
@@ -749,9 +526,9 @@ serve the read.",
     unlocked: REPLIES_ONLY,
     unlocks: &[AutomationFlag::QuorumReadServe],
     allowed_actions: QUORUM_READ_ACTIONS,
-    setup: || fresh(6, GRID),
+    setup: || fresh(6, GRID, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Err(detail) = log.linearizable() {
@@ -782,14 +559,8 @@ serve the read.",
                      for {}, and the answer is at or above that slot. The history is \
                      linearizable.",
                     node.0,
-                    index.map_or_else(
-                        || "the empty prefix".to_string(),
-                        |s| format!("slot {}", s.0)
-                    ),
-                    acked.map_or_else(
-                        || "the empty prefix".to_string(),
-                        |s| format!("slot {}", s.0)
-                    )
+                    prefix_at(*index),
+                    prefix_at(acked)
                 ))
             }
             Some((node, _)) if Some(*node) == leader => GoalStatus::Open(format!(
@@ -801,10 +572,7 @@ serve the read.",
                 "Node {} answered the read at {}, and the client holds no ack at or below that \
                  slot. Get a command chosen and acknowledged first. Then ask for the read.",
                 node.0,
-                index.map_or_else(
-                    || "the empty prefix".to_string(),
-                    |s| format!("slot {}", s.0)
-                )
+                prefix_at(*index)
             )),
             None => GoalStatus::Open(
                 "Ask a follower for a read. Then decide when the follower may answer it."
@@ -897,12 +665,12 @@ move it again.",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: HANDOFF_ACTIONS,
-    setup: || fresh(3, QuorumSystem::Majority),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let Some(handoff) = log.handoffs().first().copied() else {
@@ -956,7 +724,7 @@ move it again.",
         }
     },
     hint: |world, mistakes| {
-        let handed = log_world(world).is_some_and(|log| !log.handoffs().is_empty());
+        let handed = world.log().is_some_and(|log| !log.handoffs().is_empty());
         (mistakes > 0 || handed).then(|| {
             "Ask the successor to pass the leadership on. The refusal names the rule, and the \
              briefing explains the replayed message that the rule prevents."
@@ -1037,7 +805,7 @@ Phase 1 is complete.",
         AutomationFlag::Phase1Complete,
         AutomationFlag::DeliverMatchmakerReplies,
     ],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[
         AutomationFlag::Phase1Complete,
         AutomationFlag::DeliverMatchmakerReplies,
@@ -1045,7 +813,7 @@ Phase 1 is complete.",
     allowed_actions: MATCHMAKING_ACTIONS,
     setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let Some(leader) = log.leader() else {
@@ -1171,7 +939,7 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
     allowed_actions: RECONFIGURE_ACTIONS,
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let Some(leader) = log.leader() else {
@@ -1329,7 +1097,7 @@ reports.",
     allowed_actions: GC_ACTIONS,
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let refused = !log.refused_retires().is_empty();
@@ -1387,7 +1155,8 @@ reports.",
         ))
     },
     hint: |world, mistakes| {
-        let effective = log_world(world)
+        let effective = world
+            .log()
             .and_then(|log| log.leader().and_then(|leader| log.gc_effective(leader)));
         (mistakes > 0).then(|| match effective {
             Some(_) => "The leader now reports a floor. Compare that floor with the ballots \
@@ -1510,7 +1279,7 @@ the matchmaker does with it.",
     allowed_actions: GENERATIONS_ACTIONS,
     setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3], HANDOVER_STALL),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let active: Vec<u64> = log
@@ -1677,12 +1446,12 @@ and say which case each report gives the slot.",
     ],
     automation_on: NO_REPAIR_VERDICT,
     pinned_off: &[AutomationFlag::RepairVerdict],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::RepairVerdict],
     allowed_actions: FAULTY_ACTIONS,
-    setup: || fresh(3, QuorumSystem::Majority),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         let damaged = (0..3)
@@ -1746,8 +1515,7 @@ and say which case each report gives the slot.",
         script.drop_all(kind("Accept"));
         script.play(resend(0));
         script.settle(|message| message.kind == "Accept" && message.to == 2);
-        script
-            .drop_all(|message| matches!(message.kind.as_str(), "Accept" | "Accepted" | "Commit"));
+        script.drop_all(is_phase2);
         // The whole cluster goes down, and node 2's record rots.
         script.play(crash(0)).play(crash(1)).play(crash(2));
         script.play(Action::Corrupt { node: 2, slot: 0 });
@@ -1816,12 +1584,12 @@ cluster, and the next levels cover that change.",
     ],
     automation_on: NO_WIPED_REJOIN,
     pinned_off: &[AutomationFlag::WipedRejoin],
-    unlocked: TOGGLES,
+    unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::WipedRejoin],
     allowed_actions: WIPE_ACTIONS,
-    setup: || fresh(3, QuorumSystem::Majority),
+    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = log_world(world) else {
+        let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
         if let Some(node) = log.promise_regressed() {

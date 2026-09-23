@@ -98,9 +98,7 @@
 //! the departed leader knew about is unreachable — resigns, and ordinary
 //! Phase 1 recovers it. Phase 1 always remains the fallback.
 
-use super::{
-    Audience, BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot,
-};
+use super::{BTreeMap, BTreeSet, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Slot};
 use crate::membership::AcceptorConfig;
 use crate::proposer::RecoveryPolicy;
 
@@ -412,8 +410,8 @@ impl ColocatedNode {
         // The authority's Phase-2 membership travels with it (a matchmaker
         // deployment); the plain path carries nothing, as ever.
         let config = self.wire_config();
-        self.pending_messages.push((
-            Audience::Node(target),
+        self.send(
+            target,
             Message::Relinquish {
                 from: self.config.id,
                 to: target,
@@ -424,7 +422,7 @@ impl ColocatedNode {
                 pending,
                 config,
             },
-        ));
+        );
         // THE abdication. Everything above only *described* the authority;
         // this is where this node stops holding it — before the message can
         // reach any transport, and irreversibly for this ballot (a future

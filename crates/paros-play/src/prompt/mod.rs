@@ -32,7 +32,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::action::{ActionError, ActionErrorCode};
 use crate::auto::AutomationFlag;
+use crate::narration::{NarrationEvent, NarrationKind, say};
 
 pub use storage::RepairCase;
 
@@ -288,4 +290,63 @@ impl Prompt {
     pub fn expected(&self) -> &str {
         &self.expected
     }
+}
+
+/// Refuse a move while `open` waits on an answer.
+pub(crate) fn require_closed(open: Option<&Prompt>) -> Result<(), ActionError> {
+    if let Some(prompt) = open {
+        return Err(ActionError::new(
+            ActionErrorCode::PromptOpen,
+            format!("answer the open question first: {}", prompt.question),
+        ));
+    }
+    Ok(())
+}
+
+/// Answer the prompt `open` holds, closing it on a right answer, and say what
+/// the answer did: the violation a wrong answer would cause, or the rule a
+/// right one confirms. Both worlds answer through this.
+///
+/// # Errors
+///
+/// An [`ActionError`] when no prompt is open, `prompt_id` is not the open one,
+/// or it offers no `choice`.
+pub(crate) fn answer(
+    open: &mut Option<Prompt>,
+    prompt_id: u64,
+    choice: &str,
+) -> Result<(Verdict, NarrationEvent), ActionError> {
+    let Some(prompt) = open.as_mut() else {
+        return Err(ActionError::new(
+            ActionErrorCode::NoPrompt,
+            "no prompt is open",
+        ));
+    };
+    if prompt.id != prompt_id {
+        return Err(ActionError::new(
+            ActionErrorCode::NoPrompt,
+            format!("prompt {prompt_id} is not the open one"),
+        ));
+    }
+    if !prompt.offers(choice) {
+        return Err(ActionError::new(
+            ActionErrorCode::UnknownChoice,
+            format!("this prompt has no choice {choice:?}"),
+        ));
+    }
+    let verdict = prompt.judge(choice);
+    let (kind, node) = (prompt.kind, prompt.node);
+    if verdict == Verdict::Wrong {
+        let feedback = prompt.feedback.clone().unwrap_or_default();
+        return Ok((verdict, say(NarrationKind::Violation, feedback)));
+    }
+    *open = None;
+    let line = say(
+        NarrationKind::Info,
+        format!(
+            "That is what the protocol does here, so node {node} really does it: {}",
+            confirmation(kind)
+        ),
+    );
+    Ok((verdict, line))
 }

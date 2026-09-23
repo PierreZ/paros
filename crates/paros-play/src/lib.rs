@@ -311,28 +311,12 @@ impl Game {
             }
             Action::ReadIndex { node, client } => {
                 let world = self.log_world()?;
-                let client = match client {
-                    Some(client) => *client,
-                    None => world.clients().first().copied().ok_or_else(|| {
-                        ActionError::new(
-                            ActionErrorCode::UnknownParty,
-                            "the read is refused: this level has no client",
-                        )
-                    })?,
-                };
+                let client = reader(world, *client)?;
                 world.read_index(NodeId(*node), client)?;
             }
             Action::QuorumRead { node, client } => {
                 let world = self.log_world()?;
-                let client = match client {
-                    Some(client) => *client,
-                    None => world.clients().first().copied().ok_or_else(|| {
-                        ActionError::new(
-                            ActionErrorCode::UnknownParty,
-                            "the read is refused: this level has no client",
-                        )
-                    })?,
-                };
+                let client = reader(world, *client)?;
                 world.quorum_read(NodeId(*node), client)?;
             }
             Action::Relinquish { node, to } => {
@@ -479,6 +463,19 @@ impl Game {
                 "the move is refused: it belongs to the single-decree world",
             )
         })
+    }
+}
+
+/// The client a read names, or the level's first when it names none.
+fn reader(world: &world::World, client: Option<u64>) -> Result<u64, ActionError> {
+    match client {
+        Some(client) => Ok(client),
+        None => world.clients().first().copied().ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownParty,
+                "the read is refused: this level has no client",
+            )
+        }),
     }
 }
 

@@ -71,7 +71,7 @@ use super::{
 };
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
-use crate::model_support::{Mailbox, Rng};
+use crate::model_support::{Mailbox, Rng, env_or};
 use crate::types::{Ballot, NodeId};
 
 /// Seeds per campaign (`HANDOVER_MODEL_SEEDS` overrides; a long run is
@@ -606,6 +606,24 @@ impl World {
         &mut self.sites[usize::try_from(id.0).expect("index")]
     }
 
+    /// Mint `node`'s next campaign ballot, beside the set it believes in.
+    fn next_ballot(&mut self, node: NodeId) -> (Ballot, MatchmakerSet) {
+        let n = self.node(node);
+        let round = n.next_round;
+        n.next_round += 1;
+        (Ballot { round, node }, n.believed.clone())
+    }
+
+    /// The ballot of the effective configuration `id`'s disk holds.
+    fn effective_ballot_on_disk(&mut self, id: MatchmakerId) -> Option<Ballot> {
+        self.site(id)
+            .disk
+            .hard_state()
+            .effective
+            .as_ref()
+            .map(|(b, _)| *b)
+    }
+
     fn node(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[usize::try_from(id.0).expect("index")]
     }
@@ -664,25 +682,13 @@ impl World {
                 }
                 _ => false,
             };
-            let effective_before = self
-                .site(id)
-                .disk
-                .hard_state()
-                .effective
-                .as_ref()
-                .map(|(b, _)| *b);
+            let effective_before = self.effective_ballot_on_disk(id);
             self.site(id).disk.apply(op);
             // Claim 5, the disk half: the effective configuration is a
             // monotone scalar — a GC raise, a freeze, a vote, an activation
             // (which takes the maximum of the local and the reconstructed
             // one) may raise it, and nothing ever lowers or clears it.
-            let effective_after = self
-                .site(id)
-                .disk
-                .hard_state()
-                .effective
-                .as_ref()
-                .map(|(b, _)| *b);
+            let effective_after = self.effective_ballot_on_disk(id);
             assert!(
                 effective_after >= effective_before,
                 "the effective configuration never regresses on a disk: mm{} held {effective_before:?}, {op:?} left {effective_after:?}",
@@ -1418,13 +1424,7 @@ impl World {
             self.resend_campaign(node);
             return;
         }
-        let (round, believed) = {
-            let n = self.node(node);
-            let round = n.next_round;
-            n.next_round += 1;
-            (round, n.believed.clone())
-        };
-        let ballot = Ballot { round, node };
+        let (ballot, believed) = self.next_ballot(node);
         let offset = self.rng.below(2);
         let members: Vec<NodeId> = (0..3).map(|i| NodeId(i + offset)).collect();
         let config = AcceptorConfig::new(members, QuorumSystem::Majority);
@@ -1457,13 +1457,7 @@ impl World {
     /// set), the shape of the republish paths the sim's spares exercise.
     fn probe_pool(&mut self, node: NodeId) {
         self.register(node);
-        let (round, believed) = {
-            let n = self.node(node);
-            let round = n.next_round;
-            n.next_round += 1;
-            (round, n.believed.clone())
-        };
-        let ballot = Ballot { round, node };
+        let (ballot, believed) = self.next_ballot(node);
         let config = AcceptorConfig::new(
             vec![NodeId(0), NodeId(1), NodeId(2)],
             QuorumSystem::Majority,
@@ -1826,12 +1820,7 @@ impl World {
             for i in 0..NODES {
                 self.resend_campaign(NodeId(i));
             }
-            let mut guard = 0;
-            while !self.network.is_empty() && guard < DRAIN_STEPS {
-                self.deliver_random();
-                self.check_all();
-                guard += 1;
-            }
+            self.drain_network();
         }
         for (i, node) in self.nodes.iter().enumerate() {
             assert!(
@@ -1844,6 +1833,17 @@ impl World {
                     .map(|c| c.tally.unanswered(&node.believed)),
                 self.dump()
             );
+        }
+    }
+
+    /// Deliver until the network is empty (at most [`DRAIN_STEPS`]
+    /// deliveries), checking every claim after each.
+    fn drain_network(&mut self) {
+        let mut guard = 0;
+        while !self.network.is_empty() && guard < DRAIN_STEPS {
+            self.deliver_random();
+            self.check_all();
+            guard += 1;
         }
     }
 
@@ -1874,12 +1874,7 @@ impl World {
         // Judge the converged state on an empty network: the last probe's
         // republications are in flight, and a matchmaker left behind learns
         // the top generation from them.
-        let mut guard = 0;
-        while !self.network.is_empty() && guard < DRAIN_STEPS {
-            self.deliver_random();
-            self.check_all();
-            guard += 1;
-        }
+        self.drain_network();
         self.settle_campaigns(seed);
         self.assert_converged(seed);
         if self
@@ -1934,14 +1929,8 @@ impl Site {
 /// every step and converges once the faults stop.
 #[test]
 fn handover_holds_under_seeded_chaos_and_converges() {
-    let seeds = std::env::var("HANDOVER_MODEL_SEEDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(SEEDS);
-    let chaos_steps = std::env::var("HANDOVER_MODEL_STEPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(CHAOS_STEPS);
+    let seeds = env_or("HANDOVER_MODEL_SEEDS", SEEDS);
+    let chaos_steps = env_or("HANDOVER_MODEL_STEPS", CHAOS_STEPS);
     let mut total = Reach::default();
     for seed in 1..=seeds {
         let reach = World::new(seed).run(seed, chaos_steps);

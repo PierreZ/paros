@@ -165,15 +165,11 @@ impl<Id: Copy + Ord> Authority<Id> {
         created_tick: u64,
         own_vote: Option<Id>,
     ) {
-        let mut acked_by = BTreeSet::new();
-        if let Some(me) = own_vote {
-            acked_by.insert(me);
-        }
         self.read_rounds.push(ReadRound {
             ctx,
             index,
             required_seq,
-            acked_by,
+            acked_by: own_vote.into_iter().collect(),
             created_tick,
         });
         if let [.., prev, last] = self.read_rounds.as_slice() {

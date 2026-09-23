@@ -32,14 +32,7 @@ fn commit(from: u64, b: Ballot, slot: u64, command: Command) -> Message {
 }
 
 fn promise(from: u64, b: Ballot, accepted: BTreeMap<Slot, (Ballot, Command)>) -> Message {
-    Message::Promise {
-        from: NodeId(from),
-        ballot: b,
-        from_slot: Slot(0),
-        accepted,
-        faulty: BTreeMap::new(),
-        next_from_slot: None,
-    }
+    terminal_promise(NodeId(from), b, accepted)
 }
 
 // ---- accepted-state mutation ----------------------------------------------
@@ -169,8 +162,7 @@ fn a_decision_contradicting_the_open_round_trips_the_leader() {
 #[should_panic(expected = "two Phase-1 reports of one (slot, ballot) agree on the command")]
 fn conflicting_equal_ballot_promise_reports_trip_the_merge() {
     let mut n = node(0, &[0, 1, 2, 3, 4]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     drain(&mut n);
     let b = n.ballot();
     let mut first = BTreeMap::new();
@@ -186,8 +178,7 @@ fn conflicting_equal_ballot_promise_reports_trip_the_merge() {
 #[test]
 fn the_merge_keeps_the_highest_ballot_report() {
     let mut n = node(0, &[0, 1, 2, 3, 4]);
-    n.set_election_timeout(1);
-    n.tick();
+    campaign(&mut n);
     drain(&mut n);
     let b = n.ballot();
     let mut high = BTreeMap::new();

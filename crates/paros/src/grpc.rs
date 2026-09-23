@@ -134,41 +134,25 @@ impl WireQuorumSystem {
     }
 }
 
-impl From<&common::AcceptorConfig> for WireQuorumSystem {
-    fn from(config: &common::AcceptorConfig) -> Self {
-        Self {
-            quorum_system: config.quorum_system,
-            phase1_quorum: config.phase1_quorum,
-            phase2_quorum: config.phase2_quorum,
-            rows: config.rows,
-            cols: config.cols,
+/// Every message that carries the five quorum-system fields inline reads
+/// them the same way.
+macro_rules! wire_quorum_system_from {
+    ($($source:ty),+ $(,)?) => {$(
+        impl From<&$source> for WireQuorumSystem {
+            fn from(source: &$source) -> Self {
+                Self {
+                    quorum_system: source.quorum_system,
+                    phase1_quorum: source.phase1_quorum,
+                    phase2_quorum: source.phase2_quorum,
+                    rows: source.rows,
+                    cols: source.cols,
+                }
+            }
         }
-    }
+    )+};
 }
 
-impl From<&Reconfigure> for WireQuorumSystem {
-    fn from(request: &Reconfigure) -> Self {
-        Self {
-            quorum_system: request.quorum_system,
-            phase1_quorum: request.phase1_quorum,
-            phase2_quorum: request.phase2_quorum,
-            rows: request.rows,
-            cols: request.cols,
-        }
-    }
-}
-
-impl From<&InspectReply> for WireQuorumSystem {
-    fn from(reply: &InspectReply) -> Self {
-        Self {
-            quorum_system: reply.quorum_system,
-            phase1_quorum: reply.phase1_quorum,
-            phase2_quorum: reply.phase2_quorum,
-            rows: reply.rows,
-            cols: reply.cols,
-        }
-    }
-}
+wire_quorum_system_from!(common::AcceptorConfig, Reconfigure, InspectReply);
 
 /// Encode a quorum system for the wire.
 #[must_use]
@@ -304,6 +288,22 @@ fn command_from_proto(command: Option<internal::Command>) -> Result<Command, &'s
     }
 }
 
+/// Collect decoded `(key, value)` entries into a map, refusing the first
+/// malformed entry and any key that repeats (`duplicate` names that error).
+fn unique_map<K: Ord, V>(
+    entries: impl IntoIterator<Item = Result<(K, V), &'static str>>,
+    duplicate: &'static str,
+) -> Result<BTreeMap<K, V>, &'static str> {
+    let mut decoded = BTreeMap::new();
+    for entry in entries {
+        let (key, value) = entry?;
+        if decoded.insert(key, value).is_some() {
+            return Err(duplicate);
+        }
+    }
+    Ok(decoded)
+}
+
 fn faulty_slots_to_proto(entries: &BTreeMap<Slot, Ballot>) -> Vec<internal::FaultySlot> {
     entries
         .iter()
@@ -317,16 +317,12 @@ fn faulty_slots_to_proto(entries: &BTreeMap<Slot, Ballot>) -> Vec<internal::Faul
 fn faulty_slots_from_proto(
     entries: Vec<internal::FaultySlot>,
 ) -> Result<BTreeMap<Slot, Ballot>, &'static str> {
-    let mut decoded = BTreeMap::new();
-    for entry in entries {
-        if decoded
-            .insert(Slot(entry.slot), ballot_from_proto(entry.ballot)?)
-            .is_some()
-        {
-            return Err("duplicate faulty slot in message");
-        }
-    }
-    Ok(decoded)
+    unique_map(
+        entries
+            .into_iter()
+            .map(|entry| Ok((Slot(entry.slot), ballot_from_proto(entry.ballot)?))),
+        "duplicate faulty slot in message",
+    )
 }
 
 fn slot_commands_to_proto(
@@ -345,18 +341,16 @@ fn slot_commands_to_proto(
 fn slot_commands_from_proto(
     entries: Vec<internal::SlotCommand>,
 ) -> Result<BTreeMap<Slot, (Ballot, Command)>, &'static str> {
-    let mut decoded = BTreeMap::new();
-    for entry in entries {
-        let slot = Slot(entry.slot);
-        let value = (
-            ballot_from_proto(entry.ballot)?,
-            command_from_proto(entry.command)?,
-        );
-        if decoded.insert(slot, value).is_some() {
-            return Err("duplicate slot in message");
-        }
-    }
-    Ok(decoded)
+    unique_map(
+        entries.into_iter().map(|entry| {
+            let value = (
+                ballot_from_proto(entry.ballot)?,
+                command_from_proto(entry.command)?,
+            );
+            Ok((Slot(entry.slot), value))
+        }),
+        "duplicate slot in message",
+    )
 }
 
 /// Encode the `pending` half of a [`Message::Relinquish`] tail: each slot's
@@ -377,16 +371,12 @@ fn pending_commands_to_proto(entries: &BTreeMap<Slot, Command>) -> Vec<internal:
 fn pending_commands_from_proto(
     entries: Vec<internal::SlotCommand>,
 ) -> Result<BTreeMap<Slot, Command>, &'static str> {
-    let mut decoded = BTreeMap::new();
-    for entry in entries {
-        if decoded
-            .insert(Slot(entry.slot), command_from_proto(entry.command)?)
-            .is_some()
-        {
-            return Err("duplicate slot in message");
-        }
-    }
-    Ok(decoded)
+    unique_map(
+        entries
+            .into_iter()
+            .map(|entry| Ok((Slot(entry.slot), command_from_proto(entry.command)?))),
+        "duplicate slot in message",
+    )
 }
 
 fn snapshot_to_proto(
@@ -833,7 +823,8 @@ pub(crate) fn rpc_channel(
     )
 }
 
-async fn dispatch<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U, Status> {
+/// Hand one decoded request to the driver's inbox and wait for its answer.
+async fn call<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U, Status> {
     let (reply_tx, reply_rx) = oneshot::channel();
     sender
         .send((value, reply_tx))
@@ -844,27 +835,40 @@ async fn dispatch<T, U>(sender: &mpsc::Sender<Call<T, U>>, value: T) -> Result<U
         .map_err(|_| Status::unavailable("node driver dropped the reply"))
 }
 
+/// [`call`] for a request the driver consumes exactly as it arrived.
+async fn dispatch<T, U>(
+    sender: &mpsc::Sender<Call<T, U>>,
+    request: Request<T>,
+) -> Result<Response<U>, Status> {
+    call(sender, request.into_inner()).await.map(Response::new)
+}
+
+/// Decode one matchmaker-wire request, refusing a malformed one as an invalid
+/// argument that names `what` was being decoded.
+fn decode_wire<W, T>(
+    request: Request<W>,
+    decode: fn(W) -> Result<T, &'static str>,
+    what: &str,
+) -> Result<T, Status> {
+    decode(request.into_inner())
+        .map_err(|error| Status::invalid_argument(format!("invalid {what}: {error}")))
+}
+
 #[tonic::async_trait]
 impl public::paros_server::Paros for RpcService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn propose(&self, request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
-        dispatch(&self.propose, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.propose, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
-        dispatch(&self.read, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.read, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn compact(&self, request: Request<Compact>) -> Result<Response<CompactAck>, Status> {
-        dispatch(&self.compact, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.compact, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -872,9 +876,7 @@ impl public::paros_server::Paros for RpcService {
         &self,
         request: Request<Reconfigure>,
     ) -> Result<Response<ReconfigureAck>, Status> {
-        dispatch(&self.reconfigure, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.reconfigure, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -882,9 +884,7 @@ impl public::paros_server::Paros for RpcService {
         &self,
         request: Request<ReconfigureMatchmakers>,
     ) -> Result<Response<ReconfigureMatchmakersAck>, Status> {
-        dispatch(&self.reconfigure_matchmakers, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.reconfigure_matchmakers, request).await
     }
 }
 
@@ -926,16 +926,12 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
         &self,
         request: Request<InspectRequest>,
     ) -> Result<Response<InspectReply>, Status> {
-        dispatch(&self.inspect, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.inspect, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn retire(&self, request: Request<RetireRequest>) -> Result<Response<RetireAck>, Status> {
-        dispatch(&self.retire, request.into_inner())
-            .await
-            .map(Response::new)
+        dispatch(&self.retire, request).await
     }
 }
 
@@ -1051,24 +1047,23 @@ fn registrations_to_proto(
 fn registrations_from_proto(
     entries: Vec<matchmaker::Registration>,
 ) -> Result<BTreeMap<Ballot, Registration>, &'static str> {
-    let mut history = BTreeMap::new();
-    for entry in entries {
-        let ballot = ballot_from_proto(entry.ballot)?;
-        // The wire keeps the flag a bool; the kind is the core's word for
-        // it, mapped at the boundary.
-        let registration = Registration {
-            config: acceptor_config_from_proto(entry.config)?,
-            kind: if entry.reconfiguration {
-                RegistrationKind::Reconfiguration
-            } else {
-                RegistrationKind::Belief
-            },
-        };
-        if history.insert(ballot, registration).is_some() {
-            return Err("duplicate ballot in history");
-        }
-    }
-    Ok(history)
+    unique_map(
+        entries.into_iter().map(|entry| {
+            let ballot = ballot_from_proto(entry.ballot)?;
+            // The wire keeps the flag a bool; the kind is the core's word for
+            // it, mapped at the boundary.
+            let registration = Registration {
+                config: acceptor_config_from_proto(entry.config)?,
+                kind: if entry.reconfiguration {
+                    RegistrationKind::Reconfiguration
+                } else {
+                    RegistrationKind::Belief
+                },
+            };
+            Ok((ballot, registration))
+        }),
+        "duplicate ballot in history",
+    )
 }
 
 /// Encode a matchmaking request for the wire.
@@ -1597,9 +1592,8 @@ impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService 
         &self,
         request: Request<WireMatchRequest>,
     ) -> Result<Response<WireMatchReply>, Status> {
-        let request = match_request_from_wire(request.into_inner())
-            .map_err(|error| Status::invalid_argument(format!("invalid match request: {error}")))?;
-        dispatch(&self.requests, request)
+        let request = decode_wire(request, match_request_from_wire, "match request")?;
+        call(&self.requests, request)
             .await
             .map(|reply| Response::new(wire_match_reply(&reply)))
     }
@@ -1609,10 +1603,12 @@ impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService 
         &self,
         request: Request<WireGarbageCollect>,
     ) -> Result<Response<WireGarbageCollectAck>, Status> {
-        let request = garbage_collect_from_wire(request.into_inner()).map_err(|error| {
-            Status::invalid_argument(format!("invalid garbage-collect request: {error}"))
-        })?;
-        dispatch(&self.collects, request)
+        let request = decode_wire(
+            request,
+            garbage_collect_from_wire,
+            "garbage-collect request",
+        )?;
+        call(&self.collects, request)
             .await
             .map(|ack| Response::new(wire_garbage_collect_ack(&ack)))
     }
@@ -1622,10 +1618,12 @@ impl matchmaker::paros_matchmaker_server::ParosMatchmaker for MatchmakerService 
         &self,
         request: Request<WireReconfigureRequest>,
     ) -> Result<Response<WireReconfigureReply>, Status> {
-        let request = reconfigure_request_from_wire(request.into_inner()).map_err(|error| {
-            Status::invalid_argument(format!("invalid reconfigure request: {error}"))
-        })?;
-        dispatch(&self.reconfigures, request)
+        let request = decode_wire(
+            request,
+            reconfigure_request_from_wire,
+            "reconfigure request",
+        )?;
+        call(&self.reconfigures, request)
             .await
             .map(|reply| Response::new(wire_reconfigure_reply(&reply)))
     }

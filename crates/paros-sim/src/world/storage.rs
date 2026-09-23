@@ -600,13 +600,11 @@ impl<T: TimeProvider> DurableStorage<T> {
             // read as recovered-vs-persisted divergence.
             for (slot, _) in &torn {
                 w.marks.entry(key.clone()).or_default().insert(slot.0);
-                w.note_corruption(CorruptionInjection {
+                w.note_corruption(CorruptionInjection::dormant(
                     node,
-                    record: StorageRecord::Accepted(*slot),
-                    kind: CorruptionKind::TornTail,
-                    block: false,
-                    outcome: CorruptionOutcome::Dormant,
-                });
+                    StorageRecord::Accepted(*slot),
+                    CorruptionKind::TornTail,
+                ));
             }
         });
     }

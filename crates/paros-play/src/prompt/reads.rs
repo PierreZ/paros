@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use paros_core::{NodeId, Slot};
 
 use super::{Choice, Prompt, PromptKind};
+use crate::narration::{self, prefix_at};
 
 impl Prompt {
     /// A read at `ctx` captured `index`; an ack just arrived. Serve, or wait?
@@ -34,12 +35,8 @@ impl Prompt {
         chosen_index: Option<Slot>,
         confirmed: bool,
     ) -> Self {
-        let at = index.map_or_else(
-            || "the empty prefix".to_string(),
-            |s| format!("slot {}", s.0),
-        );
-        let applied =
-            chosen_index.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let at = prefix_at(index);
+        let applied = narration::at(chosen_index);
         let expected = if confirmed { "serve" } else { "wait" };
         let mut explanations = BTreeMap::new();
         explanations.insert(
@@ -98,7 +95,7 @@ impl Prompt {
     ) -> Self {
         let high =
             watermark.map_or_else(|| "nothing at all".to_string(), |s| format!("slot {}", s.0));
-        let here = applied.map_or_else(|| "nothing".to_string(), |s| format!("slot {}", s.0));
+        let here = narration::at(applied);
         let expected = if served { "serve" } else { "wait" };
         let mut explanations = BTreeMap::new();
         explanations.insert(

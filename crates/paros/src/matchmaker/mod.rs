@@ -125,30 +125,21 @@ where
 
     // 1. Persist every write, in order.
     for op in &writes {
-        match op {
+        let staged = match op {
             MatchmakerWriteOp::Register {
                 ballot,
                 registration,
-            } => storage
-                .register(*ballot, registration)
-                .await
-                .map_err(|e| storage_fault_crash(audit, id, e))?,
-            MatchmakerWriteOp::SetGcWatermark(watermark) => storage
-                .set_gc_watermark(*watermark)
-                .await
-                .map_err(|e| storage_fault_crash(audit, id, e))?,
-            MatchmakerWriteOp::SetScalars(scalars) => storage
-                .set_scalars(scalars)
-                .await
-                .map_err(|e| storage_fault_crash(audit, id, e))?,
+            } => storage.register(*ballot, registration).await,
+            MatchmakerWriteOp::SetGcWatermark(watermark) => {
+                storage.set_gc_watermark(*watermark).await
+            }
+            MatchmakerWriteOp::SetScalars(scalars) => storage.set_scalars(scalars).await,
             MatchmakerWriteOp::InstallRegistry {
                 scalars,
                 registrations,
-            } => storage
-                .install_registry(scalars, registrations)
-                .await
-                .map_err(|e| storage_fault_crash(audit, id, e))?,
-        }
+            } => storage.install_registry(scalars, registrations).await,
+        };
+        staged.map_err(|e| storage_fault_crash(audit, id, e))?;
     }
     if !writes.is_empty() {
         // Crash seam: staged but not flushed — the batch dies whole, and no

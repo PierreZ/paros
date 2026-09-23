@@ -6,7 +6,7 @@
 //! the reply and keeps the node's volatile leadership consistent with it.
 
 use super::{
-    Audience, Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Party, Slot, WriteOp,
+    Ballot, ColocatedNode, Command, Message, NodeId, NodeRole, Party, Slot, WriteOp,
     command_fingerprint,
 };
 use crate::acceptor::{AcceptOutcome, PrepareOutcome};
@@ -122,8 +122,8 @@ impl ColocatedNode {
                         "a promise reply ships with its durable raise in the batch"
                     );
                 }
-                self.pending_messages.push((
-                    Audience::Node(reply_to),
+                self.send(
+                    reply_to,
                     Message::Promise {
                         from: me,
                         ballot,
@@ -132,7 +132,7 @@ impl ColocatedNode {
                         faulty: page.faulty,
                         next_from_slot: page.next_from_slot,
                     },
-                ));
+                );
             }
         }
     }

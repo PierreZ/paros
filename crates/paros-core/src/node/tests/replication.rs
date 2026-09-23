@@ -3,11 +3,7 @@ use super::*;
 
 #[test]
 fn follower_resets_election_clock_on_leader_traffic() {
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // Arm node 1 with a timeout of 3 ticks. It ages two ticks (still Follower),
     // then leader contact (a streamed Accept) resets its clock, so two more
@@ -38,11 +34,7 @@ fn a_leader_without_an_ack_quorum_steps_down_after_its_window() {
     // Pins the #95 CheckQuorum contract after its sim red→green (23 zombie
     // seeds, e.g. 901969623722906706): an isolated leader must not stay
     // Leader past an ack-quorum-less election-timeout window.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     nodes[0].set_election_timeout(3);
     // Tick without ever delivering the beats (a fully partitioned leader):
@@ -72,11 +64,7 @@ fn a_leader_hearing_acks_keeps_leadership_across_windows() {
     // The healthy half of CheckQuorum: every delivered beat is acked by both
     // followers, so the window refills each time it closes and leadership is
     // never disturbed.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     nodes[0].set_election_timeout(2);
     for _ in 0..8 {
@@ -172,11 +160,7 @@ fn a_round_the_driver_never_re_sends_stalls_until_one_call_heals_it() {
     // forever — the cluster is *safe* (the slot is simply undecided) but the
     // contiguous chosen prefix is frozen below it. A single call decides it, which
     // is what proves the stall was the skipped re-send and nothing else.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy.
@@ -238,11 +222,7 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
     // `proposer` map goes with the leadership, so nothing will ever re-propose
     // slot 1 — and a promise quorum that never saw it steps clean over it. The
     // `Control::Noop` gap fill is the only thing that closes it.
-    let mut nodes = [
-        node(0, &[0, 1, 2]),
-        node(1, &[0, 1, 2]),
-        node(2, &[0, 1, 2]),
-    ];
+    let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy.
@@ -275,8 +255,7 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
 
     // Nodes 1 and 2 elect; neither ever saw slot 1, so `Election::recovered` holds
     // slot 2 alone and `next_slot` jumps over the hole.
-    nodes[1].set_election_timeout(1);
-    nodes[1].tick();
+    campaign(&mut nodes[1]);
     let q = drain(&mut nodes[1]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
     assert!(nodes[1].is_leader());

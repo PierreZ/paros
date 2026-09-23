@@ -568,39 +568,11 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn answer(&mut self, prompt_id: u64, choice: &str) -> Result<Verdict, ActionError> {
-        let Some(prompt) = self.prompt.as_mut() else {
-            return Err(ActionError::new(
-                ActionErrorCode::NoPrompt,
-                "no prompt is open",
-            ));
-        };
-        if prompt.id != prompt_id {
-            return Err(ActionError::new(
-                ActionErrorCode::NoPrompt,
-                format!("prompt {prompt_id} is not the open one"),
-            ));
-        }
-        if !prompt.offers(choice) {
-            return Err(ActionError::new(
-                ActionErrorCode::UnknownChoice,
-                format!("this prompt has no choice {choice:?}"),
-            ));
-        }
-        let verdict = prompt.judge(choice);
-        let (kind, node) = (prompt.kind, prompt.node);
+        let (verdict, line) = crate::prompt::answer(&mut self.prompt, prompt_id, choice)?;
+        self.narration.push(line);
         if verdict == Verdict::Wrong {
-            let feedback = prompt.feedback.clone().unwrap_or_default();
-            self.narrate(NarrationKind::Violation, feedback);
             return Ok(Verdict::Wrong);
         }
-        self.prompt = None;
-        self.narrate(
-            NarrationKind::Info,
-            format!(
-                "That is what the protocol does here, so node {node} really does it: {}",
-                crate::prompt::confirmation(kind)
-            ),
-        );
         match self.paused.take() {
             Some(Paused::Message { to, message }) => self.route(to, *message),
             Some(Paused::Phase2 { proposer }) => self.open_phase2(proposer),
@@ -1147,24 +1119,10 @@ impl DecreeWorld {
     }
 
     fn position_of(&self, id: u64) -> Result<usize, ActionError> {
-        self.wire
-            .iter()
-            .position(|entry| entry.id == id)
-            .ok_or_else(|| {
-                ActionError::new(
-                    ActionErrorCode::UnknownMessage,
-                    format!("there is no message #{id} in flight"),
-                )
-            })
+        super::position_in(&self.wire, id)
     }
 
     fn require_no_prompt(&self) -> Result<(), ActionError> {
-        if let Some(prompt) = &self.prompt {
-            return Err(ActionError::new(
-                ActionErrorCode::PromptOpen,
-                format!("answer the open question first: {}", prompt.question),
-            ));
-        }
-        Ok(())
+        crate::prompt::require_closed(self.prompt.as_ref())
     }
 }

@@ -2,6 +2,9 @@
 //! coverage-guided + frontier-exploration gate on the main campaign, then the
 //! two scripted corpus axes.
 
+mod common;
+
+use common::{arg, is_clean, print_never_fired, print_seed_counts};
 use paros_sim::{
     AssertKind, CHUNK_CORPUS_CI_ITERATIONS, CORPUS_CI_ITERATIONS, COVERAGE_ITERATIONS,
     SimulationReport, chunk_corpus_hunt, corpus_hunt, explore,
@@ -10,10 +13,7 @@ use paros_sim::{
 fn main() {
     // Optional first arg: exploration iteration budget (defaults to the sancov
     // coverage cap). Lets a hunt drive the code-coverage-guided sweep harder.
-    let iterations = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(COVERAGE_ITERATIONS);
+    let iterations = arg(1).unwrap_or(COVERAGE_ITERATIONS);
 
     println!("--- Chain-of-Blocks campaign (coverage + exploration) ---");
     let report = explore(iterations);
@@ -22,10 +22,7 @@ fn main() {
     } else {
         "saturated (coverage plateaued, all reachability fired)"
     };
-    println!(
-        "{} seeds: {} ok, {} failed — {}",
-        report.iterations, report.successful_runs, report.failed_runs, stop,
-    );
+    print_seed_counts(&report, &format!(" — {stop}"));
     if let Some(s) = &report.saturation {
         println!(
             "  signal {:?}: {}/{} reachability fired, {}/{} edges, plateau {}",
@@ -53,17 +50,8 @@ fn main() {
     // Name the `sometimes`/`reachable` gates that never fired. Saturation is the
     // sweep's real exit criterion, and "did not saturate" is useless without
     // knowing *which* gate is starving — that is the knob to tune.
-    if !report.coverage_violations.is_empty() {
-        println!("  coverage gates that never fired:");
-        for gate in &report.coverage_violations {
-            println!("    - {gate}");
-        }
-    }
-    if report.assertion_violations.is_empty()
-        && report.failed_runs == 0
-        && report.coverage_violations.is_empty()
-        && !report.convergence_timeout
-    {
+    print_never_fired(&report, "  ");
+    if is_clean(&report) && report.coverage_violations.is_empty() && !report.convergence_timeout {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
@@ -106,20 +94,9 @@ fn print_guidance(report: &SimulationReport) {
 /// One corpus axis: fail CI on any violation or a gate that never fired.
 fn gate_corpus(name: &str, report: &SimulationReport) {
     println!("\n--- {name} ---");
-    println!(
-        "{} seeds: {} ok, {} failed",
-        report.iterations, report.successful_runs, report.failed_runs,
-    );
-    if !report.coverage_violations.is_empty() {
-        println!("  coverage gates that never fired:");
-        for gate in &report.coverage_violations {
-            println!("    - {gate}");
-        }
-    }
-    if !report.assertion_violations.is_empty()
-        || report.failed_runs > 0
-        || !report.coverage_violations.is_empty()
-    {
+    print_seed_counts(report, "");
+    print_never_fired(report, "  ");
+    if !is_clean(report) || !report.coverage_violations.is_empty() {
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
         println!("  COVERAGE VIOLATIONS: {:?}", report.coverage_violations);
         println!("  FAILING SEEDS: {:?}", report.seeds_failing);
