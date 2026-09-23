@@ -9,6 +9,12 @@ export type ElectionView = {
  */
 timeout: number, 
 /**
+ * Ticks since the clock last reset, read off the core
+ * (`ColocatedNode::election_elapsed`): how far toward `timeout` it has
+ * run.
+ */
+elapsed: number, 
+/**
  * Whether the timeout is the no-check-quorum sentinel a hand-stepped
  * leader holds (see [`crate::world::NO_CHECK_QUORUM`]).
  */

@@ -38,7 +38,6 @@ mod verbs;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::matchmaking::Matchmaking;
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
     AcceptorConfig, Ballot, ClientId, ColocatedNode, Command, Config, GcAck, GcRequest, MatchReply,
@@ -258,15 +257,11 @@ pub struct World {
     /// not a role of the core's node: the node that drives a handover is the
     /// node the operator asked, and it holds no durable state of its own.
     reconfigurers: Vec<MatchmakerReconfigurer>,
-    /// Per node, a second [`Matchmaking`] fed exactly the answers the node is
-    /// fed — the oracle the `StaleConfiguration` prompt reads. `ColocatedNode`
-    /// hands out no reference to its own, so this is the one prompt whose
-    /// answer is computed on a parallel instance of the core's role rather
-    /// than on a clone of the node's.
-    matchmaking_shadow: Vec<Option<Matchmaking>>,
     /// Per node, the prior configurations its last completed matchmaking
-    /// phase reported — `H_b`. `Election` keeps them private, so the world
-    /// records what `MatchStep::Completed` handed it.
+    /// phase reported — `H_b`. An open `Election` names them
+    /// ([`paros_core::proposer::Election::prior`]), but a won one is gone and
+    /// the goals ask about the leadership it produced, so the world records
+    /// what `MatchStep::Completed` handed it.
     campaign_prior: Vec<Vec<AcceptorConfig>>,
     /// Per node, whether an operator retired it for good.
     retired: Vec<bool>,
@@ -370,7 +365,6 @@ impl World {
             refused_boots: Vec::new(),
             matchmakers: Vec::new(),
             reconfigurers: reconfigurers.into_iter().collect(),
-            matchmaking_shadow: (0..count).map(|_| None).collect(),
             campaign_prior: vec![Vec::new(); count],
             retired: vec![false; count],
             refused_retires: Vec::new(),
@@ -609,7 +603,7 @@ impl World {
             self.promise_watermarks[index] = self.promise_watermarks[index].max(seen);
         }
         for index in 0..self.pool.len() {
-            self.sync_matchmaking_shadow(index);
+            self.forget_superseded_prior(index);
         }
         let hold = self.policy.hold_leadership;
         for index in 0..self.pool.len() {

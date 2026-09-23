@@ -71,6 +71,15 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
         &self.config
     }
 
+    /// `H_b`: every distinct prior configuration whose Phase-1 quorum this
+    /// election must independently obtain, in ballot order. On a plain
+    /// deployment it is the one static configuration; empty means nothing
+    /// below this ballot survived the matchmakers' watermark.
+    #[must_use]
+    pub fn prior(&self) -> &[AcceptorConfig<Id>] {
+        &self.prior
+    }
+
     /// Whether every prior configuration holds a Phase-1 quorum of promises —
     /// the completion predicate, in one readable place (see the type doc).
     #[must_use]

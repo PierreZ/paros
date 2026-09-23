@@ -4,8 +4,6 @@
 //! The client is the only party that knows its own program order, so this is
 //! recorded client-side and judged client-side.
 
-use std::collections::BTreeSet;
-
 use paros_core::{ClientId, ClientSeq, NodeId, Slot};
 
 use crate::narration::prefix_at as at;
@@ -30,15 +28,11 @@ pub(super) struct Proposal {
 pub(super) struct PendingRead {
     pub(super) ctx: u64,
     pub(super) node: NodeId,
-    /// The index the round captured, recorded here because
-    /// `Proposer::read_rounds` exposes no accessor for it.
+    /// The index the read observes: what a read-index round captured when it
+    /// opened (read off `ReadRound::index`), or the watermark a leaderless
+    /// read was served at. Kept here because the client's history outlives
+    /// the round, which the core drops once it confirms.
     pub(super) index: Option<Slot>,
-    /// The beat sequence an ack must carry to count, for display only.
-    pub(super) required_seq: u64,
-    /// Who has acked a qualifying beat since the read opened — the world's own
-    /// tally, for the prompt's summary. The *judgement* always comes from a
-    /// clone of the real `Proposer`.
-    pub(super) acks: BTreeSet<NodeId>,
     /// Whether this is a **leaderless** read: a Phase-1 quorum's vote
     /// watermarks rather than a leader's beat acks. The two are served through
     /// the same `ReadState`, and only the client knows which it asked for.

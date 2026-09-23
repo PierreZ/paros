@@ -1183,6 +1183,16 @@ impl ColocatedNode {
         self.election_timeout
     }
 
+    /// Ticks since the election clock last reset — how far toward
+    /// [`ColocatedNode::election_timeout`] the timer has run. Read-only: the
+    /// clock resets wherever the core hears from a live leadership or starts
+    /// a campaign, and a caller that wants to draw it reads it here rather
+    /// than re-deriving those reset sites.
+    #[must_use]
+    pub fn election_elapsed(&self) -> u64 {
+        self.election_elapsed
+    }
+
     /// Borrow the node to drain one batch of work. The returned [`Ready`] holds
     /// the unique `&mut` borrow, so a second `ready()` before [`Ready::advance`]
     /// is a **compile error**.

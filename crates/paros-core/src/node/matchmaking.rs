@@ -116,7 +116,7 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{Ballot, ColocatedNode, NodeId, NodeRole};
-use crate::matchmaker::{MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
+use crate::matchmaker::{MatchRefusal, MatchReply, MatchRequest};
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 
@@ -245,14 +245,16 @@ impl ColocatedNode {
         self.matchmaking.is_some()
     }
 
-    /// The open matchmaking phase, if any: its ballot, the configuration it
-    /// registers, and what kind of registration that is. A read view for the
-    /// driver's audit report.
+    /// The open matchmaking phase, if any — the node's own [`Matchmaking`]
+    /// role, read-only: its ballot, the configuration it registers and what
+    /// kind of registration that is, and the tally so far (how many
+    /// matchmakers registered, how many more a quorum needs, the union of
+    /// histories above the maximum watermark). A caller that wants to ask it
+    /// a question — what would one more reply do? — clones it; the node's
+    /// own copy moves only through [`ColocatedNode::on_match_reply`].
     #[must_use]
-    pub fn matchmaking(&self) -> Option<(Ballot, &AcceptorConfig, RegistrationKind)> {
-        self.matchmaking
-            .as_ref()
-            .map(|m| (m.ballot(), m.config(), m.kind()))
+    pub fn matchmaking_role(&self) -> Option<&Matchmaking> {
+        self.matchmaking.as_ref()
     }
 
     /// Fold one matchmaker's answer into the open matchmaking phase — the

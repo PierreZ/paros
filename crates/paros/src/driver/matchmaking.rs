@@ -230,9 +230,10 @@ pub(crate) fn surface_matchmaking<A: Audit>(
     audit: &A,
     self_id: u64,
 ) {
-    if let Some((ballot, config, kind)) = node.matchmaking()
-        && *last_matchmaking != Some(ballot)
+    if let Some(m) = node.matchmaking_role()
+        && *last_matchmaking != Some(m.ballot())
     {
+        let (ballot, config, kind) = (m.ballot(), m.config(), m.kind());
         *last_matchmaking = Some(ballot);
         let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
         audit.matchmaking_started(NodeId(self_id), ballot, config, kind, generation);
