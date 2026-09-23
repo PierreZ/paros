@@ -286,6 +286,14 @@ impl Replica {
         self.committed.clear();
     }
 
+    /// Whether the contiguous walk left a **deferred continuation**: it
+    /// stopped at its per-batch bound with the next slot already chosen, and
+    /// the caller resumes it after the batch it is processing.
+    #[must_use]
+    pub fn has_advance_pending(&self) -> bool {
+        self.advance_pending
+    }
+
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where
     /// `hole` is the first slot missing from the contiguous prefix and
     /// `highest` the highest slot above it already known chosen. `None` when

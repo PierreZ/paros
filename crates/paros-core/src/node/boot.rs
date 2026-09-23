@@ -108,6 +108,7 @@ impl ColocatedNode {
             ballot,
             election_elapsed: 0,
             election_timeout: 0,
+            budgets: super::Budgets::default(),
             needs_election_timeout: true,
             heartbeat_seq: 0,
             counters: Counters::default(),

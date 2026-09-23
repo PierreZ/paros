@@ -15,7 +15,7 @@
 
 use super::{ColocatedNode, NodeRole, ReadState, Slot};
 
-/// Ticks a pending read — a read-index round waiting for its ack quorum, a
+/// Default ticks a pending read — a read-index round waiting for its ack quorum, a
 /// quorum read waiting for its row to answer whole or for the replica to
 /// cover the index it settled on — may wait before the node
 /// garbage-collects it (lost acks, an unreachable quorum or row). Dropped
@@ -23,8 +23,10 @@ use super::{ColocatedNode, NodeRole, ReadState, Slot};
 /// client reply (its retry sweep answers first, well inside this window).
 /// A watermark raised by an accept that never decided needs the next
 /// leader's gap fill to be covered, which is why the window is not shorter
-/// than an election.
-pub(super) const READ_TTL_TICKS: u64 = 20;
+/// than an election. The production value of
+/// [`Budgets::read_ttl_ticks`](crate::Budgets::read_ttl_ticks), which the
+/// driver may set per node.
+pub const READ_TTL_TICKS: u64 = 20;
 
 impl ColocatedNode {
     /// Hand the proposer this node's active configuration and chosen prefix
@@ -61,15 +63,16 @@ impl ColocatedNode {
         self.serve_quorum_reads();
     }
 
-    /// Per-tick upkeep for both tallies: drop the reads that outlived
-    /// [`READ_TTL_TICKS`], then serve what the prefix may have covered
+    /// Per-tick upkeep for both tallies: drop the reads that outlived the
+    /// read TTL ([`crate::Budgets::read_ttl_ticks`]), then serve what the prefix may have covered
     /// since. No re-broadcast is needed for the live read-index rounds:
     /// every leader tick already broadcasts a fresh, higher-seq beat whose
     /// acks confirm all older pending rounds.
     pub(super) fn tick_reads(&mut self) {
         let now = self.tick_count;
-        self.proposer.expire_reads(now, READ_TTL_TICKS);
-        self.quorum_reads.expire(now, READ_TTL_TICKS);
+        let ttl = self.budgets.read_ttl_ticks;
+        self.proposer.expire_reads(now, ttl);
+        self.quorum_reads.expire(now, ttl);
         self.serve_reads();
     }
 

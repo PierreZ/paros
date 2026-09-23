@@ -488,6 +488,23 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// **re-delegation** — so a stall is visible to the policies that
     /// judge it ([`Rounds::stalled_delegations`], [`Rounds::stalled`]).
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
+        self.resend_page_where(|_| true)
+    }
+
+    /// [`Rounds::resend_page`] over only the rounds whose custody `keep`
+    /// admits — `keep` is handed each round's proxy (`None` for a colocated
+    /// round). The page is fair over the admitted rounds alone, and only the
+    /// rounds on it count a re-send, so a round the caller chose not to
+    /// re-send is never charged one (a delegated round's take-back budget
+    /// counts re-delegations that happened, never ones that were skipped).
+    ///
+    /// # Panics
+    ///
+    /// If the page holds a round `keep` did not admit (a programmer error).
+    pub fn resend_page_where(
+        &mut self,
+        keep: impl Fn(Option<ProxyId>) -> bool,
+    ) -> Vec<PendingAccept<V>> {
         // No round survives below the compaction floor (the cross-role
         // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
         // starts at the bottom of the map and needs no floor handed in.
@@ -499,16 +516,28 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             column: r.column,
             proxy: r.proxy(),
         };
+        let admitted = |(_, r): &(&Slot, &Round<Id, V>)| keep(r.proxy());
         let mut pending: Vec<PendingAccept<V>> = self
             .by_slot
             .range(start..)
+            .filter(admitted)
             .take(RESEND_BATCH)
             .map(page)
             .collect();
         if pending.len() < RESEND_BATCH {
             let remaining = RESEND_BATCH - pending.len();
-            pending.extend(self.by_slot.range(..start).take(remaining).map(page));
+            pending.extend(
+                self.by_slot
+                    .range(..start)
+                    .filter(admitted)
+                    .take(remaining)
+                    .map(page),
+            );
         }
+        assert!(
+            pending.iter().all(|p| keep(p.proxy)),
+            "a filtered re-send page holds only admitted rounds"
+        );
         for accept in &pending {
             if let Some(round) = self.by_slot.get_mut(&accept.slot) {
                 round.resends = round.resends.saturating_add(1);
@@ -679,6 +708,19 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     /// ([`Rounds::resend_page`]).
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
         self.rounds.resend_page()
+    }
+
+    /// The next fair page of the rounds whose custody `keep` admits
+    /// ([`Rounds::resend_page_where`]).
+    ///
+    /// # Panics
+    ///
+    /// See [`Rounds::resend_page_where`].
+    pub fn resend_page_where(
+        &mut self,
+        keep: impl Fn(Option<ProxyId>) -> bool,
+    ) -> Vec<PendingAccept<V>> {
+        self.rounds.resend_page_where(keep)
     }
 
     /// Whether a round is open at `slot` at `ballot`

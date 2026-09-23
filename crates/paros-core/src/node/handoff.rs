@@ -110,8 +110,10 @@ use crate::proposer::RecoveryPolicy;
 /// shape as one [`PROMISE_BATCH`](crate::PROMISE_BATCH) page.
 pub const HANDOFF_BATCH: usize = crate::PROMISE_BATCH;
 
-/// Election timeouts a handoff leader may hold an uncovered inherited fence
-/// before resigning. The successor skipped Phase 1, so it never *recovered* the
+/// Default election timeouts a handoff leader may hold an uncovered inherited
+/// fence before resigning — the production value of
+/// [`Budgets::handoff_fence_elections`](crate::Budgets::handoff_fence_elections),
+/// which the driver may set per node. The successor skipped Phase 1, so it never *recovered* the
 /// slots below the inherited frontier — it learns them from ordinary
 /// replication and catch-up instead. If that cannot complete (the only holder
 /// of a decision departed with it), the honest move is to stop and let an
@@ -627,8 +629,9 @@ impl ColocatedNode {
     }
 
     /// Per-tick upkeep for a leadership that skipped Phase 1: resign when the
-    /// inherited fence stays uncovered for [`HANDOFF_FENCE_ELECTIONS`] election
-    /// timeouts.
+    /// inherited fence stays uncovered for the driver's handoff-fence budget
+    /// ([`crate::Budgets::handoff_fence_elections`], default
+    /// [`HANDOFF_FENCE_ELECTIONS`]) of election timeouts.
     ///
     /// A handoff leader never *recovered* the slots below its inherited
     /// frontier — it only learned the ones its predecessor described plus
@@ -658,7 +661,7 @@ impl ColocatedNode {
         self.handoff_fence_elapsed += 1;
         let deadline = self
             .election_timeout
-            .saturating_mul(HANDOFF_FENCE_ELECTIONS);
+            .saturating_mul(self.budgets.handoff_fence_elections);
         if self.handoff_fence_elapsed >= deadline {
             self.handoff.fence_step_downs = self.handoff.fence_step_downs.saturating_add(1);
             self.become_follower(None);

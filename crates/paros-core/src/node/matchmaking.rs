@@ -245,6 +245,74 @@ impl ColocatedNode {
         self.matchmaking.is_some()
     }
 
+    /// **Abandon the open campaign** while it is still matchmaking: this
+    /// candidate becomes a follower, drops the registrations it folded,
+    /// withdraws the requests it queued but not yet handed out, and asks the
+    /// driver for a fresh randomized election timeout — its next
+    /// campaign opens at a strictly higher round. A no-op (returning
+    /// `false`) on a node with no matchmaking phase open, which includes
+    /// every node of a plain deployment and every candidate already in
+    /// Phase 1. Returns whether a campaign was abandoned.
+    ///
+    /// **Abandoning is always safe**, and it is exactly the transition a
+    /// matchmaker's refusal already takes ([`ColocatedNode::on_match_reply`]'s
+    /// `Refused`) or a learned successor set takes
+    /// ([`ColocatedNode::learn_matchmakers`]): no `Prepare` has left (Phase 1
+    /// opens only once a matchmaker quorum answered), the promise this
+    /// campaign raised stays durable and only ever refuses lower ballots, and
+    /// whatever the request already registered stays in the matchmakers'
+    /// histories, where every later campaign's Phase 1 honors it. For a
+    /// **reconfiguration** campaign the operator's change may then be lost —
+    /// the documented fate of a reconfiguration whose matchmaking never
+    /// completed — *unless* it already landed at a matchmaker quorum, in
+    /// which case it is the effective configuration and every later ordinary
+    /// campaign adopts it (`MatchStep::StaleConfiguration`). The driver owns
+    /// the decision; the deterministic simulation takes it to put a campaign
+    /// down with its registration in flight, and production never does.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
+    pub fn abandon_campaign(&mut self) -> bool {
+        if self.matchmaking.is_none() {
+            return false;
+        }
+        // Preconditions: an open matchmaking phase is only ever a
+        // candidate's, on a matchmaker deployment, with no Phase 1 beside it.
+        assert!(
+            self.role == NodeRole::Candidate,
+            "only a candidate holds an open matchmaking phase"
+        );
+        assert!(
+            self.config.has_matchmakers(),
+            "a matchmaking phase opens only on a matchmaker deployment"
+        );
+        assert!(
+            self.proposer.election().is_none(),
+            "a matchmaking candidate has no Phase 1 open"
+        );
+        self.become_follower(None);
+        // A withdrawn campaign asks nothing more: the requests it queued and
+        // the caller has not drained yet (a re-ask, a next page) would
+        // otherwise leave for a ballot nobody is running. Every entry here
+        // is this campaign's — only a campaign queues matchmaking requests.
+        self.pending_match_requests.clear();
+        // Postconditions: nothing Phase-1-shaped or matchmaking-shaped left
+        // behind, the same restatement a refusal's step makes.
+        assert!(
+            self.role == NodeRole::Follower,
+            "an abandoned campaign leaves a follower"
+        );
+        assert!(
+            self.matchmaking.is_none() && self.proposer.election().is_none(),
+            "an abandoned campaign leaves no phase open"
+        );
+        self.assert_invariants();
+        true
+    }
+
     /// The open matchmaking phase, if any: its ballot, the configuration it
     /// registers, and what kind of registration that is. A read view for the
     /// driver's audit report.

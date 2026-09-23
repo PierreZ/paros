@@ -11,6 +11,7 @@ use super::{
 };
 use crate::membership::ProxyId;
 use crate::message::Audience;
+use crate::node::ResendScope;
 use crate::proxy_leader::ProxyLeader;
 use crate::types::command_fingerprint;
 
@@ -256,6 +257,61 @@ fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
         assert_eq!(n.replica().chosen_at(Slot(0)), Some(&ucmd(1, 1, 1)));
     }
     assert_eq!(nodes[0].ballot(), ballot, "no election was needed");
+}
+
+/// The re-send splits by custody: `ResendScope::Colocated` re-sends only
+/// the colocated round's `Accept`, `ResendScope::Delegated` only
+/// re-delegates, and a skipped re-delegation is not charged to the
+/// take-back budget.
+#[test]
+fn a_resend_scope_covers_one_custody_and_charges_only_what_it_sent() {
+    let mut nodes = proxied_cluster(1);
+    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose_in(
+        ClientId(1),
+        ClientSeq(2),
+        val(2),
+        None,
+        Delegation::Colocated,
+    );
+    let _ = raw(&mut nodes[0]); // both first sends are lost
+    assert!(nodes[0].has_pending_of(ResendScope::Delegated));
+    assert!(nodes[0].has_pending_of(ResendScope::Colocated));
+    for _ in 0..3 {
+        nodes[0].resend_pending_of(ResendScope::Colocated);
+        let out = raw(&mut nodes[0]);
+        assert!(
+            out.iter()
+                .all(|(a, m)| matches!(a, Audience::AcceptorsOf { .. })
+                    && matches!(m, Message::Accept { slot: Slot(1), .. })),
+            "a colocated-only re-send never re-delegates"
+        );
+        assert!(!out.is_empty());
+    }
+    nodes[0].take_back_delegated(1);
+    assert_eq!(
+        nodes[0].delegated_rounds(),
+        vec![(Slot(0), ProxyId(0))],
+        "no re-delegation happened, so none was charged"
+    );
+    nodes[0].resend_pending_of(ResendScope::Delegated);
+    let out = raw(&mut nodes[0]);
+    assert!(
+        matches!(
+            out.as_slice(),
+            [(
+                Audience::Proxy(ProxyId(0)),
+                Message::Accept { slot: Slot(0), .. }
+            )]
+        ),
+        "a delegated-only re-send is exactly the re-delegation"
+    );
+    nodes[0].take_back_delegated(1);
+    assert!(
+        nodes[0].delegated_rounds().is_empty(),
+        "charged once, taken back"
+    );
+    assert!(!nodes[0].has_pending_of(ResendScope::Delegated));
 }
 
 /// A handoff successor re-delegates every inherited pending round with

@@ -18,8 +18,7 @@ mod reads;
 mod reconfigure;
 mod replication;
 
-#[cfg(test)]
-use self::reads::READ_TTL_TICKS;
+pub use self::reads::READ_TTL_TICKS;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,12 +54,85 @@ pub use crate::acceptor::PROMISE_BATCH;
 /// the proposer's own bound, re-exported for the driver.
 pub use crate::proposer::RECOVERY_BATCH as LEADER_RECOVERY_BATCH;
 
-/// Election timeouts a leader's blocked repair probe may stay open before the
-/// leader resigns (CTRL §4.2): a leader that cannot finish recovery — e.g.
+/// Default election timeouts a leader's blocked repair probe may stay open
+/// before the leader resigns (CTRL §4.2) — the production value of
+/// [`Budgets::repair_timeout_elections`], which the driver may set per node: a
+/// leader that cannot finish recovery — e.g.
 /// partitioned from the only holder of a faulty slot's value — steps down so
 /// another node can try. Multiplies the driver-supplied randomized election
 /// timeout, so the effective window inherits its per-seed jitter.
 pub const REPAIR_TIMEOUT_ELECTIONS: u64 = 3;
+
+/// The node's **liveness budgets**: how long it waits, in its own clock, before
+/// giving up on a stuck piece of work. Driver policy handed to the core as
+/// data ([`ColocatedNode::set_budgets`]) — the same shape as the election
+/// timeout itself — so a harness can push each one to its floor per seed
+/// while production keeps [`Budgets::default`], the historical constants.
+///
+/// None of them is a safety bound: each one ends in a step the protocol
+/// already takes for other reasons (a leader resigning, a read dropped
+/// silently), so a short budget costs availability and a long one costs
+/// latency, never correctness. Every field is at least 1 — a zero budget is
+/// not an extreme but a node that gives up before it started
+/// ([`ColocatedNode::set_budgets`] asserts it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budgets {
+    /// Election timeouts a leader's blocked repair probe may stay open before
+    /// the leader resigns (CTRL §4.2). Default
+    /// [`REPAIR_TIMEOUT_ELECTIONS`]. Floor 1: one election timeout is long
+    /// enough for a re-sent `Prepare` to be answered.
+    pub repair_timeout_elections: u64,
+    /// Election timeouts a handoff leader may hold an uncovered inherited
+    /// fence before resigning. Default [`HANDOFF_FENCE_ELECTIONS`]. Floor 1:
+    /// one election timeout is long enough for catch-up to cover a fence the
+    /// predecessor's quorum already decided.
+    pub handoff_fence_elections: u64,
+    /// Ticks a pending read may wait before the node drops it. Default
+    /// [`READ_TTL_TICKS`]. Floor: one election timeout — a watermark raised
+    /// by an accept that never decided needs the next leader's gap fill to be
+    /// covered, so a shorter window drops reads that were about to complete
+    /// (a liveness cost only: the driver owns the client reply either way).
+    pub read_ttl_ticks: u64,
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Self {
+            repair_timeout_elections: REPAIR_TIMEOUT_ELECTIONS,
+            handoff_fence_elections: HANDOFF_FENCE_ELECTIONS,
+            read_ttl_ticks: READ_TTL_TICKS,
+        }
+    }
+}
+
+/// Which open Phase-2 rounds a re-send covers
+/// ([`ColocatedNode::resend_pending_of`]), by **custody** (#142): who folds
+/// the round's votes. On a deployment without proxies every round is
+/// colocated, so `Colocated` and `All` coincide there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResendScope {
+    /// Every open round: the colocated re-sends and the re-delegations.
+    All,
+    /// Only the rounds this leader folds itself: their `Accept`s go to the
+    /// column again.
+    Colocated,
+    /// Only the rounds delegated to a proxy leader: each is re-delegated to
+    /// its proxy, and the re-delegation counts toward its take-back budget.
+    Delegated,
+}
+
+impl ResendScope {
+    /// Whether a round of this custody (`proxy`: the proxy it was delegated
+    /// to, `None` when colocated) is in scope.
+    #[must_use]
+    pub fn admits(self, proxy: Option<ProxyId>) -> bool {
+        match self {
+            ResendScope::All => true,
+            ResendScope::Colocated => proxy.is_none(),
+            ResendScope::Delegated => proxy.is_some(),
+        }
+    }
+}
 
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -276,6 +348,10 @@ pub struct ColocatedNode {
     /// Driver-supplied randomized election timeout, in ticks. `0` disables the
     /// election clock (the sentinel until the driver seeds one).
     election_timeout: u64,
+    /// The driver's liveness budgets ([`Budgets`]): the repair-probe and
+    /// handoff-fence resignations and the read TTL. Volatile driver policy,
+    /// [`Budgets::default`] until the driver sets them.
+    budgets: Budgets,
     /// Set when the election clock resets (fired or stepped down); the driver
     /// reads it to feed a fresh randomized `election_timeout`. Jitter is drawn in
     /// the driver, never here (the core stays zero-dep).
@@ -918,7 +994,7 @@ impl ColocatedNode {
         {
             let timeout = self
                 .election_timeout
-                .saturating_mul(REPAIR_TIMEOUT_ELECTIONS);
+                .saturating_mul(self.budgets.repair_timeout_elections);
             if self.election_timeout != 0 && elapsed >= timeout {
                 self.counters.repair_step_downs += 1;
                 self.become_follower(None);
@@ -1010,10 +1086,36 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_pending(&mut self) {
+        self.resend_pending_of(ResendScope::All);
+    }
+
+    /// [`ColocatedNode::resend_pending`] over one **custody** of rounds
+    /// (#142): the colocated rounds' `Accept` re-sends, or the delegated
+    /// rounds' **re-delegations**, or both. The two are separate driver
+    /// decisions because they walk different paths — a re-sent `Accept`
+    /// reaches the column, a re-delegation reaches one proxy leader and
+    /// counts toward the round's take-back budget
+    /// ([`ColocatedNode::take_back_delegated`]) — and a caller that skips
+    /// one must not be charged for the other.
+    ///
+    /// **Skipping either half is always safe**, for exactly the reason
+    /// skipping the whole call is: the round's first send already went out,
+    /// a round that never gathers a quorum is simply undecided, and the
+    /// next call (or the next leadership's Phase 1) recovers it. A skipped
+    /// re-delegation is not counted, so a proxy's take-back is delayed, never
+    /// hastened. A no-op on a node that is not the leader and for a scope
+    /// with no open round.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error, never an
+    /// operating condition).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, scope = ?scope)))]
+    pub fn resend_pending_of(&mut self, scope: ResendScope) {
         if self.role != NodeRole::Leader {
             return;
         }
-        let pending = self.proposer.resend_page();
+        let pending = self.proposer.resend_page_where(|proxy| scope.admits(proxy));
         for accept in pending {
             // The same column the round was opened against: a re-send never
             // widens a grid round to another column — and the same proxy.
@@ -1116,6 +1218,32 @@ impl ColocatedNode {
         self.role == NodeRole::Leader && !self.proposer.rounds().is_empty()
     }
 
+    /// Whether this leader has open rounds of the custody `scope` names —
+    /// the per-custody form of [`ColocatedNode::has_pending_accepts`], so a
+    /// driver asks "skip the re-delegation?" only when a delegated round is
+    /// open, and "skip the re-send?" only when a colocated one is.
+    #[must_use]
+    pub fn has_pending_of(&self, scope: ResendScope) -> bool {
+        self.role == NodeRole::Leader
+            && self
+                .proposer
+                .rounds()
+                .values()
+                .any(|round| scope.admits(round.proxy()))
+    }
+
+    /// Whether a **recovery continuation** is pending: the contiguous
+    /// chosen-prefix walk stopped at its per-batch bound with the next slot
+    /// already chosen, or a leader's bounded recovery has pages left to
+    /// start. Exactly the work [`ColocatedNode::advance_recovery`] resumes —
+    /// a driver consults its policy about *when* to resume only while this
+    /// holds, since otherwise the call is a no-op.
+    #[must_use]
+    pub fn has_recovery_continuation(&self) -> bool {
+        self.replica.has_advance_pending()
+            || (self.role == NodeRole::Leader && self.proposer.recovery().is_some())
+    }
+
     /// Voluntarily resign the leadership: Leader → Follower, keeping every
     /// durable commitment (the promised ballot and the accepted log are
     /// untouched) and dropping only the volatile leadership state — the in-flight
@@ -1196,6 +1324,43 @@ impl ColocatedNode {
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
         self.assert_invariants();
+    }
+
+    /// The driver hands the core its liveness budgets ([`Budgets`]): how
+    /// many election timeouts a blocked repair probe and an uncovered
+    /// handoff fence may last before the leader resigns, and how many ticks
+    /// a pending read may wait. Driver policy, never a protocol bound: each
+    /// budget ends in a step the protocol already takes (a resignation, a
+    /// silently dropped read), so any value at or above the floor is safe.
+    /// Production passes [`Budgets::default`] (or never calls this).
+    ///
+    /// # Panics
+    ///
+    /// If any budget is zero — a node that gives up before it started is a
+    /// programmer error in the driver, not an extreme configuration — or if
+    /// an internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
+    pub fn set_budgets(&mut self, budgets: Budgets) {
+        assert!(
+            budgets.repair_timeout_elections >= 1,
+            "the repair-probe budget is at least one election timeout"
+        );
+        assert!(
+            budgets.handoff_fence_elections >= 1,
+            "the handoff-fence budget is at least one election timeout"
+        );
+        assert!(
+            budgets.read_ttl_ticks >= 1,
+            "the read TTL is at least one tick"
+        );
+        self.budgets = budgets;
+        self.assert_invariants();
+    }
+
+    /// The liveness budgets in force ([`ColocatedNode::set_budgets`]).
+    #[must_use]
+    pub fn budgets(&self) -> Budgets {
+        self.budgets
     }
 
     /// The election timeout in force (in ticks; zero until the driver set

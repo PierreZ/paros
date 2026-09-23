@@ -237,6 +237,43 @@ fn a_refused_registration_never_becomes_a_leadership() {
     assert_eq!(n.ballot().round, 8, "one above the refuser's highest (7)");
 }
 
+/// `abandon_campaign` is the refusal's transition taken by the driver: a
+/// matchmaking candidate becomes a follower with no phase open and sends no
+/// `Prepare`; a late reply for the abandoned ballot is ignored; the next
+/// campaign opens strictly higher. It is a no-op on a plain deployment and
+/// on a candidate already in Phase 1.
+#[test]
+fn an_abandoned_campaign_leaves_a_follower_and_campaigns_higher() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    let mut mms = registries(3);
+    campaign(&mut n);
+    let first_round = n.ballot().round;
+    let requests = drain_match_requests(&mut n);
+    let replies = matchmake(&mut mms, requests);
+    assert!(n.abandon_campaign());
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(!n.matchmaking_pending());
+    assert!(n.needs_election_timeout());
+    assert!(prepares(&drain(&mut n)).is_empty());
+    // The registrations it left at the matchmakers answer a dead ballot.
+    assert_eq!(n.on_match_reply(replies[0].clone()), MatchStep::Ignored);
+    // A second call has nothing to abandon.
+    assert!(!n.abandon_campaign());
+    campaign(&mut n);
+    assert!(n.ballot().round > first_round);
+    // Past matchmaking there is nothing for it to abandon: Phase 1 is open.
+    run_matchmaking(&mut n, &mut mms);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert!(!n.abandon_campaign());
+    assert_eq!(n.role(), NodeRole::Candidate);
+
+    // Plain Multi-Paxos has no matchmaking phase to abandon.
+    let mut plain = node(0, &[0, 1, 2]);
+    campaign(&mut plain);
+    assert!(!plain.abandon_campaign());
+    assert_eq!(plain.role(), NodeRole::Candidate);
+}
+
 /// Invariants 2 and 3: `H_b` is the union of every replying matchmaker's
 /// history — a configuration reported by only one of them is in — filtered
 /// by the **maximum** reported watermark, and a duplicate reply is folded
