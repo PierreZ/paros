@@ -48,7 +48,7 @@ the driver, never in a sim-only path.
   the deployment map's proxies beside its peers.
 - `grpc.rs` + `proto/{common,internal,matchmaker,paros}.proto` (built by
   `build.rs` with `tonic-prost-build`; runtime-free tonic so `paros` stays
-  wasm-checkable): `Paros` (Propose/Read/Compact/Reconfigure/
+  wasm-checkable): `Paros` (Propose/Read/QuorumRead/Compact/Reconfigure/
   ReconfigureMatchmakers), `ParosInternal` (Deliver/Inspect/Retire; a proxy
   leader serves its `Deliver` alone — `ProxyService`), `ParosMatchmaker`
   (Matchmake/GarbageCollect/Reconfigure).

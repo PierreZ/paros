@@ -245,6 +245,25 @@ pub trait Audit {
     /// the empty applied prefix, which is not slot 0).
     fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {}
 
+    /// This node served a **quorum read** (#143): its row answered whole at
+    /// `watermark` (the maximum vote watermark, `None` when nobody in the
+    /// row had voted), and the client was answered with `served`, this
+    /// node's chosen index at serve time — at or past the watermark.
+    /// `opened` is this node's chosen index when the read opened (what an
+    /// unconfirmed local read would have answered), `row` the grid row the
+    /// read asked (`None`: the whole configuration, under a majority or a
+    /// flexible split), and `leader` whether this node led when it served.
+    fn quorum_read_served(
+        &self,
+        node: NodeId,
+        row: Option<usize>,
+        watermark: Option<Slot>,
+        served: Option<Slot>,
+        opened: Option<Slot>,
+        leader: bool,
+    ) {
+    }
+
     /// This node (re)booted, having rebuilt volatile state from durable
     /// storage: its recovered promise, the chosen index it rebuilt
     /// (`None` = an empty chosen prefix), its durable deployment — the

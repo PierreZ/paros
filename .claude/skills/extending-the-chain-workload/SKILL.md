@@ -1,6 +1,6 @@
 ---
 name: extending-the-chain-workload
-description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (PROPOSE=0 through RETIRE=13, retired ids reserved), OP_COUNT and the weight table, swarm_op_enabled, buggify_knob! tunables in ChainConfig, recording every observation in ClientHistory with Ambiguous timeouts, retries that preserve (client, seq, bytes), and the reach_once gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, or when changing how the client retries or judges a reply.
+description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (PROPOSE=0 through QUORUM_READ=14, retired ids reserved), OP_COUNT and the weight table, swarm_op_enabled, buggify_knob! tunables in ChainConfig, recording every observation in ClientHistory with Ambiguous timeouts, retries that preserve (client, seq, bytes), and the reach_once gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, or when changing how the client retries or judges a reply.
 ---
 
 # Extending the chain workload
@@ -18,7 +18,7 @@ same `AuditWorld`.
 PROPOSE=0  PROPOSE_TO_NON_LEADER=1  COMPACT=2  READ_STATE=3  PAUSE=4
 DUP_REPROPOSE=5  DUAL_SUBMIT=6  COMPACT_STORM=7  READ_INDEX=8
 MATCHMAKE=9 (retired)  MATCH_GC=10 (retired)  RECONFIGURE=11
-RECONFIGURE_MATCHMAKERS=12  RETIRE=13          OP_COUNT=14
+RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14  OP_COUNT=15
 ```
 
 moonpool's operation swarm decides per seed which ids are on as a pure

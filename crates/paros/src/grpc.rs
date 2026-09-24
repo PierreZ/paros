@@ -740,6 +740,7 @@ pub(crate) fn message_from_proto(
 pub(crate) struct RpcInbox {
     pub(crate) propose: mpsc::Receiver<Call<Propose, ProposeAck>>,
     pub(crate) read: mpsc::Receiver<Call<Read, ReadAck>>,
+    pub(crate) quorum_read: mpsc::Receiver<Call<Read, ReadAck>>,
     pub(crate) deliver: mpsc::Receiver<Message>,
     pub(crate) compact: mpsc::Receiver<Call<Compact, CompactAck>>,
     pub(crate) reconfigure: mpsc::Receiver<Call<Reconfigure, ReconfigureAck>>,
@@ -770,6 +771,7 @@ pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 pub(crate) struct RpcService {
     propose: mpsc::Sender<Call<Propose, ProposeAck>>,
     read: mpsc::Sender<Call<Read, ReadAck>>,
+    quorum_read: mpsc::Sender<Call<Read, ReadAck>>,
     deliver: mpsc::Sender<Message>,
     compact: mpsc::Sender<Call<Compact, CompactAck>>,
     reconfigure: mpsc::Sender<Call<Reconfigure, ReconfigureAck>>,
@@ -780,7 +782,7 @@ pub(crate) struct RpcService {
 }
 
 /// Construct a handler/inbox pair for one node incarnation. `client_inbox`
-/// bounds each client-facing queue (propose, read, compact, inspect) and
+/// bounds each client-facing queue (propose, both reads, compact, inspect) and
 /// `peer_inbox` the peer-message queue; both must be at least 1.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn rpc_channel(
@@ -792,6 +794,7 @@ pub(crate) fn rpc_channel(
     // room for one simulation tick's peer-message fanout.
     let (propose_tx, propose_rx) = mpsc::channel(client_inbox);
     let (read_tx, read_rx) = mpsc::channel(client_inbox);
+    let (quorum_read_tx, quorum_read_rx) = mpsc::channel(client_inbox);
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
     let (compact_tx, compact_rx) = mpsc::channel(client_inbox);
     let (reconfigure_tx, reconfigure_rx) = mpsc::channel(client_inbox);
@@ -802,6 +805,7 @@ pub(crate) fn rpc_channel(
         RpcService {
             propose: propose_tx,
             read: read_tx,
+            quorum_read: quorum_read_tx,
             deliver: deliver_tx,
             compact: compact_tx,
             reconfigure: reconfigure_tx,
@@ -813,6 +817,7 @@ pub(crate) fn rpc_channel(
         RpcInbox {
             propose: propose_rx,
             read: read_rx,
+            quorum_read: quorum_read_rx,
             deliver: deliver_rx,
             compact: compact_rx,
             reconfigure: reconfigure_rx,
@@ -864,6 +869,11 @@ impl public::paros_server::Paros for RpcService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
         dispatch(&self.read, request).await
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn quorum_read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
+        dispatch(&self.quorum_read, request).await
     }
 
     #[tracing::instrument(level = "debug", skip_all)]

@@ -1469,24 +1469,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {
         let mut st = self.state();
-        // The confirmed index is the serve-time chosen index, which is
-        // monotone within an incarnation — so confirmed reads on one node
-        // never step backwards between boots' resets. (Deliberately NOT
-        // asserted against the audit's applied fold: that fold is reported
-        // before the application fsync, so after an after-apply-seam crash it
-        // can legitimately sit above what this incarnation has applied.)
-        let confirmed = index.map(|s| s.0);
-        let watermark = st.read_watermark.entry(node.0).or_insert(None);
-        assert_always!(
-            confirmed >= *watermark,
-            "a confirmed read index never regresses within a boot",
-            {
-                "node" => node.0,
-                "confirmed" => confirmed.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
-                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
-            }
-        );
-        *watermark = (*watermark).max(confirmed);
+        st.check_read_frontier(node, index);
         // The #141 outcome: the confirming ack set was a full column of a
         // grid (the leader's configuration at its current ballot).
         if let Some(round) = st.leader_round.get(&node.0).copied()
@@ -1496,6 +1479,40 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         {
             st.read_confirmed_on_column = true;
         }
+    }
+
+    fn quorum_read_served(
+        &self,
+        node: NodeId,
+        row: Option<usize>,
+        watermark: Option<Slot>,
+        served: Option<Slot>,
+        opened: Option<Slot>,
+        leader: bool,
+    ) {
+        let now = self.now_ms();
+        let mut st = self.state();
+        // The replica half of §3.4: a node answers only once its own chosen
+        // prefix covers the maximum watermark its row reported — the step
+        // that makes every write acked before the read visible to it.
+        assert_always!(
+            served >= watermark,
+            "quorum read: a node serves only once its prefix covers the row's watermark",
+            {
+                "node" => node.0,
+                "served" => served.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX))
+            }
+        );
+        // Both read paths answer from one node's chosen prefix, so the
+        // per-boot frontier is one fold over both.
+        st.check_read_frontier(node, served);
+        st.quorum_read_by_follower |= !leader;
+        // The read a local answer would have got wrong: the row knew of a
+        // vote past what this node had chosen when the read opened.
+        st.quorum_read_past_opened |= watermark > opened;
+        st.quorum_read_after_leader_change |= st.leader_change_ms.is_some_and(|t| now > t);
+        st.quorum_read_on_row |= row.is_some();
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

@@ -63,7 +63,13 @@ const RECONFIGURE_MATCHMAKERS: u8 = 12;
 /// world for good, and tell it to shut down. The node refuses while it is
 /// still a member; a retired identity never boots again.
 const RETIRE: u8 = 13;
-const OP_COUNT: u8 = 14;
+/// The PUBLIC **leaderless** read (#143, Paxos Quorum Reads): asked of a
+/// node drawn at random — leader, follower or spare — which serves it once a
+/// Phase-1 quorum's highest vote watermark is in its applied prefix. Judged
+/// by exactly the checks [`READ_INDEX`] is: the per-client frontier, read
+/// your writes, and the merged history's linearizability.
+const QUORUM_READ: u8 = 14;
+const OP_COUNT: u8 = 15;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -203,7 +209,7 @@ impl ChainConfig {
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
             // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE,
-            // RECONFIGURE_MATCHMAKERS, RETIRE
+            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -229,6 +235,10 @@ impl ChainConfig {
                 // A retirement removes a node the floor already released;
                 // the dead-node budget bounds how many may go.
                 buggify_knob!(3_u64, 0_u64..21_u64),
+                // A quorum read costs one round to a row and a wait for the
+                // server's prefix; the ceiling is a read-heavy client, the
+                // floor one that never takes the leaderless path.
+                buggify_knob!(10_u64, 0_u64..41_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -626,6 +636,8 @@ struct AdversarialCoverage {
     payload_classes: [bool; 4],
     read_index_executed: bool,
     read_index_committed: bool,
+    /// A `QUORUM_READ` step ran (the draw fired).
+    quorum_read_executed: bool,
     /// One flag per [`RECONFIGURE_SHAPES`] entry: the shape was requested and
     /// the leader started it.
     reconfigure_started: [bool; 5],
@@ -1517,21 +1529,36 @@ impl Workload for ChainWorkload {
                         }
                     }
                 }
-                READ_INDEX => {
-                    // The public linearizable read: the driver captures the
-                    // leader's applied watermark, confirms leadership with a
-                    // heartbeat-ack quorum round, and only then answers. A
-                    // timeout is Ambiguous — nothing is recorded or assumed.
+                READ_INDEX | QUORUM_READ => {
+                    // The two public linearizable reads, judged alike. The
+                    // read-index read: the driver captures the leader's
+                    // applied watermark, confirms leadership with a
+                    // heartbeat-ack quorum round, and only then answers. The
+                    // quorum read (#143): any node asks a row for its vote
+                    // watermarks and answers once its prefix covers the
+                    // maximum — so it goes to a node drawn at random, never
+                    // to the hint. A timeout is Ambiguous — nothing is
+                    // recorded or assumed.
+                    let quorum = op == QUORUM_READ;
                     let seq = next_seq;
                     next_seq = next_seq.saturating_add(1);
-                    if !self.adversarial.read_index_executed {
+                    if quorum {
+                        if !self.adversarial.quorum_read_executed {
+                            assert_reachable!("chain: quorum-read operation executes");
+                            self.adversarial.quorum_read_executed = true;
+                        }
+                    } else if !self.adversarial.read_index_executed {
                         assert_reachable!("chain: read-index operation executes");
                         self.adversarial.read_index_executed = true;
                     }
                     self.history.record_read_issued(seq, now_ms());
                     let read_deadline =
                         time.now() + Duration::from_millis(config.request_timeout_ms);
-                    let mut attempt_target = hint.current.unwrap_or(target) % server_count;
+                    let mut attempt_target = if quorum {
+                        target
+                    } else {
+                        hint.current.unwrap_or(target) % server_count
+                    };
                     let mut attempts: u64 = 0;
                     let outcome = loop {
                         let remaining = read_deadline.saturating_sub(time.now());
@@ -1540,16 +1567,22 @@ impl Workload for ChainWorkload {
                         }
                         attempts += 1;
                         let mut client = public_clients[attempt_target].clone();
+                        let request = Read {
+                            client: client_id,
+                            seq,
+                        };
+                        let call = async move {
+                            if quorum {
+                                client.quorum_read(request).await
+                            } else {
+                                client.read(request).await
+                            }
+                        };
                         let attempt = within(
                             ctx,
                             remaining,
                             None,
-                            client
-                                .read(Read {
-                                    client: client_id,
-                                    seq,
-                                })
-                                .map(|response| response.ok().map(tonic::Response::into_inner)),
+                            call.map(|response| response.ok().map(tonic::Response::into_inner)),
                         )
                         .await;
                         match attempt {
@@ -1562,9 +1595,11 @@ impl Workload for ChainWorkload {
                                     break Some(ack.read_index);
                                 }
                                 // Redirect, by this step's policy, inside
-                                // the same deadline.
+                                // the same deadline. An overdue quorum read
+                                // names no node to go to: any other serves.
+                                let leader = if quorum { None } else { ack.leader };
                                 attempt_target =
-                                    retarget.next(attempt_target, ack.leader, server_count);
+                                    retarget.next(attempt_target, leader, server_count);
                             }
                             // Transport error: same policy, no hint.
                             None => {
@@ -1586,10 +1621,14 @@ impl Workload for ChainWorkload {
                             client_id,
                             seq_id = seq,
                             read_index = signed_watermark(watermark),
+                            quorum,
                             "chain_read_index_acked"
                         );
                         // Per-client monotonicity: this client's committed
-                        // reads never observe a shrinking applied frontier.
+                        // reads never observe a shrinking applied frontier —
+                        // across both read paths (the messages name the
+                        // read-index path they were written for; they are
+                        // the slot identities, so they stay as they are).
                         assert_always!(
                             watermark >= last_read_frontier,
                             "chain: a client's read-index watermarks never move backwards",
@@ -1612,12 +1651,17 @@ impl Workload for ChainWorkload {
                                 }
                             );
                         }
-                        self.adversarial.read_index_committed = true;
+                        self.adversarial.read_index_committed |= !quorum;
                     } else {
                         // Ambiguous per convention: a timed-out read carries
                         // no constraint and is never assumed to have missed.
                         self.history.record_read_failed(seq);
-                        tracing::info!(client_id, seq_id = seq, "chain_read_index_ambiguous");
+                        tracing::info!(
+                            client_id,
+                            seq_id = seq,
+                            quorum,
+                            "chain_read_index_ambiguous"
+                        );
                     }
                 }
                 READ_STATE => {

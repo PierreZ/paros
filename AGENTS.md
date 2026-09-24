@@ -103,9 +103,11 @@ the leader, rotate the whole set — and ask the leader; on a seed without match
 is still sent and must be refused; the composer draws from the *live* pool and moves a dead
 identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the matchmaker set a node believes
 authoritative, compose a successor — grow, shrink, replace, rotate through the matchmaker pool —
-and ask any node to drive the generation handover; refused on a plain seed) and `RETIRE=13`
+and ask any node to drive the generation handover; refused on a plain seed), `RETIRE=13`
 (ask the leader which acceptors its effective GC floor released, park one in the storage world
-for good, and tell it to shut down).
+for good, and tell it to shut down) and `QUORUM_READ=14` (#143: the public leaderless read,
+asked of a node drawn at random and never redirected; judged by the same per-client frontier,
+read-your-writes and history linearizability checks as `READ_INDEX`).
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. The audit's application check (over the `ChainState` the storage layer reports
@@ -232,8 +234,13 @@ own**. The roles:
   configuration it was opened against, a node abandons its open reads when it learns a newer
   one, and a `PreReadAck` carries the answerer's configuration ballot so a row that knows a
   successor abandons the read; the residual — a grid row wholly unaware of a completed
-  successor — is what the client-history linearizability oracle judges once the driver half
-  lands. §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
+  successor — is what the client-history linearizability oracle judges (the chain campaign's
+  `QUORUM_READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
+  The driver half: a `QuorumRead` RPC on any node, parked on the read-index path's `ctx`
+  counter and deadline but bound to no role (a leader stepping down redirects its read-index
+  reads, never its quorum reads); `DriverHooks::read_row` (a BUGGIFY location, consulted on a
+  grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`
+  reports each answer.
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
   every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum`, the
   GC fence, the matchmaker-side tallies and the decree kernel all ask

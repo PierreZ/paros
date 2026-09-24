@@ -464,6 +464,25 @@ pub trait DriverHooks {
         None
     }
 
+    /// Which **row** of the active grid a quorum read (#143) should ask for
+    /// its vote watermarks, instead of the core's own `ctx % rows`: `None`
+    /// (the default) keeps the core's choice. The Phase-1 twin of
+    /// [`DriverHooks::phase2_column`]. Consulted only where it can have an
+    /// effect — on a node whose active configuration is a
+    /// [`QuorumSystem::Grid`](paros_core::QuorumSystem::Grid), from the node
+    /// loop, right before the read opens — and handed to the core through
+    /// [`paros_core::ColocatedNode::quorum_read_in`]. A returned row at or
+    /// past `rows` is ignored.
+    ///
+    /// Always safe: every full row is a Phase-1 quorum and meets every
+    /// column, so any row's maximum watermark is at or past every slot a
+    /// column chose. What the override reaches is the row mix the modulus
+    /// alone never produces — consecutive reads on one row, a row the
+    /// reader is not in.
+    fn read_row(&self, _ctx: u64, _rows: usize) -> Option<usize> {
+        None
+    }
+
     /// Which **proxy leader** this proposal's Phase 2 should be delegated to
     /// (#142), instead of the core's own `ProxyId(slot % proxy_count)`
     /// ([`paros_core::ProxyId::of`]): `None` (the default) keeps the core's

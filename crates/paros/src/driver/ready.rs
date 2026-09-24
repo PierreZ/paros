@@ -22,14 +22,43 @@ use super::reply::answer;
 use super::transport::{Outbound, send_messages};
 
 /// The client replies this node is holding open: proposals wait on their
-/// slot's commit (ack-on-commit), reads wait on their read-index round's
-/// confirmation `(client seq, tick parked at, the held reply)`, keyed by the
-/// core's `ctx` token.
+/// slot's commit (ack-on-commit), reads wait on their confirmation — a
+/// read-index round or a quorum read — keyed by the core's `ctx` token (one
+/// counter for both tallies, so a token names one read whichever served it).
 #[derive(Default)]
 pub(crate) struct ClientWaiters {
     /// `(client id, client seq, the held reply)` per slot.
     pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<ProposeAck>)>>,
-    pub(crate) pending_reads: BTreeMap<u64, (u64, u64, ReplySender<ReadAck>)>,
+    pub(crate) pending_reads: BTreeMap<u64, ParkedRead>,
+}
+
+/// Which of the two read tallies a parked read waits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPath {
+    /// The leader's read-index round (`ColocatedNode::read_index`): bound to
+    /// the leadership that opened it, redirected when it ends.
+    Index,
+    /// A leaderless quorum read (`ColocatedNode::quorum_read_in`, #143):
+    /// bound to no role, so a leadership change never touches it.
+    Quorum {
+        /// The grid row the read asked (`None`: the whole configuration).
+        row: Option<usize>,
+        /// This node's chosen index when the read opened — what a local,
+        /// unconfirmed read would have served.
+        opened: Option<Slot>,
+    },
+}
+
+/// One held client read.
+pub(crate) struct ParkedRead {
+    /// The client's seq, echoed in the answer.
+    pub(crate) seq: u64,
+    /// The driver tick the read was parked at (its confirmation deadline).
+    pub(crate) parked_at: u64,
+    /// The tally it waits on.
+    pub(crate) path: ReadPath,
+    /// The held reply.
+    pub(crate) reply: ReplySender<ReadAck>,
 }
 
 /// Materialize and send this batch's snapshot offers. An offered snapshot must
@@ -446,18 +475,47 @@ where
     //     reports the *serve-time* chosen index (at or past the confirmed read
     //     index): that is the local state actually served.
     for state in &read_states {
-        if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&state.ctx) {
+        if let Some(parked) = waiters.pending_reads.remove(&state.ctx) {
             let read_index = node.hard_state().chosen_index;
-            audit.read_confirmed(NodeId(self_id), read_index);
+            // The leader hint: a read-index answer comes from the leader
+            // itself; a quorum read's server may be anyone, so it names the
+            // leader it believes in.
+            let leader = match parked.path {
+                ReadPath::Index => Some(self_id),
+                ReadPath::Quorum { .. } => node.leader().map(|n| n.0),
+            };
+            match parked.path {
+                ReadPath::Index => audit.read_confirmed(NodeId(self_id), read_index),
+                ReadPath::Quorum { row, opened } => {
+                    let is_leader = node.role() == NodeRole::Leader;
+                    audit.quorum_read_served(
+                        NodeId(self_id),
+                        row,
+                        state.index,
+                        read_index,
+                        opened,
+                        is_leader,
+                    );
+                    tracing::info!(
+                        node = self_id,
+                        ctx = state.ctx,
+                        watermark = state
+                            .index
+                            .map_or(-1, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                        is_leader,
+                        "quorum_read_served"
+                    );
+                }
+            }
             answer(
                 hooks,
                 audit,
                 NodeId(self_id),
                 Reply::Read,
-                waiter,
+                parked.reply,
                 ReadAck {
-                    seq,
-                    leader: Some(self_id),
+                    seq: parked.seq,
+                    leader,
                     committed: true,
                     read_index: read_index.map(|s| s.0),
                 },

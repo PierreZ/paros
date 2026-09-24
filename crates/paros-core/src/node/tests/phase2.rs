@@ -374,3 +374,45 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
     nodes[0].step(nack);
     assert_eq!(nodes[0].role(), NodeRole::Follower);
 }
+
+/// Read-index on a deployment with proxies covers the allocator frontier:
+/// a delegated round's `Commit` reaches every learner at once, so the
+/// leader's own chosen prefix is not an upper bound on what a follower has
+/// applied. A round still in flight holds the read back; the plain
+/// deployment's read index is the leader's chosen prefix alone.
+#[test]
+fn a_read_index_with_proxies_waits_for_the_rounds_in_flight() {
+    let mut nodes = proxied_cluster(2);
+    let _ = raw(&mut nodes[0]);
+    let slot = match nodes[0].propose_in(ClientId(1), ClientSeq(1), val(1), None, Delegation::Auto)
+    {
+        ProposeResult::Accepted(slot) => slot,
+        other => panic!("a leader accepts a proposal: {other:?}"),
+    };
+    let _ = raw(&mut nodes[0]);
+    assert_eq!(nodes[0].read_index(1), crate::ReadIndexResult::Pending);
+    assert_eq!(
+        nodes[0]
+            .proposer()
+            .read_rounds()
+            .last()
+            .map(crate::proposer::ReadRound::index),
+        Some(Some(slot)),
+        "the read covers the delegated slot still in flight"
+    );
+
+    let mut plain = cluster::<3>();
+    make_leader(&mut plain, 0);
+    let chosen = plain[0].replica().chosen_index();
+    let _ = plain[0].propose_in(ClientId(1), ClientSeq(1), val(1), None, Delegation::Auto);
+    assert_eq!(plain[0].read_index(1), crate::ReadIndexResult::Pending);
+    assert_eq!(
+        plain[0]
+            .proposer()
+            .read_rounds()
+            .last()
+            .map(crate::proposer::ReadRound::index),
+        Some(chosen),
+        "the plain deployment reads at the leader's chosen prefix, unchanged"
+    );
+}

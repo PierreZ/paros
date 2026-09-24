@@ -284,3 +284,35 @@ fn learning_a_newer_configuration_abandons_open_quorum_reads() {
     );
     assert!(nodes[1].pending_read_states.is_empty());
 }
+
+/// The driver's named row (`quorum_read_in`): a read whose token defaults
+/// to row 1 asks row 0 when the driver names it, and completes on row 0's
+/// answers; a row the grid does not have falls back to `ctx % rows`.
+#[test]
+fn a_named_row_is_asked_instead_of_the_default() {
+    let mut nodes = grid_with_three_chosen();
+    nodes[4].quorum_read_in(1, Some(0)); // ctx 1 defaults to row 1; row 0 = {0, 1, 2}
+    assert_eq!(nodes[4].quorum_reads().pending()[0].row(), Some(0));
+    assert!(
+        nodes[4].quorum_reads().pending()[0].watermarks().is_empty(),
+        "the reader is not in row 0, so it seeds no watermark of its own"
+    );
+    let _ = drain(&mut nodes[4]);
+    for from in [NodeId(0), NodeId(1), NodeId(2)] {
+        nodes[4].step(Message::PreReadAck {
+            from,
+            ctx: 1,
+            watermark: Some(Slot(2)),
+            config_since: None,
+        });
+    }
+    assert_eq!(
+        nodes[4].pending_read_states,
+        vec![ReadState {
+            ctx: 1,
+            index: Some(Slot(2)),
+        }]
+    );
+    nodes[4].quorum_read_in(3, Some(7)); // no row 7: back to 3 % 2 = row 1
+    assert_eq!(nodes[4].quorum_reads().pending()[0].row(), Some(1));
+}

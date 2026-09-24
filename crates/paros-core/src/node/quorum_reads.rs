@@ -51,19 +51,40 @@ impl ColocatedNode {
     /// [`AcceptorConfig::row_of`]: crate::AcceptorConfig::row_of
     /// [`Ready::read_states`]: crate::Ready::read_states
     /// [`Replica::covers`]: crate::replica::Replica::covers
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
     pub fn quorum_read(&mut self, ctx: u64) {
+        self.quorum_read_in(ctx, None);
+    }
+
+    /// [`ColocatedNode::quorum_read`] with the **row named by the caller**
+    /// (`row: Some(r)`), where `quorum_read` takes the default
+    /// [`AcceptorConfig::row_of`] — the Phase-1 twin of
+    /// [`ColocatedNode::propose_in`]'s column. Every row of a grid is a
+    /// Phase-1 quorum that meets every column, so any row is a valid choice;
+    /// a row the configuration in force does not have (any row under a
+    /// majority or a flexible split, one past a grid's last) falls back to
+    /// the default ([`AcceptorConfig::read_row`]). Which row to ask is the
+    /// driver's rare-but-valid decision, never the core's.
+    ///
+    /// # Panics
+    ///
+    /// As [`ColocatedNode::quorum_read`].
+    ///
+    /// [`AcceptorConfig::row_of`]: crate::AcceptorConfig::row_of
+    /// [`AcceptorConfig::read_row`]: crate::AcceptorConfig::read_row
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
+    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
         let me = self.config.id;
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
         // ack would claim.
-        let row = self.acceptors.row_of(ctx);
+        let row = self.acceptors.read_row(ctx, row);
         let own = self
             .acceptors
             .is_phase1_addressee(me, row)
             .then(|| (me, self.acceptor.vote_watermark()));
         let addressees = self.quorum_reads.open(
             ctx,
+            row,
             self.acceptors.clone(),
             self.acceptors_since,
             self.tick_count,

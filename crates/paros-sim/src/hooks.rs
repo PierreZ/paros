@@ -41,6 +41,7 @@
 //! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | `phase2_column` | inline | "grid: a slot is decided on a column other than its own" |
+//! | `read_row` | inline | "grid: a quorum read is served by a row of a grid" |
 //! | `proxy_for` / `skip_delegation` | inline, one each | "proxy: a slot is decided through a proxy leader" |
 //! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
@@ -661,6 +662,22 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         assert_reachable!("grid: the driver overrides a round's column");
         let cols_u64 = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
         usize::try_from((slot.0.wrapping_add(1)) % cols_u64).ok()
+    }
+
+    fn read_row(&self, ctx: u64, rows: usize) -> Option<usize> {
+        // Per quorum read on a grid node. The override picks the row the
+        // modulus would not — `(ctx + 1) % rows`, the next read's row — so
+        // consecutive reads land on one row and the reader is asked about a
+        // row it may not sit in. Every row is a Phase-1 quorum meeting every
+        // column, so the choice is always valid; the fired gate is inline,
+        // the outcome — a read served by a row — is the audit's.
+        if !self.active() || rows < 2 || !buggify_with_prob!(0.10) {
+            return None;
+        }
+        // BUGGIFY pairing: the override genuinely fires.
+        assert_reachable!("grid: the driver overrides a quorum read's row");
+        let rows_u64 = u64::try_from(rows).unwrap_or(u64::MAX).max(1);
+        usize::try_from(ctx.wrapping_add(1) % rows_u64).ok()
     }
 
     fn proxy_for(&self, slot: Slot, proxy_count: usize) -> Option<ProxyId> {

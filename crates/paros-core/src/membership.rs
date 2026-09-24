@@ -307,6 +307,33 @@ impl QuorumSystem {
         }
     }
 
+    /// The row a quorum read with token `ctx` goes to when its reader
+    /// **names** one (`chosen`, a driver's override): `chosen` itself when it
+    /// is a row of this system ([`QuorumSystem::admits_read_row`]), otherwise
+    /// the pure default [`QuorumSystem::row_of`]. The Phase-1 twin of a
+    /// round's named column: every row is a Phase-1 quorum, so the choice is
+    /// always safe, and a choice the system cannot honour (a row under a
+    /// majority, one past a grid's last) falls back rather than failing.
+    #[must_use]
+    pub fn read_row(self, ctx: u64, chosen: Option<usize>) -> Option<usize> {
+        match chosen {
+            Some(row) if self.admits_read_row(Some(row)) => Some(row),
+            _ => self.row_of(ctx),
+        }
+    }
+
+    /// Whether `row` names a read row of this system: `None` under a
+    /// majority or a flexible split (the whole membership), and on a grid
+    /// either `None` or a row below `rows`.
+    #[must_use]
+    pub fn admits_read_row(self, row: Option<usize>) -> bool {
+        match (self, row) {
+            (_, None) => true,
+            (QuorumSystem::Majority | QuorumSystem::Flexible { .. }, Some(_)) => false,
+            (QuorumSystem::Grid { rows, .. }, Some(row)) => row < rows,
+        }
+    }
+
     /// Whether `voters` form a **Phase-1** quorum over `members`: the
     /// promises an election (or a CTRL repair probe) must hold before it may
     /// conclude anything about what an earlier ballot could have chosen.
@@ -697,6 +724,20 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     #[must_use]
     pub fn row_of(&self, ctx: u64) -> Option<usize> {
         self.quorum_system.row_of(ctx)
+    }
+
+    /// The row a quorum read with token `ctx` goes to when its reader names
+    /// `chosen` — [`QuorumSystem::read_row`].
+    #[must_use]
+    pub fn read_row(&self, ctx: u64, chosen: Option<usize>) -> Option<usize> {
+        self.quorum_system.read_row(ctx, chosen)
+    }
+
+    /// Whether `row` names a read row of this configuration —
+    /// [`QuorumSystem::admits_read_row`].
+    #[must_use]
+    pub fn admits_read_row(&self, row: Option<usize>) -> bool {
+        self.quorum_system.admits_read_row(row)
     }
 
     /// Whether `node` is an acceptor a Phase-1 message in `row` is addressed

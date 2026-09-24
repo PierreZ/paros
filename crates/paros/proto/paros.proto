@@ -9,6 +9,11 @@ import "common.proto";
 service Paros {
   rpc Propose(.paros.v1.Propose) returns (.paros.v1.ProposeAck);
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
+  // A leaderless linearizable read (Paxos Quorum Reads, #143): served by any
+  // node — leader, follower, spare — once a Phase-1 quorum's highest vote
+  // watermark is inside its applied prefix. Never redirected; an answer with
+  // `committed: false` is an overdue read the client retries elsewhere.
+  rpc QuorumRead(.paros.v1.Read) returns (.paros.v1.ReadAck);
   rpc Compact(.paros.v1.Compact) returns (.paros.v1.CompactAck);
   // Change the acceptor set (Matchmaker Paxos reconfiguration, #122). Only the
   // leader admits it, and only on a deployment that names matchmakers; every

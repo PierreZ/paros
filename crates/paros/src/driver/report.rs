@@ -2,6 +2,8 @@
 //! election-timeout draw, the leadership/handoff/membership transitions, and
 //! the held-reply bookkeeping a step-down performs.
 
+use std::collections::BTreeMap;
+
 use moonpool_core::{Providers, RandomProvider};
 use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole};
 
@@ -9,7 +11,7 @@ use crate::audit::Audit;
 use crate::grpc::ReadAck;
 use crate::hooks::{DriverHooks, HandoffContext};
 
-use super::ready::ClientWaiters;
+use super::ready::{ClientWaiters, ReadPath};
 
 /// What a handoff would transfer right now, from the core's public read views:
 /// the span between this leader's contiguous chosen prefix and its allocator
@@ -350,7 +352,11 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
         let writes = waiters.pending.values().map(Vec::len).sum::<usize>();
-        let reads = waiters.pending_reads.len();
+        let reads = waiters
+            .pending_reads
+            .values()
+            .filter(|parked| parked.path == ReadPath::Index)
+            .count();
         if writes + reads > 0 {
             audit.waiters_cleared(
                 NodeId(self_id),
@@ -360,13 +366,19 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             tracing::info!(node = self_id, writes, reads, "waiters_cleared");
         }
         waiters.pending.clear();
-        // Parked reads have no slot whose commit could ever answer them:
-        // redirect explicitly so the client retries the new leader now rather
-        // than burning its deadline (writes time out instead, on purpose —
-        // their slot may still commit under the new leader).
-        for (_, (seq, _, waiter)) in std::mem::take(&mut waiters.pending_reads) {
-            let _ = waiter.send(ReadAck {
-                seq,
+        // Parked read-index reads have no slot whose commit could ever answer
+        // them: redirect explicitly so the client retries the new leader now
+        // rather than burning its deadline (writes time out instead, on
+        // purpose — their slot may still commit under the new leader). A
+        // quorum read is bound to no role and stays parked.
+        let (index, quorum): (BTreeMap<_, _>, BTreeMap<_, _>) =
+            std::mem::take(&mut waiters.pending_reads)
+                .into_iter()
+                .partition(|(_, parked)| parked.path == ReadPath::Index);
+        waiters.pending_reads = quorum;
+        for parked in index.into_values() {
+            let _ = parked.reply.send(ReadAck {
+                seq: parked.seq,
                 leader: node.leader().map(|n| n.0),
                 committed: false,
                 read_index: None,

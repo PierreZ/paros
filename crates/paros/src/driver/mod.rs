@@ -84,7 +84,7 @@ use matchmaking::{
     MatchmakerLinks, folded_answer, report_match_step, send_outbox, send_reconfigure_requests,
     surface_matchmaking,
 };
-use ready::{ClientWaiters, drain_ready, storage_fault_crash};
+use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, storage_fault_crash};
 use reply::maybe_duplicate;
 use report::{Cadence, Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{SnapRepair, route_snap_message, snap_repair_tick};
@@ -362,19 +362,20 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         let overdue: Vec<(u64, bool)> = waiters
             .pending_reads
             .iter()
-            .filter_map(|(ctx, (_, parked_at, _))| {
-                let by_deadline = ticks.saturating_sub(*parked_at) > self.tunables.read_retry_ticks;
+            .filter_map(|(ctx, parked)| {
+                let by_deadline =
+                    ticks.saturating_sub(parked.parked_at) > self.tunables.read_retry_ticks;
                 (expire_all || by_deadline).then_some((*ctx, !by_deadline))
             })
             .collect();
         for (ctx, early) in overdue {
-            if let Some((seq, _, waiter)) = waiters.pending_reads.remove(&ctx) {
+            if let Some(parked) = waiters.pending_reads.remove(&ctx) {
                 self.audit.read_expired(NodeId(self.self_id), early);
                 self.answer(
                     Reply::ReadRedirect,
-                    waiter,
+                    parked.reply,
                     ReadAck {
-                        seq,
+                        seq: parked.seq,
                         leader: Some(self.self_id),
                         committed: false,
                         read_index: None,
@@ -820,10 +821,38 @@ where
                         );
                     }
                     ReadIndexResult::Pending => {
-                        waiters.pending_reads.insert(next_read_ctx, (seq, ticks, reply));
+                        let parked = ParkedRead { seq, parked_at: ticks, path: ReadPath::Index, reply };
+                        waiters.pending_reads.insert(next_read_ctx, parked);
                         next_read_ctx += 1;
                     }
                 }
+                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
+            }
+            Some((req, reply)) = rpc.quorum_read.recv() => {
+                // A leaderless read (#143, Paxos Quorum Reads), on any node:
+                // the core asks a Phase-1 quorum — a row of a grid, the whole
+                // configuration otherwise — for their vote watermarks, and the
+                // confirmed `ReadState` surfaces once this node's chosen
+                // prefix covers the maximum; the reply is parked exactly like
+                // a read-index one, on the same ctx counter, and times out the
+                // same way. Never a redirect: no role is asked for.
+                //
+                // The row override (the Phase-1 twin of `phase2_column`) is
+                // asked only where it can have an effect: under a grid. The
+                // core's `ctx % rows` stands under `NoHooks`.
+                let row = match node.acceptors().quorum_system() {
+                    QuorumSystem::Grid { rows, .. } => hooks.read_row(next_read_ctx, rows).filter(|r| *r < rows),
+                    _ => None,
+                };
+                let opened = node.hard_state().chosen_index;
+                // The row the core will ask, resolved exactly as it resolves
+                // it, for the audit's report of what served the read.
+                let row = node.acceptors().read_row(next_read_ctx, row);
+                node.quorum_read_in(next_read_ctx, row);
+                let path = ReadPath::Quorum { row, opened };
+                let parked = ParkedRead { seq: req.seq, parked_at: ticks, path, reply };
+                waiters.pending_reads.insert(next_read_ctx, parked);
+                next_read_ctx += 1;
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some(msg) = rpc.deliver.recv() => {
