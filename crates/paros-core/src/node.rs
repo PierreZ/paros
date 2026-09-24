@@ -712,7 +712,28 @@ impl ColocatedNode {
         // The fence dominates: a fresh leader must not serve below the highest
         // slot its prepare quorum reported, even while its own chosen prefix
         // still lags the recovered suffix.
-        let index = self.replica.chosen_index().max(self.proposer.read_floor());
+        //
+        // On a deployment with proxy leaders (#142) the leader is no longer
+        // the first to learn what it decided: a proxy's `Commit` goes to
+        // every learner at once, so a follower can apply a delegated slot
+        // before the leader hears of it — and a client that read that slot
+        // there (a quorum read, #143) would then read an *older* prefix
+        // here. Every value chosen under this leadership sits in a round it
+        // opened, so the read also covers the allocator frontier: it waits
+        // for the rounds in flight to decide. The plain deployment, where
+        // the leader decides every round itself, keeps its index exactly.
+        // Red→green: the hunt's seed 14602637684929161325 (two proxies, a
+        // quorum read at 3 on a follower, then a read-index at 2 on the
+        // leader: "chain: a client's read-index watermarks never move
+        // backwards").
+        let opened = (self.config.proxy_count > 0)
+            .then(|| self.proposer.next_slot().0.checked_sub(1).map(Slot))
+            .flatten();
+        let index = self
+            .replica
+            .chosen_index()
+            .max(self.proposer.read_floor())
+            .max(opened);
         // Beat immediately (rather than waiting for the next tick) so the
         // round's confirmation costs one network round trip, not a tick.
         self.broadcast_heartbeat();
