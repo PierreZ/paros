@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
-use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, Party, QuorumSystem, Slot};
+use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, NodeId, Party, QuorumSystem, Slot};
 
 use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
 use super::matchmaker::MatchmakerAudit;
@@ -478,6 +478,16 @@ pub(super) struct AuditState {
     pub(super) elected_grid: bool,
     pub(super) elected_across_grid: bool,
     pub(super) read_confirmed_on_column: bool,
+
+    // --- quorum reads (#143) -----------------------------------------------
+    /// A quorum read served by a node that did not lead, one whose row's
+    /// watermark lay past the server's chosen prefix when it opened (the
+    /// read a local answer would have got wrong), one served after the
+    /// first leader change, and one asked of a grid row.
+    pub(super) quorum_read_by_follower: bool,
+    pub(super) quorum_read_past_opened: bool,
+    pub(super) quorum_read_after_leader_change: bool,
+    pub(super) quorum_read_on_row: bool,
     pub(super) reconfigured_across_grid_boundary: bool,
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
@@ -700,6 +710,22 @@ impl AuditState {
         assert_sometimes!(
             self.read_confirmed_on_column,
             "grid: a read-index round is confirmed by a column"
+        );
+        assert_sometimes!(
+            self.quorum_read_on_row,
+            "grid: a quorum read is served by a row of a grid"
+        );
+        assert_sometimes!(
+            self.quorum_read_by_follower,
+            "quorum read: a read is served by a node that is not the leader"
+        );
+        assert_sometimes!(
+            self.quorum_read_past_opened,
+            "quorum read: the row's watermark lies past the server's prefix"
+        );
+        assert_sometimes!(
+            self.quorum_read_after_leader_change,
+            "quorum read: a read is served after a leader change"
         );
         assert_sometimes!(
             self.reconfigured_across_grid_boundary,
@@ -1287,6 +1313,29 @@ impl AuditState {
     /// allowed; only a forward skip past the frontier is a real gap, and that is
     /// legal only at the node's compaction floor (a truncated log's boot replay
     /// resumes there) or at a snapshot install.
+    /// Fold one client read a node answered at `index` (its serve-time
+    /// chosen index, from either read path) into its per-boot frontier. The
+    /// serve-time chosen index is monotone within an incarnation — so
+    /// answered reads on one node never step backwards between boots'
+    /// resets. (Deliberately NOT asserted against the audit's applied fold:
+    /// that fold is reported before the application fsync, so after an
+    /// after-apply-seam crash it can legitimately sit above what this
+    /// incarnation has applied.)
+    pub(super) fn check_read_frontier(&mut self, node: NodeId, index: Option<Slot>) {
+        let confirmed = index.map(|s| s.0);
+        let watermark = self.read_watermark.entry(node.0).or_insert(None);
+        assert_always!(
+            confirmed >= *watermark,
+            "a confirmed read index never regresses within a boot",
+            {
+                "node" => node.0,
+                "confirmed" => confirmed.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+            }
+        );
+        *watermark = (*watermark).max(confirmed);
+    }
+
     pub(super) fn check_no_gaps(&mut self, node: u64, idx: u64) {
         let at_floor = idx == self.floor.get(&node).map_or(0, |f| f.now);
         let at_snapshot = self

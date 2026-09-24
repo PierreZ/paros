@@ -51,8 +51,9 @@
 //! intersect, so some row member always knows). What remains is a grid row
 //! *wholly* unaware of a completed successor configuration: the reader
 //! rediscovers it from the next `Prepare` or `Heartbeat`, and until then a
-//! read it serves is judged by the client-history linearizability oracle
-//! when the driver half lands (the sweep's finding, not this module's
+//! read it serves is judged by the client-history linearizability oracle —
+//! the chain campaign's `QUORUM_READ` operation, served through the
+//! driver's `QuorumRead` RPC (the sweep's finding, not this module's
 //! claim).
 //!
 //! # What is deliberately not here (§3.6)
@@ -190,20 +191,23 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         self.reads.is_empty()
     }
 
-    /// Open a read at `ctx` against the row [`AcceptorConfig::row_of`]
-    /// derives for it under `config` (bound to the reader at
-    /// `config_since`), seeded with the reader's own watermark when it is
-    /// itself an addressee of that row (`own: Some((me, watermark))`).
-    /// Returns the addressees the caller sends `PreRead` to — the row minus
-    /// the reader itself.
+    /// Open a read at `ctx` against `row` of `config` (bound to the reader
+    /// at `config_since`) — the row [`AcceptorConfig::row_of`] derives for
+    /// `ctx`, or one the caller chose ([`AcceptorConfig::read_row`]) — seeded
+    /// with the reader's own watermark when it is itself an addressee of
+    /// that row (`own: Some((me, watermark))`). Returns the addressees the
+    /// caller sends `PreRead` to — the row minus the reader itself.
     ///
     /// # Panics
     ///
-    /// If a read is already open at `ctx`: the driver's token is unique per
-    /// read, so a second open at one token is a programmer error.
+    /// If a read is already open at `ctx` (the driver's token is unique per
+    /// read, so a second open at one token is a programmer error), or if
+    /// `row` is not a row of `config`'s quorum system (a row under a
+    /// majority or a flexible split, or one past a grid's last).
     pub fn open(
         &mut self,
         ctx: u64,
+        row: Option<usize>,
         config: AcceptorConfig<Id>,
         config_since: Ballot,
         created_tick: u64,
@@ -213,7 +217,10 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             self.reads.iter().all(|r| r.ctx != ctx),
             "a quorum read token is opened at most once"
         );
-        let row = config.row_of(ctx);
+        assert!(
+            config.admits_read_row(row),
+            "a quorum read is opened against a row of its configuration"
+        );
         let mut watermarks = BTreeMap::new();
         let mut addressees = config.phase1_addressees(row);
         if let Some((me, watermark)) = own {
@@ -371,7 +378,14 @@ mod tests {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
         // Node 5 is the reader, in row 1 = {4, 5, 6}: it seeds its own
         // watermark and asks the other two.
-        let addressees = reads.open(1, grid(), ballot(0), 0, Some((NodeId(5), Some(Slot(2)))));
+        let addressees = reads.open(
+            1,
+            Some(1),
+            grid(),
+            ballot(0),
+            0,
+            Some((NodeId(5), Some(Slot(2)))),
+        );
         assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
         assert_eq!(reads.row(1), Some(Some(1)));
         assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
@@ -417,7 +431,7 @@ mod tests {
     fn an_unvoted_row_confirms_at_the_empty_index() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
         let majority = AcceptorConfig::new((0..3).map(NodeId).collect(), QuorumSystem::Majority);
-        let addressees = reads.open(4, majority, ballot(0), 0, Some((NodeId(0), None)));
+        let addressees = reads.open(4, None, majority, ballot(0), 0, Some((NodeId(0), None)));
         assert_eq!(addressees, vec![NodeId(1), NodeId(2)]);
         assert_eq!(reads.fold(4, NodeId(1), None, None), PreReadFold::Counted);
         assert_eq!(reads.serve(|index| index.is_none()), vec![(4, None)]);
@@ -429,7 +443,7 @@ mod tests {
     #[test]
     fn a_newer_configuration_abandons_the_read() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, grid(), ballot(1), 0, None);
+        let _ = reads.open(0, Some(0), grid(), ballot(1), 0, None);
         assert_eq!(
             reads.fold(0, NodeId(1), Some(Slot(1)), Some(ballot(1))),
             PreReadFold::Counted,
@@ -440,8 +454,8 @@ mod tests {
             PreReadFold::Superseded
         );
         assert!(reads.is_empty());
-        let _ = reads.open(2, grid(), ballot(1), 0, None);
-        let _ = reads.open(3, grid(), ballot(3), 0, None);
+        let _ = reads.open(2, Some(0), grid(), ballot(1), 0, None);
+        let _ = reads.open(3, Some(1), grid(), ballot(3), 0, None);
         reads.abandon_superseded(ballot(3));
         assert_eq!(reads.pending().len(), 1);
         assert_eq!(reads.pending()[0].ctx(), 3);
@@ -452,8 +466,8 @@ mod tests {
     #[test]
     fn a_read_expires_by_ttl() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, grid(), ballot(0), 5, None);
-        let _ = reads.open(1, grid(), ballot(0), 9, None);
+        let _ = reads.open(0, Some(0), grid(), ballot(0), 5, None);
+        let _ = reads.open(1, Some(1), grid(), ballot(0), 9, None);
         reads.expire(15, 8);
         assert_eq!(reads.pending().len(), 1);
         assert_eq!(reads.pending()[0].ctx(), 1);
@@ -465,7 +479,48 @@ mod tests {
     #[should_panic(expected = "a quorum read token is opened at most once")]
     fn a_token_is_opened_at_most_once() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, grid(), ballot(0), 0, None);
-        let _ = reads.open(0, grid(), ballot(0), 0, None);
+        let _ = reads.open(0, Some(0), grid(), ballot(0), 0, None);
+        let _ = reads.open(0, Some(0), grid(), ballot(0), 0, None);
+    }
+
+    /// A named row: any row of the grid is honoured, a row past the last
+    /// or one under a majority falls back to `ctx % rows` / the whole
+    /// membership (`read_row`), and the tally refuses a row its
+    /// configuration does not have.
+    #[test]
+    fn a_named_read_row_is_honoured_or_falls_back() {
+        let grid = grid();
+        assert_eq!(
+            grid.read_row(4, Some(1)),
+            Some(1),
+            "a named row is honoured"
+        );
+        assert_eq!(
+            grid.read_row(4, None),
+            Some(0),
+            "the default row is ctx % rows"
+        );
+        assert_eq!(
+            grid.read_row(5, Some(2)),
+            Some(1),
+            "a row past the last falls back"
+        );
+        let majority = AcceptorConfig::new((1..=3).map(NodeId).collect(), QuorumSystem::Majority);
+        assert_eq!(
+            majority.read_row(4, Some(0)),
+            None,
+            "a majority names no row"
+        );
+        let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+        // Row 1 of the 2x3 grid is {4, 5, 6}, although ctx 4 defaults to row 0.
+        let addressees = reads.open(4, Some(1), grid, ballot(0), 0, None);
+        assert_eq!(addressees, vec![NodeId(4), NodeId(5), NodeId(6)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a quorum read is opened against a row of its configuration")]
+    fn a_row_the_configuration_lacks_is_refused() {
+        let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+        let _ = reads.open(0, Some(2), grid(), ballot(0), 0, None);
     }
 }
