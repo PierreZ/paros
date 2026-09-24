@@ -285,6 +285,24 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
 /// [`chain_seed_digest`]). Shared by the workload factory's clones.
 pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 
+/// Run a builder this crate assembled.
+///
+/// `SimulationBuilder::run` refuses a builder that cannot run as configured
+/// (exploration or determinism checking over an instance workload, fault
+/// injectors without a chaos window) before any seed runs. Every builder here
+/// is fixed at compile time, so a refusal is a harness bug, not a finding —
+/// failing seeds are never an `Err`, they are in the report.
+trait RunValid {
+    fn run_valid(self) -> SimulationReport;
+}
+
+impl RunValid for SimulationBuilder {
+    fn run_valid(self) -> SimulationReport {
+        self.run()
+            .expect("the paros-sim builder is a valid moonpool configuration")
+    }
+}
+
 /// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
 /// attrition, driver hooks, operation swarm, and the safety/recovery checks under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
@@ -299,7 +317,7 @@ pub fn explore(max_iterations: usize) -> SimulationReport {
     chain_builder(None)
         .enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED))
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
-        .run()
+        .run_valid()
 }
 
 /// Run one fresh Chain timeline without requiring coverage saturation. Used for
@@ -310,7 +328,7 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
     chain_builder(None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }
 
 /// Run one seed and return the audit's end-of-run digest: a fold of the chosen
@@ -328,7 +346,7 @@ pub fn chain_seed_digest(seed: u64) -> u64 {
     let report = chain_builder(Some(sink.clone()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run();
+        .run_valid();
     assert!(
         report.assertion_violations.is_empty(),
         "safety violation on seed {seed}: {:?}",
@@ -354,7 +372,7 @@ pub fn chain_seed_canary(seed: u64) -> SimulationReport {
         .check_determinism()
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }
 
 /// The canary at volume: `iterations` random seeds of the main campaign, each
@@ -367,7 +385,7 @@ pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
     chain_builder(None)
         .check_determinism()
         .set_iterations(iterations)
-        .run()
+        .run_valid()
 }
 
 /// Fast random-seed Chain smoke with no adaptive saturation or branch
@@ -375,7 +393,7 @@ pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
-    chain_builder(None).set_iterations(iterations).run()
+    chain_builder(None).set_iterations(iterations).run_valid()
 }
 
 /// Explore one known root seed. This is the focused recipe-discovery command;
@@ -387,7 +405,7 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
         .set_debug_seeds(vec![seed])
         .enable_exploration(exploration_config(max_runs))
         .until_coverage_stable(1, 1)
-        .run()
+        .run_valid()
 }
 
 /// Run the shared `NodeStorage` behavioral contract suite against the
@@ -401,7 +419,7 @@ pub fn run_storage_contract_suite() -> SimulationReport {
         .processes(1, || Box::new(crate::process::IdleProcess))
         .workload_factory(|| Box::new(crate::process::ContractSuiteWorkload))
         .set_iterations(1)
-        .run()
+        .run_valid()
 }
 
 // --- the CTRL evaluation corpus ----------------------------------------------
@@ -497,7 +515,7 @@ pub fn corpus_mask_case(mask: u16) -> (SimulationReport, bool) {
     let report = corpus_builder(corpus::MaskSource::Fixed(mask), Some(sink.clone()))
         .set_iterations(1)
         .set_debug_seeds(vec![u64::from(mask)])
-        .run();
+        .run_valid();
     let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
     (report, non_vacuous)
 }
@@ -510,7 +528,7 @@ pub fn corpus_mask_case(mask: u16) -> (SimulationReport, bool) {
 pub fn corpus_hunt(iterations: usize) -> SimulationReport {
     corpus_builder(corpus::MaskSource::Seeded, None)
         .set_iterations(iterations)
-        .run()
+        .run_valid()
 }
 
 /// Replay one seeded E1 corpus case deterministically.
@@ -520,7 +538,7 @@ pub fn run_corpus_seed(seed: u64) -> SimulationReport {
     corpus_builder(corpus::MaskSource::Seeded, None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }
 
 /// Run the bare-quorum lost-slot case (see `crate::corpus`): one slot decided
@@ -534,7 +552,7 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
         .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }
 
 /// Where the departed-straggler case publishes whether its run genuinely
@@ -575,7 +593,7 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
         })
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run();
+        .run_valid();
     let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
     (report, non_vacuous)
 }
@@ -590,7 +608,7 @@ pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
         .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }
 
 /// The per-chunk mask corpus builder (see `crate::corpus`). The restore-crash
@@ -640,7 +658,7 @@ pub fn run_chunk_mask(mask: u32, live: ChunkLiveCase) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), live)
         .set_iterations(1)
         .set_debug_seeds(vec![u64::from(mask)])
-        .run()
+        .run_valid()
 }
 
 /// Raw-volume chunk-mask sampling: each seed draws its mask from the seeded
@@ -650,7 +668,7 @@ pub fn run_chunk_mask(mask: u32, live: ChunkLiveCase) -> SimulationReport {
 pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
         .set_iterations(iterations)
-        .run()
+        .run_valid()
 }
 
 /// Replay one seeded chunk-mask corpus case deterministically.
@@ -660,5 +678,5 @@ pub fn run_chunk_corpus_seed(seed: u64) -> SimulationReport {
     chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run()
+        .run_valid()
 }

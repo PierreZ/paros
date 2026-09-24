@@ -20,6 +20,12 @@
 //! process of its own, with nothing to persist. Opt-in the same way: a
 //! deployment whose `Config::proxy_count` is zero runs no proxy and exchanges
 //! exactly the plain deployment's messages.
+//!
+//! [`journal`] is moonpool's write-ahead journal (`moonpool-journal`),
+//! re-exported: a CLSTORE-style log over moonpool's `BlockFile` that tells a
+//! torn write at the tail apart from mid-log corruption and reports the
+//! damaged entry's index and epoch. It is imported, not yet wired: the
+//! driver's storage seam is still [`NodeStorage`].
 
 mod audit;
 mod corruption;
@@ -53,6 +59,9 @@ pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
 };
+
+/// Moonpool's write-ahead journal: see the `moonpool-journal` crate docs.
+pub use moonpool_journal as journal;
 
 // The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,
 // `replica`, `matchmaking`, `membership`, `retained`), `ColocatedNode`, the

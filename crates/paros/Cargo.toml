@@ -21,9 +21,16 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"]
 # Both Moonpool crates come in without production providers so `paros` stays
 # wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
 # Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
-# release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "0d62b1ac731b02374364fb7d7798b72b86d4d3d2", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "0d62b1ac731b02374364fb7d7798b72b86d4d3d2" }
+# release) — same rev as paros-sim. Temporarily the tip of moonpool's
+# `claude/wal-block-interface-g85mra` branch, which adds `moonpool-journal`;
+# move it to the merge commit once that lands on `main`.
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "40b5fc3cc187d6e44b67265893ab5957eaa1bcfa", default-features = false, features = ["select"] }
+moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "40b5fc3cc187d6e44b67265893ab5957eaa1bcfa" }
+# The write-ahead journal (CLSTORE layout: tells a crash from corruption),
+# built on moonpool's BlockFile. Re-exported as `paros::journal`; same rev as
+# the other moonpool crates so its `StorageProvider` bound is the one the
+# driver's providers implement.
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "40b5fc3cc187d6e44b67265893ab5957eaa1bcfa" }
 
 # Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
 # tonic's tokio-bound `transport` feature remains disabled.

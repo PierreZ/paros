@@ -94,6 +94,7 @@ impl<P: Providers> GrpcEdge<P> {
         let server = H2Server::new(providers).with_config(H2ServerConfig {
             keep_alive: Some(grpc_keep_alive(tunables)),
             vectored_writes: true,
+            ..H2ServerConfig::default()
         });
         Ok(Self {
             accept: accept_on::<P>(&listener),
