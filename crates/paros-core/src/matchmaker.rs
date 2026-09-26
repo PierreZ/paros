@@ -457,10 +457,12 @@ impl Matchmaker {
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
-        let current = self.set().clone();
+        let current = self.set();
         match self.phase() {
             MatchmakerPhase::Active if current.generation == generation => None,
-            MatchmakerPhase::Active => Some(MatchRefusal::Generation { current }),
+            MatchmakerPhase::Active => Some(MatchRefusal::Generation {
+                current: current.clone(),
+            }),
             MatchmakerPhase::Stopped if current.generation == generation => {
                 Some(MatchRefusal::Stopped {
                     successor: self.hard_state.successor.clone(),
@@ -482,9 +484,9 @@ impl Matchmaker {
                             successor: Some(successor.clone()),
                         })
                     }
-                    None if generation < current.generation => {
-                        Some(MatchRefusal::Generation { current })
-                    }
+                    None if generation < current.generation => Some(MatchRefusal::Generation {
+                        current: current.clone(),
+                    }),
                     _ => Some(MatchRefusal::Inactive),
                 }
             }
