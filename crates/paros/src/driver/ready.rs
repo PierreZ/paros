@@ -273,8 +273,8 @@ where
     // the next decided `Truncate`.
     let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
         .writes()
-        .to_vec()
-        .into_iter()
+        .iter()
+        .cloned()
         .partition(|w| matches!(w, WriteOp::Truncate { .. }));
     let must_sync = if writes.iter().any(WriteOp::needs_sync) {
         paros_core::MustSync::Sync
