@@ -10,7 +10,7 @@ use super::{
     BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin, Message,
     NodeId, NodeRole, Slot,
 };
-use crate::matchmaker::{MatchRequest, RegistrationKind};
+use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
 use crate::proposer::{
@@ -99,17 +99,13 @@ impl ColocatedNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        if let Some(matchmakers) = &self.matchmakers {
+        if self.matchmakers.is_some() {
             // The matchmaking phase: register first, prepare only once a
-            // matchmaker quorum has answered (see `super::matchmaking`).
-            let generation = matchmakers.generation;
-            let members = matchmakers.members().to_vec();
-            self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
-            let request = MatchRequest::for_kind(kind, me, self.ballot, config, generation);
-            for matchmaker in members {
-                self.pending_match_requests
-                    .push((matchmaker, request.clone()));
-            }
+            // matchmaker quorum has answered (see `super::matchmaking`). A
+            // fresh phase has answers from nobody, so the queue addresses
+            // every member of the set from the start of its history.
+            self.matchmaking = Some(Matchmaking::new(self.ballot, config, kind));
+            self.queue_match_requests();
             // Negative space of invariant 1 (#120): nothing Phase-1-shaped
             // left this call — no `Prepare` before a matchmaker quorum.
             assert!(

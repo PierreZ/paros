@@ -118,7 +118,7 @@
 use super::{Ballot, ColocatedNode, NodeId, NodeRole};
 use crate::matchmaker::{MatchRefusal, MatchReply, MatchRequest};
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
-use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
+use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
 /// What one matchmaker reply did to an open campaign, returned by
 /// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition
@@ -187,6 +187,13 @@ fn split_reply(
     (matchmaker, to, ballot, answer)
 }
 
+/// The open phase's `MatchRequest` from `me`: its kind, ballot and
+/// configuration, fenced by `generation`, asked from the start of the
+/// history (a paged answer continues it with `MatchRequest::from_page`).
+fn phase_request(me: NodeId, m: &Matchmaking, generation: MatchmakerGeneration) -> MatchRequest {
+    MatchRequest::for_kind(m.kind(), me, m.ballot(), m.config().clone(), generation)
+}
+
 impl ColocatedNode {
     /// Re-queue the open matchmaking request toward every matchmaker that has
     /// not answered yet. A no-op on a node with no open matchmaking phase.
@@ -210,18 +217,21 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_matchmaking(&mut self) {
+        self.queue_match_requests();
+        self.assert_invariants();
+    }
+
+    /// Queue the open phase's request toward every matchmaker that has not
+    /// answered completely, each from the page cursor it owes next. A no-op
+    /// with no open phase. A freshly opened phase has answers from nobody,
+    /// so this addresses every member from the start — how a campaign sends
+    /// its first round.
+    pub(super) fn queue_match_requests(&mut self) {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
         let matchmakers = self.deployment_matchmakers();
-        let generation = matchmakers.generation;
-        let request = MatchRequest::for_kind(
-            m.kind(),
-            self.config.id,
-            m.ballot(),
-            m.config().clone(),
-            generation,
-        );
+        let request = phase_request(self.config.id, m, matchmakers.generation);
         let unanswered = m.unanswered(matchmakers);
         for (matchmaker, cursor) in unanswered {
             // A matchmaker mid-answer is re-asked from where its last page
@@ -234,7 +244,6 @@ impl ColocatedNode {
             };
             self.pending_match_requests.push((matchmaker, request));
         }
-        self.assert_invariants();
     }
 
     /// Whether a matchmaking phase is open — the driver's cue to pace
@@ -361,11 +370,7 @@ impl ColocatedNode {
         if let Some(next) = next {
             // The answer is still paged: ask this matchmaker for the rest.
             // Nothing counts toward the quorum until its last page lands.
-            let ballot = m.ballot();
-            let config = m.config().clone();
-            let kind = m.kind();
-            let generation = matchmakers.generation;
-            let request = MatchRequest::for_kind(kind, self.config.id, ballot, config, generation);
+            let request = phase_request(self.config.id, m, matchmakers.generation);
             self.pending_match_requests
                 .push((matchmaker, request.from_page(next)));
             return MatchStep::Paged { next };
