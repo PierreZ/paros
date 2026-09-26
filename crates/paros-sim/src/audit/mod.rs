@@ -596,21 +596,14 @@ pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
 /// One node's view of the shared checker. Constructed beside the node's
 /// `BuggifyHooks` and handed to `paros::run_node`; it stamps simulated time on
 /// the observations that need it and forwards everything else unchanged.
-pub(crate) struct NodeAudit<T> {
-    time: T,
-    world: Arc<AuditWorld>,
-}
-
+///
 /// The driver hands each peer-delivery task its own handle to the audit (the
 /// bounded-mailbox drops happen inside those tasks); every clone shares the
 /// one per-iteration [`AuditWorld`].
-impl<T: Clone> Clone for NodeAudit<T> {
-    fn clone(&self) -> Self {
-        Self {
-            time: self.time.clone(),
-            world: self.world.clone(),
-        }
-    }
+#[derive(Clone)]
+pub(crate) struct NodeAudit<T> {
+    time: T,
+    world: Arc<AuditWorld>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
