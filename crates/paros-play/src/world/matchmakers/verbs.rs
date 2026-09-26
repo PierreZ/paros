@@ -97,7 +97,10 @@ impl World {
             .unwrap_or_default()
     }
 
-    pub(super) fn matchmaker_index(&self, id: MatchmakerId) -> Result<usize, ActionError> {
+    pub(in crate::world) fn matchmaker_index(
+        &self,
+        id: MatchmakerId,
+    ) -> Result<usize, ActionError> {
         self.matchmakers
             .iter()
             .position(|m| m.id() == id)
@@ -444,12 +447,7 @@ impl World {
             ));
         };
         for member in &members {
-            if self.matchmaker(*member).is_none() {
-                return Err(ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no matchmaker {} in this level", member.0),
-                ));
-            }
+            self.matchmaker_index(*member)?;
         }
         let proposed = show_set(&members);
         match self.reconfigurers[index].start(&current, members) {

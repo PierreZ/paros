@@ -215,12 +215,7 @@ impl World {
                 }
                 Party::Matchmaker(_) => {
                     let to = MatchmakerId(to);
-                    if self.matchmaker(to).is_none() {
-                        return Err(ActionError::new(
-                            ActionErrorCode::UnknownParty,
-                            format!("there is no matchmaker {} in this level", to.0),
-                        ));
-                    }
+                    self.matchmaker_index(to)?;
                     Party::Matchmaker(to)
                 }
             };
