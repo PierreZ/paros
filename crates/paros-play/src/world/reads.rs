@@ -26,19 +26,15 @@ impl World {
         let mark = self.narration.len();
         // The index the round captured is read off the round itself, right
         // after it opens and before the pump can confirm it away.
-        let outcome = self.observe(id, move |world| {
-            let out = world.nodes[index].as_mut().map(|node| {
-                let result = node.read_index(ctx);
-                let captured = node
-                    .proposer()
-                    .read_rounds()
-                    .iter()
-                    .find(|round| round.ctx() == ctx)
-                    .and_then(paros_core::proposer::ReadRound::index);
-                (result, captured)
-            });
-            world.pump(id);
-            out
+        let outcome = self.drive(id, index, move |node| {
+            let result = node.read_index(ctx);
+            let captured = node
+                .proposer()
+                .read_rounds()
+                .iter()
+                .find(|round| round.ctx() == ctx)
+                .and_then(paros_core::proposer::ReadRound::index);
+            (result, captured)
         });
         let captured = outcome.as_ref().and_then(|(_, captured)| *captured);
         match outcome.map(|(result, _)| result) {
@@ -131,11 +127,8 @@ impl World {
             served_at: None,
         });
         let mark = self.narration.len();
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.quorum_read(ctx);
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.quorum_read(ctx);
         });
         let opening = say(
             NarrationKind::Read,

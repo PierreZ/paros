@@ -233,13 +233,7 @@ impl World {
         let members = show_members(config.members());
         let mark = self.narration.len();
         let requested = config.clone();
-        let result = self.observe(id, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .map(|node| node.reconfigure(&requested));
-            world.pump(id);
-            out
-        });
+        let result = self.drive(id, index, move |node| node.reconfigure(&requested));
         let text = match result {
             Some(ReconfigureResult::Started(ballot)) => format!(
                 "A client asks {} to run with the acceptors {members}. The leader does not edit \
@@ -521,11 +515,8 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.resend_matchmaking();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.resend_matchmaking();
         });
         Ok(())
     }
@@ -547,11 +538,8 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.resend_gc();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.resend_gc();
         });
         Ok(())
     }

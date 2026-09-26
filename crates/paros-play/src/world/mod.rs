@@ -497,6 +497,21 @@ impl World {
         out
     }
 
+    /// Call the node at `index` if it is live, then pump `id`, all under
+    /// [`World::observe`]. `None` when the node is down.
+    pub(crate) fn drive<R>(
+        &mut self,
+        id: NodeId,
+        index: usize,
+        f: impl FnOnce(&mut ColocatedNode) -> R,
+    ) -> Option<R> {
+        self.observe(id, move |world| {
+            let out = world.nodes[index].as_mut().map(f);
+            world.pump(id);
+            out
+        })
+    }
+
     /// The open prompt, if any.
     #[must_use]
     pub fn prompt(&self) -> Option<&Prompt> {

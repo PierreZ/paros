@@ -273,11 +273,7 @@ impl World {
                 self.fold_match_reply(to, index, reply);
             }
             Envelope::GcAck(ack) => {
-                let step = self.observe(to, move |world| {
-                    let out = world.nodes[index].as_mut().map(|node| node.on_gc_ack(&ack));
-                    world.pump(to);
-                    out
-                });
+                let step = self.drive(to, index, move |node| node.on_gc_ack(&ack));
                 if let Some(step) = step {
                     self.narrate_gc_step(to, &step);
                 }
@@ -304,13 +300,7 @@ impl World {
         index: usize,
         reply: MatchReply,
     ) {
-        let step = self.observe(to, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .map(|node| node.on_match_reply(reply));
-            world.pump(to);
-            out
-        });
+        let step = self.drive(to, index, move |node| node.on_match_reply(reply));
         if let Some(step) = step {
             if let MatchStep::Completed { prior, .. } = &step {
                 self.campaign_prior[index].clone_from(prior);
@@ -570,11 +560,8 @@ impl World {
     /// adopts the set it published, exactly as `paros::run_node` does.
     fn adopt_set(&mut self, index: usize, set: &MatchmakerSet) {
         let id = self.pool[index];
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.learn_matchmakers(set);
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.learn_matchmakers(set);
         });
     }
 }

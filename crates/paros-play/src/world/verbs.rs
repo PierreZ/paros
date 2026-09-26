@@ -315,14 +315,11 @@ impl World {
     fn tick_node(&mut self, id: NodeId, index: usize) {
         let resend = self.policy.auto_resend;
         self.narrate_tick(id, index);
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.tick();
-                if resend {
-                    node.resend_pending();
-                }
+        self.drive(id, index, move |node| {
+            node.tick();
+            if resend {
+                node.resend_pending();
             }
-            world.pump(id);
         });
         // A tick is the driver's beat, and the handover is driver policy: the
         // stall clock advances, a freeze whose quorum answered is closed, and
@@ -379,13 +376,10 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.set_election_timeout(1);
-                node.tick();
-                node.set_election_timeout(restore);
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.set_election_timeout(1);
+            node.tick();
+            node.set_election_timeout(restore);
         });
         Ok(())
     }
@@ -420,11 +414,8 @@ impl World {
             NarrationKind::Election,
             format!("{} resigns its leadership.", who(id)),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.step_down();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.step_down();
         });
         Ok(())
     }
@@ -447,11 +438,8 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.resend_pending();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.resend_pending();
         });
         Ok(())
     }
@@ -517,18 +505,14 @@ impl World {
         let mark = self.narration.len();
         let bytes = Value(value.as_bytes().to_vec());
         let issued = self.take_event();
-        let result = self.observe(id, move |world| {
-            let out = world.nodes[index].as_mut().map(|node| {
-                node.propose_in(
-                    ClientId(client),
-                    seq,
-                    bytes,
-                    column,
-                    paros_core::Delegation::Auto,
-                )
-            });
-            world.pump(id);
-            out
+        let result = self.drive(id, index, move |node| {
+            node.propose_in(
+                ClientId(client),
+                seq,
+                bytes,
+                column,
+                paros_core::Delegation::Auto,
+            )
         });
         let fresh = matches!(result, Some(ProposeResult::Accepted(_)));
         let admitted = match result {
@@ -699,12 +683,8 @@ impl World {
             return;
         };
         let mark = self.narration.len();
-        let result = self.observe(id, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .map(|node| node.propose(ClientId(client), ClientSeq(seq), bytes));
-            world.pump(id);
-            out
+        let result = self.drive(id, index, move |node| {
+            node.propose(ClientId(client), ClientSeq(seq), bytes)
         });
         let answer = match result {
             Some(ProposeResult::Chosen(slot)) => RetryAnswer::Applied(slot),
@@ -791,16 +771,14 @@ impl World {
         let (accepted, seeded) = if let Some(point) = covered {
             {
                 let clamped = Slot(up_to.min(point.0));
-                let accepted = self.observe(id, move |world| {
-                    let out = world.nodes[index].as_mut().map(|node| {
+                let accepted = self
+                    .drive(id, index, move |node| {
                         matches!(
                             node.propose_control(Control::Truncate { up_to: clamped }),
                             ProposeResult::Accepted(_)
                         )
-                    });
-                    world.pump(id);
-                    out.unwrap_or(false)
-                });
+                    })
+                    .unwrap_or(false);
                 // The request outran the covered prefix: seed the next point so
                 // a later compaction may go further.
                 let seed = up_to > point.0 && !marker_open;
@@ -894,11 +872,8 @@ impl World {
 
     /// Ask the leader to decide the next snapshot point.
     fn seed_snap_marker(&mut self, id: NodeId, index: usize) {
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.propose_snap_marker();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.propose_snap_marker();
         });
     }
 
@@ -938,13 +913,9 @@ impl World {
             ));
         }
         let mark = self.narration.len();
-        let receipt = self.observe(id, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .and_then(|node| node.relinquish_to(to));
-            world.pump(id);
-            out
-        });
+        let receipt = self
+            .drive(id, index, move |node| node.relinquish_to(to))
+            .flatten();
         let Some(receipt) = receipt else {
             self.narration.truncate(mark);
             return Err(ActionError::new(
