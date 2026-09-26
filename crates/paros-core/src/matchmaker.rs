@@ -575,10 +575,7 @@ impl Matchmaker {
 
     /// Every registration this matchmaker retains — everything at or above the
     /// watermark, with no upper bound — the whole frozen registry a `StopB`
-    /// hands the reconstruction. Its own method rather than `history_below` at
-    /// a maximal ballot: "everything retained" is a different question from
-    /// "everything below `b`", and a sentinel ballot said so only by
-    /// arithmetic accident.
+    /// hands the reconstruction.
     pub(super) fn history_from_watermark(&self) -> BTreeMap<Ballot, Registration> {
         self.registry.entries().clone()
     }

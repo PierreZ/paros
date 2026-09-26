@@ -94,7 +94,7 @@ fn follower_fills_a_hole_via_commit_replay_catch_up() {
     // Pins the #18 bug: a follower that missed both the `Accept` and the `Commit`
     // for a decided slot keeps a permanent hole (the leader re-sends `Accept`s only
     // for still-pending slots, never a `Commit`), until commit-replay catch-up
-    // heals it. The `ConvergenceOracle` catches this in simulation; this is the
+    // heals it. `paros_sim::audit` catches this in simulation; this is the
     // deterministic unit pin.
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);

@@ -94,8 +94,8 @@ fn election_fills_a_hole_the_promise_quorum_never_reported() {
     // later slot that *did* reach the promise quorum — was neither recovered nor
     // re-allocated (`next_slot` jumped over it). Nothing would ever propose it
     // again, freezing the contiguous chosen prefix one below it forever. The new
-    // leader now fills it with a `Control::Noop`. The `GapFillOracle` catches this
-    // in simulation (seed 53); this is the deterministic unit pin.
+    // leader now fills it with a `Control::Noop`. `paros_sim::audit` catches this
+    // in simulation (its chosen-gap check); this is the deterministic unit pin.
     let mut nodes = wedge_after_election();
 
     assert_eq!(
@@ -536,8 +536,8 @@ fn truncated_quorum_refuses_a_blind_candidate() {
 /// self-accept for every recovered slot, so those never entered `accepted`;
 /// `next_slot` — derived from `accepted` — landed *below* an in-flight slot,
 /// and the next `propose` re-broadcast a second command for one
-/// `(ballot, slot)` (`SafetyOracle`'s "one ballot proposes at most one command
-/// for a slot" reads that off the wire).
+/// `(ballot, slot)` (`paros_sim::audit`'s "one ballot proposes at most one
+/// command for a slot" catches it).
 #[test]
 fn a_candidate_that_learns_a_higher_ballot_commit_refuses_the_stale_win() {
     let mut x = node(0, &[0, 1, 2]);
