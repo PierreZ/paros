@@ -255,12 +255,6 @@ impl Level {
     }
 }
 
-/// No hint at all.
-#[must_use]
-pub fn no_hint(_world: &WorldKind, _mistakes: u32) -> Option<String> {
-    None
-}
-
 /// Every registered level, in play order.
 #[must_use]
 pub fn levels() -> Vec<&'static Level> {

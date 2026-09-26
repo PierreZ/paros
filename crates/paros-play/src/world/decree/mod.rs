@@ -305,16 +305,6 @@ impl DecreeWorld {
         self.violation.as_deref()
     }
 
-    /// What acceptor `id` has promised and accepted.
-    #[must_use]
-    pub fn acceptor_state(&self, id: u64) -> Option<(Ballot, Option<(Ballot, Command)>)> {
-        let acceptor = self.acceptors.iter().find(|a| a.id == NodeId(id))?;
-        Some((
-            acceptor.role.promised(),
-            acceptor.role.record(DECREE).cloned(),
-        ))
-    }
-
     /// The acceptors a phase's messages currently reach.
     #[must_use]
     pub fn reach(&self, phase: Phase) -> &[NodeId] {
