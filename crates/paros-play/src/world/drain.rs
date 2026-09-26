@@ -375,7 +375,7 @@ impl World {
     /// node is dropped and the caller stops).
     fn take_batch(&mut self, index: usize) -> Option<Batch> {
         let id = self.pool[index];
-        let pool = self.pool.clone();
+        let pool = &self.pool;
         let node = self.nodes[index].as_mut()?;
         let ready = node.ready();
         let batch = Batch {
@@ -385,7 +385,7 @@ impl World {
                 .iter()
                 .flat_map(|(audience, message)| {
                     audience
-                        .resolve(&pool, id)
+                        .resolve(pool, id)
                         .into_iter()
                         .map(move |to| (to, message.clone()))
                 })

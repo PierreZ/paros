@@ -364,7 +364,7 @@ impl World {
             beats_broadcast: 0,
             refused_boots: Vec::new(),
             matchmakers: Vec::new(),
-            reconfigurers: reconfigurers.into_iter().collect(),
+            reconfigurers,
             campaign_prior: vec![Vec::new(); count],
             retired: vec![false; count],
             refused_retires: Vec::new(),
@@ -608,13 +608,10 @@ impl World {
         }
         self.next_event = stamp;
         for index in 0..self.pool.len() {
+            let durable = self.disks[index].hard_state().max_promised_ballot;
             let seen = self.nodes[index]
                 .as_ref()
-                .map_or_else(
-                    || self.disks[index].hard_state().max_promised_ballot,
-                    |node| node.acceptor().promised(),
-                )
-                .max(self.disks[index].hard_state().max_promised_ballot);
+                .map_or(durable, |node| node.acceptor().promised().max(durable));
             self.promise_watermarks[index] = self.promise_watermarks[index].max(seen);
         }
         for index in 0..self.pool.len() {

@@ -176,7 +176,7 @@ impl World {
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let position = self.position_of(id)?;
-        let summary = self.render(&self.wire[position].clone()).summary;
+        let summary = self.render(&self.wire[position]).summary;
         self.wire.remove(position);
         self.narrate(
             NarrationKind::Info,

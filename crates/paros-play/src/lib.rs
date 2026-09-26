@@ -184,14 +184,13 @@ impl Game {
         if self.log.pop().is_none() {
             return;
         }
-        self.narration.pop();
+        // `rebuild` clears the narration and re-derives it from the log.
         self.rebuild();
     }
 
     /// Start the level again from its setup.
     pub fn reset(&mut self) {
         self.log.clear();
-        self.narration.clear();
         self.rebuild();
     }
 
