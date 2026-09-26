@@ -145,14 +145,10 @@ impl ColocatedNode {
         if !self.in_pool(from) {
             return;
         }
-        let Some(row) = self.quorum_reads.row(ctx) else {
+        let Some(read) = self.quorum_reads.get(ctx) else {
             return;
         };
-        let addressee = self
-            .quorum_reads
-            .config(ctx)
-            .is_some_and(|config| config.is_phase1_addressee(from, row));
-        if !addressee {
+        if !read.config().is_phase1_addressee(from, read.row()) {
             return;
         }
         match self.quorum_reads.fold(ctx, from, watermark, config_since) {

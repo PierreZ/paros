@@ -243,25 +243,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         addressees
     }
 
-    /// The row the read at `ctx` was addressed to, if one is open there —
-    /// what the caller's addressee guard asks before folding an answer
-    /// ([`AcceptorConfig::is_phase1_addressee`], over the read's own
-    /// configuration: [`QuorumReads::config`]).
+    /// The read open at `ctx`, if any — what the caller's addressee guard
+    /// asks before folding an answer: the row it was addressed to
+    /// ([`QuorumRead::row`]) over the configuration it is judged by
+    /// ([`QuorumRead::config`], through
+    /// [`AcceptorConfig::is_phase1_addressee`]).
     #[must_use]
-    pub fn row(&self, ctx: u64) -> Option<Option<usize>> {
-        self.reads
-            .iter()
-            .find(|r| r.ctx == ctx)
-            .map(QuorumRead::row)
-    }
-
-    /// The configuration the read at `ctx` is judged over, if one is open.
-    #[must_use]
-    pub fn config(&self, ctx: u64) -> Option<&AcceptorConfig<Id>> {
-        self.reads
-            .iter()
-            .find(|r| r.ctx == ctx)
-            .map(QuorumRead::config)
+    pub fn get(&self, ctx: u64) -> Option<&QuorumRead<Id>> {
+        self.reads.iter().find(|r| r.ctx == ctx)
     }
 
     /// Fold `from`'s watermark into the read at `ctx`. Whether `from` is an
@@ -387,7 +376,7 @@ mod tests {
             Some((NodeId(5), Some(Slot(2)))),
         );
         assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
-        assert_eq!(reads.row(1), Some(Some(1)));
+        assert_eq!(reads.get(1).map(QuorumRead::row), Some(Some(1)));
         assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
         assert_eq!(
             reads.fold(1, NodeId(4), Some(Slot(3)), None),
