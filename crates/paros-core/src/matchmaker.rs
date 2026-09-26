@@ -140,7 +140,7 @@ pub use self::state::{
     DecreeRecord, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap,
     Registration, RegistrationKind,
 };
-pub(crate) use self::state::{resolved_phase, resolved_set};
+pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -394,13 +394,8 @@ impl Matchmaker {
             // the record, so the reply that reports it never escapes a
             // non-durable scalar.
             if registration.kind.is_reconfiguration()
-                && self
-                    .hard_state
-                    .effective
-                    .as_ref()
-                    .is_none_or(|(held, _)| ballot > *held)
+                && raise_effective(&mut self.hard_state.effective, ballot, &registration.config)
             {
-                self.hard_state.effective = Some((ballot, registration.config.clone()));
                 self.stage_scalars();
             }
             self.pending_writes.push(MatchmakerWriteOp::Register {

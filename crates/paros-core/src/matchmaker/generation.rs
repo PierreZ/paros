@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use super::{
     DecreeRecord, Matchmaker, MatchmakerPhase, MatchmakerWriteOp, PendingBootstrap,
-    ReconfigureReply, ReconfigureRequest, Registration,
+    ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
 };
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -412,20 +412,9 @@ impl Matchmaker {
         // reconstruction's is the maximum over a frozen quorum). Taking the
         // maximum is what keeps the acceptor set in force across a handover
         // even when the record it came from was collected generations ago.
-        let effective = match (
-            self.hard_state.effective.take(),
-            bootstrap.effective.clone(),
-        ) {
-            (Some((mine, config)), Some((theirs, other))) => {
-                if theirs > mine {
-                    Some((theirs, other))
-                } else {
-                    Some((mine, config))
-                }
-            }
-            (held, None) => held,
-            (None, reconstructed) => reconstructed,
-        };
+        if let Some((theirs, other)) = &bootstrap.effective {
+            raise_effective(&mut self.hard_state.effective, *theirs, other);
+        }
         let registry: BTreeMap<Ballot, Registration> = bootstrap
             .history
             .into_iter()
@@ -445,7 +434,6 @@ impl Matchmaker {
         self.hard_state.successor = None;
         self.hard_state.decree = DecreeRecord::default();
         self.hard_state.gc_watermark = watermark;
-        self.hard_state.effective = effective;
         self.hard_state
             .pending
             .retain(|p| p.set.generation > successor.generation);
