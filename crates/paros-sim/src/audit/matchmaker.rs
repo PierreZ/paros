@@ -583,11 +583,12 @@ impl MatchmakerAudit {
     /// The matchmaker quorum of `generation`'s set (the bootstrap set until
     /// a generation is known).
     fn quorum(&self, generation: u64) -> usize {
-        let members = self.sets.get(&generation).map_or_else(
-            || self.bootstrap_set.clone().unwrap_or_default(),
-            Clone::clone,
-        );
-        members.len() / 2 + 1
+        self.sets
+            .get(&generation)
+            .or(self.bootstrap_set.as_ref())
+            .map_or(0, Vec::len)
+            / 2
+            + 1
     }
 
     /// Whether `matchmaker` is a member of `generation`'s set (unknown
