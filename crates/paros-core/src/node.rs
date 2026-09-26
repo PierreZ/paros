@@ -726,9 +726,13 @@ impl ColocatedNode {
         // quorum read at 3 on a follower, then a read-index at 2 on the
         // leader: "chain: a client's read-index watermarks never move
         // backwards").
-        let opened = (self.config.proxy_count > 0)
-            .then(|| self.proposer.next_slot().0.checked_sub(1).map(Slot))
-            .flatten();
+        let opened = self
+            .proposer
+            .next_slot()
+            .0
+            .checked_sub(1)
+            .map(Slot)
+            .filter(|_| self.config.has_proxies());
         let index = self
             .replica
             .chosen_index()
