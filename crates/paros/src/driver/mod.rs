@@ -56,7 +56,6 @@ pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use moonpool_core::{Providers, RandomProvider, SimulationResult, TimeProvider};
 use paros_core::{
@@ -77,7 +76,7 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
 
 use boot::{check_format_marker, replay_boot_state};
-use edge::GrpcEdge;
+use edge::{GrpcEdge, edge_reporter};
 use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
@@ -570,10 +569,7 @@ where
     // returns nothing and the edge's answer does not depend on it). Pure
     // construction, built before the bind so the edge takes its routes whole.
     let me = Party::Node(NodeId(self_id));
-    let on_reject: crate::grpc::OnReject = {
-        let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(me, kind))
-    };
+    let on_reject = edge_reporter(audit, me);
     let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
         tunables.client_inbox_capacity,
         tunables.peer_inbox_capacity,

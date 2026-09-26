@@ -16,7 +16,22 @@ use moonpool_core::{
 use moonpool_hyper::{H2Server, H2ServerConfig};
 use tokio_util::sync::CancellationToken;
 
+use paros_core::Party;
+
 use super::config::{DriverTunables, RunError, grpc_keep_alive};
+use crate::audit::Audit;
+use crate::grpc::OnReject;
+
+/// The edge's rejection callback for the driver serving as `me`: each
+/// rejection is reported to `audit` as [`Audit::edge_rejected`], stamped with
+/// that identity. Pure construction; the edge's answer does not depend on it.
+pub(crate) fn edge_reporter<A: Audit + Clone + Send + Sync + 'static>(
+    audit: &A,
+    me: Party,
+) -> OnReject {
+    let audit = audit.clone();
+    Arc::new(move |kind| audit.edge_rejected(me, kind))
+}
 
 /// The listener type a provider bundle binds.
 type Listener<P> = <<P as Providers>::Network as NetworkProvider>::TcpListener;
