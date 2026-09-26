@@ -138,13 +138,7 @@ impl ColocatedNode {
         if !self.leadership_settled() || self.ballot < self.acceptor.promised() {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unsettled);
         }
-        let base_round = self
-            .acceptor
-            .promised()
-            .round
-            .max(self.ballot.round)
-            .max(self.round_floor);
-        if base_round.checked_add(1).is_none() {
+        if self.next_campaign_round().is_none() {
             return ReconfigureResult::Refused(ReconfigureRefusal::RoundExhausted);
         }
         let previous = self.ballot;

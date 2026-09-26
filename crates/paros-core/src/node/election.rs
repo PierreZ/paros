@@ -43,6 +43,19 @@ impl ColocatedNode {
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());
     }
 
+    /// The round the next campaign opens at: strictly above every round this
+    /// node promised or led, and above the `round_floor` matchmakers taught
+    /// it. `None` once the round space is exhausted — there is no strictly
+    /// higher ballot to mint. The reconfiguration pre-check asks the same.
+    pub(super) fn next_campaign_round(&self) -> Option<u64> {
+        self.acceptor
+            .promised()
+            .round
+            .max(self.ballot.round)
+            .max(self.round_floor)
+            .checked_add(1)
+    }
+
     /// Open a campaign at a fresh ballot: bump the round, promise it durably,
     /// drop every leadership state, then either register `(b, C_b)` with the
     /// matchmakers (a deployment that names them) or go straight to Phase 1
@@ -57,13 +70,7 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = kind.is_reconfiguration())))]
     pub(super) fn campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
         let me = self.config.id;
-        let base_round = self
-            .acceptor
-            .promised()
-            .round
-            .max(self.ballot.round)
-            .max(self.round_floor);
-        let Some(round) = base_round.checked_add(1) else {
+        let Some(round) = self.next_campaign_round() else {
             // The wire/domain round space is exhausted. There is no strictly
             // higher valid ballot to campaign at, so remain a follower rather
             // than wrapping or reusing the maximum round.
