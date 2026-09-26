@@ -17,12 +17,19 @@ pub(super) fn ballot_to_proto(ballot: Ballot) -> common::Ballot {
     }
 }
 
+/// A ballot the wire carries unconditionally (a oneof arm, a repeated or an
+/// already-unwrapped field) decodes infallibly.
+impl From<common::Ballot> for Ballot {
+    fn from(ballot: common::Ballot) -> Self {
+        Ballot {
+            round: ballot.round,
+            node: NodeId(ballot.node),
+        }
+    }
+}
+
 pub(super) fn ballot_from_proto(ballot: Option<common::Ballot>) -> Result<Ballot, &'static str> {
-    let ballot = ballot.ok_or("missing ballot")?;
-    Ok(Ballot {
-        round: ballot.round,
-        node: NodeId(ballot.node),
-    })
+    Ok(ballot.ok_or("missing ballot")?.into())
 }
 
 /// The wire form of a [`Party`] (#142): the node field, zero for a proxy, and

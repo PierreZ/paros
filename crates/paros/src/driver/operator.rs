@@ -163,10 +163,7 @@ pub(crate) fn retire<A: Audit>(
     self_id: u64,
     req: &RetireRequest,
 ) -> RetireAck {
-    let watermark = req.gc_watermark.map(|b| Ballot {
-        round: b.round,
-        node: NodeId(b.node),
-    });
+    let watermark = req.gc_watermark.map(Ballot::from);
     let accepted = watermark.is_some_and(|w| node.may_retire(w));
     let refusal = if accepted {
         ""

@@ -117,7 +117,7 @@ pub(crate) fn match_request_from_wire(
         MatchRequest::new(from, ballot, config, generation)
     };
     Ok(match request.from_ballot {
-        Some(cursor) => base.from_page(ballot_from_proto(Some(cursor))?),
+        Some(cursor) => base.from_page(cursor.into()),
         None => base,
     })
 }
@@ -182,21 +182,18 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
         matchmaker::match_reply::Outcome::Registered(registered) => MatchOutcome::Registered {
             from_ballot: ballot_from_proto(registered.from_ballot)?,
             history: registrations_from_proto(registered.history)?,
-            next_from_ballot: registered
-                .next_from_ballot
-                .map(|b| ballot_from_proto(Some(b)))
-                .transpose()?,
+            next_from_ballot: registered.next_from_ballot.map(Ballot::from),
             gc_watermark: ballot_from_proto(registered.gc_watermark)?,
             effective: effective_from_proto(registered.effective)?,
         },
         matchmaker::match_reply::Outcome::Refused(refused) => {
             MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {
                 matchmaker::refused::Reason::StaleHighest(highest) => MatchRefusal::Stale {
-                    highest: ballot_from_proto(Some(highest))?,
+                    highest: highest.into(),
                 },
                 matchmaker::refused::Reason::BelowWatermark(watermark) => {
                     MatchRefusal::BelowWatermark {
-                        watermark: ballot_from_proto(Some(watermark))?,
+                        watermark: watermark.into(),
                     }
                 }
                 matchmaker::refused::Reason::Stopped(stopped) => MatchRefusal::Stopped {

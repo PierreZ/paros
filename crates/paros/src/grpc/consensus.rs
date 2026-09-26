@@ -432,10 +432,7 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ctx: message.ctx,
             watermark: message.watermark.map(Slot),
-            config_since: message
-                .config_since
-                .map(|ballot| ballot_from_proto(Some(ballot)))
-                .transpose()?,
+            config_since: message.config_since.map(Ballot::from),
         }),
     }
 }
