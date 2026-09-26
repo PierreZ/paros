@@ -135,7 +135,7 @@ where
 // would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0, to = to.0, at = at.0, chunks = chunks.len()))]
-pub(crate) async fn handle_snap_chunk_request<S, H, A>(
+async fn handle_snap_chunk_request<S, H, A>(
     node: &ColocatedNode,
     storage: &S,
     out: &Outbound,
@@ -233,7 +233,7 @@ pub(crate) async fn handle_snap_chunk_request<S, H, A>(
 // `handle_snap_chunk_request`); bundling them would only rename them.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id, at = at.0, chunks = chunks.len()))]
-pub(crate) async fn handle_snap_chunk_response<S, H, A>(
+async fn handle_snap_chunk_response<S, H, A>(
     node: &mut ColocatedNode,
     storage: &mut S,
     snap: &mut SnapRepair,

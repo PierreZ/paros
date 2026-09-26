@@ -470,7 +470,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 // a bundle would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
-pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
+async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
@@ -592,7 +592,7 @@ fn delivery_batch<A: Audit>(
 /// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
-pub(crate) fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
+fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
     audit.dropped_at_send(from, to, msg);
     let kind = message_kind(msg);
     if let Message::Accept { slot, .. } = msg {

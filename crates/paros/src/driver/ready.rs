@@ -751,31 +751,6 @@ pub(crate) fn crash_if<H: DriverHooks, A: Audit>(
     Ok(())
 }
 
-/// The matchmaker driver's twin of [`crash_if`], reported through
-/// [`Audit::matchmaker_crashed`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-pub(crate) fn match_crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    matchmaker: MatchmakerId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.matchmaker_crashed(matchmaker, seam);
-        tracing::info!(
-            matchmaker = matchmaker.0,
-            seam = seam.label(),
-            "matchmaker_crashed"
-        );
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
-}
-
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a
 /// storage fault never lets the node keep running on state it does not durably
 /// have. The decision is reported through [`Audit::storage_fault`] (typed, at

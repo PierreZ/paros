@@ -40,13 +40,13 @@
 //! and the per-arm steps that loop shares (`NodeLoop`).
 
 mod boot;
-pub(crate) mod config;
+mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
 mod handover;
 mod matchmaking;
 mod operator;
-pub(crate) mod ready;
+mod ready;
 pub(crate) mod reply;
 mod report;
 mod snap_repair;
