@@ -153,6 +153,15 @@ fn grid_column<I>(members: &[I], cols: usize, column: usize) -> impl Iterator<It
     members.iter().skip(column).step_by(cols.max(1))
 }
 
+/// `value % modulus` as an index below `modulus` — the grid's pure
+/// addressing arithmetic (a slot's column, a read token's row). A zero
+/// modulus is treated as one. The remainder is below `modulus`, which came
+/// from a `usize`, so it always converts back.
+fn residue(value: u64, modulus: usize) -> usize {
+    let modulus = u64::try_from(modulus).unwrap_or(u64::MAX).max(1);
+    usize::try_from(value % modulus).unwrap_or(0)
+}
+
 /// Whether every member of `cell` voted.
 fn all_voted<'a, I: Ord + 'a>(cell: impl IntoIterator<Item = &'a I>, voters: &BTreeSet<I>) -> bool {
     cell.into_iter().all(|m| voters.contains(m))
@@ -259,12 +268,7 @@ impl QuorumSystem {
     pub fn column_of(self, slot: Slot) -> Option<usize> {
         match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
-            QuorumSystem::Grid { cols, .. } => {
-                let cols = u64::try_from(cols).unwrap_or(u64::MAX).max(1);
-                // `slot % cols < cols`, and `cols` came from a `usize`, so the
-                // remainder always converts back.
-                Some(usize::try_from(slot.0 % cols).unwrap_or(0))
-            }
+            QuorumSystem::Grid { cols, .. } => Some(residue(slot.0, cols)),
         }
     }
 
@@ -299,11 +303,7 @@ impl QuorumSystem {
     pub fn row_of(self, ctx: u64) -> Option<usize> {
         match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
-            QuorumSystem::Grid { rows, .. } => {
-                let rows = u64::try_from(rows).unwrap_or(u64::MAX).max(1);
-                // `ctx % rows < rows`, and `rows` came from a `usize`.
-                Some(usize::try_from(ctx % rows).unwrap_or(0))
-            }
+            QuorumSystem::Grid { rows, .. } => Some(residue(ctx, rows)),
         }
     }
 
