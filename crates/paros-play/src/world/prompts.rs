@@ -9,6 +9,7 @@
 //! `paros-core` do with this message?" without doing it — which is what lets a
 //! wrong answer cost a mistake instead of a state.
 
+use paros_core::proposer::Proposer;
 use paros_core::{
     AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Message, NodeId, QuorumSystem, Slot,
     WriteOp,
@@ -48,15 +49,7 @@ impl World {
         if !self.policy.manual.contains(&PromptKind::Phase1Complete) {
             return None;
         }
-        let Message::Promise {
-            from,
-            ballot,
-            from_slot,
-            accepted,
-            faulty,
-            next_from_slot,
-        } = message
-        else {
+        let Message::Promise { ballot, .. } = message else {
             return None;
         };
         let node = self.nodes[index].as_ref()?;
@@ -80,15 +73,7 @@ impl World {
             .iter()
             .map(|config| config.members().to_vec())
             .collect();
-        let mut clone = node.proposer().clone();
-        clone.fold_promise(
-            *from,
-            *ballot,
-            *from_slot,
-            accepted.clone(),
-            faulty.clone(),
-            *next_from_slot,
-        );
+        let clone = proposer_with_promise(node.proposer(), message)?;
         let complete = clone.phase1_won(node.acceptor().promised());
         let promised: Vec<NodeId> = clone
             .election()
@@ -566,4 +551,34 @@ impl World {
             applies_now,
         ))
     }
+}
+
+/// A clone of `proposer` with the arriving `Promise` folded in, the state
+/// both the Phase-1 prompt and the first recovery page are judged on. `None`
+/// when `message` is not a `Promise`; every other guard stays with the caller.
+pub(super) fn proposer_with_promise(
+    proposer: &Proposer<NodeId, Command>,
+    message: &Message,
+) -> Option<Proposer<NodeId, Command>> {
+    let Message::Promise {
+        from,
+        ballot,
+        from_slot,
+        accepted,
+        faulty,
+        next_from_slot,
+    } = message
+    else {
+        return None;
+    };
+    let mut clone = proposer.clone();
+    clone.fold_promise(
+        *from,
+        *ballot,
+        *from_slot,
+        accepted.clone(),
+        faulty.clone(),
+        *next_from_slot,
+    );
+    Some(clone)
 }
