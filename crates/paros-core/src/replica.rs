@@ -245,8 +245,7 @@ impl Replica {
 
     /// Whether `entry`'s `(client, seq)` identity is recorded in the applied
     /// ledger at a slot **other than** `slot` — the #94 duplicate test.
-    #[must_use]
-    pub fn applied_elsewhere(&self, entry: &Entry, slot: Slot) -> bool {
+    fn applied_elsewhere(&self, entry: &Entry, slot: Slot) -> bool {
         self.applied_at(entry.client, entry.seq)
             .is_some_and(|first| first != slot)
     }
@@ -341,6 +340,18 @@ impl Replica {
         self.inflight.insert((client, seq), slot);
     }
 
+    /// Track `command` in flight at `slot` if it is a client entry whose
+    /// identity has not already applied at another slot — a re-proposed or
+    /// learned #94 duplicate suppresses to a no-op at apply, so a retry must
+    /// hit the ledger fast path instead of parking on it.
+    pub fn track_command(&mut self, slot: Slot, command: &Command) {
+        if let Command::User(entry) = command
+            && !self.applied_elsewhere(entry, slot)
+        {
+            self.inflight.insert((entry.client, entry.seq), slot);
+        }
+    }
+
     /// Learn `slot` chosen with `command`. The caller has already checked the
     /// slot is retained and not yet known chosen here.
     ///
@@ -363,11 +374,7 @@ impl Replica {
         );
         self.chosen.insert(slot, command.clone());
         self.inflight.retain(|_, s| *s != slot);
-        if let Command::User(entry) = command
-            && !self.applied_elsewhere(entry, slot)
-        {
-            self.inflight.insert((entry.client, entry.seq), slot);
-        }
+        self.track_command(slot, command);
         if slot < self.first_unchosen()
             && let Command::User(entry) = command
         {
