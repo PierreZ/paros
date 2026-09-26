@@ -620,11 +620,14 @@ impl AuditState {
     /// their union. The union rule would count here and be wrong: it is
     /// exactly what the negative core test refuses.
     pub(super) fn observe_accept_send(&mut self, from: Party, to: u64, ballot: Ballot) {
-        let Some(config) = self.config_of(ballot).cloned() else {
+        let Some(addressed_member) = self
+            .config_of(ballot)
+            .map(|config| config.contains(paros::NodeId(to)))
+        else {
             return;
         };
         assert_always!(
-            config.contains(paros::NodeId(to)),
+            addressed_member,
             "reconfiguration: an Accept reaches only the ballot's own acceptors",
             { "from" => from.to_string(), "to" => to, "round" => ballot.round }
         );
@@ -922,14 +925,16 @@ impl AuditState {
         // The tally is counted over the ballot's *own* configuration — a
         // learner outside it (a spare, a removed member replaying a commit)
         // holds the same bytes but casts no vote (#122).
-        let config = self.config_of(ballot).cloned();
+        // Field-level borrows (the body of `config_of`), so the tallies
+        // below can be written while the configuration is borrowed.
+        let config = self
+            .configs
+            .get(&(ballot.round, ballot.node.0))
+            .or(self.bootstrap.as_ref());
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
         let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
-        if config
-            .as_ref()
-            .is_some_and(|c| c.has_phase2_quorum(&voters))
-        {
+        if config.is_some_and(|c| c.has_phase2_quorum(&voters)) {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -940,7 +945,7 @@ impl AuditState {
                     // a grid column) it may be smaller than a majority of it,
                     // which is the whole point of the variant. Judged through
                     // the boundary's own majority predicate, never a count.
-                    if let Some(c) = &config
+                    if let Some(c) = config
                         && !QuorumSystem::is_majority(c.members(), &voters)
                     {
                         self.decided_below_majority = true;
@@ -951,7 +956,7 @@ impl AuditState {
                     // the boundary's own column predicates, never a count:
                     // the deciding voters lie in some full column, and not
                     // in the slot's.
-                    if let Some(c) = &config
+                    if let Some(c) = config
                         && let QuorumSystem::Grid { cols, .. } = c.quorum_system()
                     {
                         self.decided_on_column = true;
@@ -1038,7 +1043,7 @@ impl AuditState {
         // A promise-majority *of the ballot's own configuration*: only its
         // members' promises decide whether the leader can still assemble a
         // quorum at that ballot.
-        let Some(config) = self.config_of(ballot).cloned() else {
+        let Some(config) = self.config_of(ballot) else {
             return;
         };
         let above: BTreeSet<paros::NodeId> = self
