@@ -125,9 +125,8 @@ impl ColocatedNode {
     /// Queue `msg` to every node of the pool except this one — the learner
     /// fan-out (commits, beats, catch-up), which reaches spares and removed
     /// members so every replica keeps the chosen log.
-    pub(super) fn broadcast(&mut self, msg: &Message) {
-        self.pending_messages
-            .push((Audience::Learners, msg.clone()));
+    pub(super) fn broadcast(&mut self, msg: Message) {
+        self.pending_messages.push((Audience::Learners, msg));
     }
 
     /// Queue `msg` to the one node `to`.

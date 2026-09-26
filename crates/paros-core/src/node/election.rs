@@ -185,7 +185,7 @@ impl ColocatedNode {
         // win (a won election gap-fills only *accepted* slots it can re-proposes;
         // this learns *chosen* ones outright). Harmless when we are not behind — a
         // peer with nothing past `from_slot` simply sends nothing.
-        self.broadcast(&self.catch_up_request(from_slot));
+        self.broadcast(self.catch_up_request(from_slot));
         self.try_become_leader();
     }
 

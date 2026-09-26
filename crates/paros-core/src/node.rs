@@ -965,7 +965,7 @@ impl ColocatedNode {
         // catch-up replay; one that truncated past them offers a snapshot.
         // Once per tick — the same cadence heartbeat-driven catch-up uses.
         if let Some(from_slot) = self.replica.app_repair() {
-            self.broadcast(&self.catch_up_request(from_slot));
+            self.broadcast(self.catch_up_request(from_slot));
         } else if let Some(first_faulty) = self
             .acceptor
             .first_faulty()
@@ -977,7 +977,7 @@ impl ColocatedNode {
             // peers so the record itself heals; a peer that has it chosen
             // serves it, and this node's own next election covers it either
             // way (the campaign range starts at the first faulty slot).
-            self.broadcast(&self.catch_up_request(first_faulty));
+            self.broadcast(self.catch_up_request(first_faulty));
         }
     }
 

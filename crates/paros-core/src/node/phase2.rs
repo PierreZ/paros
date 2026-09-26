@@ -309,7 +309,7 @@ impl ColocatedNode {
             slot < self.acceptor.first_slot() || self.replica.chosen_at(slot) == Some(&command),
             "a decided slot is chosen with the decided command"
         );
-        self.broadcast(&Message::Commit {
+        self.broadcast(Message::Commit {
             from: Party::Node(me),
             ballot,
             slot,
