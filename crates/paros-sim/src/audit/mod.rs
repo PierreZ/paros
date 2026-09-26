@@ -185,9 +185,14 @@ impl AuditWorld {
         self.lock().app_index.remove(&node);
     }
 
-    /// How many below-floor `Prepare`s each acceptor has refused so far.
-    pub(crate) fn below_floor_refusals(&self) -> BTreeMap<u64, u64> {
-        self.lock().below_floor_refusals.clone()
+    /// How many below-floor `Prepare`s the acceptors ranked `min_node` and
+    /// above have refused so far, summed.
+    pub(crate) fn below_floor_refusals_from(&self, min_node: u64) -> u64 {
+        self.lock()
+            .below_floor_refusals
+            .range(min_node..)
+            .map(|(_, count)| count)
+            .sum()
     }
 
     /// Whether `node` installed a snapshot landing at or past `index`.

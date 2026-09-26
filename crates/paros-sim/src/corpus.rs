@@ -1371,22 +1371,11 @@ impl Workload for SnapshotLifecycleWorkload {
         // are read from the audit: a survivor's refusal count rises, and node
         // 0 lands a snapshot at or past the point.
         let audit = audit_world(state);
-        let refusals_before: u64 = audit
-            .below_floor_refusals()
-            .into_iter()
-            .filter(|(node, _)| *node >= 1)
-            .map(|(_, count)| count)
-            .sum();
+        let refusals_before = audit.below_floor_refusals_from(1);
         lifecycle::restart(ctx, &servers[1]).await;
         lifecycle::restart(ctx, &servers[2]).await;
         let refusal = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
-            audit
-                .below_floor_refusals()
-                .into_iter()
-                .filter(|(node, _)| *node >= 1)
-                .map(|(_, count)| count)
-                .sum::<u64>()
-                > refusals_before
+            audit.below_floor_refusals_from(1) > refusals_before
         })
         .await;
         assert_always!(
