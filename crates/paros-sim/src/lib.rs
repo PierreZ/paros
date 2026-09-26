@@ -52,6 +52,13 @@ use crate::lifecycle::ScriptedLifecycle;
 use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess, ScriptedOptions};
 use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP};
 
+/// An optional slot or watermark as a signed trace/detail value: `None`
+/// (the empty prefix, nothing seen yet) is `-1`, and a value too large for
+/// an `i64` saturates at `i64::MAX`.
+pub(crate) fn signed_watermark(watermark: Option<u64>) -> i64 {
+    watermark.map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX))
+}
+
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
 /// deterministically instead of swallowing requests forever.

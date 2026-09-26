@@ -159,7 +159,7 @@ impl AuditWorld {
             "chain: a snapshot jump never moves the applied index backward",
             {
                 "node" => node,
-                "from" => previous.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
+                "from" => crate::signed_watermark(previous),
                 "to" => index
             }
         );
@@ -499,7 +499,7 @@ impl AuditWorld {
             st.decided_max.is_some_and(|decided| decided >= cluster_max),
             "the applied frontier never runs ahead of the quorum-decided frontier",
             {
-                "decided_max" => st.decided_max.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+                "decided_max" => crate::signed_watermark(st.decided_max),
                 "cluster_max" => cluster_max
             }
         );
@@ -544,9 +544,9 @@ impl AuditWorld {
                 "every node converges to the cluster's chosen prefix at the end of the settle tail",
                 {
                     "node" => node,
-                    "prefix" => prefix.map_or(-1_i64, |p| i64::try_from(p).unwrap_or(i64::MAX)),
+                    "prefix" => crate::signed_watermark(prefix),
                     "cluster_max" => cluster_max,
-                    "decided_max" => st.decided_max.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                    "decided_max" => crate::signed_watermark(st.decided_max)
                 }
             );
         }
@@ -1428,7 +1428,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "client" => client,
                 "seq" => seq,
                 "acked_slot" => slot.0,
-                "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                "applied_at" => crate::signed_watermark(applied_at)
             }
         );
         if st.leader_change_ms.is_some() {
@@ -1500,8 +1500,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "quorum read: a node serves only once its prefix covers the row's watermark",
             {
                 "node" => node.0,
-                "served" => served.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
-                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX))
+                "served" => crate::signed_watermark(served.map(|s| s.0)),
+                "watermark" => crate::signed_watermark(watermark.map(|s| s.0))
             }
         );
         // Both read paths answer from one node's chosen prefix, so the
@@ -1608,7 +1608,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 {
                     "node" => node.0,
                     "recovered" => ci.0,
-                    "frontier" => frontier.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                    "frontier" => crate::signed_watermark(frontier)
                 }
             );
         }

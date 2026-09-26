@@ -551,12 +551,6 @@ async fn inspect(
     within(ctx, timeout, None, probe).await
 }
 
-/// A read-index watermark as a signed trace/detail value: `-1` is the empty
-/// applied prefix.
-fn signed_watermark(watermark: Option<u64>) -> i64 {
-    watermark.map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX))
-}
-
 #[derive(Clone)]
 struct AckedCommand {
     seq: u64,
@@ -1620,7 +1614,7 @@ impl Workload for ChainWorkload {
                         tracing::info!(
                             client_id,
                             seq_id = seq,
-                            read_index = signed_watermark(watermark),
+                            read_index = crate::signed_watermark(watermark),
                             quorum,
                             "chain_read_index_acked"
                         );
@@ -1633,8 +1627,8 @@ impl Workload for ChainWorkload {
                             watermark >= last_read_frontier,
                             "chain: a client's read-index watermarks never move backwards",
                             {
-                                "previous" => signed_watermark(last_read_frontier),
-                                "observed" => signed_watermark(watermark),
+                                "previous" => crate::signed_watermark(last_read_frontier),
+                                "observed" => crate::signed_watermark(watermark),
                             }
                         );
                         last_read_frontier = last_read_frontier.max(watermark);
@@ -1647,7 +1641,7 @@ impl Workload for ChainWorkload {
                                 "chain: a read-index ack covers the client's acked writes",
                                 {
                                     "max_acked_slot" => acked,
-                                    "observed" => signed_watermark(watermark),
+                                    "observed" => crate::signed_watermark(watermark),
                                 }
                             );
                         }

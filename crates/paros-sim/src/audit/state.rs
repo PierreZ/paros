@@ -1334,8 +1334,8 @@ impl AuditState {
             "a confirmed read index never regresses within a boot",
             {
                 "node" => node.0,
-                "confirmed" => confirmed.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
-                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                "confirmed" => crate::signed_watermark(confirmed),
+                "watermark" => crate::signed_watermark(*watermark)
             }
         );
         *watermark = (*watermark).max(confirmed);
@@ -1388,7 +1388,7 @@ impl AuditState {
                     "client" => client,
                     "seq" => seq,
                     "acked_slot" => slot,
-                    "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                    "applied_at" => crate::signed_watermark(applied_at)
                 }
             );
         }

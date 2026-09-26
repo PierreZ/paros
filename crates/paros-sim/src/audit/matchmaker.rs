@@ -1682,7 +1682,7 @@ impl MatchmakerAudit {
                 {
                     "node" => node.0,
                     "round" => watermark.round,
-                    "fence" => fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                    "fence" => crate::signed_watermark(fence.map(|s| s.0)),
                     "uncovered" => uncovered.to_string()
                 }
             );
