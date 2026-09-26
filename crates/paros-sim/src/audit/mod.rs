@@ -659,6 +659,12 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// on the tally (see [`AuditWorld::check_final_convergence`]). `from` is
     /// a node, or the proxy leader that decided the `Commit` (#142); only a
     /// node ever sends an `Accepted`.
+    ///
+    /// A `Commit` on the wire, whoever sends it, names a decided slot, and
+    /// where the durable-accept tally already knows the decision it carries
+    /// that value. Checked against `decided`, never the apply-fed `chosen`
+    /// map: a #94 re-chosen identity applies as a `Noop` everywhere while its
+    /// commit honestly carries the decided user command.
     fn observe_durable_send(&self, from: Party, msg: &Message) {
         if let Message::Accepted { ballot, slot, .. } = msg {
             let st = self.state();
@@ -697,8 +703,9 @@ impl<T: TimeProvider> NodeAudit<T> {
             // ignores it).
             let st = self.state();
             let vhash = command_hash(command);
-            let min_floor = st.cluster_min_floor();
             let decided = st.decided_vhash(slot.0);
+            // The cluster floor is an O(nodes) walk, so it is taken only on
+            // failure: `assert_always!` evaluates its detail map lazily.
             assert_always!(
                 decided.is_some(),
                 "an outgoing Commit names a slot a durable accept quorum already decided",
@@ -706,7 +713,7 @@ impl<T: TimeProvider> NodeAudit<T> {
                     "from" => from.to_string(),
                     "slot" => slot.0,
                     "round" => ballot.round,
-                    "min_floor" => min_floor
+                    "min_floor" => st.cluster_min_floor()
                 }
             );
             assert_always!(
@@ -714,19 +721,6 @@ impl<T: TimeProvider> NodeAudit<T> {
                 "an outgoing Commit carries the quorum-decided value",
                 { "from" => from.to_string(), "slot" => slot.0, "round" => ballot.round }
             );
-        }
-    }
-
-    /// A `Commit` on the wire, whoever sends it: it names a decided slot,
-    /// and where the durable-accept tally already knows the decision it
-    /// carries that value. Checked against `decided`, never the apply-fed
-    /// `chosen` map: a #94 re-chosen identity applies as a `Noop` everywhere
-    /// while its commit honestly carries the decided user command.
-    fn observe_commit_send(&self, from: Party, msg: &Message) {
-        self.observe_durable_send(from, msg);
-        if let Message::Commit { slot, command, .. } = msg {
-            let vhash = command_hash(command);
-            let st = self.state();
             if let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0) {
                 assert_always!(
                     vhash == decided_vhash,
@@ -1019,7 +1013,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // and reported before the send; a re-answer names an older record
         // that was folded when it was first written or re-read at boot). A
         // `Commit` names a decided slot and carries the decided value.
-        self.observe_commit_send(Party::Node(node), msg);
+        self.observe_durable_send(Party::Node(node), msg);
         // The Phase-2 half of P2b, checked *on the wire*, and the two claims
         // around it: *who* may propose under this ballot (authority
         // uniqueness — checked first, since a violation of it explains a
@@ -1053,7 +1047,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // proxy; the call is the shared seam). Routing Phase 2 through a
         // proxy removes no check — the proxy's later quorum check judges
         // the decision, not the order of each vote and its fsync.
-        self.observe_commit_send(Party::Node(node), msg);
+        self.observe_durable_send(Party::Node(node), msg);
         // A delegation is the leader exercising its Phase-2 authority for
         // the slot — the same two claims a colocated `Accept` makes about
         // *who* and *what*; *whom* it addresses is a proxy, which is judged
@@ -1096,7 +1090,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 st.observe_accept_send(from, to.0, *ballot);
                 st.observe_proposal(from, *ballot, slot.0, vhash);
             }
-            Message::Commit { .. } => self.observe_commit_send(from, msg),
+            Message::Commit { .. } => self.observe_durable_send(from, msg),
             _ => {}
         }
     }
