@@ -7,8 +7,8 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, Control, NodeId, ProposeResult, ReconfigureRefusal,
-    ReconfigureResult, Slot,
+    AcceptorConfig, Ballot, ColocatedNode, Control, MatchmakerId, NodeId, ProposeResult,
+    ReconfigureRefusal, ReconfigureResult, Slot, StartRefusal,
 };
 
 use crate::audit::Audit;
@@ -19,6 +19,7 @@ use crate::grpc::{
 use crate::storage::NodeStorage;
 
 use super::events::reconfigure_outcome;
+use super::handover::HandoverDriver;
 use super::snap_repair::SnapRepair;
 
 /// The application permits dropping the log prefix up to `up_to`. Only the
@@ -183,6 +184,30 @@ pub(crate) fn retire<A: Audit>(
     RetireAck {
         accepted,
         refusal: refusal.to_string(),
+    }
+}
+
+/// A matchmaker-set reconfiguration request (#125): any node may drive it.
+/// Refusable like every operator request — a plain deployment, an empty
+/// target, a matchmaker this node has no link to, or a handover already in
+/// flight; otherwise the handover starts and the refusal is empty. The loop
+/// reports the start and puts its requests on the wire.
+#[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
+pub(crate) fn reconfigure_matchmakers(
+    node: &ColocatedNode,
+    handover: &mut HandoverDriver,
+    target: &[MatchmakerId],
+    is_known: impl Fn(&MatchmakerId) -> bool,
+) -> &'static str {
+    match node.matchmaker_set() {
+        None => "no_matchmakers",
+        Some(_) if target.is_empty() => "empty",
+        Some(_) if !target.iter().all(is_known) => "unknown_matchmaker",
+        Some(current) => match handover.start(current, target.to_vec()) {
+            Ok(()) => "",
+            Err(StartRefusal::Busy) => "busy",
+            Err(StartRefusal::Empty) => "empty",
+        },
     }
 }
 

@@ -61,9 +61,9 @@ use std::sync::Arc;
 use moonpool_core::{Providers, RandomProvider, SimulationResult, TimeProvider};
 use paros_core::{
     ClientId, ClientSeq, ColocatedNode, Delegation, GcAck, MatchRefusal, MatchReply, MatchStep,
-    MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId,
-    QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
-    StartRefusal, Value,
+    MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId, NodeRole, Party,
+    ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerStep, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -163,6 +163,28 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         );
     }
 
+    /// Report a matchmaker-set handover this node just started (or is
+    /// finishing, `finishing`) from `current` toward `target`, then put its
+    /// first requests on the matchmaker wire — in that order.
+    fn start_reconfigurer(
+        &self,
+        handover: &mut HandoverDriver,
+        current: &MatchmakerSet,
+        target: &[MatchmakerId],
+        finishing: bool,
+    ) {
+        self.audit
+            .reconfigurer_started(NodeId(self.self_id), current, target);
+        tracing::info!(
+            node = self.self_id,
+            generation = current.generation.0,
+            target = target.len() as u64,
+            finishing,
+            "reconfigurer_started"
+        );
+        self.send_reconfigure(handover.take_requests());
+    }
+
     /// The two straggler paths of a handover (#125), taken by whichever node
     /// meets them in a matchmaker's refusal: a registry frozen with no
     /// successor is finished by this node (the reconfigurer's decree adopts
@@ -191,15 +213,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 if let Some(current) = node.matchmaker_set().cloned()
                     && handover.finish(&current).is_ok()
                 {
-                    audit.reconfigurer_started(NodeId(self_id), &current, current.members());
-                    tracing::info!(
-                        node = self_id,
-                        generation = current.generation.0,
-                        target = current.members().len() as u64,
-                        finishing = true,
-                        "reconfigurer_started"
-                    );
-                    self.send_reconfigure(handover.take_requests());
+                    self.start_reconfigurer(handover, &current, current.members(), true);
                 }
             }
             MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
@@ -975,29 +989,14 @@ where
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
-                let refusal = match node.matchmaker_set() {
-                    None => "no_matchmakers",
-                    Some(_) if target.is_empty() => "empty",
-                    Some(_) if !target.iter().all(|m| links.clients.contains_key(m)) => "unknown_matchmaker",
-                    Some(current) => match handover.start(current, target.clone()) {
-                        Ok(()) => "",
-                        Err(StartRefusal::Busy) => "busy",
-                        Err(StartRefusal::Empty) => "empty",
-                    },
-                };
+                let refusal = operator::reconfigure_matchmakers(&node, &mut handover, &target, |m| {
+                    links.clients.contains_key(m)
+                });
                 let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
                 if let Some(current) = node.matchmaker_set()
                     && refusal.is_empty()
                 {
-                    audit.reconfigurer_started(NodeId(self_id), current, &target);
-                    tracing::info!(
-                        node = self_id,
-                        generation,
-                        target = target.len() as u64,
-                        finishing = false,
-                        "reconfigurer_started"
-                    );
-                    loop_ctx.send_reconfigure(handover.take_requests());
+                    loop_ctx.start_reconfigurer(&mut handover, current, &target, false);
                 }
                 audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
                 tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
