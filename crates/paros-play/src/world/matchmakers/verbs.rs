@@ -13,7 +13,7 @@ use crate::narration::{NarrationKind, many, who};
 use crate::view::show_ballot;
 use crate::world::drain::Paused;
 use crate::world::matchmakers::{MatchmakerProcess, show_members, show_set, which};
-use crate::world::{World, unknown_node};
+use crate::world::{World, not_leader, unknown_node};
 
 impl World {
     /// The matchmakers this level deployed, in id order. Empty on a plain
@@ -246,19 +246,7 @@ impl World {
             ),
             Some(ReconfigureResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
-                return Err(ActionError::new(
-                    ActionErrorCode::NotLeader,
-                    match hint {
-                        Some(leader) => format!(
-                            "node {} is not the leader; a reconfiguration goes to node {}",
-                            id.0, leader.0
-                        ),
-                        None => format!(
-                            "node {} is not the leader, and it does not know who is",
-                            id.0
-                        ),
-                    },
-                ));
+                return Err(not_leader(id, hint, "a reconfiguration goes to"));
             }
             Some(ReconfigureResult::Refused(refusal)) => {
                 self.reconfigure_refused(id, refusal, &members);

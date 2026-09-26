@@ -20,7 +20,7 @@ use crate::view::show_ballot;
 use crate::world::disk::Disk;
 use crate::world::drain::Paused;
 use crate::world::history::Proposal;
-use crate::world::{Envelope, NO_CHECK_QUORUM, Party, World, name, unknown_node};
+use crate::world::{Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, unknown_node};
 
 /// What a leader answered one `Compact` request with.
 ///
@@ -518,19 +518,7 @@ impl World {
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
-                return Err(ActionError::new(
-                    ActionErrorCode::NotLeader,
-                    match hint {
-                        Some(leader) => format!(
-                            "node {} is not the leader; the client must ask node {}",
-                            id.0, leader.0
-                        ),
-                        None => format!(
-                            "node {} is not the leader, and it does not know who is",
-                            id.0
-                        ),
-                    },
-                ));
+                return Err(not_leader(id, hint, "the client must ask"));
             }
             Some(
                 ProposeResult::Accepted(slot)
@@ -747,18 +735,10 @@ impl World {
         let index = self.require_live(id)?;
         let node = self.nodes[index].as_ref().ok_or_else(|| unknown_node(id))?;
         if !node.is_leader() {
-            return Err(ActionError::new(
-                ActionErrorCode::NotLeader,
-                match node.leader() {
-                    Some(leader) => format!(
-                        "node {} is not the leader; a compaction request goes to node {}",
-                        id.0, leader.0
-                    ),
-                    None => format!(
-                        "node {} is not the leader, and it does not know who is",
-                        id.0
-                    ),
-                },
+            return Err(not_leader(
+                id,
+                node.leader(),
+                "a compaction request goes to",
             ));
         }
         let covered = self.covered_snap_point(index);

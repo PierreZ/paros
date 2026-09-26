@@ -6,10 +6,10 @@
 
 use paros_core::{NodeId, ReadIndexResult, ReadState, Slot};
 
-use crate::action::{ActionError, ActionErrorCode};
+use crate::action::ActionError;
 use crate::narration::{NarrationKind, prefix_at, say, who};
-use crate::world::World;
 use crate::world::history::PendingRead;
+use crate::world::{World, not_leader};
 
 impl World {
     /// A client asks `id` for a linearizable read.
@@ -17,7 +17,7 @@ impl World {
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
+    /// [`ActionErrorCode`](crate::action::ActionErrorCode).
     pub fn read_index(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;
@@ -40,19 +40,7 @@ impl World {
         match outcome.map(|(result, _)| result) {
             Some(ReadIndexResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
-                return Err(ActionError::new(
-                    ActionErrorCode::NotLeader,
-                    match hint {
-                        Some(leader) => format!(
-                            "node {} is not the leader; a linearizable read goes to node {}",
-                            id.0, leader.0
-                        ),
-                        None => format!(
-                            "node {} is not the leader, and it does not know who is",
-                            id.0
-                        ),
-                    },
-                ));
+                return Err(not_leader(id, hint, "a linearizable read goes to"));
             }
             Some(ReadIndexResult::Pending) | None => {}
         }
@@ -102,7 +90,7 @@ impl World {
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
+    /// [`ActionErrorCode`](crate::action::ActionErrorCode).
     pub fn quorum_read(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
         self.require_no_prompt()?;
         let index = self.require_live(id)?;

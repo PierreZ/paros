@@ -705,6 +705,24 @@ pub fn name(party: Party) -> String {
     }
 }
 
+/// The refusal a node that is not the leader gives, pointing the client at
+/// the leader it knows of through `redirect` ("a linearizable read goes to").
+fn not_leader(id: NodeId, hint: Option<NodeId>, redirect: &str) -> ActionError {
+    ActionError::new(
+        ActionErrorCode::NotLeader,
+        match hint {
+            Some(leader) => format!(
+                "node {} is not the leader; {redirect} node {}",
+                id.0, leader.0
+            ),
+            None => format!(
+                "node {} is not the leader, and it does not know who is",
+                id.0
+            ),
+        },
+    )
+}
+
 fn unknown_node(id: NodeId) -> ActionError {
     ActionError::new(
         ActionErrorCode::UnknownNode,
