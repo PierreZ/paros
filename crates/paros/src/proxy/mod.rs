@@ -32,7 +32,9 @@
 use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
-use paros_core::{AcceptorConfig, Audience, Message, NodeId, Party, ProxyId, ProxyLeader};
+use paros_core::{
+    AcceptorConfig, Audience, Ballot, Message, NodeId, Party, ProxyId, ProxyLeader, Slot,
+};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -57,6 +59,39 @@ pub struct ProxyConfig {
     pub acceptors: AcceptorConfig,
 }
 
+/// The coordinates of a delegated `Accept` the report needs once the core
+/// has consumed the message: its leader, ballot, slot and command hash.
+#[derive(Clone, Copy)]
+struct DelegatedAccept {
+    leader: NodeId,
+    ballot: Ballot,
+    slot: Slot,
+    vhash: u64,
+}
+
+impl DelegatedAccept {
+    /// Read the report's coordinates off `msg` before it is stepped; `None`
+    /// for anything but an `Accept`.
+    fn of(msg: &Message) -> Option<Self> {
+        let Message::Accept {
+            leader,
+            ballot,
+            slot,
+            command,
+            ..
+        } = msg
+        else {
+            return None;
+        };
+        Some(Self {
+            leader: *leader,
+            ballot: *ballot,
+            slot: *slot,
+            vhash: command_hash(command),
+        })
+    }
+}
+
 /// Report what one delegated `Accept` did at the proxy, read off the core's
 /// own counters before and after the step.
 fn report_delegation<A: Audit>(
@@ -64,15 +99,14 @@ fn report_delegation<A: Audit>(
     id: ProxyId,
     before: paros_core::proxy_leader::ProxyCounters,
     after: paros_core::proxy_leader::ProxyCounters,
-    msg: &Message,
+    accept: Option<DelegatedAccept>,
 ) {
-    let Message::Accept {
+    let Some(DelegatedAccept {
         leader,
         ballot,
         slot,
-        command,
-        ..
-    } = msg
+        vhash,
+    }) = accept
     else {
         return;
     };
@@ -94,8 +128,7 @@ fn report_delegation<A: Audit>(
     } else {
         DelegationOutcome::Ignored
     };
-    let vhash = command_hash(command);
-    audit.proxy_delegated(id, *leader, *slot, *ballot, vhash, outcome);
+    audit.proxy_delegated(id, leader, slot, ballot, vhash, outcome);
     tracing::info!(
         proxy = id.0,
         from = leader.0,
@@ -270,7 +303,7 @@ where
     // The sans-IO core: empty, over the bootstrap configuration. Every boot
     // is a first boot — there is nothing to recover — and it is reported so
     // an oracle can tie a rebooted proxy to the leader's re-delegations.
-    let mut proxy = ProxyLeader::new(id, config.acceptors.clone());
+    let mut proxy = ProxyLeader::new(id, config.acceptors);
     audit.proxy_booted(id, proxy.acceptors());
     tracing::info!(
         proxy = id.0,
@@ -348,9 +381,10 @@ where
                 } else {
                     tracing::info!(proxy = id.0, kind, "msg_received");
                 }
+                let accept = DelegatedAccept::of(&msg);
                 let before = proxy.counters();
-                proxy.step(msg.clone());
-                report_delegation(audit, id, before, proxy.counters(), &msg);
+                proxy.step(msg);
+                report_delegation(audit, id, before, proxy.counters(), accept);
                 drain(&mut proxy, &pool, &out, hooks, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
