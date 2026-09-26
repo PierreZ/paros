@@ -386,8 +386,9 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     }
 }
 
-/// Surface a peer message's arrival (mirror of `msg_sent`), so the demo can
-/// pair sends with receives and mark the unmatched ones as network drops.
+/// Surface a peer message's arrival (mirror of `msg_sent`), so a human reading
+/// the trace can pair sends with receives and spot the unmatched ones as
+/// network drops.
 fn trace_received(self_id: u64, msg: &Message) {
     let kind = message_kind(msg);
     match message_route(msg) {
@@ -480,8 +481,8 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// # Errors
 ///
 /// The exit is typed ([`RunError`]): [`RunError::SeamCrash`] when `hooks` fires
-/// at a durability seam (the caller recovers by re-running `run_node` with
-/// fresh storage); [`RunError::Storage`] when a [`NodeStorage`] call failed and
+/// at a durability seam (the caller recovers by re-running `run_node` against
+/// the surviving durable storage, which rebuilds the volatile state); [`RunError::Storage`] when a [`NodeStorage`] call failed and
 /// the driver took its fail-stop crash decision — production treats it as a
 /// process exit (crash-only), the sim node loop recovers through the same
 /// restart path as a seam crash; [`RunError::Refused`] when `boot` and the

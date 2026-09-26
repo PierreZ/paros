@@ -782,7 +782,8 @@ pub(crate) struct RpcService {
 }
 
 /// Construct a handler/inbox pair for one node incarnation. `client_inbox`
-/// bounds each client-facing queue (propose, both reads, compact, inspect) and
+/// bounds each client-facing queue (propose, both reads, compact, reconfigure,
+/// reconfigure-matchmakers, inspect, retire) and
 /// `peer_inbox` the peer-message queue; both must be at least 1.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn rpc_channel(

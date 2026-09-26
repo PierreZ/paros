@@ -41,10 +41,9 @@ use crate::storage::StorageError;
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};
 
 /// A stable digest of an acceptor configuration (FNV-1a over the sorted
-/// membership and the quorum system), emitted on the audit callbacks so a
-/// checker can compare configurations by equality without carrying them. The
-/// same function on both ends: the driver hashes what it persists and what it
-/// replies, an observer hashes what it sees on the wire.
+/// membership and the quorum system), emitted as a trace field so a human
+/// reading the trace can compare configurations by equality without printing
+/// them. The audit callbacks carry the configuration itself.
 #[must_use]
 pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
     // The same byte sequence, tag for tag, the digest has always folded:
