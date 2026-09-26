@@ -162,7 +162,9 @@ pub(crate) struct AppliedTransition {
     pub(crate) kind: &'static str,
 }
 
-pub(crate) fn command_hash(command: &Command) -> u64 {
+/// The chain application's hash of a command, over its own encoding
+/// (`encode_command`) — not the audit's `paros::command_hash`.
+fn app_command_hash(command: &Command) -> u64 {
     fnv1a(&encode_command(command))
 }
 
@@ -180,7 +182,7 @@ pub(crate) fn hash_text(hash: u64) -> String {
 /// Log the `Truncate { up_to }` control command a compaction request asks
 /// for, and return its hash.
 pub(crate) fn trace_truncate(up_to: u64) -> u64 {
-    let cmd_hash = command_hash(&Command::Control(Control::Truncate { up_to: Slot(up_to) }));
+    let cmd_hash = app_command_hash(&Command::Control(Control::Truncate { up_to: Slot(up_to) }));
     tracing::info!(
         cmd = %hash_text(cmd_hash),
         up_to,

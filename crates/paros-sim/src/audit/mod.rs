@@ -653,6 +653,15 @@ impl<T: TimeProvider> NodeAudit<T> {
         self.world.lock()
     }
 
+    /// Count one message leaving a node or a proxy, by kind.
+    fn count_sent(&self, msg: &Message) {
+        *self
+            .state()
+            .sent_kinds
+            .entry(message_kind(msg))
+            .or_default() += 1;
+    }
+
     /// Persist-before-send, observed at the send seam: the two replies whose
     /// meaning is a durable fact must find that fact already folded — an
     /// `Accepted` its sender's durable accept, a `Commit` a quorum decision
@@ -955,11 +964,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {
-        *self
-            .state()
-            .sent_kinds
-            .entry(message_kind(msg))
-            .or_default() += 1;
+        self.count_sent(msg);
         if let Message::Prepare { ballot, config, .. } = msg {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
             self.state().observe_prepare_send(node.0, to.0, *ballot);
@@ -1034,12 +1039,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn sent_to_proxy(&self, node: NodeId, proxy: ProxyId, msg: &Message) {
-        *self
-            .state()
-            .sent_kinds
-            .entry(message_kind(msg))
-            .or_default() += 1;
+    fn sent_to_proxy(&self, node: NodeId, _proxy: ProxyId, msg: &Message) {
+        self.count_sent(msg);
         // Persist-before-send at the accept seam, whoever the vote goes to:
         // an acceptor's `Accepted` to a proxy claims "I hold this durably"
         // exactly as one to a leader does, so the check `sent` runs is run
@@ -1064,15 +1065,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.observe_authority_use(node.0, *ballot);
             st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
         }
-        let _ = proxy;
     }
 
     fn proxy_sent(&self, proxy: ProxyId, to: NodeId, msg: &Message) {
-        *self
-            .state()
-            .sent_kinds
-            .entry(message_kind(msg))
-            .or_default() += 1;
+        self.count_sent(msg);
         let from = Party::Proxy(proxy);
         match msg {
             // The fan-out carries the leader's command to the ballot's own
@@ -1523,17 +1519,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // names the same bootstrap membership, pool and matchmaker set.
         let bootstrap = st
             .bootstrap
-            .get_or_insert_with(|| deployment.bootstrap.clone())
-            .clone();
+            .get_or_insert_with(|| deployment.bootstrap.clone());
         assert_always!(
-            bootstrap == deployment.bootstrap,
+            *bootstrap == deployment.bootstrap,
             "every node derives the same bootstrap configuration",
             { "node" => node.0, "members" => deployment.bootstrap.members().len() }
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
-        let known = st.pool.get_or_insert_with(|| pool.clone()).clone();
+        let known = st.pool.get_or_insert_with(|| pool.clone());
         assert_always!(
-            known == pool,
+            *known == pool,
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );

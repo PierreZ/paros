@@ -560,12 +560,9 @@ impl MatchmakerAudit {
     /// declared it.
     pub(super) fn note_deployment(&mut self, matchmakers: &[MatchmakerId]) {
         let ids: Vec<u64> = matchmakers.iter().map(|m| m.0).collect();
-        let known = self
-            .bootstrap_set
-            .get_or_insert_with(|| ids.clone())
-            .clone();
+        let known = self.bootstrap_set.get_or_insert_with(|| ids.clone());
         assert_always!(
-            known == ids,
+            *known == ids,
             "matchmaker: every node derives the same matchmaker set",
             { "reported" => ids.len(), "folded" => known.len() }
         );

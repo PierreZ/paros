@@ -858,14 +858,11 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let world = storage_world(ctx.state());
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_budget(1, 1);
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_pool_size(1);
+        {
+            let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.set_budget(1, 1);
+            guard.set_pool_size(1);
+        }
         let faults = StorageFaults::new(
             ctx.time().clone(),
             Duration::ZERO,
