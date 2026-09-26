@@ -25,6 +25,7 @@ use super::ready::{crash_if, report_applied, report_snap_recorded, storage_fault
 ///
 /// [`RunError::Refused`] when the claim and the marker disagree (nothing was
 /// written); [`RunError::Storage`] when formatting the store failed.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) async fn check_format_marker<S: NodeStorage, A: Audit>(
     storage: &mut S,
     boot: BootKind,

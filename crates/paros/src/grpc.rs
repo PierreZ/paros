@@ -986,6 +986,7 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
         enqueue_delivery(&self.deliver, &self.on_reject, request).await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn inspect(
         &self,
         _request: Request<InspectRequest>,
@@ -995,6 +996,7 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn retire(
         &self,
         _request: Request<RetireRequest>,

@@ -34,6 +34,7 @@ use super::snap_repair::SnapRepair;
 /// `accepted: false`; the client's retry finds the point once the quorum's
 /// custody advertisements land. Proposal-side policy only — the acceptor
 /// paths stay fully opaque.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn compact(
     node: &mut ColocatedNode,
     snap: &mut SnapRepair,
@@ -104,6 +105,7 @@ pub(crate) fn compact(
 /// non-leader redirects, a plain deployment refuses outright, and an
 /// unsettled leadership asks the client to retry. Reported here; the loop
 /// settles the batch it opened before the ack leaves.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn reconfigure<A: Audit>(
     node: &mut ColocatedNode,
     audit: &A,
@@ -153,6 +155,7 @@ pub(crate) fn reconfigure<A: Audit>(
 /// configuration naming this node was bound to — and not the operator's
 /// belief that it read a retirable list. Only reads the core: an accepted
 /// retirement takes effect on the loop's next tick.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn retire<A: Audit>(
     node: &ColocatedNode,
     audit: &A,
@@ -185,6 +188,7 @@ pub(crate) fn retire<A: Audit>(
 
 /// A pure read of the core and the store: what an operator (or a client's
 /// composer) sees of this node.
+#[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
 pub(crate) async fn inspect<S: NodeStorage>(node: &ColocatedNode, storage: &S) -> InspectReply {
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();

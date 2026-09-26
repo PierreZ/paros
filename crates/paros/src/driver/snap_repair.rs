@@ -75,6 +75,7 @@ impl SnapRepair {
 ///
 /// A chunk install's typed exit ([`RunError`]): its crash seams or a storage
 /// fault.
+#[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 pub(crate) async fn route_snap_message<S, H, A>(
     node: &mut ColocatedNode,
     storage: &mut S,

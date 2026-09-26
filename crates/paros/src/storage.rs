@@ -660,6 +660,7 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn snapshot(&self) -> Vec<u8> {
         // The default in-memory storage has no application state machine, so its
         // opaque "snapshot" is a deterministic marker of the chosen prefix. A real
@@ -717,6 +718,7 @@ impl NodeStorage for MemStorage {
             .map(|(_, blob)| snap_chunk_count(blob.len()))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(at = at.0, chunk))]
     async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
         let (point, blob) = self.snap_point.as_ref()?;
         if *point != at {
