@@ -777,7 +777,7 @@ allocates `next_slot`, and a restart recomputes `next_slot` the same way — and
 prefix would freeze one below it cluster-wide and forever, with reads fenced above it and
 commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
 quorum intersection: a value already chosen there would have been reported by some Promise. The core
-surfaces the failure through `ColocatedNode::chosen_gap()` (the `Ready` handshake only ever hands out the
+surfaces the failure through `node.replica().chosen_gap()` (the `Ready` handshake only ever hands out the
 *contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver reports
 each tick through `Audit::chosen_gap` and `paros_sim::audit` asserts against at quiescence.
 
