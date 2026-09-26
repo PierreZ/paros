@@ -28,7 +28,7 @@ const SIM_BINARIES: &[SimBinary] = &[SimBinary {
     name: "sim-paros-chain",
     // The shipped library is the system under test: the sans-IO state machine plus
     // the provider-generic driver. NOT `paros_sim` — that is the test harness
-    // (oracles, workload, viz serde), and instrumenting it would inflate the edge
+    // (oracles, workload, fault world), and instrumenting it would inflate the edge
     // denominator and misdirect coverage-guided exploration onto harness code.
     sancov_crates: "paros_core,paros",
 }];

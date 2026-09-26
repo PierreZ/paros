@@ -544,9 +544,10 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
         .run()
 }
 
-/// Where the departed-straggler case publishes whether its run genuinely
-/// reached its injection (see [`departed_straggler_case`]). Shared by the
-/// workload factory's clones.
+/// Where a scripted corpus case publishes whether its run genuinely judged
+/// what it was written for — the E1 mask corpus its analytic outcome (see
+/// [`corpus_mask_case`]), the departed-straggler case its injection (see
+/// [`departed_straggler_case`]). Shared by the workload factory's clones.
 pub(crate) type NonVacuousSink = Arc<Mutex<bool>>;
 
 /// Run the departed-straggler case (see `crate::corpus`, #124): a four-node
@@ -576,9 +577,9 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
     };
     let report = scripted_builder(corpus::DEPARTED_POOL, 1, options)
         .workload_factory(move || {
-            Box::new(corpus::DepartedStragglerWorkload::new(Some(
+            Box::new(corpus::DepartedStragglerWorkload::new(
                 workload_sink.clone(),
-            )))
+            ))
         })
         .set_iterations(1)
         .set_debug_seeds(vec![seed])

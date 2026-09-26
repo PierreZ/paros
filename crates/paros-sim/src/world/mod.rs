@@ -117,7 +117,7 @@ pub(super) struct NodeDisk {
     /// the latest point is retained.
     snap_point: Option<(u64, ChainState)>,
     /// Per-chunk health of the retained point's blob (fixed
-    /// [`SNAP_CHUNK_BYTES`] chunking of the encoded state).
+    /// [`SNAP_CHUNK_BYTES`](paros::SNAP_CHUNK_BYTES) chunking of the encoded state).
     snap_chunk_health: Vec<RecordHealth>,
     /// The format marker (#147): written by the driver on the identity's
     /// first boot, never cleared — gone only with the whole disk (a wipe).

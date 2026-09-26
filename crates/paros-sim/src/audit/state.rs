@@ -200,7 +200,7 @@ pub(super) struct AuditState {
     /// reported — the monotonicity watermark for those reports alone (the
     /// folded [`Floor`] also absorbs installs and ground-truth flushes, which
     /// can legally outrun a reordered stale truncate; see
-    /// [`NodeAudit::truncated`]).
+    /// [`NodeAudit::truncated`](paros::Audit::truncated)).
     pub(super) truncate_watermark: BTreeMap<u64, u64>,
 
     // --- applied prefix -----------------------------------------------------
@@ -301,7 +301,7 @@ pub(super) struct AuditState {
     pub(super) crashed_before_sync: bool,
     pub(super) crashed_after_sync: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
-    /// ([`Audit::storage_fault`] with `Io`/`FsyncFailed`).
+    /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,
     pub(super) storage_fault_crashed: bool,
     /// Typed Stage-7 corruption/metadata crash decisions folded in.
@@ -347,10 +347,10 @@ pub(super) struct AuditState {
     /// boot must not keep explaining gaps forever.
     pub(super) reported_faulty: BTreeMap<u64, BTreeSet<u64>>,
     /// Faulty reports staged since the node's last boot report: the scan
-    /// speaks *before* [`Audit::recovered`] fires, so the swap-in happens
+    /// speaks *before* [`Audit::recovered`](paros::Audit::recovered) fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     pub(super) faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
-    /// Repair progress observed (from [`Audit::repair_progress`]): in-place
+    /// Repair progress observed (from [`Audit::repair_progress`](paros::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.
     pub(super) repaired_seen: bool,
@@ -1255,7 +1255,7 @@ impl AuditState {
     /// cluster can actually observe (a proposal on the wire), never against a
     /// node's own `role` flag. Two nodes exercising one ballot for overlapping
     /// slots is exactly how two different values get chosen for one slot, and
-    /// the sibling check in [`NodeAudit::sent`] ("one ballot proposes at most
+    /// the sibling check in [`NodeAudit::sent`](paros::Audit::sent) ("one ballot proposes at most
     /// one command for a slot") is the consequence this exists to prevent
     /// upstream of.
     pub(super) fn observe_authority_use(&mut self, node: u64, ballot: Ballot) {

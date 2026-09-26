@@ -33,7 +33,7 @@ const P_SNAP_CHUNK_ROT: f64 = 0.05;
 /// budget (or [`StorageWorld::may_park`]'s dead-node budget for the families
 /// that crash), which is what keeps a live quorum readable. Density buys a
 /// denser fault *window*, never a longer one: the sites are rolled only while
-/// [`StorageFaults::active`] holds.
+/// [`StorageFaults::active`](crate::world::storage::StorageFaults::active) holds.
 #[derive(Clone, Copy)]
 struct RotRates {
     entry: f64,

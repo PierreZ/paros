@@ -118,8 +118,9 @@ fn sort_ips(ips: &mut Vec<String>) {
 
 /// The seed's deployment, read off the topology's process groups. Every
 /// builder registers its nodes as the [`ACCEPTOR_GROUP`] — a process is named
-/// by [`crate::process::NodeProcess::name`], corpus and main campaign alike —
-/// so a topology with no matchmaker group is simply a deployment whose
+/// by [`NodeProcess`](crate::process::NodeProcess)'s
+/// [`Process::name`](moonpool_sim::Process::name), corpus and main campaign
+/// alike — so a topology with no matchmaker group is simply a deployment whose
 /// matchmaker list is empty: the plain one.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
