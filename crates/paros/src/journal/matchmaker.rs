@@ -13,12 +13,14 @@
 //! replaced. There is no repair in place for a registry — a matchmaker
 //! whose durable state is unusable is *replaced* through a matchmaker-set
 //! reconfiguration (#125) — so detection is the whole job. A damaged record
-//! in the **last** append is reported as
-//! [`Undecidable`](crate::CorruptionVerdict::Undecidable): a crash between
+//! the journal reports in its **last append batch**
+//! ([`Recovery::ambiguous_batch`](moonpool_journal::Recovery::ambiguous_batch))
+//! is [`Undecidable`](crate::CorruptionVerdict::Undecidable): a crash between
 //! the identifier write and the sync leaves exactly that shape, and so does
-//! rot, and no local algorithm tells them apart (CTRL Theorem A.1); anywhere
-//! earlier it is [`Corrupted`](crate::CorruptionVerdict::Corrupted), because
-//! a later append proves the sync returned.
+//! rot, and no local algorithm tells them apart (CTRL Theorem A.1); one the
+//! journal reports as corrupt is
+//! [`Corrupted`](crate::CorruptionVerdict::Corrupted), because a later sync
+//! covers it.
 
 use std::collections::BTreeMap;
 
@@ -27,7 +29,7 @@ use moonpool_journal::{EntryId, Journal, Record, Tag};
 use paros_core::{Ballot, MatchmakerHardState, NodeId, Registration, RegistryStorage};
 use serde::{Deserialize, Serialize};
 
-use super::frame::{Framed, Kind, Scanned, batch_of, encode, epoch, tag, words};
+use super::frame::{Framed, Kind, Scanned, encode, epoch, tag, words};
 use super::plan::plan;
 use super::{GENESIS, JournalStoreConfig, append_error, open_error};
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
@@ -151,7 +153,6 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     journal: Option<Journal<P>>,
     image: MatchImage,
     staged: Vec<MatchRecord>,
-    batch: u64,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
@@ -182,7 +183,6 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             journal: None,
             image: MatchImage::default(),
             staged: Vec::new(),
-            batch: 0,
         }
     }
 
@@ -235,7 +235,6 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 .map_err(|e| append_error(&e))?;
             scanned.truncate(cut);
         }
-        let last_batch = scanned.iter().map(|entry| batch_of(entry.id.epoch)).max();
         let mut image = MatchImage::default();
         let mut pending: Vec<Pending> = Vec::new();
         let mut skip = plan.skip.iter().peekable();
@@ -281,7 +280,13 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         let watermark = image.hard_state.gc_watermark;
         pending.retain(|p| !matches!(p.record, StorageRecord::Registration(b) if b < watermark));
         if let Some(first) = pending.first() {
-            let verdict = if Some(batch_of(first.id.epoch)) == last_batch {
+            // The journal says which damage sits in the last append batch:
+            // nothing after it proves its sync returned.
+            let ambiguous = recovery
+                .ambiguous_batch
+                .iter()
+                .any(|id| id.index == first.id.index);
+            let verdict = if ambiguous {
                 CorruptionVerdict::Undecidable
             } else {
                 CorruptionVerdict::Corrupted
@@ -293,7 +298,6 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 verdict,
             });
         }
-        self.batch = plan.last_batch + 1;
         self.image = image;
         self.staged.clear();
         self.journal = Some(journal);
@@ -301,21 +305,19 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     }
 
     async fn append(&mut self, records: &[MatchRecord]) -> Result<(), StorageError> {
-        let batch = self.batch;
         let journal = self.journal.as_mut().expect("opened before appending");
         let payloads: Vec<Vec<u8>> = records.iter().map(encode).collect();
         let framed: Vec<Record<'_>> = records
             .iter()
             .zip(&payloads)
             .map(|(record, payload)| {
-                Record::new(epoch(record.kind(), batch), payload).with_tag(record.tag())
+                Record::new(epoch(record.kind()), payload).with_tag(record.tag())
             })
             .collect();
         journal
             .append(&framed)
             .await
             .map_err(|e| append_error(&e))?;
-        self.batch += 1;
         Ok(())
     }
 

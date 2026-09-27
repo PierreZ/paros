@@ -409,6 +409,28 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
                 }
                 other => panic!("a damaged live registration must crash: {other:?}"),
             }
+            // Damage in the last append batch is the undecidable row: a
+            // crash before its sync leaves the same shape.
+            let mut last = open_registry(provider.clone(), "m3").await.expect("open");
+            last.register(ballot(1), &belief(0xC100))
+                .await
+                .expect("register");
+            last.sync().await.expect("sync");
+            last.register(ballot(2), &belief(0xD200))
+                .await
+                .expect("register");
+            last.sync().await.expect("sync");
+            drop(last);
+            rot_entry(&provider, "m3", 2).await;
+            match open_registry(provider.clone(), "m3").await {
+                Err(StorageError::Corruption {
+                    record, verdict, ..
+                }) => {
+                    assert_eq!(record, StorageRecord::Registration(ballot(2)));
+                    assert_eq!(verdict, CorruptionVerdict::Undecidable);
+                }
+                other => panic!("a damaged last registration must crash: {other:?}"),
+            }
             // Collected below the watermark, the same damage is harmless.
             let mut other = open_registry(provider.clone(), "m2").await.expect("open");
             other

@@ -31,18 +31,20 @@
 //! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
 //! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
 //!
-//! Every entry's epoch is `kind << 56 | batch`, where `batch` counts the
-//! appends: the far identifier alone says what an entry *was*, and which
-//! batch — the last one is the only one a crash can have left unsynced.
+//! Every entry's epoch is its record kind, so the far identifier alone says
+//! what a damaged entry *was*; the journal itself tracks append batches and
+//! reports damage in the last one apart
+//! ([`Recovery::ambiguous_batch`](moonpool_journal::Recovery::ambiguous_batch)).
 //!
 //! # Corruption: what the journal reports, what paros does with it
 //!
 //! The journal tells a torn tail (no identifier: never acknowledged, cut)
 //! from a damaged entry whose identifier survived, and reports the latter
 //! with its identity. The stores run the journal with
-//! [`AmbiguousTail::Keep`]: a damaged
-//! last entry stays in the log, marked corrupt, so its identity survives the
-//! next crash too — the CTRL undecidable row is the replication layer's to
+//! [`AmbiguousTail::Keep`]: the damaged
+//! entries of the last append batch — which a crash before the sync leaves
+//! exactly as rot would — stay in the log, marked corrupt, so their identity
+//! survives the next crash too — the CTRL undecidable row is the replication layer's to
 //! resolve, never a local truncation. What a damaged entry means is decided
 //! by its kind (`node_image` and `matchmaker` hold the per-kind table):
 //!

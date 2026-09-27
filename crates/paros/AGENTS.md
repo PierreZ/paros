@@ -75,7 +75,7 @@ the driver, never in a sim-only path.
 - `journal/` the durable stores on `moonpool-journal` (`pub mod journal`):
   `JournalStorage` (`node.rs`, `NodeStorage`), `JournalMatchmakerStorage`
   (`matchmaker.rs`), `JournalStoreConfig` — a log of write operations folded
-  at boot. `frame.rs` one record ↔ one entry (epoch = kind + append number,
+  at boot. `frame.rs` one record ↔ one entry (epoch = the record kind,
   tag = identity: `(slot, ballot)`, `(point, chunk)`, a ballot; postcard
   payload behind a version byte) · `plan.rs` where a boot's fold starts
   (checkpoint brackets: cut an open one, start at the newest intact one,

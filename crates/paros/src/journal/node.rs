@@ -65,8 +65,6 @@ pub struct JournalStorage<P: StorageProvider> {
     pub(super) image: NodeImage,
     /// Records applied to the image and not yet appended.
     staged: Vec<NodeRecord>,
-    /// The next append number.
-    batch: u64,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
@@ -99,7 +97,6 @@ impl<P: StorageProvider> JournalStorage<P> {
             meta_dirty: false,
             image: NodeImage::default(),
             staged: Vec::new(),
-            batch: 0,
         }
     }
 
@@ -194,7 +191,6 @@ impl<P: StorageProvider> JournalStorage<P> {
                 "faulty_entry_reported"
             );
         }
-        self.batch = plan.last_batch + 1;
         self.image = image;
         self.staged.clear();
         self.meta_dirty = false;
@@ -209,21 +205,19 @@ impl<P: StorageProvider> JournalStorage<P> {
     }
 
     async fn append(&mut self, records: &[NodeRecord]) -> Result<(), StorageError> {
-        let batch = self.batch;
         let journal = self.journal.as_mut().expect("opened before appending");
         let payloads: Vec<Vec<u8>> = records.iter().map(encode).collect();
         let framed: Vec<Record<'_>> = records
             .iter()
             .zip(&payloads)
             .map(|(record, payload)| {
-                Record::new(epoch(record.kind(), batch), payload).with_tag(record.tag())
+                Record::new(epoch(record.kind()), payload).with_tag(record.tag())
             })
             .collect();
         journal
             .append(&framed)
             .await
             .map_err(|e| append_error(&e))?;
-        self.batch += 1;
         Ok(())
     }
 
@@ -259,8 +253,12 @@ fn report(node: u64, recovery: &Recovery) {
     if recovery.torn_tail {
         tracing::info!(node, "journal_torn_tail_discarded");
     }
-    if let Some(id) = &recovery.ambiguous_tail {
-        tracing::warn!(node, index = id.index, "journal_ambiguous_tail_kept");
+    if !recovery.ambiguous_batch.is_empty() {
+        tracing::warn!(
+            node,
+            entries = recovery.ambiguous_batch.len() as u64,
+            "journal_ambiguous_batch_kept"
+        );
     }
     if recovery.slots_rewritten + recovery.headers_repaired > 0 || recovery.meta_repaired {
         tracing::info!(

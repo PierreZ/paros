@@ -1,5 +1,5 @@
-//! How one store record becomes one journal entry: the epoch (record kind
-//! and batch number), the tag (the record's identity, kept in the journal's
+//! How one store record becomes one journal entry: the epoch (the record's
+//! kind), the tag (the record's identity, kept in the journal's
 //! far identifier), and the payload (a version byte and the record's
 //! `postcard` encoding).
 //!
@@ -19,11 +19,7 @@ use serde::de::DeserializeOwned;
 /// not decoded (it reads as damaged).
 const FORMAT_VERSION: u8 = 1;
 
-/// The epoch's low bits count appends: one number per batch.
-const BATCH_BITS: u32 = 56;
-const BATCH_MASK: u64 = (1 << BATCH_BITS) - 1;
-
-/// What an entry holds, as its epoch's top byte records it.
+/// What an entry holds, as its epoch records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
     /// An accepted (or learned) record: `(slot, ballot, command)`.
@@ -78,19 +74,15 @@ impl Kind {
     }
 }
 
-/// The epoch an entry of `kind` gets in append number `batch`.
-pub(crate) fn epoch(kind: Kind, batch: u64) -> u64 {
-    ((kind as u64) << BATCH_BITS) | (batch & BATCH_MASK)
+/// The epoch an entry of `kind` gets: the kind itself, so the journal's
+/// far identifier alone says what a damaged entry was.
+pub(crate) fn epoch(kind: Kind) -> u64 {
+    kind as u64
 }
 
 /// The kind an epoch records, if it is one this store writes.
 pub(crate) fn kind_of(epoch: u64) -> Option<Kind> {
-    Kind::from_byte(u8::try_from(epoch >> BATCH_BITS).ok()?)
-}
-
-/// The append number an epoch records.
-pub(crate) fn batch_of(epoch: u64) -> u64 {
-    epoch & BATCH_MASK
+    Kind::from_byte(u8::try_from(epoch).ok()?)
 }
 
 /// A tag of up to three little-endian words.
@@ -193,10 +185,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn epochs_carry_the_kind_and_the_batch() {
-        let e = epoch(Kind::SnapChunk, 42);
-        assert_eq!(kind_of(e), Some(Kind::SnapChunk));
-        assert_eq!(batch_of(e), 42);
+    fn epochs_carry_the_kind() {
+        assert_eq!(kind_of(epoch(Kind::SnapChunk)), Some(Kind::SnapChunk));
+        assert_eq!(kind_of(1 << 56), None, "a foreign epoch is no kind");
         assert_eq!(kind_of(0), None, "an all-zero epoch is no kind");
     }
 

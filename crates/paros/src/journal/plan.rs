@@ -26,7 +26,7 @@
 
 use std::ops::Range;
 
-use super::frame::{Kind, Scanned, batch_of};
+use super::frame::{Kind, Scanned};
 
 /// Where to start and what to skip.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,18 +43,11 @@ pub(crate) struct Plan {
     pub skip: Vec<Range<usize>>,
     /// The fold starts nowhere: the prefix is gone and no bracket survives.
     pub lost: bool,
-    /// The last append number any entry carries (0 for an empty log).
-    pub last_batch: u64,
 }
 
 /// Plan a fold over `scanned` (the live log in order). `at_genesis` says
 /// the log still begins at the first index it ever had.
 pub(crate) fn plan<R>(scanned: &[Scanned<R>], at_genesis: bool) -> Plan {
-    let last_batch = scanned
-        .iter()
-        .map(|entry| batch_of(entry.id.epoch))
-        .max()
-        .unwrap_or(0);
     let mut brackets: Vec<Range<usize>> = Vec::new();
     let mut open: Option<(usize, Kind)> = None;
     for (at, entry) in scanned.iter().enumerate() {
@@ -98,7 +91,6 @@ pub(crate) fn plan<R>(scanned: &[Scanned<R>], at_genesis: bool) -> Plan {
         strict,
         skip,
         lost,
-        last_batch,
     }
 }
 
@@ -109,12 +101,12 @@ mod tests {
     use super::*;
     use crate::journal::frame::epoch;
 
-    /// A scanned entry of `kind` in append `batch`, intact or damaged.
-    fn entry(index: u64, kind: Kind, batch: u64, intact: bool) -> Scanned<()> {
+    /// A scanned entry of `kind`, intact or damaged.
+    fn entry(index: u64, kind: Kind, intact: bool) -> Scanned<()> {
         Scanned {
             id: EntryId {
                 index,
-                epoch: epoch(kind, batch),
+                epoch: epoch(kind),
                 tag: [0; moonpool_journal::TAG_SIZE],
             },
             kind: Some(kind),
@@ -126,7 +118,7 @@ mod tests {
         shape
             .iter()
             .enumerate()
-            .map(|(at, (kind, intact))| entry(at as u64 + 1, *kind, at as u64, *intact))
+            .map(|(at, (kind, intact))| entry(at as u64 + 1, *kind, *intact))
             .collect()
     }
 
@@ -151,7 +143,6 @@ mod tests {
         assert_eq!((p.start, p.strict, p.lost), (1, None, false));
         assert_eq!(p.skip, vec![5..8], "the damaged newer copy is skipped");
         assert_eq!(p.cut_at, None);
-        assert_eq!(p.last_batch, 8);
     }
 
     #[test]

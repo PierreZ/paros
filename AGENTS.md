@@ -543,10 +543,11 @@ production and over `SimStorageProvider` under test ("test the code you ship", a
 disk). This reverses the earlier "paros does not use moonpool's storage layer" line, at the
 user's request: the journal is the high-level engine that line was waiting for, and the reusable
 gaps it had (a caller identity wider than one epoch, a kept ambiguous tail, batched replay,
-metadata self-repair) went upstream (PierreZ/moonpool#284) instead of being rebuilt here. The
+metadata self-repair, the whole last batch reported as ambiguous) went upstream
+(PierreZ/moonpool#284, #285) instead of being rebuilt here. The
 mapping is a **log of write operations folded at boot**, never the state itself (an acceptor
 re-accepts a slot while later slots stay; the journal's index is dense): each staged write is
-one entry whose far identifier carries its kind, its append number and its identity tag
+one entry whose far identifier carries its kind (as the epoch) and its identity tag
 (`(slot, ballot)` for a vote, `(point, chunk)` for a snapshot chunk, a ballot for a
 registration); the promise and the format marker live in the journal's two-copy metadata,
 flushed before the log so a record never outruns the promise covering it; periodic bracketed
