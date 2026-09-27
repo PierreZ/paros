@@ -581,6 +581,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "replica" => replica.0 }
         );
         st.replicas.insert(replica.0);
+        // A replica's read frontier is per boot, as a node's.
+        st.read_watermark.remove(&replica.0);
     }
 
     fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {
@@ -893,6 +895,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         let mut st = self.state();
         st.any_ack_checked = true;
+        // Decision 1 of #144: the node asked acks, and the slot's reply
+        // owner — a replica, a different process by construction — is noted
+        // so the gate can prove it applied what it would have answered.
+        if let Some(owner) = paros::ReplicaId::of(slot, st.replica_count) {
+            let owner = crate::roles::replica_node_id(owner).0;
+            if owner != node.0 {
+                let first = st.acked_by_other.entry(owner).or_insert(slot.0);
+                *first = (*first).min(slot.0);
+            }
+        }
         // A committed ack is a claim about a specific applied command: on both
         // ack paths (ack-on-commit and the dedup fast path) the apply of this
         // `(client, seq)` was folded before the ack fired — on this node, or,
@@ -993,6 +1005,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.quorum_read_past_opened |= watermark > opened;
         st.quorum_read_after_leader_change |= st.leader_change_ms.is_some_and(|t| now > t);
         st.quorum_read_on_row |= row.is_some();
+        // §3.4's own shape (#144): the read answered from a replica's state.
+        st.quorum_read_on_replica |= st.replicas.contains(&node.0);
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -1024,6 +1038,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );
+        st.replica_count = deployment.replica_count;
         st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.matchmaker.node_booted(node);

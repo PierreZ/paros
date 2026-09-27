@@ -71,6 +71,9 @@ pub struct Deployment {
     /// Every matchmaker a matchmaker-set reconfiguration may draw from
     /// (`Config::matchmaker_pool()`).
     pub matchmaker_pool: Vec<MatchmakerId>,
+    /// How many replicas the deployment runs (`Config::replica_count`, #144):
+    /// the modulus of `Config::reply_owner`, zero on the plain deployment.
+    pub replica_count: usize,
 }
 
 /// One `MatchB` page as it leaves a matchmaker: where it starts, the

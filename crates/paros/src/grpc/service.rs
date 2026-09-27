@@ -253,15 +253,19 @@ pub(crate) struct LaneService {
     deliver: mpsc::Sender<Message>,
     /// The replica's `Inspect` queue; `None` on a proxy leader.
     inspect: Option<mpsc::Sender<Call<InspectRequest, InspectReply>>>,
+    /// The replica's public `QuorumRead` queue (§3.4: a client reads from a
+    /// replica); `None` on a proxy leader.
+    quorum_read: Option<mpsc::Sender<Call<Read, ReadAck>>>,
     on_reject: OnReject,
     role: LaneRole,
 }
 
 /// The loop-side queues of a [`LaneService`]: the lane, and — on a replica —
-/// the `Inspect` calls.
+/// the `Inspect` and the `QuorumRead` calls.
 pub(crate) struct LaneInbox {
     pub(crate) deliver: mpsc::Receiver<Message>,
     pub(crate) inspect: Option<mpsc::Receiver<Call<InspectRequest, InspectReply>>>,
+    pub(crate) quorum_read: Option<mpsc::Receiver<Call<Read, ReadAck>>>,
 }
 
 /// Construct a lane role's handler/inbox pair; `peer_inbox` bounds the lane
@@ -273,25 +277,85 @@ pub(crate) fn lane_channel(
     on_reject: OnReject,
 ) -> (LaneService, LaneInbox) {
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
-    let (inspect_tx, inspect_rx) = match role {
-        LaneRole::Proxy => (None, None),
-        LaneRole::Replica => {
-            let (tx, rx) = mpsc::channel(peer_inbox);
-            (Some(tx), Some(rx))
-        }
-    };
+    let (inspect_tx, inspect_rx) = replica_queue(role, peer_inbox);
+    let (quorum_read_tx, quorum_read_rx) = replica_queue(role, peer_inbox);
     (
         LaneService {
             deliver: deliver_tx,
             inspect: inspect_tx,
+            quorum_read: quorum_read_tx,
             on_reject,
             role,
         },
         LaneInbox {
             deliver: deliver_rx,
             inspect: inspect_rx,
+            quorum_read: quorum_read_rx,
         },
     )
+}
+
+/// A queue only a replica's lane carries.
+type ReplicaQueue<T> = (Option<mpsc::Sender<T>>, Option<mpsc::Receiver<T>>);
+
+fn replica_queue<T>(role: LaneRole, capacity: usize) -> ReplicaQueue<T> {
+    match role {
+        LaneRole::Proxy => (None, None),
+        LaneRole::Replica => {
+            let (tx, rx) = mpsc::channel(capacity);
+            (Some(tx), Some(rx))
+        }
+    }
+}
+
+/// A replica's public face (§3.4): it serves the **leaderless read** from its
+/// own applied state — the paper's shape, where a client reads from a
+/// replica — and nothing a node's client asks of a leader. A proxy leader
+/// serves no client call at all.
+#[tonic::async_trait]
+impl public::paros_server::Paros for LaneService {
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn propose(&self, _request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
+        Err(Status::unimplemented("propose to a node of the pool"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn read(&self, _request: Request<Read>) -> Result<Response<ReadAck>, Status> {
+        Err(Status::unimplemented("a read-index read is the leader's"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn quorum_read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
+        match &self.quorum_read {
+            Some(quorum_read) => dispatch(quorum_read, request).await,
+            None => Err(Status::unimplemented("a proxy leader serves no read")),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn compact(&self, _request: Request<Compact>) -> Result<Response<CompactAck>, Status> {
+        Err(Status::unimplemented("compaction is asked of the leader"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure(
+        &self,
+        _request: Request<Reconfigure>,
+    ) -> Result<Response<ReconfigureAck>, Status> {
+        Err(Status::unimplemented(
+            "reconfiguration is asked of the leader",
+        ))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure_matchmakers(
+        &self,
+        _request: Request<ReconfigureMatchmakers>,
+    ) -> Result<Response<ReconfigureMatchmakersAck>, Status> {
+        Err(Status::unimplemented(
+            "a matchmaker handover is driven by a node",
+        ))
+    }
 }
 
 #[tonic::async_trait]

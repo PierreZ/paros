@@ -34,7 +34,10 @@
 use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationError, SimulationResult, TimeProvider};
-use paros_core::{Ballot, Command, Control, MustSync, NodeId, Party, ReplicaNode, Slot, WriteOp};
+use paros_core::{
+    Ballot, Command, Control, MustSync, NodeId, Party, QuorumSystem, ReadState, ReplicaNode, Slot,
+    WriteOp,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
@@ -42,15 +45,17 @@ use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{GrpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
 use crate::driver::ready::{
-    crash_if, persist_writes, report_applied, report_snap_recorded, storage_fault_crash,
+    ParkedRead, ReadPath, crash_if, persist_writes, report_applied, report_snap_recorded,
+    storage_fault_crash,
 };
+use crate::driver::reply::answer;
 use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::grpc::{
-    InspectReply, LaneRole, ParosInternalClient, ParosInternalServer, lane_channel,
-    quorum_system_to_proto,
+    InspectReply, LaneRole, ParosInternalClient, ParosInternalServer, ParosServer, ReadAck,
+    ReplySender, lane_channel, quorum_system_to_proto,
 };
-use crate::hooks::{DriverHooks, Seam};
+use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::NodeStorage;
 
 /// Walk the retained chosen prefix back through the application on a
@@ -152,7 +157,9 @@ async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
 /// prefix to the application and fsync it (the `AfterApplyBeforeSync` seam
 /// between), and only then make a decided compaction floor durable — a
 /// floor never outruns the application state covering the slots it drops.
-/// Then release the next page of a deferred walk.
+/// Then release the next page of a deferred walk, and hand back the quorum
+/// reads this batch confirmed: answered only now, after the apply that
+/// covers them (the node's order, `drain_ready` step 3b).
 #[tracing::instrument(level = "trace", skip_all, fields(replica = self_id))]
 async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
     replica: &mut ReplicaNode,
@@ -161,7 +168,7 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
     self_id: u64,
     hooks: &H,
     audit: &A,
-) -> Result<(), RunError> {
+) -> Result<Vec<ReadState>, RunError> {
     let ready = replica.ready();
     let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
         .writes()
@@ -177,6 +184,7 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
         })
         .collect();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let read_states: Vec<ReadState> = ready.read_states().to_vec();
     ready.advance();
 
     // A replica holds no promise; the ballot the persist report is handed
@@ -251,7 +259,137 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
         .await?;
     }
     replica.advance_recovery();
-    Ok(())
+    Ok(read_states)
+}
+
+/// The replica's held client reads, keyed by the core's `ctx` token.
+struct ParkedReads {
+    reads: BTreeMap<u64, ParkedRead>,
+    next_ctx: u64,
+}
+
+impl ParkedReads {
+    /// A leaderless read served from this replica's own state (§3.4): the
+    /// core asks a row of the configuration it believes in force, and the
+    /// reply is parked until the row answered whole and this replica applied
+    /// the maximum watermark. The row override is the node's hook, asked only
+    /// under a grid, from the loop.
+    fn open<H: DriverHooks>(
+        &mut self,
+        replica: &mut ReplicaNode,
+        seq: u64,
+        reply: ReplySender<ReadAck>,
+        ticks: u64,
+        hooks: &H,
+    ) {
+        let ctx = self.next_ctx;
+        self.next_ctx += 1;
+        let row = match replica.acceptors().quorum_system() {
+            QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
+            _ => None,
+        };
+        let row = replica.acceptors().read_row(ctx, row);
+        let opened = replica.replica().chosen_index();
+        replica.quorum_read_in(ctx, row);
+        let path = ReadPath::Quorum { row, opened };
+        self.reads.insert(
+            ctx,
+            ParkedRead {
+                seq,
+                parked_at: ticks,
+                path,
+                reply,
+            },
+        );
+    }
+
+    /// Answer every read the core confirmed and this replica's applied
+    /// prefix covers — the state the client reads is this replica's own —
+    /// reporting each to the audit as the node driver does.
+    fn answer_served<H: DriverHooks, A: Audit>(
+        &mut self,
+        served: &[ReadState],
+        replica: &ReplicaNode,
+        self_id: u64,
+        hooks: &H,
+        audit: &A,
+    ) {
+        for state in served {
+            let Some(parked) = self.reads.remove(&state.ctx) else {
+                continue;
+            };
+            let read_index = replica.replica().chosen_index();
+            if let ReadPath::Quorum { row, opened } = parked.path {
+                audit.quorum_read_served(
+                    NodeId(self_id),
+                    row,
+                    state.index,
+                    read_index,
+                    opened,
+                    false,
+                );
+            }
+            tracing::info!(
+                replica = self_id,
+                ctx = state.ctx,
+                watermark = state
+                    .index
+                    .map_or(-1, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                "quorum_read_served"
+            );
+            answer(
+                hooks,
+                audit,
+                NodeId(self_id),
+                Reply::Read,
+                parked.reply,
+                ReadAck {
+                    seq: parked.seq,
+                    leader: replica.leader().map(|n| n.0),
+                    committed: true,
+                    read_index: read_index.map(|s| s.0),
+                },
+            );
+        }
+    }
+
+    /// Answer a retry redirect to every read whose confirmation is overdue
+    /// (a row that never answered whole, a watermark this replica has not
+    /// reached): the client records it ambiguous and asks again.
+    fn expire<H: DriverHooks, A: Audit>(
+        &mut self,
+        ticks: u64,
+        retry_ticks: u64,
+        replica: &ReplicaNode,
+        self_id: u64,
+        hooks: &H,
+        audit: &A,
+    ) {
+        let overdue: Vec<u64> = self
+            .reads
+            .iter()
+            .filter(|(_, parked)| ticks.saturating_sub(parked.parked_at) > retry_ticks)
+            .map(|(ctx, _)| *ctx)
+            .collect();
+        for ctx in overdue {
+            if let Some(parked) = self.reads.remove(&ctx) {
+                audit.read_expired(NodeId(self_id), false);
+                answer(
+                    hooks,
+                    audit,
+                    NodeId(self_id),
+                    Reply::ReadRedirect,
+                    parked.reply,
+                    ReadAck {
+                        seq: parked.seq,
+                        leader: replica.leader().map(|n| n.0),
+                        committed: false,
+                        read_index: None,
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Surface an inbound message's arrival for a human reading the trace, the
@@ -341,7 +479,12 @@ where
     let mut inspects = lane.inspect.ok_or_else(|| {
         SimulationError::InvalidState("a replica's lane carries an inspect queue".into())
     })?;
-    let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
+    let mut quorum_reads = lane.quorum_read.ok_or_else(|| {
+        SimulationError::InvalidState("a replica's lane carries a quorum-read queue".into())
+    })?;
+    let grpc_service = tonic::service::Routes::new(ParosServer::new(service.clone()))
+        .add_service(ParosInternalServer::new(service))
+        .prepare();
     let mut edge = GrpcEdge::bind(
         &providers,
         &local_addr,
@@ -356,24 +499,86 @@ where
     let mut replica = ReplicaNode::new(&storage);
     replay_boot_state(&mut replica, &mut storage, self_id, hooks, audit).await?;
 
-    // One lane per node of the pool: a replica only ever asks an acceptor.
+    let (_channels, out) = acceptor_lanes(
+        &providers,
+        tunables,
+        &incarnation_shutdown,
+        audit,
+        me,
+        members,
+    )?;
+
+    // The boot may already carry a batch: records learned above the prefix
+    // before the crash complete it on the way back up.
+    drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
+
+    let mut parked = ParkedReads {
+        reads: BTreeMap::new(),
+        next_ctx: 0,
+    };
+    let mut ticks: u64 = 0;
+    let time = providers.time().clone();
+    let mut next_tick = time.now() + tunables.tick_interval;
+    loop {
+        moonpool_core::select! {
+            accepted = edge.serve_next(&providers) => accepted?,
+            Some(msg) = inbox.recv() => {
+                trace_received(self_id, &msg);
+                replica.step(msg);
+                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
+                parked.answer_served(&served, &replica, self_id, hooks, audit);
+            }
+            Some((req, reply)) = quorum_reads.recv() => {
+                parked.open(&mut replica, req.seq, reply, ticks, hooks);
+                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
+                parked.answer_served(&served, &replica, self_id, hooks, audit);
+            }
+            _ = time.sleep(next_tick.saturating_sub(time.now())) => {
+                next_tick = time.now() + tunables.tick_interval;
+                ticks += 1;
+                replica.tick();
+                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
+                parked.answer_served(&served, &replica, self_id, hooks, audit);
+                parked.expire(ticks, tunables.read_retry_ticks, &replica, self_id, hooks, audit);
+                if let Some((hole, above)) = replica.replica().chosen_gap() {
+                    audit.chosen_gap(NodeId(self_id), hole, above);
+                    tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
+                }
+                tracing::info!(replica = self_id, "replica_tick");
+            }
+            Some((_req, reply)) = inspects.recv() => {
+                // No batch: an inspect reads the replica and its store.
+                let _ = reply.send(inspect(&replica, &storage).await);
+            }
+            () = shutdown.cancelled() => return Ok(()),
+        }
+    }
+}
+
+/// Open one lane per node of the pool — a replica only ever asks an
+/// acceptor — and the [`Outbound`] over them. The channels are returned so
+/// the caller keeps them alive for the incarnation.
+fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
+    providers: &P,
+    tunables: DriverTunables,
+    shutdown: &CancellationToken,
+    audit: &A,
+    me: Party,
+    members: Vec<(NodeId, String)>,
+) -> SimulationResult<(Channels<P>, Outbound)> {
     let mut channels = Channels::with_capacity(members.len());
     let lanes = LaneOpener {
-        providers: &providers,
+        providers,
         tunables,
-        shutdown: incarnation_shutdown.clone(),
+        shutdown: shutdown.clone(),
         audit,
         from: me,
     };
     let peer_queues = members
         .into_iter()
         .map(|(node, addr)| {
-            let client = channels.connect(
-                &providers,
-                &tunables,
-                addr,
-                ParosInternalClient::with_origin,
-            )?;
+            let client =
+                channels.connect(providers, &tunables, addr, ParosInternalClient::with_origin)?;
             let regular = lanes.open(
                 "paros-grpc-replica-catch-up",
                 client,
@@ -389,45 +594,13 @@ where
             ))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
-    let _channels = channels;
     let out = Outbound {
         peer_queues,
         proxy_queues: BTreeMap::new(),
         learners: Vec::new(),
         sender: me,
     };
-
-    // The boot may already carry a batch: records learned above the prefix
-    // before the crash complete it on the way back up.
-    drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-
-    let time = providers.time().clone();
-    let mut next_tick = time.now() + tunables.tick_interval;
-    loop {
-        moonpool_core::select! {
-            accepted = edge.serve_next(&providers) => accepted?,
-            Some(msg) = inbox.recv() => {
-                trace_received(self_id, &msg);
-                replica.step(msg);
-                drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-            }
-            _ = time.sleep(next_tick.saturating_sub(time.now())) => {
-                next_tick = time.now() + tunables.tick_interval;
-                replica.tick();
-                drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-                if let Some((hole, above)) = replica.replica().chosen_gap() {
-                    audit.chosen_gap(NodeId(self_id), hole, above);
-                    tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
-                }
-                tracing::info!(replica = self_id, "replica_tick");
-            }
-            Some((_req, reply)) = inspects.recv() => {
-                // No batch: an inspect reads the replica and its store.
-                let _ = reply.send(inspect(&replica, &storage).await);
-            }
-            () = shutdown.cancelled() => return Ok(()),
-        }
-    }
+    Ok((channels, out))
 }
 
 /// Answer an operator's or a probe's `Inspect`: the replica's chosen prefix,

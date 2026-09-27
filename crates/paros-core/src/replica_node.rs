@@ -124,8 +124,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::membership::ReplicaId;
+use crate::ReadState;
+use crate::membership::{AcceptorConfig, ReplicaId};
 use crate::message::{Audience, Message};
+use crate::node::READ_TTL_TICKS;
+use crate::quorum_read::QuorumReads;
 use crate::replica::Replica;
 use crate::state::Config;
 use crate::storage::Storage;
@@ -145,6 +148,8 @@ pub struct ReplicaCounters {
     pub catch_up_requests: u64,
     /// Snapshot boundaries installed.
     pub snapshots_installed: u64,
+    /// Quorum reads opened here (#143 on a replica, §3.4).
+    pub quorum_reads: u64,
     /// Messages that are not a replica's to hear (`Prepare`, `Accept`, …),
     /// or a beat from outside the pool.
     pub ignored: u64,
@@ -168,8 +173,20 @@ pub struct ReplicaNode {
     faulty: BTreeSet<Slot>,
     /// The node whose beat this replica heard last — where it pulls from.
     leader: Option<NodeId>,
+    /// The acceptor configuration this replica believes in force — the one
+    /// a quorum read asks a row of. The bootstrap membership, then whatever
+    /// a beat carries on a matchmaker deployment (the follower's rule).
+    acceptors: AcceptorConfig,
+    /// The ballot `acceptors` is bound to here.
+    acceptors_since: Ballot,
+    /// The open quorum reads (§3.4): a row's watermarks, then this
+    /// replica's own applied prefix.
+    quorum_reads: QuorumReads<NodeId>,
+    /// Logical time, for the reads' TTL.
+    tick_count: u64,
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
+    pending_read_states: Vec<ReadState>,
     counters: ReplicaCounters,
 }
 
@@ -228,14 +245,20 @@ impl ReplicaNode {
             );
         }
         let replica = Replica::from_boot(chosen_index, storage.sealed_sessions(), &below);
+        let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
         let mut node = Self {
             config,
             replica,
             floor,
             faulty,
             leader: None,
+            acceptors,
+            acceptors_since: Ballot::zero(),
+            quorum_reads: QuorumReads::new(),
+            tick_count: 0,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
+            pending_read_states: Vec::new(),
             counters: ReplicaCounters::default(),
         };
         for (slot, (_, command)) in above {
@@ -279,9 +302,22 @@ impl ReplicaNode {
                 sessions,
                 ..
             } => self.install(ballot, chosen_index, snapshot, sessions),
-            Message::Heartbeat { from, commit, .. } => self.on_heartbeat(from, commit),
+            Message::Heartbeat {
+                from,
+                ballot,
+                commit,
+                config,
+                ..
+            } => self.on_heartbeat(from, ballot, commit, config),
+            Message::PreReadAck {
+                from,
+                ctx,
+                watermark,
+                config_since,
+            } => self.on_pre_read_ack(from, ctx, watermark, config_since),
             _ => self.counters.ignored += 1,
         }
+        self.serve_quorum_reads();
         self.assert_invariants();
     }
 
@@ -296,6 +332,9 @@ impl ReplicaNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(replica = self.config.id.0)))]
     pub fn tick(&mut self) {
+        self.tick_count += 1;
+        self.quorum_reads.expire(self.tick_count, READ_TTL_TICKS);
+        self.serve_quorum_reads();
         let first_faulty = self.faulty.first().copied();
         if let Some(from_slot) = self.replica.app_repair().or(first_faulty) {
             let targets: Vec<NodeId> = match self.leader {
@@ -327,6 +366,46 @@ impl ReplicaNode {
         self.assert_invariants();
     }
 
+    /// **Leaderless read on a replica** (Compartmentalized Paxos §3.4, the
+    /// paper's own shape): ask a row of the acceptor configuration this
+    /// replica believes in force for their vote watermarks, settle on the
+    /// maximum once the row answered whole, and surface a [`ReadState`]
+    /// carrying `ctx` through [`ReplicaReady::read_states`] once *this
+    /// replica's* applied prefix covers it — the state that answers the read
+    /// is this replica's own. The same tally and the same safety argument as
+    /// [`crate::ColocatedNode::quorum_read_in`] (see [`crate::quorum_read`]);
+    /// what differs is only that the reader is never an addressee of its own
+    /// row, since a replica votes nothing. `row` is the driver's choice, as
+    /// on a node; a row the configuration lacks falls back to the default.
+    ///
+    /// # Panics
+    ///
+    /// If a read is already open at `ctx` (a driver token is unique), or an
+    /// internal invariant is broken.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ctx)))]
+    pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
+        let row = self.acceptors.read_row(ctx, row);
+        let addressees = self.quorum_reads.open(
+            ctx,
+            row,
+            self.acceptors.clone(),
+            self.acceptors_since,
+            self.tick_count,
+            None,
+        );
+        self.counters.quorum_reads += 1;
+        for to in addressees {
+            self.pending_messages.push((
+                Audience::Node(to),
+                Message::PreRead {
+                    reply_to: self.config.id,
+                    ctx,
+                },
+            ));
+        }
+        self.assert_invariants();
+    }
+
     /// Release the next bounded page of the apply walk after the caller has
     /// fully processed the previous batch — the node's
     /// [`crate::ColocatedNode::advance_recovery`], for the one continuation a
@@ -353,17 +432,84 @@ impl ReplicaNode {
 
     /// A leader's beat: follow its watermark, never its ballot. A replica
     /// promises nothing, so it acks nothing — its answer to a beat is a
-    /// catch-up request when the beat's prefix is ahead of its own.
-    fn on_heartbeat(&mut self, from: NodeId, commit: Option<Slot>) {
+    /// catch-up request when the beat's prefix is ahead of its own. On a
+    /// matchmaker deployment the beat also carries the configuration the
+    /// leader's ballot runs with, which the replica adopts by the follower's
+    /// rule (strictly newer ballot) for the quorum reads it opens.
+    fn on_heartbeat(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        commit: Option<Slot>,
+        config: Option<AcceptorConfig>,
+    ) {
         // Wire hygiene, as on a node: only a node of the pool is followed.
-        if self.config.pool().binary_search(&from).is_err() {
+        if !self.in_pool(from) {
             self.counters.ignored += 1;
             return;
         }
         self.leader = Some(from);
+        self.learn_config(ballot, config);
         if commit > self.replica.chosen_index() {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
+    }
+
+    /// Adopt `config` when `ballot` is above the one the current belief is
+    /// bound to, on a matchmaker deployment only (a plain beat carries none),
+    /// and abandon every read opened against the superseded one — the row
+    /// asked need not intersect the successor's columns.
+    fn learn_config(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
+        let Some(config) = config else {
+            return;
+        };
+        if !self.config.has_matchmakers() || ballot <= self.acceptors_since {
+            return;
+        }
+        if !config.members().iter().all(|m| self.in_pool(*m)) {
+            return;
+        }
+        self.acceptors = config;
+        self.acceptors_since = ballot;
+        self.quorum_reads.abandon_superseded(ballot);
+    }
+
+    /// Fold an acceptor's watermark into the read at `ctx`: the node's
+    /// guards (`on_pre_read_ack`), then the tally; `step` serves after.
+    fn on_pre_read_ack(
+        &mut self,
+        from: NodeId,
+        ctx: u64,
+        watermark: Option<Slot>,
+        config_since: Option<Ballot>,
+    ) {
+        if !self.in_pool(from) {
+            self.counters.ignored += 1;
+            return;
+        }
+        let Some(read) = self.quorum_reads.get(ctx) else {
+            return;
+        };
+        if !read.config().is_phase1_addressee(from, read.row()) {
+            return;
+        }
+        // What the fold did matters only through the serve `step` runs next.
+        let _ = self.quorum_reads.fold(ctx, from, watermark, config_since);
+    }
+
+    /// Serve every confirmed read this replica's applied prefix covers.
+    fn serve_quorum_reads(&mut self) {
+        let replica = &self.replica;
+        let served = self.quorum_reads.serve(|index| replica.covers(index));
+        self.pending_read_states.extend(
+            served
+                .into_iter()
+                .map(|(ctx, index)| ReadState { ctx, index }),
+        );
+    }
+
+    fn in_pool(&self, id: NodeId) -> bool {
+        self.config.pool().binary_search(&id).is_ok()
     }
 
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
@@ -536,10 +682,18 @@ impl ReplicaNode {
             "a replica never emits an acceptor write"
         );
         assert!(
-            self.pending_messages
+            self.pending_messages.iter().all(|(_, m)| matches!(
+                m,
+                Message::CatchUpRequest { .. } | Message::PreRead { .. }
+            )),
+            "a replica sends nothing but catch-up requests and pre-reads"
+        );
+        assert!(
+            self.quorum_reads
+                .pending()
                 .iter()
-                .all(|(_, m)| matches!(m, Message::CatchUpRequest { .. })),
-            "a replica sends nothing but catch-up requests"
+                .all(|r| r.watermarks().keys().all(|id| self.in_pool(*id))),
+            "a replica folds no watermark from outside the pool"
         );
     }
 
@@ -553,6 +707,13 @@ impl ReplicaNode {
     #[must_use]
     pub fn replica(&self) -> &Replica {
         &self.replica
+    }
+
+    /// The acceptor configuration this replica believes in force — the one
+    /// its quorum reads ask a row of.
+    #[must_use]
+    pub fn acceptors(&self) -> &AcceptorConfig {
+        &self.acceptors
     }
 
     /// The compaction floor: the first slot whose record is retained.
@@ -583,6 +744,7 @@ impl ReplicaNode {
     fn clear_pending(&mut self) {
         self.pending_writes.clear();
         self.pending_messages.clear();
+        self.pending_read_states.clear();
         self.replica.clear_committed();
     }
 }
@@ -641,10 +803,20 @@ impl ReplicaReady<'_> {
         &self.node.pending_writes
     }
 
-    /// Outbound messages: catch-up requests, each to one node.
+    /// Outbound messages: catch-up requests and quorum-read `PreRead`s,
+    /// each to one node.
     #[must_use]
     pub fn messages(&self) -> &[(Audience, Message)] {
         &self.node.pending_messages
+    }
+
+    /// Quorum reads this replica can now answer from its own state: the
+    /// row confirmed the index and this replica applied at or past it. The
+    /// node's [`crate::Ready::read_states`] contract — answer each one once
+    /// the batch's `committed` is applied.
+    #[must_use]
+    pub fn read_states(&self) -> &[ReadState] {
+        &self.node.pending_read_states
     }
 
     /// Newly chosen `(slot, command)` pairs to apply, in contiguous slot

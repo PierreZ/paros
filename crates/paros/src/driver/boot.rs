@@ -139,6 +139,7 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         pool: node.config().pool().to_vec(),
         matchmakers: node.config().matchmakers.clone(),
         matchmaker_pool: node.config().matchmaker_pool().to_vec(),
+        replica_count: node.config().replica_count,
     };
     audit.recovered(
         NodeId(self_id),

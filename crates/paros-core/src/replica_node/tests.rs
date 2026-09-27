@@ -121,6 +121,8 @@ struct Tier {
     replicas: Vec<ReplicaNode>,
     disks: Vec<Disk>,
     applied: Vec<Vec<(Slot, Command)>>,
+    /// The quorum reads each replica served, in order.
+    served: Vec<Vec<crate::ReadState>>,
 }
 
 impl Tier {
@@ -134,6 +136,7 @@ impl Tier {
             replicas: disks.iter().map(ReplicaNode::new).collect(),
             disks,
             applied: vec![Vec::new(); REPLICAS.len()],
+            served: vec![Vec::new(); REPLICAS.len()],
         }
     }
 
@@ -189,6 +192,7 @@ impl Tier {
             self.disks[r].apply(op);
         }
         self.applied[r].extend(ready.committed().iter().cloned());
+        self.served[r].extend(ready.read_states().iter().copied());
         let out = ready
             .messages()
             .iter()
@@ -322,6 +326,59 @@ fn replicas_apply_in_order_and_heal_a_dropped_commit_through_catch_up() {
     for n in &tier.nodes {
         assert_eq!(n.replica().chosen_index(), Some(Slot(2)));
     }
+}
+
+/// §3.4 on a replica: the row's maximum watermark is the read index, and
+/// the replica answers only once *its own* applied prefix covers it — a
+/// replica missing a chosen slot holds the read until catch-up heals it.
+#[test]
+fn a_replica_serves_a_quorum_read_once_it_applied_the_row_watermark() {
+    let mut tier = Tier::new();
+    tier.elect();
+    for seq in 1..=3 {
+        // Replica 10 never hears slot 2's `Commit`.
+        tier.propose(seq, commit_to(10, 2));
+    }
+    assert_eq!(tier.applied_slots(0), vec![0, 1]);
+    tier.replicas[0].quorum_read_in(7, None);
+    let q = tier.drain_replica(0);
+    assert_eq!(q.len(), 3, "a majority's row is the whole membership");
+    assert!(q.iter().all(
+        |(_, m)| matches!(m, Message::PreRead { reply_to, ctx: 7 } if *reply_to == NodeId(10))
+    ));
+    tier.deliver(q, |_, _| true);
+    assert!(
+        tier.served[0].is_empty(),
+        "the row voted slot 2; replica 10 applied only up to slot 1"
+    );
+    tier.beat(|_, _| true);
+    assert_eq!(tier.applied_slots(0), vec![0, 1, 2]);
+    assert_eq!(
+        tier.served[0],
+        vec![crate::ReadState {
+            ctx: 7,
+            index: Some(Slot(2))
+        }]
+    );
+    assert_eq!(tier.replicas[0].counters().quorum_reads, 1);
+    // A read that no row ever answers is dropped by the TTL, silently.
+    tier.replicas[1].quorum_read_in(8, None);
+    let _ = tier.drain_replica(1);
+    for _ in 0..=crate::node::READ_TTL_TICKS {
+        tier.replicas[1].tick();
+        let _ = tier.drain_replica(1);
+    }
+    let q = vec![(
+        NodeId(11),
+        Message::PreReadAck {
+            from: NodeId(0),
+            ctx: 8,
+            watermark: Some(Slot(2)),
+            config_since: None,
+        },
+    )];
+    tier.deliver(q, |_, _| true);
+    assert!(tier.served[1].is_empty(), "an expired read serves nothing");
 }
 
 #[test]

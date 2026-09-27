@@ -1323,8 +1323,17 @@ impl Workload for ChainWorkload {
                     self.history.record_read_issued(seq, now_ms());
                     let read_deadline =
                         time.now() + Duration::from_millis(config.request_timeout_ms);
+                    // A quorum read may be asked of a replica (§3.4: the
+                    // paper's reader): indices past the pool name the
+                    // replica tier, drawn from the target draw's high bits.
+                    let replica_count = replica_clients.public.len();
                     let mut attempt_target = if quorum {
-                        target
+                        let span = u64::try_from(server_count + replica_count).unwrap_or(1);
+                        let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
+                        if drawn >= server_count {
+                            assert_reachable!("chain: a quorum read is asked of a replica");
+                        }
+                        drawn
                     } else {
                         hint.current.unwrap_or(target) % server_count
                     };
@@ -1335,7 +1344,10 @@ impl Workload for ChainWorkload {
                             break None;
                         }
                         attempts += 1;
-                        let mut client = public_clients[attempt_target].clone();
+                        let mut client = match attempt_target.checked_sub(server_count) {
+                            Some(replica) => replica_clients.public[replica].clone(),
+                            None => public_clients[attempt_target].clone(),
+                        };
                         let request = Read {
                             client: client_id,
                             seq,

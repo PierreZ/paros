@@ -103,11 +103,15 @@ impl ColocatedNode {
     /// durable write and no promise moves — the ack claims only "I have
     /// voted this high", which the durable log already holds. Answered by
     /// every pooled node, member of the reader's configuration or not (the
-    /// reader's tally counts only its row; acceptor guards are pool-based).
+    /// reader's tally counts only its row; acceptor guards are pool-based),
+    /// to a pooled reader or a replica (#144: a replica reads the same way).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = reply_to.0, ctx)))]
     pub(super) fn on_pre_read(&mut self, reply_to: NodeId, ctx: u64) {
-        // Wire hygiene: an ack never answers an arbitrary id.
-        if !self.in_pool(reply_to) {
+        // Wire hygiene: an ack never answers an arbitrary id — a node of the
+        // pool, or, on a deployment with a replica tier, a replica (its id is
+        // outside the pool by construction; the driver routes it through the
+        // deployment map and drops an address it does not know).
+        if !self.in_pool(reply_to) && !self.config.has_replicas() {
             return;
         }
         let writes_at_entry = self.pending_writes.len();

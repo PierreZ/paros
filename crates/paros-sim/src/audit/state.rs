@@ -516,6 +516,13 @@ pub(super) struct AuditState {
     /// that never voted for it, and a replica below every acceptor's floor
     /// healed by a snapshot install.
     pub(super) applied_on_replica: bool,
+    /// The deployment's replica count (`Deployment::replica_count`).
+    pub(super) replica_count: usize,
+    /// Per reply-owner replica, the lowest slot it owns that another process
+    /// acked (#144, decision 1).
+    pub(super) acked_by_other: BTreeMap<u64, u64>,
+    /// A quorum read was served by a replica (§3.4, #144).
+    pub(super) quorum_read_on_replica: bool,
     pub(super) replica_installed_snapshot: bool,
 }
 
@@ -837,6 +844,21 @@ impl AuditState {
         assert_sometimes!(
             self.replica_installed_snapshot,
             "replica: a replica below the floor is healed by a snapshot"
+        );
+        // Decision 1 of #144: a slot the node asked acked is owned by a
+        // replica that applied it too — the owner the future client library
+        // will wait on reached the slot it would have answered.
+        assert_sometimes!(
+            self.acked_by_other
+                .iter()
+                .any(|(owner, slot)| { self.frontier.get(owner).is_some_and(|next| next > slot) }),
+            "replica: an acked slot's reply owner, another process, applied it"
+        );
+        // §3.4 on the tier it was written for: a client read answered from
+        // a replica's applied state, certified by a row of acceptors.
+        assert_sometimes!(
+            self.quorum_read_on_replica,
+            "replica: a quorum read is served by a replica"
         );
     }
 
