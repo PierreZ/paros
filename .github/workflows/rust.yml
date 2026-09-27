@@ -68,6 +68,10 @@ jobs:
         run: nix develop --command cargo run -p paros-core --example acceptor_grid
       - name: Run quorum_read
         run: nix develop --command cargo run -p paros-core --example quorum_read
+      - name: Run proxy_leader
+        run: nix develop --command cargo run -p paros-core --example proxy_leader
+      - name: Run replica_tier
+        run: nix develop --command cargo run -p paros-core --example replica_tier
 
   # The sans-IO core and the library driver stay portable to wasm32: paros-core is
   # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The

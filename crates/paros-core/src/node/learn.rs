@@ -128,6 +128,13 @@ impl ColocatedNode {
             |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
             &mut self.pending_writes,
         );
+        // The bare acceptor (#144) sheds the walk's application output and
+        // keeps everything else it did: the durable chosen index, the ledger,
+        // the decided truncation below. What the walk would have handed an
+        // application is exactly what this node does not run.
+        if !self.config.runs_application() {
+            self.replica.clear_committed();
+        }
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }

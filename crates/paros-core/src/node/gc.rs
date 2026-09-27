@@ -46,6 +46,21 @@
 //! candidate from `C_b` whose Phase 1 reports nothing at a slot `C_old`
 //! chose: a `Noop` gap fill over a chosen value, two values for one slot.
 //!
+//! **Re-read against a replica tier (#144).** A deployment may now run
+//! [`ReplicaNode`](crate::ReplicaNode)s beside its acceptors and bare
+//! acceptors ([`Application::Shed`](crate::Application::Shed)) among them,
+//! and neither moves the rule. A bare acceptor sheds only the application:
+//! `mark_chosen` still records the chosen value as its authoritative record
+//! and its chosen index still rides its `HeartbeatAck`, so it satisfies the
+//! condition exactly as a colocated member does. A replica is in no
+//! configuration and acks no beat, so its chosen index is never counted
+//! toward the fence. A replica tier makes Scenario 3 *available* — the
+//! chosen prefix persisted on replicas that are not acceptors — but paros
+//! does not adopt it: counting replicas would let a configuration be
+//! forgotten while a Phase-2 quorum of `C_b` has not yet learned the
+//! prefix, trading the acceptors' own P2c chain for a durability claim made
+//! somewhere else. The stronger rule stays.
+//!
 //! The two floors relate as follows. The **compaction floor**
 //! (`ColocatedNode::first_slot`, `Control::Truncate`) is per node and says "these
 //! slots are chosen and their records are gone here; recover them from a

@@ -449,6 +449,7 @@ async fn run_acceptor(
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
         proxy_count: proxies.len(),
+        ..Config::default()
     };
 
     // The per-iteration durable-storage world, shared by every node and

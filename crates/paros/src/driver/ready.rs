@@ -592,11 +592,19 @@ async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
                 promise_changed = true;
                 storage.persist_ballot(*ballot).await
             }
+            // A replica's learned record (#144) is the accepted record's
+            // durable shape; only a `ReplicaNode` emits it, and it is never a
+            // vote, so `surface_persisted` reports it as nothing accepted.
             WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
                 slot,
                 ballot,
                 value: command,
-            }) => {
+            })
+            | WriteOp::Learned {
+                slot,
+                ballot,
+                command,
+            } => {
                 storage
                     .append_accepted(*slot, *ballot, command.clone())
                     .await
@@ -723,7 +731,8 @@ fn surface_persisted<A: Audit>(
                     "log_applied"
                 );
             }
-            WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) => {}
+            // A learned record is not an accept: no quorum oracle may fold it.
+            WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) | WriteOp::Learned { .. } => {}
         }
     }
 }

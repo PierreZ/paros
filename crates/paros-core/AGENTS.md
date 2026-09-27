@@ -20,8 +20,12 @@ doctrine; this file is the map.
   emits the `Commit`, relays a `Nack`, re-fans-out on its beat, evicts a round nobody answers
   on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
   handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
-  `node.replica().chosen_gap()`) · `membership.rs` `AcceptorConfig`,
-  `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
+  `node.replica().chosen_gap()`) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
+  deployment**, #144: a `Replica` over a durable chosen log with no `Acceptor` — steps `Commit`,
+  `CatchUpResponse`, `InstallSnapshot`, `Heartbeat`; sends only `CatchUpRequest`; writes
+  `WriteOp::Learned`, never an acceptor op; never in the pool; its module doc holds the
+  coupling analysis behind the bare acceptor, `Application::Shed` on `ColocatedNode`) ·
+  `membership.rs` `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,
   `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen, and
   whose row addressing — `row_of`, `phase1_addressees`, `is_phase1_addressee`,
@@ -46,8 +50,9 @@ doctrine; this file is the map.
 - `message.rs` `Message` + `Audience` + `Party` (a node or a proxy: the reply party of an
   `Accept`, the sender of a `Commit`) · `ready.rs` `Ready<'a>` (the borrow
   guard that makes a second `ready()` before `advance()` a compile error) ·
-  `state.rs` `HardState` (two scalars, `#[non_exhaustive]`) and `Config` (`proxy_count`,
-  zero on the plain deployment) · `storage.rs` the read-only `Storage` recovery port ·
+  `state.rs` `HardState` (two scalars, `#[non_exhaustive]`) and `Config` (`proxy_count` and
+  `replica_count`, zero on the plain deployment; `application`, `Colocated` unless the node is
+  a bare acceptor) · `storage.rs` the read-only `Storage` recovery port ·
   `types.rs` · `write.rs` `WriteOp`.
 - `proxy_model.rs` the proxy model checker and `model_support.rs` the seeded RNG and lossy
   mailbox both model checkers share (test-only).
@@ -71,6 +76,11 @@ doctrine; this file is the map.
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` are the only environment variables the
   workspace reads.
+- **A bare acceptor is a learner.** `Application::Shed` sheds only what the application
+  needed — `Ready::committed` (cleared after the walk in `node/learn.rs`), the application
+  repair (`open_app_repair` asserts) and the application snapshot; the chosen index, the
+  prefix and the ledger stay (`assert_deployment_invariants`). A new learner line is written
+  once, on the shared path, never behind the policy.
 - **The allocator frontier is durable by construction**: a leader records every round it
   opens in its own log whenever its promise allows, colocated or delegated, in its column or
   not (`node/phase2.rs`, `record_own_round`), so a reboot rederives the frontier and the
@@ -80,7 +90,7 @@ doctrine; this file is the map.
 
 Unit tests are inline: `node/tests.rs` + `node/tests/*.rs` (one file per
 concern), plus the role, matchmaker, reconfigurer, decree and model-checker
-modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,quorum_read,proxy_leader}.rs`
+modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,quorum_read,proxy_leader,replica_tier}.rs`
 run in CI.
 Gates: `cargo check --target wasm32-unknown-unknown -p paros-core` (with and
 without default features), `cargo check -p paros-core --features serde`,

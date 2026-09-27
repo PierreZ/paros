@@ -60,6 +60,15 @@ pub enum AcceptorWrite<V> {
 /// durable state. That is the answer to "is persist-before-send an acceptor
 /// property": it is, and a second deployment that reuses `Acceptor` gets the
 /// whole durable surface with the role.
+///
+/// The one deployment without an `Acceptor` that still keeps a log, the
+/// [`ReplicaNode`](crate::ReplicaNode) (#144), emits
+/// [`Learned`](WriteOp::Learned) in place of the accepted record, and the
+/// floor-moving ops its prefix needs ([`Truncate`](WriteOp::Truncate),
+/// [`InstallSnapshot`](WriteOp::InstallSnapshot)) — never an
+/// [`Acceptor`](WriteOp::Acceptor) op. Nothing it sends is predicated on
+/// its writes (it sends only catch-up requests), so its fsync buys only
+/// that the boot read-back finds every record below the chosen index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WriteOp {
@@ -68,6 +77,22 @@ pub enum WriteOp {
     /// lower-ballot accept for a now-chosen slot is load-bearing for restart
     /// safety (see [`crate::ColocatedNode`]).
     Acceptor(AcceptorWrite<Command>),
+    /// Persist the `(ballot, command)` **chosen** at `slot` on a node that
+    /// is not an acceptor — a [`crate::ReplicaNode`] (#144). The same durable
+    /// record shape as [`AcceptorWrite::AppendAccepted`] (a boot scan reads
+    /// both back through [`crate::Storage::accepted`]), and never a vote: a
+    /// replica answers no `Prepare` and sits in no configuration, so nothing
+    /// ever counts this record toward a quorum. A distinct op so a driver and
+    /// an audit can tell a learned record from an accepted one — an audit
+    /// that folds durable accepts into a quorum oracle must not fold this.
+    Learned {
+        /// The chosen slot.
+        slot: Slot,
+        /// The ballot the command was chosen at.
+        ballot: Ballot,
+        /// The chosen command.
+        command: Command,
+    },
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
     /// Truncate the log below `first`, discarding the compacted prefix, and
@@ -135,13 +160,16 @@ pub enum MustSync {
 }
 
 impl WriteOp {
-    /// Whether this op requires an fsync (a promise-raise, accepted-append, or
-    /// truncate).
+    /// Whether this op requires an fsync (a promise-raise, an accepted or
+    /// learned record, a truncate, or a snapshot install).
     #[must_use]
     pub fn needs_sync(&self) -> bool {
         matches!(
             self,
-            WriteOp::Acceptor(_) | WriteOp::Truncate { .. } | WriteOp::InstallSnapshot { .. }
+            WriteOp::Acceptor(_)
+                | WriteOp::Learned { .. }
+                | WriteOp::Truncate { .. }
+                | WriteOp::InstallSnapshot { .. }
         )
     }
 }

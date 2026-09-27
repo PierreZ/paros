@@ -63,6 +63,19 @@ impl ColocatedNode {
     /// leaves its bootstrap configuration; a matchmaker deployment runs
     /// Phase 2 under a configuration drawn from the pool.
     fn assert_deployment_invariants(&self) {
+        // The bare acceptor (#144): it keeps the learner's state — the chosen
+        // index, the prefix, the ledger — and hands the application nothing,
+        // so it never holds an applied batch or an application repair.
+        if !self.config.runs_application() {
+            assert!(
+                self.replica.committed().is_empty(),
+                "a bare acceptor surfaces nothing to an application"
+            );
+            assert!(
+                self.replica.app_repair().is_none(),
+                "a bare acceptor never opens an application repair"
+            );
+        }
         // The deployment couplings: plain Multi-Paxos never matchmakes and
         // never leaves its bootstrap configuration; a matchmaker deployment
         // runs Phase 2 under a configuration drawn from the pool.

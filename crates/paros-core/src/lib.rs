@@ -58,6 +58,9 @@
 //! `quorum_read.rs` change the *data* the same roles run over, and
 //! `proxy_leader.rs` runs the first **second deployment**: a
 //! [`ProxyLeader`] beside a leader, the Phase-2 tally on another process.
+//! `replica_tier.rs` runs the third: [`ReplicaNode`]s that learn and apply
+//! without voting, beside bare acceptors that vote and apply nothing
+//! ([`Application::Shed`]).
 
 pub mod acceptor;
 mod collector;
@@ -75,6 +78,7 @@ mod proxy_model;
 pub mod quorum_read;
 mod ready;
 pub mod replica;
+pub mod replica_node;
 pub mod retained;
 mod state;
 mod storage;
@@ -91,6 +95,7 @@ pub use matchmaker::{
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,
+    ReplicaId,
 };
 pub use message::{Audience, Message, Party};
 pub use node::{
@@ -102,8 +107,9 @@ pub use node::{
 pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
+pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
 pub use retained::RetainedWindow;
-pub use state::{Config, HardState};
+pub use state::{Application, Config, HardState};
 pub use storage::Storage;
 pub use types::{
     Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId, SessionEntry, Slot,

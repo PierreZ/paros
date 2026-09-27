@@ -1173,9 +1173,15 @@ impl ColocatedNode {
     /// # Panics
     ///
     /// If `from` lies past the contiguous chosen prefix — the driver may only
-    /// name a slot the durable chosen index already covers.
+    /// name a slot the durable chosen index already covers — or if this node
+    /// is a bare acceptor ([`Application::Shed`](crate::Application::Shed)),
+    /// which runs no application to repair.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0)))]
     pub fn open_app_repair(&mut self, from: Slot) {
+        assert!(
+            self.config.runs_application(),
+            "only a node that runs the application opens an application repair"
+        );
         self.replica.open_app_repair(from);
         self.pump_app_repair();
         self.assert_invariants();

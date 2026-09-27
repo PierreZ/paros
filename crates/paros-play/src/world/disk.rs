@@ -246,7 +246,12 @@ impl Disk {
                 slot,
                 ballot,
                 value,
-            }) => {
+            })
+            | WriteOp::Learned {
+                slot,
+                ballot,
+                command: value,
+            } => {
                 // A record written over a faulty entry **is** the repair: the
                 // value is readable again, so the slot leaves the faulty set
                 // and the next boot reports `have` for it.

@@ -20,6 +20,7 @@ because the perturbation is a caller that stops calling.
 | Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds (the standalone `Rounds` tally the proposer embeds; a round's `Custody` is colocated or delegated to a `ProxyId`; a proxy leader embeds the same tally, never a second kernel), the standing authority (`Authority`: read fence, read-index rounds, `CheckQuorum` window — embedded the same way), bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
 | the proxy leader (#142): a `Rounds` plus routing on its own process — fans a delegated `Accept` out to the column, folds, emits `Commit { from: Party::Proxy }`, relays a `Nack`, re-fans-out on its beat (`resend_pending`), works for the highest ballot it was handed; ephemeral, no `WriteOp`; proven by `proxy_model.rs` | `proxy_leader.rs` (`ProxyLeader`, `ProxyReady`) |
 | chosen prefix, contiguous apply walk, at-most-once ledger, repair cursor; `chosen_gap()` lives here (`node.replica().chosen_gap()`) | `replica.rs` (`Replica`) |
+| the replica tier (#144): a `Replica` over a durable chosen log on a process with no `Acceptor` — steps `Commit` / `CatchUpResponse` / `InstallSnapshot` / `Heartbeat`, sends only `CatchUpRequest`, writes `WriteOp::Learned` (never an acceptor op), never in the pool; the coupling analysis behind the bare acceptor (`Config::application = Application::Shed`) is its module doc; `Config::reply_owner` names a slot's reply owner | `replica_node.rs` (`ReplicaNode`, `ReplicaReady`) |
 | `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership.rs` |
 | the leaderless read tally (#143): a row's vote watermarks, the maximum, bound to one configuration, TTL-bounded; the acceptor answers `vote_watermark`, the replica answers `covers` | `quorum_read.rs` (`QuorumRead`, `QuorumReads`) |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
@@ -83,7 +84,7 @@ cargo check --target wasm32-unknown-unknown -p paros-core
 cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
 cargo check -p paros-core --features serde
 RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps
-cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums, acceptor_grid, quorum_read, proxy_leader
+cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, flexible_quorums, acceptor_grid, quorum_read, proxy_leader, replica_tier
 cargo nextest run -p paros-core                   # incl. the handover and proxy model checkers
 ```
 

@@ -883,6 +883,43 @@ impl ProxyId {
     }
 }
 
+/// A **replica** of the deployment (#144, Compartmentalized Paxos §3.3):
+/// a rank among the [`crate::ReplicaNode`]s that learn and apply the chosen
+/// log without voting. Its own namespace, like [`ProxyId`]: a replica is
+/// never an acceptor, never in a configuration and never counted by a
+/// quorum. The id names **who owns a slot's reply**, nothing else — on the
+/// wire a replica speaks as the [`NodeId`] its deployment
+/// map gave it, because the learner messages it sends and receives
+/// (`CatchUpRequest`, `CatchUpResponse`, `InstallSnapshot`) address nodes.
+///
+/// The core holds only the count (`Config::replica_count`) and derives a
+/// slot's owner as `ReplicaId(slot % replica_count)` ([`ReplicaId::of`]):
+/// a pure function of the slot, so every replica, every node and a future
+/// client library agree on the owner without carrying it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReplicaId(pub u64);
+
+impl ReplicaId {
+    /// The replica that owns `slot`'s reply under a deployment of
+    /// `replica_count` replicas: `slot % replica_count`. `None` when the
+    /// count is zero — the plain deployment, where the node asked replies.
+    #[must_use]
+    pub fn of(slot: Slot, replica_count: usize) -> Option<Self> {
+        if replica_count == 0 {
+            return None;
+        }
+        let count = u64::try_from(replica_count).unwrap_or(u64::MAX);
+        Some(Self(slot.0 % count))
+    }
+
+    /// Whether this id names a replica of a deployment of `replica_count`.
+    #[must_use]
+    pub fn is_in(self, replica_count: usize) -> bool {
+        u64::try_from(replica_count).is_ok_and(|count| self.0 < count)
+    }
+}
+
 impl Fingerprint for Vec<MatchmakerId> {
     /// The identity a matchmaker set carries through Phase 2: an FNV-1a fold
     /// over the members, in their sorted order. The value a decree chooses is
