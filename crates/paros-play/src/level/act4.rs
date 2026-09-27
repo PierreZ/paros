@@ -172,6 +172,7 @@ fn deployed(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
+                ..Config::default()
             })
         })
         .collect();

@@ -219,6 +219,24 @@ own**. The roles:
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
   ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else —
   and answers one question about it, `covers(index)`, for the quorum reads below.
+- `replica_node.rs` — `ReplicaNode` (#144, Compartmentalized Paxos §3.3): the **third
+  deployment**, a `Replica` over a durable chosen log on a process that is not an acceptor. It
+  steps `Commit`, `CatchUpResponse`, `InstallSnapshot` and `Heartbeat` (the watermark and the
+  leader hint, never the ballot), sends only `CatchUpRequest`, persists `WriteOp::Learned` —
+  the accepted record's durable shape, never a vote, and a distinct op so no audit folds it
+  into a quorum — plus `SetChosenIndex`, `Truncate` and `InstallSnapshot`, and never an
+  acceptor op. It is never in `Config::peers` or the pool (asserted at boot), answers no
+  `Prepare` or `Accept`, and acks no beat. Its mirror is the **bare acceptor**: a
+  `ColocatedNode` with `Config::application = Application::Shed` — one code path for every
+  learner line, and the three outputs it sheds (`Ready::committed`, the application repair,
+  the application snapshot). The module doc holds the **coupling analysis** — why an acceptor
+  keeps a chosen index and a chosen prefix (the authoritative record, the floor inside the
+  prefix, the CTRL probe and recovery skipping chosen slots, the GC fence, catch-up served
+  from the prefix, the handoff tail, the sealed ledger) and what only reflects the
+  colocation. `Config::replica_count` (zero is the plain deployment) and
+  `Config::reply_owner(slot) = ReplicaId(slot % replica_count)` name the replica that owns a
+  slot's reply; nothing routes on it yet — the node a client asked still acks (#144,
+  decision 1).
 - `quorum_read.rs` — `QuorumRead` / `QuorumReads` (#143, Compartmentalized Paxos §3.4, *Paxos
   Quorum Reads*): the **leaderless read** tally. A reader asks a Phase-1 quorum — a row of a
   grid (`AcceptorConfig::row_of`, `ctx % rows`, addressed through `phase1_addressees` and
@@ -288,7 +306,10 @@ changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, 
 — set-membership predicates and column addressing, still zero tally lines); the proxy leader is
 the first second deployment (`proxy_leader.rs`, #142 — the embedded `Rounds` on another
 process, a count in `Config`, zero tally lines; its driver `paros::run_proxy` and its process
-group `paros-proxy` are the harness's third role). Still to come: a replica tier the same way.
+group `paros-proxy` are the harness's third role); the replica tier is the third
+(`replica_node.rs`, #144 — the `Replica` on a process with no `Acceptor`, a count in `Config`,
+and the bare acceptor as `Application::Shed` on the same `ColocatedNode`; its driver and
+process group are part B of #144).
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O;
 `paros::run_matchmaker` and `paros::run_proxy` are the same shape for the two other roles.
@@ -402,8 +423,9 @@ confirmed by a column, a reconfiguration between a grid and a majority. Module d
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
-paros has no replica tier, so the paper's Scenario 3 is *not* what it implements; what it has is
-stronger for the purpose — a node that learns a slot chosen records it as its authoritative
+paros does not implement the paper's Scenario 3 — a replica tier (#144) makes it *available*, and
+paros still counts only acceptors, bare or colocated, since both keep the chosen prefix; what it
+has is stronger for the purpose — a node that learns a slot chosen records it as its authoritative
 accepted record before its chosen index advances, and a truncated member refuses a `Prepare`
 below its floor — so the condition is: the leadership is settled (no leader recovery, CTRL probe
 or application repair open) and **a Phase-2 quorum of `C_b` reports a chosen index at or past the

@@ -1,6 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
-use crate::membership::{MatchmakerId, QuorumSystem};
+use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
 use crate::types::{Ballot, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
@@ -94,6 +94,51 @@ pub struct Config {
     /// protocol data: which process answers to a `ProxyId` is the driver's
     /// deployment map, so a dead proxy is replaced without editing this.
     pub proxy_count: usize,
+    /// How many **replicas** the deployment runs beside its acceptors (#144,
+    /// Compartmentalized Paxos §3.3): `ReplicaId(0..replica_count)`, each a
+    /// [`crate::ReplicaNode`] that learns and applies but never votes.
+    /// **Zero is the plain deployment**, the `None` arm like a zero
+    /// `proxy_count`: every node is its own replica and nothing else
+    /// learns. With a count, [`Config::reply_owner`] names the one replica
+    /// that owns a slot's client reply (§3.3: each replies for `1/n` of the
+    /// slots). A replica votes on nothing and adopts no ballot, so the count
+    /// carries no quorum obligation, and which process answers to a
+    /// `ReplicaId` is the driver's deployment map.
+    pub replica_count: usize,
+    /// Whether this node runs the application beside its acceptor (#144):
+    /// [`Application::Colocated`] is today's node and the default;
+    /// [`Application::Shed`] is the **bare acceptor** — it votes, learns and
+    /// keeps the chosen prefix exactly as a colocated node does, and hands
+    /// the application nothing. Deployment data, never a feature: one code
+    /// path runs the learner logic for both.
+    pub application: Application,
+}
+
+/// Whether a [`crate::ColocatedNode`] runs the **application** or sheds it
+/// (#144, the bare acceptor).
+///
+/// An explicit type rather than a flag, because what it names is a
+/// deployment, not a switch: the `FoundationDB` log/storage split, a small
+/// durable acceptor tier plus a replica tier that runs the application.
+/// Shedding the application sheds exactly what the colocation put there —
+/// the [`Ready::committed`](crate::Ready::committed) output, the application
+/// repair that re-emits it, and the application snapshot the driver would
+/// produce from it. Everything a learner needs stays: the chosen index, the
+/// chosen prefix, the at-most-once ledger a truncation seals and a snapshot
+/// install hands on. Why each of those stays is the coupling analysis in
+/// [`crate::replica_node`]'s module doc.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Application {
+    /// The node applies the chosen prefix to the application in order — the
+    /// only deployment before #144, and the default.
+    #[default]
+    Colocated,
+    /// The **bare acceptor**: a learner that applies nothing. Its
+    /// [`Ready::committed`](crate::Ready::committed) is always empty and it
+    /// never opens an application repair; a snapshot it installs restores
+    /// its *log* to the boundary, never an application.
+    Shed,
 }
 
 impl Config {
@@ -119,6 +164,33 @@ impl Config {
     #[must_use]
     pub fn has_proxies(&self) -> bool {
         self.proxy_count > 0
+    }
+
+    /// Whether this deployment runs a replica tier (#144).
+    #[must_use]
+    pub fn has_replicas(&self) -> bool {
+        self.replica_count > 0
+    }
+
+    /// The replica that owns `slot`'s client reply (Compartmentalized Paxos
+    /// §3.3): `ReplicaId(slot % replica_count)`, [`ReplicaId::of`]. `None`
+    /// on a deployment without a replica tier, where the node the client
+    /// asked replies.
+    ///
+    /// The contract is only that every party derives the same owner from
+    /// the slot without coordination. Nothing routes on it yet: the node a
+    /// client asked still acks the proposal it serves, and the owner is
+    /// what a future client library that connects to replicas will act on.
+    #[must_use]
+    pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
+        ReplicaId::of(slot, self.replica_count)
+    }
+
+    /// Whether this node applies what it learns ([`Application::Colocated`])
+    /// rather than shedding it (the bare acceptor).
+    #[must_use]
+    pub fn runs_application(&self) -> bool {
+        self.application == Application::Colocated
     }
 
     /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.

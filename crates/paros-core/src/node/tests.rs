@@ -45,6 +45,7 @@ impl TestStorage {
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
                 proxy_count: 0,
+                ..Config::default()
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
@@ -335,6 +336,7 @@ fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
 // the learned promise), and the healthy re-propose the stale win used to break.
 
 mod acceptor;
+mod bare_acceptor;
 mod bounds;
 mod catch_up_snapshot;
 mod decide_apply;

@@ -218,6 +218,71 @@ example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
 `observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
 al., *Compartmentalized Paxos* §3.1. No level yet.
 
+## The replica tier
+
+Every node in the previous sections has two jobs. As an **acceptor** it votes on
+the log. As a **replica** it applies the chosen log to the application and
+answers the client. The two jobs scale in opposite directions. An extra acceptor
+makes each quorum bigger, so the protocol gets slower. An extra replica only
+learns, so the application gets more throughput and more read capacity. When
+both jobs share one process, you cannot scale one without the other.
+
+So paros can split them. A **replica node** learns and applies, and it never
+votes. It receives the `Commit`s that the leader or a proxy leader sends to every
+learner, and it persists each chosen value in the same record format a node uses.
+That record is not a vote: a replica is in no configuration, it answers no
+`Prepare` and no `Accept`, and it acks no beat. When a `Commit` is lost, the
+replica sees the gap in the next beat's watermark and asks the leader for the
+missing range. When the range was truncated, the leader offers a snapshot, as it
+does for any node below its floor. The one replica that answers the client for
+slot `s` is `s % replica_count`, so each replica sends a share of the replies.
+Today the node that the client asked still sends the reply; the reply owner is
+the data a future client library will use.
+
+The mirror image is the **bare acceptor**: a node that votes and applies nothing.
+The code answers the question "what must an acceptor keep when it drops the
+application?" one coupling at a time. It keeps its chosen index and the chosen
+values. An acceptor only truncates chosen slots. A new leader skips the slots that
+are already chosen. Garbage collection counts the chosen indices of a Phase-2
+quorum. A lagging node or replica is healed from the acceptors' chosen values.
+What a bare acceptor drops is only what the application needed: the `committed`
+output, the application repair and the application snapshot. So a bare acceptor
+is the same node with one setting changed, not a second code path.
+
+```mermaid
+flowchart LR
+    L[leader]
+    subgraph acceptors [bare acceptors: vote, keep the chosen log]
+        A0[acceptor 0]
+        A1[acceptor 1]
+        A2[acceptor 2]
+    end
+    subgraph replicas [replicas: apply, never vote]
+        R0[replica 0]
+        R1[replica 1]
+    end
+    L -- Accept --> A1
+    L -- Accept --> A2
+    A1 -- Accepted --> L
+    A2 -- Accepted --> L
+    L -- Commit --> R0
+    L -- Commit --> R1
+    R1 -- CatchUpRequest --> L
+```
+
+The garbage collection rule does not change. The paper's Scenario 3 lets a
+configuration be forgotten once replicas outside it hold the chosen prefix. paros
+still counts only acceptors, bare or colocated, because they are the ones whose
+records the next Phase 1 reads.
+
+**In the code.** `ReplicaNode`, `ReplicaReady`, `ReplicaCounters`
+(`replica_node.rs`, whose module doc holds the coupling analysis);
+`Application::Shed`, `Config::replica_count`, `Config::reply_owner` (`state.rs`);
+`ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
+`paros-core/examples/replica_tier.rs`. The driver and the simulation's process
+group are the second half of #144. Paper: Whittaker et al., *Compartmentalized
+Paxos* §2.3 and §3.3. No level yet.
+
 ## Cooperative leader handoff
 
 Leadership changes hands for two reasons, and only one of them needs an election.

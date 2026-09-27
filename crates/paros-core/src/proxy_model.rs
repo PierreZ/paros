@@ -102,6 +102,8 @@ impl Disk {
             WriteOp::Truncate { .. } | WriteOp::InstallSnapshot { .. } => {
                 unreachable!("the proxy model never compacts")
             }
+            // Only a `ReplicaNode` learns without accepting; the model runs none.
+            WriteOp::Learned { .. } => unreachable!("the proxy model runs no replica tier"),
         }
     }
 }
@@ -360,6 +362,7 @@ impl World {
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
             proxy_count: PROXIES,
+            ..Config::default()
         }
     }
 

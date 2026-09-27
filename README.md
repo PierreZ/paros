@@ -41,7 +41,7 @@ storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and har
 
 ## Learning Paxos with paros-core
 
-Six small, deterministic, runnable examples drive the composable roles of
+Eight small, deterministic, runnable examples drive the composable roles of
 [`paros-core`](crates/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
@@ -65,6 +65,14 @@ property each one teaches. Read them in order:
    row of the same grid answers with its vote watermarks while a column is mid-decision, the
    reader settles on the maximum and waits for its replica to apply it, and the leader sends
    no beat and opens no round — a linearizable read with no leader and no clock.
+7. [`proxy_leader.rs`](crates/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
+   sequences and a `ProxyLeader` on another process fans each slot's `Accept` out, folds the
+   votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
+   successor re-delegates what it inherited.
+8. [`replica_tier.rs`](crates/paros-core/examples/replica_tier.rs) — the replica tier: three
+   bare acceptors (`Application::Shed`) vote and keep the chosen prefix but apply nothing, two
+   `ReplicaNode`s apply it and never vote, a replica that lost a `Commit` catches up from the
+   leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
 
 ```sh
 cargo run -p paros-core --example single_decree
@@ -73,6 +81,8 @@ cargo run -p paros-core --example matchmaker
 cargo run -p paros-core --example flexible_quorums
 cargo run -p paros-core --example acceptor_grid
 cargo run -p paros-core --example quorum_read
+cargo run -p paros-core --example proxy_leader
+cargo run -p paros-core --example replica_tier
 ```
 
 ## Build and test
