@@ -214,6 +214,7 @@ impl AuditWorld {
             "a committed write ack is checked against the acking node's applied prefix"
         );
         st.check_protocol_gates();
+        st.check_tier_gates();
         st.check_driver_hook_gates();
         st.matchmaker.check_gates();
     }
@@ -498,6 +499,21 @@ impl AuditWorld {
                 || st.wiped.contains(&node)
                 || st.retired.contains(&node)
             {
+                continue;
+            }
+            // A bare acceptor (#144) applies nothing: what converges is its
+            // chosen prefix, onto the same frontier the appliers reached.
+            if st.bare.contains(&node) {
+                let chosen = st.chosen_watermark.get(&node).copied();
+                assert_always!(
+                    chosen.is_some_and(|c| c >= cluster_max),
+                    "bare acceptor: its chosen prefix covers the cluster's applied prefix at the end of the tail",
+                    {
+                        "node" => node,
+                        "chosen" => crate::signed_watermark(chosen),
+                        "cluster_max" => cluster_max
+                    }
+                );
                 continue;
             }
             let prefix = st.applied_max.get(&node).copied();

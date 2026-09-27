@@ -9,8 +9,10 @@
 //! `run_node` a production `tokio::main` would; a [`MatchmakerProcess`] runs
 //! `run_matchmaker` over its own slice of the same world; a [`ProxyProcess`]
 //! runs `run_proxy` (#142) with no slice at all — a proxy leader holds
-//! nothing durable, so a kill simply reboots it empty. The first two sit
-//! inside a recovery loop that turns a `buggify`-injected seam crash into a real
+//! nothing durable, so a kill simply reboots it empty; a [`ReplicaProcess`]
+//! runs `run_replica` (#144) over its own fault-free disk in the same world,
+//! outside the copy budget — a replica is not an acceptor. Every role with a
+//! disk sits inside a recovery loop that turns a `buggify`-injected seam crash into a real
 //! crash+restart: the driver unwinds, the volatile core is dropped, and the
 //! next iteration rebuilds it from the durable [`StorageWorld`]. A process kill
 //! — moonpool attrition on the main campaign, the scripted lifecycle on the
@@ -31,13 +33,16 @@ use moonpool_sim::{
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
 use crate::hooks::{BuggifyHooks, ScriptedCrash};
-use crate::roles::{ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, Role};
+use crate::roles::{
+    ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
+};
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, storage_world};
 use paros::{
-    AcceptorConfig, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId,
-    ProxyConfig, ProxyId, RunError, Seam, parse_addr, run_matchmaker, run_node, run_proxy,
+    AcceptorConfig, Application, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId,
+    NodeId, ProxyConfig, ProxyId, ReplicaId, RunError, Seam, parse_addr, run_matchmaker, run_node,
+    run_proxy, run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -49,6 +54,15 @@ fn ranked<I>(ips: &[String], id: fn(u64) -> I) -> SimulationResult<Vec<(I, Strin
             parse_addr(ip).map(|addr| (id(u64::try_from(rank).expect("rank fits u64")), addr))
         })
         .collect()
+}
+
+/// The replica tier's address book (#144): each replica's wire `NodeId`
+/// ([`replica_node_id`], outside the pool) and address, in `ReplicaId`
+/// order; empty on a seed without replicas.
+fn replica_book(deployment: &Deployment) -> SimulationResult<Vec<(NodeId, String)>> {
+    ranked(deployment.replicas(), |rank| {
+        replica_node_id(ReplicaId(rank))
+    })
 }
 
 /// The **bootstrap acceptor configuration** of a seed, as every node and every
@@ -266,6 +280,22 @@ impl ProxyProcess {
     }
 }
 
+/// A replica in the simulation (#144): its own process group, so a seed
+/// draws how many it deploys independently of the other pools and attrition
+/// can be scoped to it. Durable: a kill reboots it from its disk, and it
+/// catches up from the acceptors.
+pub(crate) struct ReplicaProcess {
+    /// Whether the driver hooks and the shape knobs are live (the main
+    /// campaign) or dark (a scripted case — none registers replicas today).
+    perturb: bool,
+}
+
+impl ReplicaProcess {
+    pub(crate) fn chaotic() -> Self {
+        Self { perturb: true }
+    }
+}
+
 /// One inert topology member that keeps the simulator lifecycle open while a
 /// workload drives something else (the storage contract suite).
 pub(crate) struct IdleProcess;
@@ -390,6 +420,31 @@ impl Process for ProxyProcess {
     }
 }
 
+#[async_trait]
+impl Process for ReplicaProcess {
+    fn name(&self) -> &'static str {
+        REPLICA_GROUP
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let perturb = self.perturb;
+        dispatch(
+            ctx,
+            "every replica process is mapped to the replica role",
+            "a replica",
+            |role| match role {
+                Role::Replica(rank) => Some(rank),
+                _ => None,
+            },
+            |deployment, rank, my_ip| async move {
+                run_replica_role(ctx, &deployment, rank, &my_ip, perturb).await
+            },
+        )
+        .await
+    }
+}
+
 /// An acceptor: the provider-generic node driver inside the crash/recovery
 /// loop (see the module doc).
 // One recovery loop with per-exit-kind handling; splitting the arms would
@@ -416,6 +471,9 @@ async fn run_acceptor(
     // `Config`'s `proxy_count` — zero on a seed without proxies, the plain
     // deployment whose every Phase 2 stays colocated.
     let proxies = ranked(deployment.proxies(), ProxyId)?;
+    // The replica tier (#144): the learners outside the pool, each under
+    // its wire `NodeId`; empty on a seed without replicas.
+    let replicas = replica_book(deployment)?;
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
     let bootstrap: Vec<NodeId> = match options.bootstrap {
         Some(n) => crate::shape::fixed_bootstrap_ranks(ctx.state(), n),
@@ -441,6 +499,14 @@ async fn run_acceptor(
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
+    // A bare acceptor (#144) is deployment data too, drawn once per seed and
+    // only where a replica tier runs the application.
+    let application =
+        if crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), perturb) {
+            Application::Shed
+        } else {
+            Application::Colocated
+        };
     let config = Config {
         id: self_rank,
         peers: bootstrap,
@@ -449,7 +515,8 @@ async fn run_acceptor(
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
         proxy_count: proxies.len(),
-        ..Config::default()
+        replica_count: deployment.replica_count(),
+        application,
     };
 
     // The per-iteration durable-storage world, shared by every node and
@@ -590,6 +657,7 @@ async fn run_acceptor(
             members.clone(),
             matchmakers.clone(),
             proxies.clone(),
+            replicas.clone(),
             boot,
             tunables,
             ctx.shutdown().clone(),
@@ -828,6 +896,7 @@ async fn run_proxy_role(
         parse_addr(my_ip)?,
         config,
         members,
+        replica_book(deployment)?,
         incarnation.shape.tunables,
         ctx.shutdown().clone(),
         &hooks,
@@ -840,6 +909,124 @@ async fn run_proxy_role(
         // unreachable here, and one showing up is a driver bug.
         other => SimulationError::InvalidState(format!("proxy {} exited with {other}", id.0)),
     })
+}
+
+/// A replica (#144): the provider-generic replica driver inside the same
+/// crash/recovery loop as a node — a seam crash unwinds `run_replica`, the
+/// volatile `ReplicaNode` is dropped, and the next incarnation rebuilds it
+/// from the durable world. Its disk is its own slice of the world under its
+/// IP, registered outside the copy budget and fault-free: the budget defends
+/// the acceptors' copies, and a replica's records are never one. A replica
+/// holds no promise, so a lost disk would only mean a first boot that
+/// relearns the log; the world never takes one away.
+#[tracing::instrument(level = "debug", skip_all, fields(replica = rank.0))]
+async fn run_replica_role(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    rank: ReplicaId,
+    my_ip: &str,
+    perturb: bool,
+) -> SimulationResult<()> {
+    let members = ranked(deployment.acceptors(), NodeId)?;
+    let has_matchmakers = !deployment.matchmakers().is_empty();
+    let bootstrap = bootstrap_config(ctx, members.len(), has_matchmakers, perturb);
+    let id = replica_node_id(rank);
+    let config = Config {
+        id,
+        peers: bootstrap.members().to_vec(),
+        quorum_system: bootstrap.quorum_system(),
+        nodes: members.iter().map(|(node, _)| *node).collect(),
+        replica_count: deployment.replica_count(),
+        ..Config::default()
+    };
+    let RoleRig {
+        incarnation,
+        hooks,
+        checker,
+        audit,
+    } = arm_role(ctx, my_ip, perturb);
+    let world = storage_world(ctx.state());
+    {
+        let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.note_replica(my_ip);
+        // The application's digest-lane count is one per-run value every
+        // applier must slice by; a replica may boot before any acceptor
+        // published it, so it publishes the seed's own draw too.
+        guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
+    }
+    let faults = StorageFaults::new(
+        ctx.time().clone(),
+        Duration::ZERO,
+        false,
+        WritePathRates::default(),
+    );
+    loop {
+        let boot = if world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .provisioned(my_ip)
+        {
+            BootKind::ExistingMember
+        } else {
+            BootKind::FirstBoot
+        };
+        let storage = DurableStorage::restore(
+            config.clone(),
+            Arc::downgrade(&world),
+            my_ip.to_string(),
+            id.0,
+            faults.clone(),
+            checker.clone(),
+        );
+        match run_replica(
+            ctx.providers().clone(),
+            storage,
+            parse_addr(my_ip)?,
+            members.clone(),
+            boot,
+            incarnation.shape.tunables,
+            ctx.shutdown().clone(),
+            &hooks,
+            &audit,
+        )
+        .await
+        {
+            Err(RunError::SeamCrash(_)) => {
+                restart_delay!(
+                    ctx,
+                    "a seam-crashed replica restarts after a buggified delay"
+                );
+            }
+            // A fault-free disk never fails a write; one showing up is a
+            // harness bug, recorded and refused.
+            Err(RunError::Storage(e)) => {
+                assert_always!(
+                    false,
+                    "replica: a fault-free replica disk never fails",
+                    { "replica" => id.0, "error" => e.to_string() }
+                );
+                return Err(SimulationError::InvalidState(format!(
+                    "replica {} storage fault: {e}",
+                    id.0
+                )));
+            }
+            // The world never wipes a replica and the provisioning ledger
+            // records its format, so its claim always matches its disk.
+            Err(RunError::Refused(refusal)) => {
+                assert_always!(
+                    false,
+                    "replica: a replica's boot claim matches its disk",
+                    { "replica" => id.0, "refusal" => format!("{refusal:?}") }
+                );
+                return Err(SimulationError::InvalidState(format!(
+                    "replica {} refused a boot: {refusal:?}",
+                    id.0
+                )));
+            }
+            Err(RunError::Infra(e)) => return Err(e),
+            Ok(()) => return Ok(()),
+        }
+    }
 }
 
 /// The **contract-suite workload** (issue #21 item F): runs the shared

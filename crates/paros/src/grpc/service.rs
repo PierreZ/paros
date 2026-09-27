@@ -228,38 +228,138 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
     }
 }
 
-// ---- the proxy leader (#142) ------------------------------------------------
+// ---- the deliver-only roles: the proxy leader (#142), the replica (#144) ----
 
-/// The proxy leader's tonic handler: the node contract's **Phase-2 subset**.
-/// A proxy receives delegated `Accept`s, `Accepted`s and `Nack`s through the
-/// same `Deliver` lane a node does, and nothing a client or an operator asks
-/// a node — it holds no replica to inspect and retires by stopping its
-/// process — so the other two internal methods are refused as unimplemented.
-#[derive(Clone)]
-pub(crate) struct ProxyService {
-    deliver: mpsc::Sender<Message>,
-    on_reject: OnReject,
+/// Which deliver-only role a [`LaneService`] serves — the reason its two
+/// operator methods are refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneRole {
+    /// A proxy leader: holds no replica to inspect, retired by stopping it.
+    Proxy,
+    /// A replica that is not an acceptor: it answers `Inspect` with its
+    /// chosen prefix and its application's state — what a probe comparing
+    /// every applier reads — and has no configuration to retire from.
+    Replica,
 }
 
-/// Construct the proxy leader's handler/inbox pair; `peer_inbox` bounds the
-/// one lane (at least 1).
+/// The tonic handler of a role that hears the **`Deliver` lane** and
+/// little else: a proxy leader receives delegated `Accept`s, `Accepted`s and
+/// `Nack`s, a replica receives `Commit`s, beats and catch-up answers, both
+/// through the same lane a node does. A replica also answers `Inspect` (its
+/// application is what a probe reads); nothing else a client or an operator
+/// asks a node is theirs, so the rest is refused as unimplemented.
+#[derive(Clone)]
+pub(crate) struct LaneService {
+    deliver: mpsc::Sender<Message>,
+    /// The replica's `Inspect` queue; `None` on a proxy leader.
+    inspect: Option<mpsc::Sender<Call<InspectRequest, InspectReply>>>,
+    /// The replica's public `QuorumRead` queue (§3.4: a client reads from a
+    /// replica); `None` on a proxy leader.
+    quorum_read: Option<mpsc::Sender<Call<Read, ReadAck>>>,
+    on_reject: OnReject,
+    role: LaneRole,
+}
+
+/// The loop-side queues of a [`LaneService`]: the lane, and — on a replica —
+/// the `Inspect` and the `QuorumRead` calls.
+pub(crate) struct LaneInbox {
+    pub(crate) deliver: mpsc::Receiver<Message>,
+    pub(crate) inspect: Option<mpsc::Receiver<Call<InspectRequest, InspectReply>>>,
+    pub(crate) quorum_read: Option<mpsc::Receiver<Call<Read, ReadAck>>>,
+}
+
+/// Construct a lane role's handler/inbox pair; `peer_inbox` bounds the lane
+/// and the replica's `Inspect` queue (each at least 1).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn proxy_channel(
+pub(crate) fn lane_channel(
+    role: LaneRole,
     peer_inbox: usize,
     on_reject: OnReject,
-) -> (ProxyService, mpsc::Receiver<Message>) {
+) -> (LaneService, LaneInbox) {
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
+    let (inspect_tx, inspect_rx) = replica_queue(role, peer_inbox);
+    let (quorum_read_tx, quorum_read_rx) = replica_queue(role, peer_inbox);
     (
-        ProxyService {
+        LaneService {
             deliver: deliver_tx,
+            inspect: inspect_tx,
+            quorum_read: quorum_read_tx,
             on_reject,
+            role,
         },
-        deliver_rx,
+        LaneInbox {
+            deliver: deliver_rx,
+            inspect: inspect_rx,
+            quorum_read: quorum_read_rx,
+        },
     )
 }
 
+/// A queue only a replica's lane carries.
+type ReplicaQueue<T> = (Option<mpsc::Sender<T>>, Option<mpsc::Receiver<T>>);
+
+fn replica_queue<T>(role: LaneRole, capacity: usize) -> ReplicaQueue<T> {
+    match role {
+        LaneRole::Proxy => (None, None),
+        LaneRole::Replica => {
+            let (tx, rx) = mpsc::channel(capacity);
+            (Some(tx), Some(rx))
+        }
+    }
+}
+
+/// A replica's public face (§3.4): it serves the **leaderless read** from its
+/// own applied state — the paper's shape, where a client reads from a
+/// replica — and nothing a node's client asks of a leader. A proxy leader
+/// serves no client call at all.
 #[tonic::async_trait]
-impl internal::paros_internal_server::ParosInternal for ProxyService {
+impl public::paros_server::Paros for LaneService {
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn propose(&self, _request: Request<Propose>) -> Result<Response<ProposeAck>, Status> {
+        Err(Status::unimplemented("propose to a node of the pool"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn read(&self, _request: Request<Read>) -> Result<Response<ReadAck>, Status> {
+        Err(Status::unimplemented("a read-index read is the leader's"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn quorum_read(&self, request: Request<Read>) -> Result<Response<ReadAck>, Status> {
+        match &self.quorum_read {
+            Some(quorum_read) => dispatch(quorum_read, request).await,
+            None => Err(Status::unimplemented("a proxy leader serves no read")),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn compact(&self, _request: Request<Compact>) -> Result<Response<CompactAck>, Status> {
+        Err(Status::unimplemented("compaction is asked of the leader"))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure(
+        &self,
+        _request: Request<Reconfigure>,
+    ) -> Result<Response<ReconfigureAck>, Status> {
+        Err(Status::unimplemented(
+            "reconfiguration is asked of the leader",
+        ))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn reconfigure_matchmakers(
+        &self,
+        _request: Request<ReconfigureMatchmakers>,
+    ) -> Result<Response<ReconfigureMatchmakersAck>, Status> {
+        Err(Status::unimplemented(
+            "a matchmaker handover is driven by a node",
+        ))
+    }
+}
+
+#[tonic::async_trait]
+impl internal::paros_internal_server::ParosInternal for LaneService {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn deliver(
         &self,
@@ -271,11 +371,14 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn inspect(
         &self,
-        _request: Request<InspectRequest>,
+        request: Request<InspectRequest>,
     ) -> Result<Response<InspectReply>, Status> {
-        Err(Status::unimplemented(
-            "a proxy leader holds no replica to inspect",
-        ))
+        match &self.inspect {
+            Some(inspect) => dispatch(inspect, request).await,
+            None => Err(Status::unimplemented(
+                "a proxy leader holds no replica to inspect",
+            )),
+        }
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -283,8 +386,9 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
         &self,
         _request: Request<RetireRequest>,
     ) -> Result<Response<RetireAck>, Status> {
-        Err(Status::unimplemented(
-            "a proxy leader is retired by stopping its process",
-        ))
+        Err(Status::unimplemented(match self.role {
+            LaneRole::Proxy => "a proxy leader is retired by stopping its process",
+            LaneRole::Replica => "a replica is retired by stopping its process",
+        }))
     }
 }

@@ -139,6 +139,8 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         pool: node.config().pool().to_vec(),
         matchmakers: node.config().matchmakers.clone(),
         matchmaker_pool: node.config().matchmaker_pool().to_vec(),
+        replica_count: node.config().replica_count,
+        application: node.config().application,
     };
     audit.recovered(
         NodeId(self_id),
@@ -150,7 +152,13 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
     let mut replayed_application = false;
     let mut replayed_snap_points: Vec<Slot> = Vec::new();
     let mut repair_from: Option<Slot> = None;
-    if let Some(ci) = node.hard_state().chosen_index {
+    // A bare acceptor (#144, `Application::Shed`) has no application to
+    // replay into and nothing to repair: its log is the whole of its state.
+    let replayed_prefix = node
+        .hard_state()
+        .chosen_index
+        .filter(|_| node.config().runs_application());
+    if let Some(ci) = replayed_prefix {
         let applied_slot = storage.applied_slot();
         let floor = node.acceptor().first_slot();
         let resume = applied_slot.map_or(Slot(0), |a| Slot(a.0.saturating_add(1)));

@@ -42,6 +42,11 @@ green quickly. Do not put a multi-thousand-iteration `explore()` back into a nex
 three-to-six process pool of `NodeProcess::chaotic()` plus zero to five `MatchmakerProcess`es
 plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
 IP order — the count is every node's `Config::proxy_count`, zero the plain deployment)
+plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that apply and never vote,
+`ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
+`Config::replica_count`, zero the plain deployment; each on a fault-free disk outside the copy
+budget, and each judged by the same `ChainState` application check and final convergence claim
+as a node)
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
@@ -51,7 +56,8 @@ the one four-node, one-matchmaker case that needs a spare and a prior configurat
 process plays which role is the **deployment/role map** (`paros_sim::roles`), read off moonpool's
 **process groups** (moonpool #197: one `.processes()` registration per role, each with its own
 per-seed count and IP range — `paros-node` is the acceptor pool, `paros-matchmaker` the
-matchmakers, `paros-proxy` the proxy leaders — and attrition scoped per group with
+matchmakers, `paros-proxy` the proxy leaders, `paros-replica` the replicas — and attrition
+scoped per group with
 `AttritionVictims::group`), so every process
 and every client derives the same map without coordination. Membership is never "every process
 in the topology": the pool is the map's acceptor list, and the **bootstrap configuration** is
@@ -222,7 +228,9 @@ own**. The roles:
 - `replica_node.rs` — `ReplicaNode` (#144, Compartmentalized Paxos §3.3): the **third
   deployment**, a `Replica` over a durable chosen log on a process that is not an acceptor. It
   steps `Commit`, `CatchUpResponse`, `InstallSnapshot` and `Heartbeat` (the watermark and the
-  leader hint, never the ballot), sends only `CatchUpRequest`, persists `WriteOp::Learned` —
+  leader hint and the configuration, never the ballot) and the `PreReadAck`s of the quorum
+  reads it serves from its own applied state (§3.4, `quorum_read_in`), sends `CatchUpRequest`
+  and `PreRead`, persists `WriteOp::Learned` —
   the accepted record's durable shape, never a vote, and a distinct op so no audit folds it
   into a quorum — plus `SetChosenIndex`, `Truncate` and `InstallSnapshot`, and never an
   acceptor op. It is never in `Config::peers` or the pool (asserted at boot), answers no
@@ -235,7 +243,8 @@ own**. The roles:
   from the prefix, the handoff tail, the sealed ledger) and what only reflects the
   colocation. `Config::replica_count` (zero is the plain deployment) and
   `Config::reply_owner(slot) = ReplicaId(slot % replica_count)` name the replica that owns a
-  slot's reply; nothing routes on it yet — the node a client asked still acks (#144,
+  slot's reply; nothing routes on it yet — the node a client asked still acks, and the harness
+  gates that an acked slot's owner applied it (#144,
   decision 1).
 - `quorum_read.rs` — `QuorumRead` / `QuorumReads` (#143, Compartmentalized Paxos §3.4, *Paxos
   Quorum Reads*): the **leaderless read** tally. A reader asks a Phase-1 quorum — a row of a
@@ -308,11 +317,13 @@ the first second deployment (`proxy_leader.rs`, #142 — the embedded `Rounds` o
 process, a count in `Config`, zero tally lines; its driver `paros::run_proxy` and its process
 group `paros-proxy` are the harness's third role); the replica tier is the third
 (`replica_node.rs`, #144 — the `Replica` on a process with no `Acceptor`, a count in `Config`,
-and the bare acceptor as `Application::Shed` on the same `ColocatedNode`; its driver and
-process group are part B of #144).
+and the bare acceptor as `Application::Shed` on the same `ColocatedNode`; its driver
+`paros::run_replica` and its process group `paros-replica` are the harness's fourth role; the
+bare acceptor is drawn per seed, whole-pool, on a seed with replicas — `shape::bare_acceptors`).
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O;
-`paros::run_matchmaker` and `paros::run_proxy` are the same shape for the two other roles.
+`paros::run_matchmaker`, `paros::run_proxy` and `paros::run_replica` are the same shape for
+the three other roles.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
 code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool

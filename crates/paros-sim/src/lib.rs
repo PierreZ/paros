@@ -49,8 +49,10 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
-use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess, ScriptedOptions};
-use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP};
+use crate::process::{
+    MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess, ScriptedOptions,
+};
+use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
 /// (the empty prefix, nothing seen yet) is `-1`, and a value too large for
@@ -150,6 +152,16 @@ pub(crate) const MATCHMAKER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=5;
 /// `Config` carries; which process answers to a `ProxyId` is the deployment
 /// map's.
 pub(crate) const PROXY_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=3;
+/// Per-seed **replica tier** draw (inclusive, #144): the replica process
+/// group (`crate::roles::REPLICA_GROUP`), drawn independently of the other
+/// pools. Zero is the plain deployment — `Config::replica_count = 0`, the
+/// learner traffic reaching the pool alone, the wire byte-for-byte today's.
+/// One replica is the tier whose single member must heal itself from the
+/// acceptors after every attrition kill; two make `reply_owner` alternate
+/// and let one replica sit below the floor while the other stays current.
+/// The count is protocol data every node's `Config` carries; which process
+/// answers to a `ReplicaId` is the deployment map's.
+pub(crate) const REPLICA_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -216,11 +228,14 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// Moonpool re-samples each attrition base per seed under `ChaosMode::Swarm`
 /// (about half the seeds run a regime with no attrition, and the restart
 /// window is rescaled to 50–200% of the range below), so the values here are
-/// a base, not a fixed shape. The three regimes are independent: the acceptor
+/// a base, not a fixed shape. The four regimes are independent: the acceptor
 /// pool's `max_dead` budget is spent only by dead acceptors, the
-/// matchmakers' only by dead matchmakers and the proxies' only by dead
-/// proxies, so a killed matchmaker or proxy never keeps the cluster's own
-/// quorum whole by proxy, and every role can be down at once. A killed proxy
+/// matchmakers' only by dead matchmakers, the proxies' only by dead proxies
+/// and the replicas' only by dead replicas, so a killed matchmaker, proxy or
+/// replica never keeps the cluster's own quorum whole by proxy, and every
+/// role can be down at once. A killed replica (#144) comes back to a log the
+/// acceptors kept deciding and truncating without it — the catch-up and the
+/// below-floor snapshot install a replica exists to survive. A killed proxy
 /// leader (#142) is the fault the leader's take-back exists for: every slot
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
@@ -232,7 +247,7 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
-fn chaos_surfaces() -> [Chaos; 5] {
+fn chaos_surfaces() -> [Chaos; 6] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -257,6 +272,10 @@ fn chaos_surfaces() -> [Chaos; 5] {
             config: regime(AttritionVictims::group(PROXY_GROUP)),
             mode: ChaosMode::Swarm,
         },
+        Chaos::Attrition {
+            config: regime(AttritionVictims::group(REPLICA_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
         Chaos::BuggifyKnobs,
     ]
 }
@@ -279,6 +298,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
             Box::new(MatchmakerProcess::chaotic())
         })
         .processes(PROXY_POOL_RANGE, || Box::new(ProxyProcess::chaotic()))
+        .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))

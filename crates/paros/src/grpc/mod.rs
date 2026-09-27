@@ -66,4 +66,4 @@ pub(crate) use matchmaker_codec::{
 };
 pub(crate) use matchmaker_service::{MatchmakerInbox, matchmaker_channel};
 pub use service::EdgeRejection;
-pub(crate) use service::{OnReject, RpcInbox, proxy_channel, rpc_channel};
+pub(crate) use service::{LaneRole, OnReject, RpcInbox, lane_channel, rpc_channel};

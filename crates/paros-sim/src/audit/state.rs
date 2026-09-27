@@ -507,6 +507,31 @@ pub(super) struct AuditState {
     pub(super) proxied_round_survived_handoff: bool,
     pub(super) proxy_resend_skipped: bool,
     pub(super) proxy_round_expired: bool,
+
+    // --- the replica tier (#144) --------------------------------------------
+    /// Every replica that booted: learners outside the pool that hold no
+    /// promise, registered by `replica_booted` before anything they report.
+    pub(super) replicas: BTreeSet<u64>,
+    /// The two outcomes the campaign must reach: a slot applied on a replica
+    /// that never voted for it, and a replica below every acceptor's floor
+    /// healed by a snapshot install.
+    pub(super) applied_on_replica: bool,
+    /// Bare acceptors (#144, `Application::Shed`), from their boot reports:
+    /// they apply nothing, so their convergence is their chosen prefix.
+    pub(super) bare: BTreeSet<u64>,
+    /// A bare acceptor acked a client on a slot it never applied.
+    pub(super) bare_acked: bool,
+    /// Acks a bare acceptor gave before any process applied the identity:
+    /// `(client, seq) -> acked slot`, judged when the identity applies.
+    pub(super) bare_acks_pending: BTreeMap<(u64, u64), u64>,
+    /// The deployment's replica count (`Deployment::replica_count`).
+    pub(super) replica_count: usize,
+    /// Per reply-owner replica, the lowest slot it owns that another process
+    /// acked (#144, decision 1).
+    pub(super) acked_by_other: BTreeMap<u64, u64>,
+    /// A quorum read was served by a replica (§3.4, #144).
+    pub(super) quorum_read_on_replica: bool,
+    pub(super) replica_installed_snapshot: bool,
 }
 
 impl AuditState {
@@ -739,20 +764,6 @@ impl AuditState {
         if self.decided_off_column {
             assert_reachable!("grid: a slot is decided on a column other than its own");
         }
-        // The proxy outcomes (#142): a seed with proxies delegates every
-        // settled proposal, so a sweep decides through a proxy; and the
-        // take-back — the leader's liveness under a dead or slow proxy —
-        // fires wherever a proxy's `Commit` is late by the budget, which a
-        // killed proxy, a lost delegation or the budget's own floor
-        // produces.
-        assert_sometimes!(
-            self.decided_through_proxy,
-            "proxy: a slot is decided through a proxy leader"
-        );
-        assert_sometimes!(
-            self.delegation_taken_back,
-            "proxy: a leader takes a delegated round back"
-        );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -810,6 +821,58 @@ impl AuditState {
                 ("new leader elected", self.leader_rounds.len() >= 2),
                 ("client acknowledged", self.ack_after_leader_change),
             ]
+        );
+    }
+
+    /// The compartmentalized tiers' outcome gates — the proxy leaders
+    /// (#142) and the replicas (#144) — checked beside the protocol's own.
+    pub(super) fn check_tier_gates(&self) {
+        // The proxy outcomes (#142): a seed with proxies delegates every
+        // settled proposal, so a sweep decides through a proxy; and the
+        // take-back — the leader's liveness under a dead or slow proxy —
+        // fires wherever a proxy's `Commit` is late by the budget, which a
+        // killed proxy, a lost delegation or the budget's own floor
+        // produces.
+        assert_sometimes!(
+            self.decided_through_proxy,
+            "proxy: a slot is decided through a proxy leader"
+        );
+        assert_sometimes!(
+            self.delegation_taken_back,
+            "proxy: a leader takes a delegated round back"
+        );
+        // The replica outcomes (#144): a seed with a replica tier applies
+        // on a process that never voted, and a replica killed by its own
+        // attrition regime comes back below the floor the acceptors kept
+        // raising without it.
+        assert_sometimes!(
+            self.applied_on_replica,
+            "replica: a slot is applied on a replica that never voted"
+        );
+        assert_sometimes!(
+            self.replica_installed_snapshot,
+            "replica: a replica below the floor is healed by a snapshot"
+        );
+        // The bare acceptor (#144): a slot decided and acked by an acceptor
+        // that never applied it — the application lives on the replicas.
+        assert_sometimes!(
+            self.bare_acked,
+            "bare acceptor: a client is acked on a slot the acceptor never applied"
+        );
+        // Decision 1 of #144: a slot the node asked acked is owned by a
+        // replica that applied it too — the owner the future client library
+        // will wait on reached the slot it would have answered.
+        assert_sometimes!(
+            self.acked_by_other
+                .iter()
+                .any(|(owner, slot)| { self.frontier.get(owner).is_some_and(|next| next > slot) }),
+            "replica: an acked slot's reply owner, another process, applied it"
+        );
+        // §3.4 on the tier it was written for: a client read answered from
+        // a replica's applied state, certified by a row of acceptors.
+        assert_sometimes!(
+            self.quorum_read_on_replica,
+            "replica: a quorum read is served by a replica"
         );
     }
 
@@ -984,8 +1047,12 @@ impl AuditState {
         }
     }
 
-    /// The lowest compaction floor across the cluster: everything below it is
-    /// truncated *everywhere*, so the per-slot safety tallies can be pruned.
+    /// The lowest compaction floor across the acceptors: everything below it
+    /// is truncated on every *voter*, so the per-slot safety tallies can be
+    /// pruned. A replica (#144) is not counted — it votes on nothing, and
+    /// may sit below this floor after a long outage; what it still applies
+    /// there is judged against the decided witness the pruning keeps
+    /// ([`AuditState::decided_vhash`]).
     pub(super) fn cluster_min_floor(&self) -> u64 {
         self.booted
             .iter()

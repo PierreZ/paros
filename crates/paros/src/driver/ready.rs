@@ -158,21 +158,59 @@ fn note_mid_election_snapshot<A: Audit>(
     }
 }
 
+/// The prefix this node's acks and reads are answered from: the
+/// application's durable prefix on a colocated node, the chosen prefix on a
+/// bare acceptor (#144), which applies nothing.
+pub(crate) fn served_prefix<S: NodeStorage>(node: &ColocatedNode, storage: &S) -> Option<Slot> {
+    if node.config().runs_application() {
+        storage.applied_slot()
+    } else {
+        node.replica().chosen_index()
+    }
+}
+
+/// A **bare acceptor's** acks (#144, `Application::Shed`): it applies
+/// nothing, so a proposal it parked is answered once its slot is inside the
+/// contiguous chosen prefix — the register a bare deployment defines is the
+/// chosen log; the application lives on the replicas. Each parked slot is
+/// paired with the command chosen there (a #94 duplicate as the `Noop` the
+/// walk treats it as, a slot no longer retained as a `Noop` too — neither
+/// matches a waiter, so the client retries through the dedup path), and the
+/// ordinary ack path judges the identity exactly as it does on a colocated
+/// node.
+fn chosen_waiters(node: &ColocatedNode, waiters: &ClientWaiters) -> Vec<(Slot, Command)> {
+    let Some(ci) = node.replica().chosen_index() else {
+        return Vec::new();
+    };
+    waiters
+        .pending
+        .range(..=ci)
+        .map(|(slot, _)| {
+            let chosen = node
+                .replica()
+                .chosen_at(*slot)
+                .filter(|_| !node.replica().duplicate_slots().contains(slot))
+                .cloned()
+                .unwrap_or(Command::Control(paros_core::Control::Noop));
+            (*slot, chosen)
+        })
+        .collect()
+}
+
 /// Ack-on-commit: only now can a client learn success — both the chosen index
 /// and the application transition are durable. Controls have no proposal
 /// waiter. The reply may be deliberately dropped at the reply seam
 /// ([`DriverHooks::drop_client_reply`]): the server state has advanced either
 /// way, and the client's retry takes the `(client, seq)` dedup path.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, committed = committed.len()))]
-fn ack_committed_waiters<S, H, A>(
-    storage: &S,
+fn ack_committed_waiters<H, A>(
+    applied: Option<Slot>,
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
     self_id: u64,
     committed: &[(Slot, Command)],
 ) where
-    S: NodeStorage,
     H: DriverHooks,
     A: Audit,
 {
@@ -207,14 +245,7 @@ fn ack_committed_waiters<S, H, A>(
                 });
                 continue;
             }
-            audit.client_acked(
-                NodeId(self_id),
-                client,
-                seq,
-                *slot,
-                storage.applied_slot(),
-                false,
-            );
+            audit.client_acked(NodeId(self_id), client, seq, *slot, applied, false);
             answer(
                 hooks,
                 audit,
@@ -291,10 +322,7 @@ where
         .iter()
         .flat_map(|(audience, msg)| {
             let proxy = audience.proxy().map(Party::Proxy);
-            let nodes = audience
-                .resolve(&pool, NodeId(self_id))
-                .into_iter()
-                .map(Party::Node);
+            let nodes = out.resolve(audience, &pool).into_iter().map(Party::Node);
             proxy
                 .into_iter()
                 .chain(nodes)
@@ -468,7 +496,13 @@ where
         send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions).await;
     }
 
-    ack_committed_waiters(storage, waiters, hooks, audit, self_id, &committed);
+    let applied = served_prefix(node, storage);
+    if node.config().runs_application() {
+        ack_committed_waiters(applied, waiters, hooks, audit, self_id, &committed);
+    } else {
+        let decided = chosen_waiters(node, waiters);
+        ack_committed_waiters(applied, waiters, hooks, audit, self_id, &decided);
+    }
 
     // 3b. Answer confirmed reads — after the apply loop, so the applied prefix
     //     this same batch carried is covered by what the read observes. The ack
@@ -576,7 +610,7 @@ pub(crate) fn report_snap_recorded<A: Audit>(audit: &A, self_id: u64, points: &[
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
-async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,

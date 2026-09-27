@@ -18,9 +18,7 @@ mod reads;
 mod reconfigure;
 mod replication;
 
-#[cfg(test)]
-use self::reads::READ_TTL_TICKS;
-
+pub(crate) use self::reads::READ_TTL_TICKS;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use self::handoff::{

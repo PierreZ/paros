@@ -42,7 +42,7 @@ use crate::driver::edge::{GrpcEdge, edge_reporter};
 use crate::driver::events::{command_hash, message_kind, message_route};
 use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
 use crate::driver::{DriverTunables, RunError};
-use crate::grpc::{ParosInternalClient, ParosInternalServer, proxy_channel};
+use crate::grpc::{LaneRole, ParosInternalClient, ParosInternalServer, lane_channel};
 use crate::hooks::DriverHooks;
 
 /// A proxy leader's deployment data: its identity in the proxy namespace and
@@ -145,7 +145,8 @@ fn report_delegation<A: Audit>(
 /// each fan-out, each decision, each relayed refusal — resolve every
 /// audience through the deployment map as a proxy sends
 /// ([`Audience::resolve_from_proxy`]: a proxy is nobody's peer, so the
-/// leader hears its own delegation's fan-out when it sits in the column),
+/// leader hears its own delegation's fan-out when it sits in the column;
+/// a `Commit` to the learners reaches the deployment's replicas too),
 /// and send. Nothing to persist: the batch is messages alone.
 #[tracing::instrument(level = "trace", skip_all, fields(proxy = proxy.id().0))]
 fn drain<H: DriverHooks, A: Audit>(
@@ -159,7 +160,7 @@ fn drain<H: DriverHooks, A: Audit>(
     let ready = proxy.ready();
     let mut messages: Vec<(Party, Message)> = Vec::new();
     for (audience, msg) in ready.messages() {
-        let addressees = audience.resolve_from_proxy(pool);
+        let addressees = out.resolve(audience, pool);
         match (audience, msg) {
             (
                 Audience::AcceptorsOf { column, .. },
@@ -243,7 +244,9 @@ fn drain<H: DriverHooks, A: Audit>(
 /// subset on `local_addr`, and sends to the acceptors and learners named in
 /// `members` — the full **node pool** (`NodeId` → address), the same list
 /// every node is given, so a fan-out to a column and a `Commit` to every
-/// learner resolve through the same deployment map. `tunables` supplies the
+/// learner resolve through the same deployment map. `replicas` is the
+/// deployment's replica tier (#144, `NodeId` → address, outside the pool;
+/// empty without one): a `Commit` reaches them beside the pool. `tunables` supplies the
 /// tick cadence, the retention budget (`proxy_round_resends`), the h2
 /// keep-alive and the mailbox shape; `hooks` and
 /// `audit` are the provider-generic seams every driver in this crate takes,
@@ -264,6 +267,7 @@ pub async fn run_proxy<P, H, A>(
     local_addr: String,
     config: ProxyConfig,
     members: Vec<(NodeId, String)>,
+    replicas: Vec<(NodeId, String)>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -283,7 +287,8 @@ where
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
     let on_reject = edge_reporter(audit, me);
-    let (service, mut inbox) = proxy_channel(tunables.peer_inbox_capacity, on_reject);
+    let (service, lane) = lane_channel(LaneRole::Proxy, tunables.peer_inbox_capacity, on_reject);
+    let mut inbox = lane.deliver;
     let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
     let mut edge = GrpcEdge::bind(
         &providers,
@@ -307,10 +312,12 @@ where
         "proxy_booted"
     );
 
-    // One lane per node of the pool: the acceptors the fan-outs reach and
-    // the learners the `Commit`s reach are the same list.
+    // One lane per node of the pool — the acceptors the fan-outs reach and
+    // the learners the `Commit`s reach are the same list — and one per
+    // replica, which the `Commit`s reach too.
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
-    let mut channels = Channels::with_capacity(members.len());
+    let learners: Vec<NodeId> = replicas.iter().map(|(id, _)| *id).collect();
+    let mut channels = Channels::with_capacity(members.len() + replicas.len());
     let lanes = LaneOpener {
         providers: &providers,
         tunables,
@@ -320,6 +327,7 @@ where
     };
     let peer_queues = members
         .into_iter()
+        .chain(replicas)
         .map(|(node, addr)| {
             let client = channels.connect(
                 &providers,
@@ -348,6 +356,7 @@ where
     let out = Outbound {
         peer_queues,
         proxy_queues: BTreeMap::new(),
+        learners,
         sender: me,
     };
 

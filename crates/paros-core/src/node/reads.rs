@@ -24,7 +24,7 @@ use super::{ColocatedNode, NodeRole, ReadState, Slot};
 /// A watermark raised by an accept that never decided needs the next
 /// leader's gap fill to be covered, which is why the window is not shorter
 /// than an election.
-pub(super) const READ_TTL_TICKS: u64 = 20;
+pub(crate) const READ_TTL_TICKS: u64 = 20;
 
 impl ColocatedNode {
     /// Hand the proposer this node's active configuration and chosen prefix

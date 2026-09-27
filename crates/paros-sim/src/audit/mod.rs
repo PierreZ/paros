@@ -48,10 +48,10 @@ use std::sync::{Arc, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
-    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    AcceptorConfig, Application, Audit, Ballot, BootRefusal, Command, Control, Deployment,
+    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
+    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
+    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
     SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
@@ -327,17 +327,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // The core adopts `max(promise, ballot)` on install and any raise is
         // surfaced (as the batch's `SetPromise`) before this write's report,
         // so by now the folded promise must already cover the snapshot's
-        // ballot — a lower fold would mean the adoption was lost.
-        let folded = st.promised.get(&node.0).copied();
-        assert_always!(
-            folded.is_some_and(|p| p >= ballot),
-            "an installed snapshot's ballot is covered by the node's promise",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "folded_round" => folded.map_or(0, |p| p.round)
-            }
-        );
+        // ballot — a lower fold would mean the adoption was lost. A replica
+        // (#144) holds no promise at all: the claim is an acceptor's.
+        if st.replicas.contains(&node.0) {
+            st.replica_installed_snapshot = true;
+        } else {
+            let folded = st.promised.get(&node.0).copied();
+            assert_always!(
+                folded.is_some_and(|p| p >= ballot),
+                "an installed snapshot's ballot is covered by the node's promise",
+                {
+                    "node" => node.0,
+                    "round" => ballot.round,
+                    "folded_round" => folded.map_or(0, |p| p.round)
+                }
+            );
+        }
         // An offer is only ever materialized from state the serving peer had
         // durably applied (the driver skips a mismatched offer), and that
         // apply was folded before the offer left — so a landing past the
@@ -384,6 +389,24 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
         let mut st = self.state();
+        if st.replicas.contains(&node.0) {
+            st.applied_on_replica = true;
+        }
+        if let Some((client, seq)) = identity
+            && let Some(acked) = st.bare_acks_pending.remove(&(client, seq))
+        {
+            assert_always!(
+                acked == slot.0,
+                "a committed ack names the slot its command applied at",
+                {
+                    "node" => node.0,
+                    "client" => client,
+                    "seq" => seq,
+                    "acked_slot" => acked,
+                    "applied_at" => slot.0
+                }
+            );
+        }
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
@@ -407,7 +430,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // command, and control-slot agreement is already covered by the
         // per-slot `chosen` check above.
         if identity.is_some()
-            && let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0)
+            && let Some(decided_vhash) = st.decided_vhash(slot.0)
         {
             assert_always!(
                 vhash == decided_vhash,
@@ -419,9 +442,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // only once chosen, chosen only on a quorum of `Accepted`s, and each
         // of those left its node after the audit folded the durable accept —
         // so by the time any node applies a slot, the tally has decided it.
-        // The end-of-run `decided >= applied` leg is this, per slot.
+        // The end-of-run `decided >= applied` leg is this, per slot. A slot
+        // the tally pruned below the acceptors' floor stays decided through
+        // its witness: a replica (#144) may still apply it — it was down
+        // while the acceptors truncated, and it holds its own log below
+        // their floor — and its decision is exactly what the witness keeps
+        // (seeds 14697535725710265276, 12166376049160003182 and
+        // 2038247294279376366 on the first replica-tier hunt).
         assert_always!(
-            st.decided.contains_key(&slot.0),
+            st.decided_vhash(slot.0).is_some(),
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
@@ -555,6 +584,20 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             Message::Commit { .. } => self.observe_durable_send(from, msg),
             _ => {}
         }
+    }
+
+    fn replica_booted(&self, replica: NodeId, _chosen_index: Option<Slot>, _floor: Slot) {
+        let mut st = self.state();
+        // A replica's id is outside the pool by construction; a collision
+        // would fold a replica's reports into an acceptor's state.
+        assert_always!(
+            st.pool.as_ref().is_none_or(|pool| !pool.contains(&replica.0)),
+            "replica: a replica's id is outside the node pool",
+            { "replica" => replica.0 }
+        );
+        st.replicas.insert(replica.0);
+        // A replica's read frontier is per boot, as a node's.
+        st.read_watermark.remove(&replica.0);
     }
 
     fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {
@@ -867,6 +910,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         let mut st = self.state();
         st.any_ack_checked = true;
+        // Decision 1 of #144: the node asked acks, and the slot's reply
+        // owner — a replica, a different process by construction — is noted
+        // so the gate can prove it applied what it would have answered.
+        if let Some(owner) = paros::ReplicaId::of(slot, st.replica_count) {
+            let owner = crate::roles::replica_node_id(owner).0;
+            if owner != node.0 {
+                let first = st.acked_by_other.entry(owner).or_insert(slot.0);
+                *first = (*first).min(slot.0);
+            }
+        }
         // A committed ack is a claim about a specific applied command: on both
         // ack paths (ack-on-commit and the dedup fast path) the apply of this
         // `(client, seq)` was folded before the ack fired — on this node, or,
@@ -874,8 +927,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // it. The ack must name exactly the index the identity applied at; an
         // ack for a never-applied identity fails the same check.
         let applied_at = st.applied_identity.get(&(client, seq)).copied();
+        // A bare acceptor (#144) acks on the chosen prefix and applies
+        // nothing, so the replicas may not have applied the identity yet: the
+        // claim is then held until they do (`applied`), judged there by the
+        // same message.
+        if st.bare.contains(&node.0) {
+            st.bare_acked = true;
+            if applied_at.is_none() {
+                st.bare_acks_pending.insert((client, seq), slot.0);
+            }
+        }
         assert_always!(
-            applied_at == Some(slot.0),
+            applied_at == Some(slot.0) || (applied_at.is_none() && st.bare.contains(&node.0)),
             "a committed ack names the slot its command applied at",
             {
                 "node" => node.0,
@@ -967,6 +1030,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.quorum_read_past_opened |= watermark > opened;
         st.quorum_read_after_leader_change |= st.leader_change_ms.is_some_and(|t| now > t);
         st.quorum_read_on_row |= row.is_some();
+        // §3.4's own shape (#144): the read answered from a replica's state.
+        st.quorum_read_on_replica |= st.replicas.contains(&node.0);
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -998,6 +1063,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );
+        st.replica_count = deployment.replica_count;
+        if deployment.application == Application::Shed {
+            st.bare.insert(node.0);
+        } else {
+            st.bare.remove(&node.0);
+        }
         st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.matchmaker.node_booted(node);

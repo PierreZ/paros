@@ -10,19 +10,26 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 
 - `roles.rs` the per-seed **deployment/role map** read off moonpool process
   groups: `ACCEPTOR_GROUP = "paros-node"`, `MATCHMAKER_GROUP = "paros-matchmaker"`,
-  `PROXY_GROUP = "paros-proxy"` (#142), `Deployment`, `Role`.
+  `PROXY_GROUP = "paros-proxy"` (#142), `REPLICA_GROUP = "paros-replica"` (#144; a
+  replica speaks as `replica_node_id(rank)` = `NodeId(1000 + rank)`, outside every pool),
+  `Deployment`, `Role`.
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
   (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
   `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
   the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
-  grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
+  grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), and
+  `bare_acceptors` (#144: the whole pool `Application::Shed`, only on a seed with
+  replicas; the workload probes replicas and waits for the bare chosen prefix), drawn once
   per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
 - `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
   fixed bootstrap subset, one scripted seam crash), `MatchmakerProcess`, `ProxyProcess` (runs
-  `paros::run_proxy`; nothing durable, a kill reboots it empty), `IdleProcess`,
+  `paros::run_proxy`; nothing durable, a kill reboots it empty), `ReplicaProcess` (runs
+  `paros::run_replica` in a seam-crash recovery loop over its own **fault-free** disk,
+  registered with `StorageWorld::note_replica` so the copy budget never counts it — a
+  replica's record is never a copy an acceptor quorum needs), `IdleProcess`,
   `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
   `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
@@ -36,7 +43,7 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `buggify_knob!`; the operation-id table `PROPOSE=0 … QUORUM_READ=14`,
   `OP_COUNT`, the weight table, the reconfiguration shape rings).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
-  parked identities) · `world/storage.rs` `DurableStorage` (`NodeStorage` +
+  parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`NodeStorage` +
   write-path fault sites) · `world/rot.rs` boot-rot BUGGIFY sites, one per
   fault family · `world/matchmaker.rs` `DurableMatchmakerStorage`.
 - `audit/mod.rs` `AuditWorld`, `check_run`, `reach_once!` · `audit/state.rs`
