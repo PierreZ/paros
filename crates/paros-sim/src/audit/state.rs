@@ -1011,8 +1011,12 @@ impl AuditState {
         }
     }
 
-    /// The lowest compaction floor across the cluster: everything below it is
-    /// truncated *everywhere*, so the per-slot safety tallies can be pruned.
+    /// The lowest compaction floor across the acceptors: everything below it
+    /// is truncated on every *voter*, so the per-slot safety tallies can be
+    /// pruned. A replica (#144) is not counted — it votes on nothing, and
+    /// may sit below this floor after a long outage; what it still applies
+    /// there is judged against the decided witness the pruning keeps
+    /// ([`AuditState::decided_vhash`]).
     pub(super) fn cluster_min_floor(&self) -> u64 {
         self.booted
             .iter()

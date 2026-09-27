@@ -415,7 +415,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // command, and control-slot agreement is already covered by the
         // per-slot `chosen` check above.
         if identity.is_some()
-            && let Some(&(_, _, decided_vhash)) = st.decided.get(&slot.0)
+            && let Some(decided_vhash) = st.decided_vhash(slot.0)
         {
             assert_always!(
                 vhash == decided_vhash,
@@ -427,9 +427,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // only once chosen, chosen only on a quorum of `Accepted`s, and each
         // of those left its node after the audit folded the durable accept —
         // so by the time any node applies a slot, the tally has decided it.
-        // The end-of-run `decided >= applied` leg is this, per slot.
+        // The end-of-run `decided >= applied` leg is this, per slot. A slot
+        // the tally pruned below the acceptors' floor stays decided through
+        // its witness: a replica (#144) may still apply it — it was down
+        // while the acceptors truncated, and it holds its own log below
+        // their floor — and its decision is exactly what the witness keeps
+        // (seeds 14697535725710265276, 12166376049160003182 and
+        // 2038247294279376366 on the first replica-tier hunt).
         assert_always!(
-            st.decided.contains_key(&slot.0),
+            st.decided_vhash(slot.0).is_some(),
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
