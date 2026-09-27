@@ -11,7 +11,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_hyper::ReconnectingChannel;
-use paros_core::{Message, NodeId, Party, ProxyId};
+use paros_core::{Audience, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -204,11 +204,34 @@ pub(crate) struct Outbound {
     /// The proxy leaders' regular mailboxes: a node delegates through them,
     /// and nothing bulky ever goes to a proxy (a proxy holds no snapshot).
     pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
+    /// The deployment's replicas (#144): learners that are not in the node
+    /// pool, reached by every [`Audience::Learners`] message beside the pool
+    /// and addressed by their own `NodeId` (a catch-up answer, a snapshot
+    /// offer). Their lanes are in `peer_queues`. Empty on a deployment
+    /// without a replica tier, and on a replica itself — a replica sends to
+    /// no learner.
+    pub(crate) learners: Vec<NodeId>,
     /// Who is sending, for the observability events and the audit.
     pub(crate) sender: Party,
 }
 
 impl Outbound {
+    /// Resolve `audience` as this handle sends it: the core's own resolution
+    /// against the node `pool` ([`Audience::resolve`] for a node, which never
+    /// addresses itself; [`Audience::resolve_from_proxy`] for a proxy, which
+    /// is nobody's peer), then — for [`Audience::Learners`] — the
+    /// deployment's replicas, which the pool does not name.
+    pub(crate) fn resolve(&self, audience: &Audience, pool: &[NodeId]) -> Vec<NodeId> {
+        let mut nodes = match self.sender {
+            Party::Node(me) => audience.resolve(pool, me),
+            Party::Proxy(_) => audience.resolve_from_proxy(pool),
+        };
+        if *audience == Audience::Learners {
+            nodes.extend(self.learners.iter().copied());
+        }
+        nodes
+    }
+
     /// The node this handle sends as. The node driver's own paths (the
     /// `Ready` drain, the snapshot repair plane) are the only callers, and
     /// they never run on a proxy.

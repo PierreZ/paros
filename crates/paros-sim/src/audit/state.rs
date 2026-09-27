@@ -507,6 +507,16 @@ pub(super) struct AuditState {
     pub(super) proxied_round_survived_handoff: bool,
     pub(super) proxy_resend_skipped: bool,
     pub(super) proxy_round_expired: bool,
+
+    // --- the replica tier (#144) --------------------------------------------
+    /// Every replica that booted: learners outside the pool that hold no
+    /// promise, registered by `replica_booted` before anything they report.
+    pub(super) replicas: BTreeSet<u64>,
+    /// The two outcomes the campaign must reach: a slot applied on a replica
+    /// that never voted for it, and a replica below every acceptor's floor
+    /// healed by a snapshot install.
+    pub(super) applied_on_replica: bool,
+    pub(super) replica_installed_snapshot: bool,
 }
 
 impl AuditState {
@@ -739,20 +749,6 @@ impl AuditState {
         if self.decided_off_column {
             assert_reachable!("grid: a slot is decided on a column other than its own");
         }
-        // The proxy outcomes (#142): a seed with proxies delegates every
-        // settled proposal, so a sweep decides through a proxy; and the
-        // take-back — the leader's liveness under a dead or slow proxy —
-        // fires wherever a proxy's `Commit` is late by the budget, which a
-        // killed proxy, a lost delegation or the budget's own floor
-        // produces.
-        assert_sometimes!(
-            self.decided_through_proxy,
-            "proxy: a slot is decided through a proxy leader"
-        );
-        assert_sometimes!(
-            self.delegation_taken_back,
-            "proxy: a leader takes a delegated round back"
-        );
         // The #67 check reads a promise and a won ballot; saturation has to see
         // it actually compare something.
         assert_sometimes!(
@@ -810,6 +806,37 @@ impl AuditState {
                 ("new leader elected", self.leader_rounds.len() >= 2),
                 ("client acknowledged", self.ack_after_leader_change),
             ]
+        );
+    }
+
+    /// The compartmentalized tiers' outcome gates — the proxy leaders
+    /// (#142) and the replicas (#144) — checked beside the protocol's own.
+    pub(super) fn check_tier_gates(&self) {
+        // The proxy outcomes (#142): a seed with proxies delegates every
+        // settled proposal, so a sweep decides through a proxy; and the
+        // take-back — the leader's liveness under a dead or slow proxy —
+        // fires wherever a proxy's `Commit` is late by the budget, which a
+        // killed proxy, a lost delegation or the budget's own floor
+        // produces.
+        assert_sometimes!(
+            self.decided_through_proxy,
+            "proxy: a slot is decided through a proxy leader"
+        );
+        assert_sometimes!(
+            self.delegation_taken_back,
+            "proxy: a leader takes a delegated round back"
+        );
+        // The replica outcomes (#144): a seed with a replica tier applies
+        // on a process that never voted, and a replica killed by its own
+        // attrition regime comes back below the floor the acceptors kept
+        // raising without it.
+        assert_sometimes!(
+            self.applied_on_replica,
+            "replica: a slot is applied on a replica that never voted"
+        );
+        assert_sometimes!(
+            self.replica_installed_snapshot,
+            "replica: a replica below the floor is healed by a snapshot"
         );
     }
 

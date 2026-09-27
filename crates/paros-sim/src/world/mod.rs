@@ -345,6 +345,12 @@ pub(crate) struct StorageWorld {
     /// exactly when the marker lands durably, so a first boot whose format
     /// sync was lost is a first boot again.
     provisioned: BTreeSet<String>,
+    /// The replica tier's disks (#144), by IP: learners that are not
+    /// acceptors. Their records are never a *copy* the budget defends — a
+    /// replica answers no Phase 1 — so the copy count never looks at them,
+    /// and their disks run fault-free (the replica's own write path is not
+    /// what the budget protects).
+    replicas: BTreeSet<String>,
     /// Matchmakers whose durable state was lost for good (#125): the
     /// registry stays down, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
@@ -569,6 +575,11 @@ impl StorageWorld {
         );
     }
 
+    /// Register `key` as a replica's disk (#144): outside the copy count.
+    pub(crate) fn note_replica(&mut self, key: &str) {
+        self.replicas.insert(key.to_string());
+    }
+
     /// The addressable node pool, set once at boot (first caller wins, like
     /// the cluster size; every node derives the same number).
     pub(crate) fn set_pool_size(&mut self, n: usize) {
@@ -610,7 +621,7 @@ impl StorageWorld {
             }
         }
         for (node, disk) in &self.disks {
-            if disk.first_slot.0 > slot {
+            if disk.first_slot.0 > slot && !self.replicas.contains(node) {
                 unclean.insert(node);
             }
         }

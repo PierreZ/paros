@@ -228,38 +228,52 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
     }
 }
 
-// ---- the proxy leader (#142) ------------------------------------------------
+// ---- the deliver-only roles: the proxy leader (#142), the replica (#144) ----
 
-/// The proxy leader's tonic handler: the node contract's **Phase-2 subset**.
-/// A proxy receives delegated `Accept`s, `Accepted`s and `Nack`s through the
-/// same `Deliver` lane a node does, and nothing a client or an operator asks
-/// a node — it holds no replica to inspect and retires by stopping its
-/// process — so the other two internal methods are refused as unimplemented.
-#[derive(Clone)]
-pub(crate) struct ProxyService {
-    deliver: mpsc::Sender<Message>,
-    on_reject: OnReject,
+/// Which deliver-only role a [`LaneService`] serves — the reason its two
+/// operator methods are refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneRole {
+    /// A proxy leader: holds no replica to inspect, retired by stopping it.
+    Proxy,
+    /// A replica that is not an acceptor: it has nothing an operator's
+    /// `Inspect` reports about a node, and no configuration to retire from.
+    Replica,
 }
 
-/// Construct the proxy leader's handler/inbox pair; `peer_inbox` bounds the
-/// one lane (at least 1).
+/// The tonic handler of a role that only hears the **`Deliver` lane**: a
+/// proxy leader receives delegated `Accept`s, `Accepted`s and `Nack`s, a
+/// replica receives `Commit`s, beats and catch-up answers, both through the
+/// same lane a node does. Nothing a client or an operator asks a node is
+/// theirs, so the other two internal methods are refused as unimplemented.
+#[derive(Clone)]
+pub(crate) struct LaneService {
+    deliver: mpsc::Sender<Message>,
+    on_reject: OnReject,
+    role: LaneRole,
+}
+
+/// Construct a deliver-only role's handler/inbox pair; `peer_inbox` bounds
+/// the one lane (at least 1).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn proxy_channel(
+pub(crate) fn lane_channel(
+    role: LaneRole,
     peer_inbox: usize,
     on_reject: OnReject,
-) -> (ProxyService, mpsc::Receiver<Message>) {
+) -> (LaneService, mpsc::Receiver<Message>) {
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
     (
-        ProxyService {
+        LaneService {
             deliver: deliver_tx,
             on_reject,
+            role,
         },
         deliver_rx,
     )
 }
 
 #[tonic::async_trait]
-impl internal::paros_internal_server::ParosInternal for ProxyService {
+impl internal::paros_internal_server::ParosInternal for LaneService {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn deliver(
         &self,
@@ -273,9 +287,10 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
         &self,
         _request: Request<InspectRequest>,
     ) -> Result<Response<InspectReply>, Status> {
-        Err(Status::unimplemented(
-            "a proxy leader holds no replica to inspect",
-        ))
+        Err(Status::unimplemented(match self.role {
+            LaneRole::Proxy => "a proxy leader holds no replica to inspect",
+            LaneRole::Replica => "a replica is inspected through its application",
+        }))
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -283,8 +298,9 @@ impl internal::paros_internal_server::ParosInternal for ProxyService {
         &self,
         _request: Request<RetireRequest>,
     ) -> Result<Response<RetireAck>, Status> {
-        Err(Status::unimplemented(
-            "a proxy leader is retired by stopping its process",
-        ))
+        Err(Status::unimplemented(match self.role {
+            LaneRole::Proxy => "a proxy leader is retired by stopping its process",
+            LaneRole::Replica => "a replica is retired by stopping its process",
+        }))
     }
 }

@@ -327,17 +327,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // The core adopts `max(promise, ballot)` on install and any raise is
         // surfaced (as the batch's `SetPromise`) before this write's report,
         // so by now the folded promise must already cover the snapshot's
-        // ballot — a lower fold would mean the adoption was lost.
-        let folded = st.promised.get(&node.0).copied();
-        assert_always!(
-            folded.is_some_and(|p| p >= ballot),
-            "an installed snapshot's ballot is covered by the node's promise",
-            {
-                "node" => node.0,
-                "round" => ballot.round,
-                "folded_round" => folded.map_or(0, |p| p.round)
-            }
-        );
+        // ballot — a lower fold would mean the adoption was lost. A replica
+        // (#144) holds no promise at all: the claim is an acceptor's.
+        if st.replicas.contains(&node.0) {
+            st.replica_installed_snapshot = true;
+        } else {
+            let folded = st.promised.get(&node.0).copied();
+            assert_always!(
+                folded.is_some_and(|p| p >= ballot),
+                "an installed snapshot's ballot is covered by the node's promise",
+                {
+                    "node" => node.0,
+                    "round" => ballot.round,
+                    "folded_round" => folded.map_or(0, |p| p.round)
+                }
+            );
+        }
         // An offer is only ever materialized from state the serving peer had
         // durably applied (the driver skips a mismatched offer), and that
         // apply was folded before the offer left — so a landing past the
@@ -384,6 +389,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
         let mut st = self.state();
+        if st.replicas.contains(&node.0) {
+            st.applied_on_replica = true;
+        }
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
@@ -555,6 +563,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             Message::Commit { .. } => self.observe_durable_send(from, msg),
             _ => {}
         }
+    }
+
+    fn replica_booted(&self, replica: NodeId, _chosen_index: Option<Slot>, _floor: Slot) {
+        let mut st = self.state();
+        // A replica's id is outside the pool by construction; a collision
+        // would fold a replica's reports into an acceptor's state.
+        assert_always!(
+            st.pool.as_ref().is_none_or(|pool| !pool.contains(&replica.0)),
+            "replica: a replica's id is outside the node pool",
+            { "replica" => replica.0 }
+        );
+        st.replicas.insert(replica.0);
     }
 
     fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {

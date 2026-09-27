@@ -291,10 +291,7 @@ where
         .iter()
         .flat_map(|(audience, msg)| {
             let proxy = audience.proxy().map(Party::Proxy);
-            let nodes = audience
-                .resolve(&pool, NodeId(self_id))
-                .into_iter()
-                .map(Party::Node);
+            let nodes = out.resolve(audience, &pool).into_iter().map(Party::Node);
             proxy
                 .into_iter()
                 .chain(nodes)
@@ -576,7 +573,7 @@ pub(crate) fn report_snap_recorded<A: Audit>(audit: &A, self_id: u64, points: &[
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
-async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,

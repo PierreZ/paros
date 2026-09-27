@@ -270,6 +270,20 @@ flowchart LR
     R1 -- CatchUpRequest --> L
 ```
 
+A replica runs on a process of its own, driven by the fourth driver beside the
+node's, the matchmaker's and the proxy's. Unlike a proxy it is durable: it keeps
+its chosen log on the same storage a node uses, with the same boot scan, the same
+format marker and the same crash seams, and a crash reboots it from its disk.
+The leader's beats and `Commit`s reach it because the deployment map adds the
+replicas to every message addressed to the learners. In the simulation the
+replicas are their own process group, drawn per seed like the proxies and killed
+by their own attrition regime. Their disks sit outside the storage budget,
+because a replica's record is never a copy a quorum needs. The same application
+check that judges every node judges them, as does the claim that every learner
+has converged at the end of the run. A killed replica that comes back below the
+floor the acceptors kept raising is healed by a snapshot install, and the sweep
+proves that path is taken.
+
 The garbage collection rule does not change. The paper's Scenario 3 lets a
 configuration be forgotten once replicas outside it hold the chosen prefix. paros
 still counts only acceptors, bare or colocated, because they are the ones whose
@@ -279,8 +293,10 @@ records the next Phase 1 reads.
 (`replica_node.rs`, whose module doc holds the coupling analysis);
 `Application::Shed`, `Config::replica_count`, `Config::reply_owner` (`state.rs`);
 `ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
-`paros-core/examples/replica_tier.rs`. The driver and the simulation's process
-group are the second half of #144. Paper: Whittaker et al., *Compartmentalized
+`paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
+(`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
+`REPLICA_GROUP` (`paros-sim/src/process.rs`, `roles.rs`). The bare acceptor is
+not drawn in the simulation yet. Paper: Whittaker et al., *Compartmentalized
 Paxos* §2.3 and §3.3. No level yet.
 
 ## Cooperative leader handoff

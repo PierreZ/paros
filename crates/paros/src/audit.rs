@@ -498,6 +498,12 @@ pub trait Audit {
     /// per round taken back, on the beat that took it.
     fn delegation_taken_back(&self, node: NodeId, slot: Slot, proxy: ProxyId) {}
 
+    /// The replica `replica` (#144, a learner outside the pool that is not
+    /// an acceptor) (re)booted from its durable chosen log: the chosen
+    /// index it rebuilt (`None` = an empty prefix) and its compaction floor.
+    /// Reported before its boot replay walks the application.
+    fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, floor: Slot) {}
+
     /// The proxy leader `proxy` (re)booted, empty, over the bootstrap
     /// configuration `acceptors`. A proxy holds nothing durable, so every
     /// boot is a first boot; a rebooted proxy relearns its rounds from the

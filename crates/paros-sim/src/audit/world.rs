@@ -214,6 +214,7 @@ impl AuditWorld {
             "a committed write ack is checked against the acking node's applied prefix"
         );
         st.check_protocol_gates();
+        st.check_tier_gates();
         st.check_driver_hook_gates();
         st.matchmaker.check_gates();
     }

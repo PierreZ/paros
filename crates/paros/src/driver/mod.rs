@@ -39,14 +39,14 @@
 //! `mod.rs` itself holds only [`run_node`], the select loop that wires them,
 //! and the per-arm steps that loop shares (`NodeLoop`).
 
-mod boot;
+pub(crate) mod boot;
 mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
 mod handover;
 mod matchmaking;
 mod operator;
-mod ready;
+pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
 mod snap_repair;
@@ -474,6 +474,13 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// and takes it back after `tunables.proxy_take_back_resends` re-delegations
 /// without a `Commit`.
 ///
+/// `replicas` is the deployment map's replica tier (#144, `NodeId` →
+/// address, empty without one): learners outside the pool that are not
+/// acceptors. Every message the core addresses to the learners — a
+/// `Commit`, a beat — reaches them beside the pool, and a catch-up answer or
+/// a snapshot offer addressed to one reaches its lane. Its length is the
+/// `Config`'s `replica_count`.
+///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
 /// first boot formats the store (the marker, durably) before the core reads
 /// it; an existing member must find the marker, or the driver refuses
@@ -503,7 +510,7 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// identity stays down); [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not
 /// a deliberate crash and must propagate.
-#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len()))]
+#[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // One cohesive select loop: every arm is a thin feed into the core plus the
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring (providers,
@@ -517,6 +524,7 @@ pub async fn run_node<P, S, H, A>(
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
     proxies: Vec<(ProxyId, String)>,
+    replicas: Vec<(NodeId, String)>,
     boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -598,7 +606,11 @@ where
     // Every reconnecting channel this incarnation opens, closed when the
     // bundle drops; a bad origin fails the connect and the bundle closes
     // whatever was opened before it.
-    let mut channels = Channels::with_capacity(members.len() + proxies.len() + matchmakers.len());
+    let mut channels =
+        Channels::with_capacity(members.len() + replicas.len() + proxies.len() + matchmakers.len());
+    // The replicas (#144) get a node's two lanes: a snapshot offer to a
+    // replica below the floor rides the bulky lane, as to any peer.
+    let learners: Vec<NodeId> = replicas.iter().map(|(id, _)| *id).collect();
     let lanes = LaneOpener {
         providers: &providers,
         tunables,
@@ -608,6 +620,7 @@ where
     };
     let peer_queues = members
         .into_iter()
+        .chain(replicas)
         .map(|(id, addr)| {
             let client = channels.connect(
                 &providers,
@@ -707,6 +720,7 @@ where
     let out = Outbound {
         peer_queues,
         proxy_queues,
+        learners,
         sender: me,
     };
     let loop_ctx = NodeLoop {

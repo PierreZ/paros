@@ -12,7 +12,10 @@
 //! derives its `Config` from and every client proposes to; the matchmaker
 //! list is what a campaigning leader registers with; the proxy list is what
 //! a settled leader delegates Phase 2 to, and its length is the `Config`'s
-//! `proxy_count`.
+//! `proxy_count`. The [`REPLICA_GROUP`] holds the replica tier (#144): a
+//! learner that applies the chosen log and never votes, `ReplicaId(rank)`
+//! for the reply it owns and [`replica_node_id`] on the wire — an id outside
+//! the pool, since a replica is never a member of anything.
 //!
 //! The map is a pure function of the seed's topology, so every process and
 //! every workload derives the *same* map without coordination, a recipe
@@ -32,7 +35,7 @@
 use std::net::IpAddr;
 
 use moonpool_sim::{WorkloadTopology, assert_always};
-use paros::{MatchmakerId, NodeId, ProxyId};
+use paros::{MatchmakerId, NodeId, ProxyId, ReplicaId};
 
 /// The process group of the paros nodes (`NodeProcess::name`).
 pub(crate) const ACCEPTOR_GROUP: &str = "paros-node";
@@ -40,6 +43,19 @@ pub(crate) const ACCEPTOR_GROUP: &str = "paros-node";
 pub(crate) const MATCHMAKER_GROUP: &str = "paros-matchmaker";
 /// The process group of the proxy leaders (`ProxyProcess::name`, #142).
 pub(crate) const PROXY_GROUP: &str = "paros-proxy";
+/// The process group of the replicas (`ReplicaProcess::name`, #144).
+pub(crate) const REPLICA_GROUP: &str = "paros-replica";
+
+/// Where the replicas' `NodeId`s start: far above any pool the campaign
+/// draws (`PROCESS_POOL_RANGE` tops out at six), so a replica's wire
+/// identity can never collide with an acceptor's and reads apart in a trace.
+const REPLICA_ID_BASE: u64 = 1000;
+
+/// The `NodeId` the replica of rank `rank` speaks as on the wire: outside the
+/// node pool by construction (a replica is in no configuration).
+pub(crate) fn replica_node_id(rank: ReplicaId) -> NodeId {
+    NodeId(REPLICA_ID_BASE + rank.0)
+}
 
 /// One process's role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,32 +67,40 @@ pub(crate) enum Role {
     /// A proxy leader, ranked among the proxies — neither an acceptor nor a
     /// replica (#142).
     Proxy(ProxyId),
+    /// A replica, ranked among the replicas — a learner that is not an
+    /// acceptor (#144).
+    Replica(ReplicaId),
 }
 
 /// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`),
-/// sorted matchmaker IPs (`MatchmakerId(i)` ↔ `matchmakers[i]`) and sorted
-/// proxy IPs (`ProxyId(i)` ↔ `proxies[i]`).
+/// sorted matchmaker IPs (`MatchmakerId(i)` ↔ `matchmakers[i]`), sorted
+/// proxy IPs (`ProxyId(i)` ↔ `proxies[i]`) and sorted replica IPs
+/// (`ReplicaId(i)` ↔ `replicas[i]`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Deployment {
     acceptors: Vec<String>,
     matchmakers: Vec<String>,
     proxies: Vec<String>,
+    replicas: Vec<String>,
 }
 
 impl Deployment {
-    /// Build the map from three IP lists (any order, duplicates allowed).
+    /// Build the map from four IP lists (any order, duplicates allowed).
     fn from_groups(
         mut acceptors: Vec<String>,
         mut matchmakers: Vec<String>,
         mut proxies: Vec<String>,
+        mut replicas: Vec<String>,
     ) -> Self {
         sort_ips(&mut acceptors);
         sort_ips(&mut matchmakers);
         sort_ips(&mut proxies);
+        sort_ips(&mut replicas);
         Self {
             acceptors,
             matchmakers,
             proxies,
+            replicas,
         }
     }
 
@@ -88,10 +112,13 @@ impl Deployment {
         if let Some(rank) = self.matchmakers.iter().position(|m| m == ip) {
             return Some(Role::Matchmaker(MatchmakerId(rank as u64)));
         }
-        self.proxies
+        if let Some(rank) = self.proxies.iter().position(|p| p == ip) {
+            return Some(Role::Proxy(ProxyId(rank as u64)));
+        }
+        self.replicas
             .iter()
-            .position(|p| p == ip)
-            .map(|rank| Role::Proxy(ProxyId(rank as u64)))
+            .position(|r| r == ip)
+            .map(|rank| Role::Replica(ReplicaId(rank as u64)))
     }
 
     /// The acceptor pool, in `NodeId` order.
@@ -108,6 +135,18 @@ impl Deployment {
     /// proxies, whose every Phase 2 is colocated).
     pub(crate) fn proxies(&self) -> &[String] {
         &self.proxies
+    }
+
+    /// The replicas, in `ReplicaId` order (empty on a seed without
+    /// replicas, whose learner traffic reaches the pool alone); each speaks
+    /// as [`replica_node_id`] on the wire.
+    pub(crate) fn replicas(&self) -> &[String] {
+        &self.replicas
+    }
+
+    /// How many replicas the seed deploys: every node's `replica_count`.
+    pub(crate) fn replica_count(&self) -> usize {
+        self.replicas.len()
     }
 }
 
@@ -127,7 +166,8 @@ pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
     let acceptors = topology.ips_in_group(ACCEPTOR_GROUP);
     let matchmakers = topology.ips_in_group(MATCHMAKER_GROUP);
     let proxies = topology.ips_in_group(PROXY_GROUP);
-    let map = Deployment::from_groups(acceptors, matchmakers, proxies);
+    let replicas = topology.ips_in_group(REPLICA_GROUP);
+    let map = Deployment::from_groups(acceptors, matchmakers, proxies, replicas);
     assert_always!(
         !map.acceptors.is_empty(),
         "a deployment names at least one acceptor",
@@ -154,6 +194,7 @@ mod tests {
             shuffled,
             vec!["10.0.2.2".to_string(), "10.0.2.1".to_string()],
             vec!["10.0.3.2".to_string(), "10.0.3.1".to_string()],
+            vec!["10.0.4.2".to_string(), "10.0.4.1".to_string()],
         );
         assert_eq!(map.acceptors(), pool(4).as_slice());
         assert_eq!(map.matchmakers().len(), 2);
@@ -164,6 +205,8 @@ mod tests {
             Some(Role::Matchmaker(MatchmakerId(1)))
         );
         assert_eq!(map.role_of("10.0.3.1"), Some(Role::Proxy(ProxyId(0))));
+        assert_eq!(map.role_of("10.0.4.2"), Some(Role::Replica(ReplicaId(1))));
+        assert_eq!(replica_node_id(ReplicaId(0)), NodeId(1000));
         assert_eq!(map.role_of("10.9.9.9"), None);
     }
 
@@ -171,9 +214,10 @@ mod tests {
     /// deployment.
     #[test]
     fn an_empty_matchmaker_group_is_the_plain_deployment() {
-        let map = Deployment::from_groups(pool(3), Vec::new(), Vec::new());
+        let map = Deployment::from_groups(pool(3), Vec::new(), Vec::new(), Vec::new());
         assert!(map.matchmakers().is_empty());
         assert!(map.proxies().is_empty());
+        assert_eq!(map.replica_count(), 0);
         assert_eq!(map.acceptors().len(), 3);
     }
 }

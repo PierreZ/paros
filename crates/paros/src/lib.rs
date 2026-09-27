@@ -20,6 +20,12 @@
 //! process of its own, with nothing to persist. Opt-in the same way: a
 //! deployment whose `Config::proxy_count` is zero runs no proxy and exchanges
 //! exactly the plain deployment's messages.
+//!
+//! [`run_replica`] is the fourth (#144, Compartmentalized Paxos §3.3): a
+//! [`ReplicaNode`] — the chosen log and the application, no vote — over the
+//! same [`NodeStorage`] a node runs on. Opt-in again: a deployment whose
+//! `Config::replica_count` is zero runs none, and the node driver's learner
+//! traffic reaches the pool alone.
 
 mod audit;
 mod corruption;
@@ -28,6 +34,7 @@ mod grpc;
 mod hooks;
 mod matchmaker;
 mod proxy;
+mod replica_tier;
 mod storage;
 
 pub use audit::{Audit, DelegationOutcome, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
@@ -49,6 +56,7 @@ pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };
 pub use proxy::{ProxyConfig, run_proxy};
+pub use replica_tier::run_replica;
 pub use storage::{
     MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
     WriteOutcome, snap_chunk_count, storage_contract_suite,
