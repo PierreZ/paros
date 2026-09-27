@@ -293,6 +293,7 @@ where
         &providers,
         edge.handle(),
         tunables.peer_inbox_capacity,
+        me,
         edge_reporter(audit, me),
         incarnation_shutdown.clone(),
     )?;

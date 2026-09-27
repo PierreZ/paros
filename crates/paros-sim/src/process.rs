@@ -365,7 +365,15 @@ impl Process for NodeProcess {
                 _ => None,
             },
             |deployment, self_rank, my_ip| async move {
-                Box::pin(run_acceptor(ctx, &deployment, self_rank, &my_ip, perturb, options)).await
+                Box::pin(run_acceptor(
+                    ctx,
+                    &deployment,
+                    self_rank,
+                    &my_ip,
+                    perturb,
+                    options,
+                ))
+                .await
             },
         )
         .await

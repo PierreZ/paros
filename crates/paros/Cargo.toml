@@ -23,9 +23,9 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"]
 # `paros` stays wasm-safe; a future `native` feature + `parosd` binary layers
 # tokio back on. Pinned to a commit on moonpool's `main` (it evolves fast; not
 # the crates.io release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "74f0417353dc29611378d458a112f97b7aae2be0", default-features = false, features = ["select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "75377c54acca979cacb525c12793707ab664b784", default-features = false, features = ["select"] }
 # Typed request/reply RPC over the provider traits, protobuf bodies (prost).
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "74f0417353dc29611378d458a112f97b7aae2be0", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "75377c54acca979cacb525c12793707ab664b784", default-features = false, features = ["prost"] }
 
 prost = "0.14"
 # The driver emits standard observability events (node_tick, peer_message_received)

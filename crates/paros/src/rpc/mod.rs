@@ -47,7 +47,7 @@ mod tests;
 
 pub use client::NodeClient;
 pub(crate) use client::{MatchmakerClient, well_known};
-pub use inbound::EdgeRejection;
+pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
 pub(crate) use inbound::{
     Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
 };

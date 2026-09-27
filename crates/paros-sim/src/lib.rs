@@ -65,7 +65,9 @@ pub(crate) fn signed_watermark(watermark: Option<u64>) -> i64 {
 /// builder this crate assembled: every one registers its fault injectors with
 /// a chaos window and never pairs an instance workload with exploration or
 /// the determinism canary, so the runner cannot refuse it, and an `Err` is a
-/// harness bug rather than a seed's outcome.
+/// harness bug rather than a seed's outcome. That is why it panics instead of
+/// using a moonpool assertion macro: it is a setup failure before any seed
+/// ran, not a check on a run — do not copy it as a pattern for checks.
 trait RunConfigured {
     fn run_configured(self) -> SimulationReport;
 }

@@ -12,7 +12,7 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::ReplySender;
 
 /// Consult the reply-drop hook exactly once, after the server state advanced,
-/// and either send `ack` to the held reply handle (dropping it is the caller's broken promise) or report the drop through
+/// and either send `ack` to the held reply handle or report the drop through
 /// `report_drop`, where its trace is emitted.
 fn answer_or_drop<T, H: DriverHooks>(
     hooks: &H,

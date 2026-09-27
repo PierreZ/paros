@@ -1,6 +1,7 @@
-//! The driver's matchmaker wire (#120, #123, #125): the link per matchmaker, the batch of requests a drained `Ready` hands the loop, the
-//! detached RPC tasks that carry them, and the reports of what each answer did
-//! to the open campaign.
+//! The driver's matchmaker wire (#120, #123, #125): the link per matchmaker,
+//! the batch of requests a drained `Ready` hands the loop, the detached RPC
+//! tasks that carry them, and the reports of what each answer did to the open
+//! campaign.
 
 use std::collections::BTreeMap;
 use std::future::Future;

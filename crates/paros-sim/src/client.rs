@@ -19,6 +19,15 @@ pub(crate) type SimClient = NodeClient<SimProviders>;
 /// drops: every exit path from a workload stops it (the drop guard cancels
 /// the task, which drops the driver and with it every connection and
 /// pending call).
+///
+/// **Why a detached task is safe here.** The runtime draws moonpool
+/// randomness and BUGGIFY (dial and ping jitter, its request cuts), and a
+/// detached task that outlived a run would shift the next run's stream. This
+/// one cannot: the handle lives in the workload's own `run` scope, so the
+/// cancel lands before `run` returns and the task ends at its next poll,
+/// inside the same run. It consults no paros hook (hooks stay on node
+/// loops). The determinism canary covers it: every seed runs twice and must
+/// reproduce every draw.
 pub(crate) struct ClientRuntime {
     rpc: RpcHandle<SimProviders>,
     _stop: DropGuard,
@@ -26,6 +35,7 @@ pub(crate) struct ClientRuntime {
 
 impl ClientRuntime {
     /// Start a runtime under `config`.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn start(ctx: &SimContext, config: RpcConfig) -> SimulationResult<Self> {
         let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), config)
             .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
@@ -74,6 +84,8 @@ pub(crate) fn client_rpc_config(
     ping_timeout: Duration,
 ) -> RpcConfig {
     let mut config = RpcConfig {
+        // The nodes' own limit, so a large `Inspect` reply fits.
+        max_frame_bytes: paros::MAX_FRAME_BYTES,
         connect_timeout,
         ..RpcConfig::default()
     };

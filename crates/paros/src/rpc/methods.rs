@@ -6,11 +6,13 @@
 //! ever reused. An incompatible change to a method's bodies bumps its
 //! [`SchemaVersion`], which a server refuses before decoding.
 //!
-//! | Range | Contract | Served by |
-//! |---|---|---|
-//! | `0x5041_0001..` | the public journal (`proto/paros.proto`) | a node; `QuorumRead` also a replica |
-//! | `0x5041_0101..` | cluster-internal (`proto/internal.proto`) | a node; `Deliver` also a proxy and a replica, `Inspect` also a replica |
-//! | `0x5041_0201..` | the matchmaker (`proto/matchmaker.proto`) | a matchmaker |
+//! - `0x5041_0001..` — the public journal (`proto/paros.proto`), served by
+//!   a node; `QuorumRead` also by a replica.
+//! - `0x5041_0101..` — cluster-internal (`proto/internal.proto`), served by a
+//!   node; `Deliver` also by a proxy leader and a replica, `Inspect` also by
+//!   a replica.
+//! - `0x5041_0201..` — the matchmaker contract (`proto/matchmaker.proto`),
+//!   served by a matchmaker.
 //!
 //! A role that does not serve a method simply does not register it, and a
 //! call to it is refused `EndpointNotFound` before any handler runs.

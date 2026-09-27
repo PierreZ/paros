@@ -262,6 +262,21 @@ impl AuditWorld {
         self.lock().retired.insert(node);
     }
 
+    /// The operator parked a retired identity for good after an ambiguous
+    /// `Retire` (#123): the world never releases it, so it stays down
+    /// whether or not it ever boots again — and a node that was already
+    /// dead when it was retired may not reboot before the run ends, when
+    /// [`note_retired_boot`](Self::note_retired_boot) would have told the
+    /// audit. Seed 7375908273228548587 of the moonpool-rpc migration's
+    /// 10k hunt: node 0 crashed at 3.9 s, was reconfigured out and named
+    /// retirable, the workload's `Retire` found it dead, and the run ended
+    /// before its restart — convergence then waited on a node the harness
+    /// itself had shut down.
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
+    pub(crate) fn note_retired_parked(&self, node: u64) {
+        self.lock().retired.insert(node);
+    }
+
     /// A matchmaker's registry was lost for good (#125).
     #[tracing::instrument(level = "debug", skip(self))]
     pub(crate) fn note_matchmaker_lost(&self) {

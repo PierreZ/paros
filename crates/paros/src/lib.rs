@@ -46,8 +46,8 @@ pub use driver::{
     registration_history_hash, run_node,
 };
 pub use rpc::{
-    Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, NodeClient, Propose,
-    ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, MAX_FRAME_BYTES, NodeClient,
+    Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, WireQuorumSystem,
     quorum_system_from_proto, quorum_system_to_proto,
 };

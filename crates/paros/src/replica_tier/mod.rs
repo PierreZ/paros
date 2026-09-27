@@ -494,6 +494,7 @@ where
         &providers,
         &edge,
         &tunables,
+        me,
         edge_reporter(audit, me),
         incarnation_shutdown.clone(),
     )?;

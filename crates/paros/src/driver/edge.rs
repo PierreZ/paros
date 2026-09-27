@@ -9,6 +9,19 @@
 //! returning, or dropped mid-await by a crash — the listener, every
 //! connection and every pending call go with it on the spot, so a restart
 //! at the same address never meets its predecessor's socket.
+//!
+//! **The trade.** Polled by the loop, the runtime makes no network progress
+//! while an arm body awaits — above all the durability pipeline's storage
+//! calls in `drain_ready`. Outbound lanes, replies, pings and dials all wait
+//! for the arm to finish. The simulation cannot see this (its disks complete
+//! every operation on the poll that started it), and it is acceptable while
+//! an fsync is short next to the liveness ping (`keep_alive_timeout`): a
+//! stalled persist delays traffic, it reorders or loses nothing, and every
+//! class the lanes carry is lossy by contract. It stops being acceptable
+//! once device latency is modelled or a production disk can stall past the
+//! ping timeout — then the runtime moves to its own task, owned by the
+//! incarnation, and the crash-cleanliness this buys has to be re-earned
+//! (the listener must be released before a restart binds the address).
 
 use std::future::Future;
 use std::io;
@@ -66,6 +79,7 @@ impl<P: Providers> RpcEdge<P> {
     ///
     /// A configuration the runtime refuses or a failed bind, as
     /// [`RunError::Infra`](super::RunError::Infra).
+    #[tracing::instrument(level = "debug", skip_all, fields(role, local_addr = %local_addr))]
     pub(crate) async fn listen(
         providers: &P,
         local_addr: &str,
@@ -119,10 +133,12 @@ impl NodeInbox {
     /// # Errors
     ///
     /// A registration the runtime refuses.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn serve<P: Providers>(
         providers: &P,
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
+        me: Party,
         on_reject: OnReject,
         shutdown: CancellationToken,
     ) -> SimulationResult<Self> {
@@ -140,6 +156,7 @@ impl NodeInbox {
                 providers,
                 rpc,
                 tunables.peer_inbox_capacity,
+                me,
                 on_reject,
                 shutdown,
             )?,
@@ -162,10 +179,12 @@ impl ReplicaInbox {
     /// # Errors
     ///
     /// A registration the runtime refuses.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn serve<P: Providers>(
         providers: &P,
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
+        me: Party,
         on_reject: OnReject,
         shutdown: CancellationToken,
     ) -> SimulationResult<Self> {
@@ -177,6 +196,7 @@ impl ReplicaInbox {
                 providers,
                 rpc,
                 tunables.peer_inbox_capacity,
+                me,
                 on_reject,
                 shutdown,
             )?,
@@ -199,6 +219,7 @@ impl MatchmakerInbox {
     /// # Errors
     ///
     /// A registration the runtime refuses.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn serve<P: Providers>(edge: &RpcEdge<P>) -> SimulationResult<Self> {
         let rpc = edge.handle();
         Ok(Self {
