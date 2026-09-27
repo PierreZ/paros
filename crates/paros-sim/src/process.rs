@@ -1037,6 +1037,74 @@ async fn run_replica_role(
     }
 }
 
+use moonpool_sim::SimStorageProvider;
+
+/// The two contract suites against the library's journal stores
+/// ([`paros::JournalStorage`], [`paros::JournalMatchmakerStorage`]) on the
+/// simulated disk, each store in a directory of its own.
+#[tracing::instrument(level = "debug", skip_all)]
+async fn journal_contract_suites(provider: SimStorageProvider) {
+    use paros::{
+        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, MatchmakerStorage,
+        NodeStorage,
+    };
+    let config = Config {
+        id: NodeId(0),
+        peers: vec![NodeId(0)],
+        ..Config::default()
+    };
+    let store = JournalStoreConfig {
+        checkpoint_after: 4,
+        ..JournalStoreConfig::small()
+    };
+    let open_node = |provider: SimStorageProvider, dir: String, config: Config| async move {
+        let mut node = JournalStorage::new(provider, dir, config, store);
+        node.boot_scan().await.expect("a clean journal store boots");
+        node
+    };
+    let mut instance = 0_u64;
+    let fresh = || {
+        instance += 1;
+        open_node(
+            provider.clone(),
+            format!("journal-contract/node-{instance}"),
+            config.clone(),
+        )
+    };
+    let reopen = |old: JournalStorage<SimStorageProvider>| {
+        let dir = old.dir().to_string();
+        drop(old);
+        open_node(provider.clone(), dir, config.clone())
+    };
+    Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
+    let open_registry = |provider: SimStorageProvider, dir: String| async move {
+        let mut registry = JournalMatchmakerStorage::new(provider, dir, store);
+        registry
+            .boot_scan()
+            .await
+            .expect("a clean journal registry boots");
+        registry
+    };
+    let mut registry_instance = 0_u64;
+    let fresh_registry = || {
+        registry_instance += 1;
+        open_registry(
+            provider.clone(),
+            format!("journal-contract/mm-{registry_instance}"),
+        )
+    };
+    let reopen_registry = |old: JournalMatchmakerStorage<SimStorageProvider>| {
+        let dir = old.dir().to_string();
+        drop(old);
+        open_registry(provider.clone(), dir)
+    };
+    Box::pin(paros::matchmaker_storage_contract_suite(
+        fresh_registry,
+        reopen_registry,
+    ))
+    .await;
+}
+
 /// The **contract-suite workload** (issue #21 item F): runs the shared
 /// [`paros::storage_contract_suite`] against the world-backed [`DurableStorage`]
 /// inside one quiet simulation iteration, so the sim's storage fake can never
@@ -1076,14 +1144,14 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         // per-transition storage check.
         let fresh = || {
             instance += 1;
-            DurableStorage::restore(
+            std::future::ready(DurableStorage::restore(
                 config.clone(),
                 Arc::downgrade(&world),
                 format!("10.9.9.{instance}"),
                 100 + instance,
                 faults.clone(),
                 Arc::new(AuditWorld::client_free()),
-            )
+            ))
         };
         // A reopen is a clean reboot of the same store: drop the handle and
         // re-restore from the world's durable records under the same key, and
@@ -1091,33 +1159,42 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         let reopen = |old: DurableStorage<_>| {
             let (key, node_id, checker) = (old.key.clone(), old.node_id, old.checker.clone());
             drop(old);
-            DurableStorage::restore(
+            std::future::ready(DurableStorage::restore(
                 config.clone(),
                 Arc::downgrade(&world),
                 key,
                 node_id,
                 faults.clone(),
                 checker,
-            )
+            ))
         };
         Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
         // The matchmaker registry's contract, against its world-backed store.
         let mut registry_instance = 0_u64;
         let fresh_registry = || {
             registry_instance += 1;
-            DurableMatchmakerStorage::restore(
+            std::future::ready(DurableMatchmakerStorage::restore(
                 Arc::downgrade(&world),
                 format!("10.9.8.{registry_instance}"),
                 faults.clone(),
                 0,
-            )
+            ))
         };
         let reopen_registry = |old: DurableMatchmakerStorage<_>| {
             let key = old.key().to_string();
             drop(old);
-            DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0)
+            std::future::ready(DurableMatchmakerStorage::restore(
+                Arc::downgrade(&world),
+                key,
+                faults.clone(),
+                0,
+            ))
         };
         paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry).await;
+        // The durable stores the library ships (`paros::journal`), over this
+        // simulation's own disk: the same two suites, reopened through a
+        // real journal open and boot scan.
+        Box::pin(journal_contract_suites(ctx.storage().clone())).await;
         // The crash half the shared suite cannot express (an in-memory store
         // has no un-synced stage): a registration or a watermark raise that
         // was staged but never fsynced does not survive the incarnation, so a

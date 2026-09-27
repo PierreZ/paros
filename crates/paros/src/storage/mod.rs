@@ -52,6 +52,11 @@ pub enum StorageRecord {
     /// The whole staged batch: an fsync flushes every record staged since the
     /// last flush, so a failed fsync has no single-record identity.
     Batch,
+    /// A matchmaker's registration record under this ballot.
+    Registration(Ballot),
+    /// A matchmaker's durable scalars (generation, freeze, successor,
+    /// decree record, watermark).
+    MatchmakerScalars,
     /// The record store itself, at file granularity (FS metadata): the
     /// identity a [`StorageError::Metadata`] fault names, since a missing or
     /// unopenable store has no single-record identity either.
@@ -71,6 +76,10 @@ impl fmt::Display for StorageRecord {
             }
             StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
             StorageRecord::Batch => write!(f, "batch"),
+            StorageRecord::Registration(ballot) => {
+                write!(f, "registration[{}.{}]", ballot.round, ballot.node.0)
+            }
+            StorageRecord::MatchmakerScalars => write!(f, "matchmaker-scalars"),
             StorageRecord::Store => write!(f, "store"),
         }
     }

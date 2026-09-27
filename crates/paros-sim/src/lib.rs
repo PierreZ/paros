@@ -401,7 +401,9 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
 /// Run the shared `NodeStorage` behavioral contract suite against the
 /// simulation's world-backed storage, inside one quiet iteration. `MemStorage`
 /// runs the identical suite as a `paros` unit test; together they keep the fake
-/// and the trait contract from drifting apart.
+/// and the trait contract from drifting apart. The same iteration runs both
+/// suites against the library's journal stores (`paros::journal`) on the
+/// simulation's own disk.
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_storage_contract_suite() -> SimulationReport {

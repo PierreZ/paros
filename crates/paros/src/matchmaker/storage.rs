@@ -232,8 +232,9 @@ fn suite_belief(n: u64) -> Registration {
 /// The behavioral **contract suite** every [`MatchmakerStorage`] implementation
 /// must pass, run against [`MemMatchmakerStorage`] here and against the
 /// simulation's world-backed store in `paros-sim`, so a fake can never drift
-/// from the trait contract. `fresh` returns an empty store; `reopen` simulates
-/// a clean reboot of the same store — every read-back goes through it and
+/// from the trait contract. `fresh` returns (a future of) an empty store;
+/// `reopen` simulates a clean reboot of the same store (asynchronously: a
+/// disk-backed store opens and scans on the way up) — every read-back goes through it and
 /// through the [`RegistryStorage`] port, because that is how the core reads
 /// durable state: once, at construction, record by record.
 ///
@@ -243,10 +244,14 @@ fn suite_belief(n: u64) -> Registration {
 #[doc(hidden)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all)]
-pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
-    mut fresh: impl FnMut() -> S,
-    mut reopen: impl FnMut(S) -> S,
-) {
+pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
+    mut fresh: impl FnMut() -> Fresh,
+    mut reopen: impl FnMut(S) -> Reopened,
+) where
+    S: MatchmakerStorage,
+    Fresh: Future<Output = S>,
+    Reopened: Future<Output = S>,
+{
     use paros_core::Matchmaker;
     // What every reopen must satisfy: the durable records and the durable
     // scalars are mutually consistent (no record below the watermark, every
@@ -291,7 +296,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
 
     // A fresh store is empty, and registrations round-trip through a sync as
     // individually readable records.
-    let s = fresh();
+    let s = fresh().await;
     assert_eq!(
         s.initial_state(),
         MatchmakerHardState::default(),
@@ -302,7 +307,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         "a fresh store holds no registration"
     );
     consistent(&s);
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     s.register(suite_ballot(1), &suite_belief(3))
         .await
         .expect("register 1");
@@ -310,7 +315,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         .await
         .expect("register 2");
     s.sync().await.expect("sync");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
         s.registered_ballots(),
@@ -332,7 +337,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         .expect("register 3");
     s.set_gc_watermark(suite_ballot(2)).await.expect("raise");
     s.sync().await.expect("sync raise");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
@@ -355,7 +360,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         .await
         .expect("re-raise lower");
     s.sync().await.expect("sync no-op");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
         s.initial_state().gc_watermark,
@@ -375,7 +380,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
     scalars.gc_watermark = suite_ballot(1);
     s.set_scalars(&scalars).await.expect("scalars");
     s.sync().await.expect("sync scalars");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     consistent(&s);
     let read_back = s.initial_state();
     assert_eq!(
@@ -409,7 +414,7 @@ pub async fn matchmaker_storage_contract_suite<S: MatchmakerStorage>(
         .await
         .expect("install");
     s.sync().await.expect("sync install");
-    let s = reopen(s);
+    let s = reopen(s).await;
     consistent(&s);
     assert_eq!(
         s.initial_state(),
@@ -437,8 +442,8 @@ mod tests {
         // In-memory writes are immediately visible: a reboot is the same
         // handle.
         futures::executor::block_on(matchmaker_storage_contract_suite(
-            MemMatchmakerStorage::new,
-            |s| s,
+            || std::future::ready(MemMatchmakerStorage::new()),
+            std::future::ready,
         ));
     }
 }

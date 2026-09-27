@@ -1,6 +1,8 @@
 //! The behavioral contract suite every [`NodeStorage`] implementation must
 //! pass, shared by the in-memory store and the simulation's world-backed one.
 
+use std::future::Future;
+
 use paros_core::{Ballot, Command, MustSync, Slot};
 
 use super::{NodeStorage, snap_chunk_count};
@@ -12,8 +14,10 @@ use super::{NodeStorage, snap_chunk_count};
 /// *outside* this contract (#70): from the trait's point of view both
 /// implementations behave identically on the clean path this suite drives.
 ///
-/// `fresh` must return an empty storage for the same single-node membership on
-/// every call. `reopen` simulates a clean reboot of the same store: the reads
+/// `fresh` must return (a future of) an empty storage for the same
+/// single-node membership on every call. `reopen` simulates a clean reboot
+/// of the same store — asynchronously, because a disk-backed store opens and
+/// scans its records on the way up: the reads
 /// the suite asserts are the *recovery port's* (the core reads durable state
 /// once, at construction), so every read-back goes through a reopen — an
 /// in-memory implementation may return the same handle, a world-backed one
@@ -26,10 +30,14 @@ use super::{NodeStorage, snap_chunk_count};
 // One linear behavioral walk; splitting it would scatter the contract.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all)]
-pub async fn storage_contract_suite<S: NodeStorage>(
-    mut fresh: impl FnMut() -> S,
-    mut reopen: impl FnMut(S) -> S,
-) {
+pub async fn storage_contract_suite<S, Fresh, Reopened>(
+    mut fresh: impl FnMut() -> Fresh,
+    mut reopen: impl FnMut(S) -> Reopened,
+) where
+    S: NodeStorage,
+    Fresh: Future<Output = S>,
+    Reopened: Future<Output = S>,
+{
     use paros_core::{ClientId, ClientSeq, Entry, Value};
     let ballot = |round: u64| Ballot {
         round,
@@ -47,31 +55,31 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     // `format` is flushed and reopened, and written by nothing else — a
     // store that took protocol writes without ever being formatted stays
     // unformatted (that is exactly the wiped-disk shape the driver refuses).
-    let s = fresh();
+    let s = fresh().await;
     assert!(!s.is_formatted(), "a fresh store carries no format marker");
-    let mut s = fresh();
+    let mut s = fresh().await;
     s.persist_ballot(ballot(1)).await.expect("ballot");
     s.sync(MustSync::Sync).await.expect("sync ballot");
-    let s = reopen(s);
+    let s = reopen(s).await;
     assert!(
         !s.is_formatted(),
         "protocol writes never format a store on their own"
     );
-    let mut s = fresh();
+    let mut s = fresh().await;
     s.format().await.expect("format");
     s.sync(MustSync::Sync).await.expect("sync format");
-    let s = reopen(s);
+    let s = reopen(s).await;
     assert!(s.is_formatted(), "the format marker survives a reopen");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     s.persist_ballot(ballot(2))
         .await
         .expect("ballot after format");
     s.sync(MustSync::Sync).await.expect("sync after format");
-    let s = reopen(s);
+    let s = reopen(s).await;
     assert!(s.is_formatted(), "the format marker is never removed");
 
     // Scalars + per-slot records round-trip through a Sync flush.
-    let mut s = fresh();
+    let mut s = fresh().await;
     s.persist_ballot(ballot(4)).await.expect("ballot");
     s.append_accepted(Slot(0), ballot(4), user(1, 0xa))
         .await
@@ -81,7 +89,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
         .expect("append 1");
     s.set_chosen_index(Slot(1)).await.expect("chosen index");
     s.sync(MustSync::Sync).await.expect("sync");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.max_promised_ballot, ballot(4), "promise round-trips");
     assert_eq!(hs.chosen_index, Some(Slot(1)), "chosen index round-trips");
@@ -102,7 +110,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
         .await
         .expect("re-append 1");
     s.sync(MustSync::Sync).await.expect("sync upsert");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     assert_eq!(
         s.accepted(Slot(1)).map(|(b, _)| b),
         Some(ballot(5)),
@@ -114,7 +122,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
         .await
         .expect("truncate");
     s.sync(MustSync::Sync).await.expect("sync truncate");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     assert_eq!(s.first_slot(), Slot(1), "the floor rose");
     assert!(
         s.accepted(Slot(0)).is_none(),
@@ -128,14 +136,14 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     // A floor never moves backward.
     s.truncate(Slot(0), &[]).await.expect("re-truncate lower");
     s.sync(MustSync::Sync).await.expect("sync no-op truncate");
-    let s = reopen(s);
+    let s = reopen(s).await;
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
 
     // A snapshot install: chosen index jumps, promise takes the max (never
     // regresses), floor lands one past the boundary, sessions seal. The blob
     // comes from a *source* storage whose applied prefix genuinely covers the
     // boundary, so an application-typed implementation's boundary checks hold.
-    let mut source = fresh();
+    let mut source = fresh().await;
     for s in 0..=4u64 {
         source
             .append_accepted(Slot(s), ballot(1), user(10 + s, 0x40))
@@ -155,7 +163,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     source.sync(MustSync::Sync).await.expect("source sync");
     let blob = source.snapshot().await;
 
-    let mut s = fresh();
+    let mut s = fresh().await;
     s.persist_ballot(ballot(9)).await.expect("high promise");
     s.sync(MustSync::Sync).await.expect("sync promise");
     s.install_snapshot(
@@ -167,7 +175,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     .await
     .expect("install");
     s.sync(MustSync::Sync).await.expect("sync install");
-    let s = reopen(s);
+    let s = reopen(s).await;
     let (hs, _config) = s.initial_state();
     assert_eq!(hs.chosen_index, Some(Slot(4)), "the install set the index");
     assert_eq!(
@@ -189,7 +197,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     // A decided snapshot point (#101): recorded at its marker slot, retained
     // across a reopen, chunked at the fixed size, and chunk reads reassemble
     // exactly the blob the point captured.
-    let mut s = fresh();
+    let mut s = fresh().await;
     for slot in 0..=2u64 {
         s.append_accepted(Slot(slot), ballot(1), user(20 + slot, 0x50))
             .await
@@ -204,7 +212,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
     let blob = s.snapshot().await;
     s.record_snapshot(Slot(2)).await.expect("record point");
     s.sync(MustSync::Sync).await.expect("sync point");
-    let mut s = reopen(s);
+    let mut s = reopen(s).await;
     assert_eq!(
         s.latest_snap_point(),
         Some(Slot(2)),
@@ -237,7 +245,7 @@ pub async fn storage_contract_suite<S: NodeStorage>(
         .await
         .expect("chunk write succeeds");
     s.sync(MustSync::Sync).await.expect("sync chunk write");
-    let s = reopen(s);
+    let s = reopen(s).await;
     assert_eq!(
         s.read_snap_chunk(Slot(2), 0).await,
         Some(first),
