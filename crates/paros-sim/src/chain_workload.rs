@@ -768,6 +768,11 @@ impl Workload for ChainWorkload {
         );
         let clients = ClientSet::connect(ctx, &servers, &channel_config)?;
         let (public_clients, internal_clients) = (&clients.public, &clients.internal);
+        // The replica tier (#144): never proposed to, only probed — a replica
+        // applies the same log, so the settle tail waits for it and the
+        // live-read comparison judges it beside every acceptor. Empty on a
+        // seed without replicas.
+        let replica_clients = ClientSet::connect(ctx, deployment.replicas(), &channel_config)?;
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
@@ -2014,13 +2019,19 @@ impl Workload for ChainWorkload {
             // every *live* node; the parked set's unavailability is separately
             // asserted as explained (audit + storage gates).
             let parked = crate::world::parked_nodes(ctx.state());
+            // A replica is probed after the acceptors, numbered past them
+            // (`server_count + rank`); its disk is never parked.
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !parked.contains(&servers[*i]))
+                .chain(server_count..server_count + replica_clients.internal.len())
                 .collect();
             let mut observed: Vec<(usize, ChainState)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
-                let mut client = internal_clients[node].clone();
+                let mut client = match node.checked_sub(server_count) {
+                    Some(replica) => replica_clients.internal[replica].clone(),
+                    None => internal_clients[node].clone(),
+                };
                 let state = inspect(ctx, &mut client, request_timeout)
                     .await
                     .and_then(|reply| ChainState::decode(&reply.snapshot).ok());

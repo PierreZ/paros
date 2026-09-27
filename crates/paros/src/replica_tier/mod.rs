@@ -46,7 +46,10 @@ use crate::driver::ready::{
 };
 use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
-use crate::grpc::{LaneRole, ParosInternalClient, ParosInternalServer, lane_channel};
+use crate::grpc::{
+    InspectReply, LaneRole, ParosInternalClient, ParosInternalServer, lane_channel,
+    quorum_system_to_proto,
+};
 use crate::hooks::{DriverHooks, Seam};
 use crate::storage::NodeStorage;
 
@@ -333,8 +336,11 @@ where
 
     let me = Party::Node(NodeId(self_id));
     let on_reject = edge_reporter(audit, me);
-    let (service, mut inbox) =
-        lane_channel(LaneRole::Replica, tunables.peer_inbox_capacity, on_reject);
+    let (service, lane) = lane_channel(LaneRole::Replica, tunables.peer_inbox_capacity, on_reject);
+    let mut inbox = lane.deliver;
+    let mut inspects = lane.inspect.ok_or_else(|| {
+        SimulationError::InvalidState("a replica's lane carries an inspect queue".into())
+    })?;
     let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
     let mut edge = GrpcEdge::bind(
         &providers,
@@ -415,7 +421,33 @@ where
                 }
                 tracing::info!(replica = self_id, "replica_tick");
             }
+            Some((_req, reply)) = inspects.recv() => {
+                // No batch: an inspect reads the replica and its store.
+                let _ = reply.send(inspect(&replica, &storage).await);
+            }
             () = shutdown.cancelled() => return Ok(()),
         }
+    }
+}
+
+/// Answer an operator's or a probe's `Inspect`: the replica's chosen prefix,
+/// its floor and its application's state — the opaque snapshot a probe
+/// compares across every applier. The configuration fields name the
+/// bootstrap acceptors this replica learns from; a replica never leads and
+/// holds no matchmaker belief or GC floor.
+async fn inspect<S: NodeStorage>(replica: &ReplicaNode, storage: &S) -> InspectReply {
+    let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+        quorum_system_to_proto(replica.config().quorum_system).into_parts();
+    InspectReply {
+        chosen_index: replica.replica().chosen_index().map(|slot| slot.0),
+        first_slot: replica.first_slot().0,
+        snapshot: storage.snapshot().await,
+        members: replica.config().peers.iter().map(|n| n.0).collect(),
+        quorum_system,
+        phase1_quorum,
+        phase2_quorum,
+        rows,
+        cols,
+        ..InspectReply::default()
     }
 }

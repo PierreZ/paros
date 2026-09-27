@@ -287,8 +287,8 @@ where
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
     let on_reject = edge_reporter(audit, me);
-    let (service, mut inbox) =
-        lane_channel(LaneRole::Proxy, tunables.peer_inbox_capacity, on_reject);
+    let (service, lane) = lane_channel(LaneRole::Proxy, tunables.peer_inbox_capacity, on_reject);
+    let mut inbox = lane.deliver;
     let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
     let mut edge = GrpcEdge::bind(
         &providers,

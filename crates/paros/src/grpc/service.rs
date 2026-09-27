@@ -236,39 +236,61 @@ impl internal::paros_internal_server::ParosInternal for RpcService {
 pub(crate) enum LaneRole {
     /// A proxy leader: holds no replica to inspect, retired by stopping it.
     Proxy,
-    /// A replica that is not an acceptor: it has nothing an operator's
-    /// `Inspect` reports about a node, and no configuration to retire from.
+    /// A replica that is not an acceptor: it answers `Inspect` with its
+    /// chosen prefix and its application's state — what a probe comparing
+    /// every applier reads — and has no configuration to retire from.
     Replica,
 }
 
-/// The tonic handler of a role that only hears the **`Deliver` lane**: a
-/// proxy leader receives delegated `Accept`s, `Accepted`s and `Nack`s, a
-/// replica receives `Commit`s, beats and catch-up answers, both through the
-/// same lane a node does. Nothing a client or an operator asks a node is
-/// theirs, so the other two internal methods are refused as unimplemented.
+/// The tonic handler of a role that hears the **`Deliver` lane** and
+/// little else: a proxy leader receives delegated `Accept`s, `Accepted`s and
+/// `Nack`s, a replica receives `Commit`s, beats and catch-up answers, both
+/// through the same lane a node does. A replica also answers `Inspect` (its
+/// application is what a probe reads); nothing else a client or an operator
+/// asks a node is theirs, so the rest is refused as unimplemented.
 #[derive(Clone)]
 pub(crate) struct LaneService {
     deliver: mpsc::Sender<Message>,
+    /// The replica's `Inspect` queue; `None` on a proxy leader.
+    inspect: Option<mpsc::Sender<Call<InspectRequest, InspectReply>>>,
     on_reject: OnReject,
     role: LaneRole,
 }
 
-/// Construct a deliver-only role's handler/inbox pair; `peer_inbox` bounds
-/// the one lane (at least 1).
+/// The loop-side queues of a [`LaneService`]: the lane, and — on a replica —
+/// the `Inspect` calls.
+pub(crate) struct LaneInbox {
+    pub(crate) deliver: mpsc::Receiver<Message>,
+    pub(crate) inspect: Option<mpsc::Receiver<Call<InspectRequest, InspectReply>>>,
+}
+
+/// Construct a lane role's handler/inbox pair; `peer_inbox` bounds the lane
+/// and the replica's `Inspect` queue (each at least 1).
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lane_channel(
     role: LaneRole,
     peer_inbox: usize,
     on_reject: OnReject,
-) -> (LaneService, mpsc::Receiver<Message>) {
+) -> (LaneService, LaneInbox) {
     let (deliver_tx, deliver_rx) = mpsc::channel(peer_inbox);
+    let (inspect_tx, inspect_rx) = match role {
+        LaneRole::Proxy => (None, None),
+        LaneRole::Replica => {
+            let (tx, rx) = mpsc::channel(peer_inbox);
+            (Some(tx), Some(rx))
+        }
+    };
     (
         LaneService {
             deliver: deliver_tx,
+            inspect: inspect_tx,
             on_reject,
             role,
         },
-        deliver_rx,
+        LaneInbox {
+            deliver: deliver_rx,
+            inspect: inspect_rx,
+        },
     )
 }
 
@@ -285,12 +307,14 @@ impl internal::paros_internal_server::ParosInternal for LaneService {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn inspect(
         &self,
-        _request: Request<InspectRequest>,
+        request: Request<InspectRequest>,
     ) -> Result<Response<InspectReply>, Status> {
-        Err(Status::unimplemented(match self.role {
-            LaneRole::Proxy => "a proxy leader holds no replica to inspect",
-            LaneRole::Replica => "a replica is inspected through its application",
-        }))
+        match &self.inspect {
+            Some(inspect) => dispatch(inspect, request).await,
+            None => Err(Status::unimplemented(
+                "a proxy leader holds no replica to inspect",
+            )),
+        }
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
