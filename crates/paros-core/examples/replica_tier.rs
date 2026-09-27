@@ -287,7 +287,7 @@ fn main() {
     assert_eq!(d.applied_slots(1), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(d.applied[0], d.applied[1], "one order on every replica");
     // The one message a replica ignored: the candidate's proactive
-    // `CatchUpRequest` to every learner — a replica serves nobody.
+    // `CatchUpRequest` to every learner — a replica serves no peer.
     assert_eq!(d.replicas[0].counters().ignored, 1);
 
     println!("\n== 6. who replies to the client for each slot");

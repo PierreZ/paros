@@ -22,7 +22,8 @@ doctrine; this file is the map.
   handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
   `node.replica().chosen_gap()`) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
   deployment**, #144: a `Replica` over a durable chosen log with no `Acceptor` — steps `Commit`,
-  `CatchUpResponse`, `InstallSnapshot`, `Heartbeat`; sends only `CatchUpRequest`; writes
+  `CatchUpResponse`, `InstallSnapshot`, `Heartbeat`, `PreReadAck`; sends `CatchUpRequest`
+  and, for the quorum reads it serves from its own state (§3.4), `PreRead`; writes
   `WriteOp::Learned`, never an acceptor op; never in the pool; its module doc holds the
   coupling analysis behind the bare acceptor, `Application::Shed` on `ColocatedNode`) ·
   `membership.rs` `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and

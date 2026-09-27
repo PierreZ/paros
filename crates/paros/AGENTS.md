@@ -48,15 +48,17 @@ the driver, never in a sim-only path.
   the deployment map's proxies beside its peers · `replica_tier/mod.rs`
   `run_replica` (#144: the fourth driver — the node contract's learner subset
   over a `NodeStorage`, the node's boot scan, format marker and durability seams,
-  sends only catch-up requests, serves nobody; the snapshot chunk-repair plane is
-  not wired yet). `run_node` and `run_proxy` take the deployment's replicas and
+  sends catch-up requests and pre-reads, serves clients the public `QuorumRead` from its
+  own applied state and nothing else, holds no snapshot custody and runs no chunk plane, by
+  decision — the module doc says why). `run_node` and `run_proxy` take the deployment's replicas and
   `Outbound::resolve` adds them to every `Audience::Learners` send; `Outbound::learners`
   is the list and their lanes sit in `peer_queues`.
 - `grpc.rs` + `proto/{common,internal,matchmaker,paros}.proto` (built by
   `build.rs` with `tonic-prost-build`; runtime-free tonic so `paros` stays
   wasm-checkable): `Paros` (Propose/Read/QuorumRead/Compact/Reconfigure/
   ReconfigureMatchmakers), `ParosInternal` (Deliver/Inspect/Retire; a proxy
-  leader and a replica serve their `Deliver` alone — `LaneService`, `LaneRole`), `ParosMatchmaker`
+  leader and a replica serve their `Deliver` — a replica its `Inspect` and the public
+  `QuorumRead` too — `LaneService`, `LaneRole`), `ParosMatchmaker`
   (Matchmake/GarbageCollect/Reconfigure).
 - `corruption.rs` the CTRL record classification (`classify_log`).
 

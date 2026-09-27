@@ -19,13 +19,23 @@
 //!
 //! - **In:** `Commit` (from a leader or a proxy leader, the two alike), the
 //!   `CatchUpResponse` its own requests draw, the `InstallSnapshot` a peer
-//!   serves when it asked below that peer's floor, and `Heartbeat` — for
-//!   the commit watermark and the leader hint only. Every other message is
-//!   not a replica's to hear and is ignored.
+//!   serves when it asked below that peer's floor, `Heartbeat` — for the
+//!   commit watermark, the leader hint and, on a matchmaker deployment, the
+//!   configuration in force, never the ballot — and the `PreReadAck`s its
+//!   own quorum reads draw. Every other message is not a replica's to hear
+//!   and is ignored.
 //! - **Out:** `CatchUpRequest`, to the beat's sender when its watermark is
 //!   ahead of this replica's prefix, and on the driver's tick while an
-//!   application repair or a faulty record is open. A replica serves nobody:
-//!   healing it is the acceptors' job, as healing a lagging acceptor is.
+//!   application repair or a faulty record is open; `PreRead`, to a row of
+//!   acceptors, for a quorum read. A replica serves no peer: healing it is
+//!   the acceptors' job, as healing a lagging acceptor is.
+//! - **Reads** (§3.4, the paper's own reader): [`ReplicaNode::quorum_read_in`]
+//!   runs the node's [`QuorumReads`] tally — a row's vote watermarks, the
+//!   maximum — and [`ReplicaReady::read_states`] surfaces the read once
+//!   *this replica's* applied prefix covers it, so the client reads the
+//!   replica's own state. The reader is never an addressee of its own row
+//!   (it votes nothing), and a read over a superseded configuration is
+//!   abandoned when a beat names a newer one.
 //! - **Durable:** the chosen log through the same record surface a node
 //!   uses — [`WriteOp::Learned`] where a node writes an accepted record, the
 //!   relaxed [`WriteOp::SetChosenIndex`] from the walk, and the floor-moving

@@ -284,6 +284,31 @@ has converged at the end of the run. A killed replica that comes back below the
 floor the acceptors kept raising is healed by a snapshot install, and the sweep
 proves that path is taken.
 
+A replica is also where the paper's leaderless read happens. A client asks a
+replica for a quorum read; the replica asks a row of acceptors how far each has
+voted, takes the highest answer, and replies from its own state once it has
+applied that far. It is the same tally a node runs, so the same argument makes it
+linearizable, and no clock is involved. The simulation sends some quorum reads
+to replicas, judges them by the same client history as every other read, and
+requires that a replica served one.
+
+The client's write is still acknowledged by the node it asked, because a client
+talks to one endpoint and waits for one answer. Each slot's reply owner is
+computed all the same, and the simulation requires that the owner of an
+acknowledged slot applied it, which is the fact a future client library that
+talks to replicas would rely on.
+
+The bare acceptor runs in the simulation too. On a seed with replicas, one draw
+can make the whole acceptor pool bare. The acceptors then vote and keep the log,
+and only the replicas apply. A bare acceptor acknowledges a write once the slot
+is chosen, and the check that the acknowledged command is really the one chosen
+there is made when a replica applies it. A bare acceptor keeps no application
+bytes, so it can never offer a snapshot. On such a seed no acceptor can vouch for
+a snapshot point, the leader refuses every truncation, and the log is never
+compacted. Replicas do not stand in for acceptors here: the truncation rule
+counts the processes that may have to serve a snapshot to a node left below the
+new floor, and only acceptors ever serve one.
+
 The garbage collection rule does not change. The paper's Scenario 3 lets a
 configuration be forgotten once replicas outside it hold the chosen prefix. paros
 still counts only acceptors, bare or colocated, because they are the ones whose
@@ -295,9 +320,10 @@ records the next Phase 1 reads.
 `ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
 (`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
-`REPLICA_GROUP` (`paros-sim/src/process.rs`, `roles.rs`). The bare acceptor is
-not drawn in the simulation yet. Paper: Whittaker et al., *Compartmentalized
-Paxos* §2.3 and §3.3. No level yet.
+`REPLICA_GROUP` (`paros-sim/src/process.rs`, `roles.rs`); the replica's quorum
+read `ReplicaNode::quorum_read_in`; the bare-acceptor draw `shape::bare_acceptors`
+(`paros-sim/src/shape.rs`). Paper: Whittaker et al., *Compartmentalized
+Paxos* §2.3, §3.3 and §3.4. No level yet.
 
 ## Cooperative leader handoff
 

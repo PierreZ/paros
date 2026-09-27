@@ -10,7 +10,7 @@
 //! `CatchUpResponse` / `InstallSnapshot` answers its own requests draw,
 //! through the same `Deliver` lane a node does — and drains every batch the
 //! core produces in the node's own order: persist (the learned records, the
-//! chosen index) → send (catch-up requests only) → apply the contiguous
+//! chosen index) → send (catch-up requests and pre-reads) → apply the contiguous
 //! prefix to the application → application fsync → the compaction floor.
 //!
 //! **Durable, and never a vote.** A replica keeps its chosen log on the same
@@ -18,14 +18,29 @@
 //! the durability seams all apply — but it writes a learned record
 //! ([`paros_core::WriteOp::Learned`]) where a node writes an accepted one, it
 //! answers no `Prepare` and no `Accept`, and it is in no configuration, so no
-//! quorum ever counts it. It serves nobody either: a lagging replica is
+//! quorum ever counts it. It serves no peer either: a lagging replica is
 //! healed from the acceptors, never from another replica, so it offers no
 //! snapshot and answers no catch-up.
 //!
-//! **Not yet here:** the snapshot-point chunk repair plane (`SnapAck` /
-//! `SnapChunkRequest` / `SnapChunkResponse`). A replica records the decided
-//! snapshot points it applies, like a node, but does not advertise custody
-//! or heal a rotted chunk; those messages reach the core, which ignores them.
+//! **It serves clients one thing: the leaderless read** (§3.4). The public
+//! `QuorumRead` RPC opens a quorum read in the core (the grid row is the
+//! node's `read_row` hook), parks the reply exactly as the node driver does,
+//! answers it after the apply that covers the confirmed index, and expires
+//! it on `read_retry_ticks`. Every other public call is refused as
+//! unimplemented.
+//!
+//! **No snapshot custody, by decision.** A replica records the decided
+//! snapshot points it applies, like a node, but it neither advertises
+//! custody nor runs the chunk repair plane (`SnapAck` /
+//! `SnapChunkRequest` / `SnapChunkResponse` reach the core, which ignores
+//! them). The `Truncate` precondition — a quorum advertises custody of a
+//! decided snapshot point — exists so that a node left below the new floor
+//! can be served a snapshot; the only processes that serve one are
+//! acceptors, so the custodians it counts are acceptors, and re-derived with
+//! a replica tier it stays exactly that. A replica below the floor is healed
+//! by an acceptor's `InstallSnapshot`. A deployment of bare acceptors holds
+//! no custody at all, so its leader never truncates: the log grows and no
+//! floor forms, the price of an acceptor that keeps no application bytes.
 //!
 //! A deployment whose `Config::replica_count` is zero runs no replica; the
 //! node driver then sends its learner traffic to the pool alone, exactly the
