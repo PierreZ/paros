@@ -26,7 +26,7 @@ ts-rs = { version = "12", features = ["serde-compat"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # MUST stay exactly 0.2.117: the flake pins `wasm-bindgen-cli` 0.2.117, and the
 # CLI refuses a bundle produced by any other version of the crate.
-wasm-bindgen = "=0.2.117"
+wasm-bindgen = "=0.2.128"
 console_error_panic_hook = "0.1"
 
 [lints]
