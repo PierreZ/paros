@@ -40,8 +40,8 @@ use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, storage_world};
 use paros::{
-    AcceptorConfig, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId,
-    ProxyConfig, ProxyId, ReplicaId, RunError, Seam, parse_addr, run_matchmaker, run_node,
+    AcceptorConfig, Application, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId,
+    NodeId, ProxyConfig, ProxyId, ReplicaId, RunError, Seam, parse_addr, run_matchmaker, run_node,
     run_proxy, run_replica,
 };
 
@@ -499,6 +499,14 @@ async fn run_acceptor(
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
+    // A bare acceptor (#144) is deployment data too, drawn once per seed and
+    // only where a replica tier runs the application.
+    let application =
+        if crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), perturb) {
+            Application::Shed
+        } else {
+            Application::Colocated
+        };
     let config = Config {
         id: self_rank,
         peers: bootstrap,
@@ -508,7 +516,7 @@ async fn run_acceptor(
         matchmaker_pool,
         proxy_count: proxies.len(),
         replica_count: deployment.replica_count(),
-        ..Config::default()
+        application,
     };
 
     // The per-iteration durable-storage world, shared by every node and

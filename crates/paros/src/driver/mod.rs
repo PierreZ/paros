@@ -83,7 +83,7 @@ use matchmaking::{
     MatchmakerLinks, folded_answer, report_match_step, send_outbox, send_reconfigure_requests,
     surface_matchmaking,
 };
-use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, storage_fault_crash};
+use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, served_prefix, storage_fault_crash};
 use reply::maybe_duplicate;
 use report::{Cadence, Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{SnapRepair, route_snap_message, snap_repair_tick};
@@ -818,7 +818,7 @@ where
                         // ack that named nothing was unfalsifiable: the client was
                         // told "applied" with no way for an oracle to check the
                         // claim against the applied prefix.
-                        audit.client_acked(NodeId(self_id), client, seq, slot, storage.applied_slot(), true);
+                        audit.client_acked(NodeId(self_id), client, seq, slot, served_prefix(&node, &storage), true);
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
                         loop_ctx.answer(
                             Reply::ProposeDedup,

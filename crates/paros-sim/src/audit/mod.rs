@@ -48,10 +48,10 @@ use std::sync::{Arc, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
-    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH, MatchRefusal,
-    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId,
-    PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
+    AcceptorConfig, Application, Audit, Ballot, BootRefusal, Command, Control, Deployment,
+    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
+    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
+    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
     SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
@@ -391,6 +391,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         if st.replicas.contains(&node.0) {
             st.applied_on_replica = true;
+        }
+        if let Some((client, seq)) = identity
+            && let Some(acked) = st.bare_acks_pending.remove(&(client, seq))
+        {
+            assert_always!(
+                acked == slot.0,
+                "a committed ack names the slot its command applied at",
+                {
+                    "node" => node.0,
+                    "client" => client,
+                    "seq" => seq,
+                    "acked_slot" => acked,
+                    "applied_at" => slot.0
+                }
+            );
         }
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
@@ -912,8 +927,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // it. The ack must name exactly the index the identity applied at; an
         // ack for a never-applied identity fails the same check.
         let applied_at = st.applied_identity.get(&(client, seq)).copied();
+        // A bare acceptor (#144) acks on the chosen prefix and applies
+        // nothing, so the replicas may not have applied the identity yet: the
+        // claim is then held until they do (`applied`), judged there by the
+        // same message.
+        if st.bare.contains(&node.0) {
+            st.bare_acked = true;
+            if applied_at.is_none() {
+                st.bare_acks_pending.insert((client, seq), slot.0);
+            }
+        }
         assert_always!(
-            applied_at == Some(slot.0),
+            applied_at == Some(slot.0) || (applied_at.is_none() && st.bare.contains(&node.0)),
             "a committed ack names the slot its command applied at",
             {
                 "node" => node.0,
@@ -1039,6 +1064,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "pool" => pool.len() }
         );
         st.replica_count = deployment.replica_count;
+        if deployment.application == Application::Shed {
+            st.bare.insert(node.0);
+        } else {
+            st.bare.remove(&node.0);
+        }
         st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.matchmaker.node_booted(node);

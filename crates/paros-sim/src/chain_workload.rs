@@ -748,6 +748,9 @@ impl Workload for ChainWorkload {
         // whoever asked first — a node or this client — and the same for
         // both.
         let policy = crate::shape::quorum_policy(ctx.state(), servers.len(), true);
+        // Bare acceptors (#144): the pool votes and applies nothing, so its
+        // application state is never probed — the replicas hold it.
+        let bare = crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), true);
         // The matchmaker pool's address book and the floor no matchmaker set
         // this client asks for goes below (#125): the bootstrap set's size,
         // capped at three — the smallest set that keeps a quorum after the
@@ -1446,7 +1449,17 @@ impl Workload for ChainWorkload {
                     }
                 }
                 READ_STATE => {
-                    let mut client = internal_clients[target].clone();
+                    // On a bare seed the application lives on the replicas:
+                    // the probe reads one of them instead.
+                    let mut client = if bare {
+                        let span = replica_clients.internal.len().max(1);
+                        match replica_clients.internal.get(target % span) {
+                            Some(replica) => replica.clone(),
+                            None => internal_clients[target].clone(),
+                        }
+                    } else {
+                        internal_clients[target].clone()
+                    };
                     if let Some(state) = inspect(ctx, &mut client, request_timeout)
                         .await
                         .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
@@ -2033,8 +2046,10 @@ impl Workload for ChainWorkload {
             let parked = crate::world::parked_nodes(ctx.state());
             // A replica is probed after the acceptors, numbered past them
             // (`server_count + rank`); its disk is never parked.
+            // A bare acceptor holds no application state to compare; its
+            // chosen prefix is the audit's convergence claim.
             let live: Vec<usize> = (0..server_count)
-                .filter(|i| !parked.contains(&servers[*i]))
+                .filter(|i| !bare && !parked.contains(&servers[*i]))
                 .chain(server_count..server_count + replica_clients.internal.len())
                 .collect();
             let mut observed: Vec<(usize, ChainState)> = Vec::with_capacity(live.len());
@@ -2068,6 +2083,27 @@ impl Workload for ChainWorkload {
             // trace bug cannot manufacture agreement here. Different counts may
             // be ordinary catch-up; equal counts with different digests are an
             // immediate state-machine-safety violation.
+            // On a bare seed (#144) the acceptors hold no application state,
+            // but the tail still waits for every live one's chosen prefix to
+            // reach the replicas' applied count: a partitioned acceptor must
+            // heal before the run is judged, exactly as a colocated one must.
+            let bare_lagging = match (bare, observed.first()) {
+                (true, Some((_, reference))) if !unanswered => {
+                    let mut lagging = false;
+                    for i in (0..server_count).filter(|i| !parked.contains(&servers[*i])) {
+                        let mut client = internal_clients[i].clone();
+                        let chosen = inspect(ctx, &mut client, request_timeout)
+                            .await
+                            .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
+                        if chosen != Some(reference.applied_count) {
+                            lagging = true;
+                            break;
+                        }
+                    }
+                    lagging
+                }
+                _ => false,
+            };
             if let Some((reference_node, reference)) =
                 (!unanswered).then(|| observed.first().copied()).flatten()
             {
@@ -2097,6 +2133,7 @@ impl Workload for ChainWorkload {
                         guard.done_proposing == guard.registered
                     };
                     if all_quiet
+                        && !bare_lagging
                         && reference.applied_count > pre_tail_count
                         && observed.iter().all(|(_, state)| *state == reference)
                     {

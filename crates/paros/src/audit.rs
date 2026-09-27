@@ -74,6 +74,10 @@ pub struct Deployment {
     /// How many replicas the deployment runs (`Config::replica_count`, #144):
     /// the modulus of `Config::reply_owner`, zero on the plain deployment.
     pub replica_count: usize,
+    /// **This node's** application policy (`Config::application`): whether
+    /// it applies what it learns or is a bare acceptor. The one per-node
+    /// field of the report.
+    pub application: paros_core::Application,
 }
 
 /// One `MatchB` page as it leaves a matchmaker: where it starts, the

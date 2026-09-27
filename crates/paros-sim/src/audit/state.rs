@@ -516,6 +516,14 @@ pub(super) struct AuditState {
     /// that never voted for it, and a replica below every acceptor's floor
     /// healed by a snapshot install.
     pub(super) applied_on_replica: bool,
+    /// Bare acceptors (#144, `Application::Shed`), from their boot reports:
+    /// they apply nothing, so their convergence is their chosen prefix.
+    pub(super) bare: BTreeSet<u64>,
+    /// A bare acceptor acked a client on a slot it never applied.
+    pub(super) bare_acked: bool,
+    /// Acks a bare acceptor gave before any process applied the identity:
+    /// `(client, seq) -> acked slot`, judged when the identity applies.
+    pub(super) bare_acks_pending: BTreeMap<(u64, u64), u64>,
     /// The deployment's replica count (`Deployment::replica_count`).
     pub(super) replica_count: usize,
     /// Per reply-owner replica, the lowest slot it owns that another process
@@ -844,6 +852,12 @@ impl AuditState {
         assert_sometimes!(
             self.replica_installed_snapshot,
             "replica: a replica below the floor is healed by a snapshot"
+        );
+        // The bare acceptor (#144): a slot decided and acked by an acceptor
+        // that never applied it — the application lives on the replicas.
+        assert_sometimes!(
+            self.bare_acked,
+            "bare acceptor: a client is acked on a slot the acceptor never applied"
         );
         // Decision 1 of #144: a slot the node asked acked is owned by a
         // replica that applied it too — the owner the future client library
