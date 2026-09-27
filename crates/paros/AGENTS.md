@@ -12,13 +12,15 @@ the driver, never in a sim-only path.
   `driver/{boot,ready,report,transport,snap_repair,matchmaking,handover,operator,events}.rs`
   by stage: boot replay, the `Ready` handshake's I/O side in
   persist-before-send order, post-batch upkeep, the bounded keep-newest
-  `PeerMailbox` (with `Channels` and `LaneOpener`, the connect-and-lane
-  wiring every driver opens its peers through), the chunk-repair plane
+  `PeerMailbox` (with `LaneOpener` and `peer_address`, the lane wiring
+  every driver opens its peers through), the chunk-repair plane
   (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never enter
   `ColocatedNode`), the matchmaker wire, the matchmaker-set handover, the operator RPCs
   (compact, reconfigure, retire, inspect) ·
-  `driver/edge.rs` `GrpcEdge` (the inbound edge all three drivers serve
-  from: listener, h2 server, the persistent accept) · `driver/reply.rs`
+  `driver/edge.rs` `RpcEdge` (the inbound edge all four drivers serve
+  from: a listening moonpool-rpc runtime the loop polls as a `select!`
+  arm, never spawned, so a crash drops its listener on the spot) and each
+  role's typed inboxes (`NodeInbox`, `ReplicaInbox`, `MatchmakerInbox`) · `driver/reply.rs`
   the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·
   `driver/config.rs` `DriverTunables` and its production defaults.
 - `hooks.rs` `DriverHooks` (the BUGGIFY prong-1 surface, every method
@@ -53,13 +55,22 @@ the driver, never in a sim-only path.
   decision — the module doc says why). `run_node` and `run_proxy` take the deployment's replicas and
   `Outbound::resolve` adds them to every `Audience::Learners` send; `Outbound::learners`
   is the list and their lanes sit in `peer_queues`.
-- `grpc.rs` + `proto/{common,internal,matchmaker,paros}.proto` (built by
-  `build.rs` with `tonic-prost-build`; runtime-free tonic so `paros` stays
-  wasm-checkable): `Paros` (Propose/Read/QuorumRead/Compact/Reconfigure/
-  ReconfigureMatchmakers), `ParosInternal` (Deliver/Inspect/Retire; a proxy
-  leader and a replica serve their `Deliver` — a replica its `Inspect` and the public
-  `QuorumRead` too — `LaneService`, `LaneRole`), `ParosMatchmaker`
-  (Matchmake/GarbageCollect/Reconfigure).
+- `rpc/` + `proto/{common,internal,matchmaker,paros}.proto` (messages built
+  by `build.rs` with `prost-build`; the transport is **moonpool-rpc**, so the
+  wire is deterministic in simulation and `paros` stays wasm-checkable):
+  `rpc/methods.rs` one `RpcMethod` marker per call, each a **well-known
+  endpoint** (`WellKnownMethod`, method id = well-known id, never reused) —
+  the public journal (Propose/Read/QuorumRead/Compact/Reconfigure/
+  ReconfigureMatchmakers), the internal contract (Deliver/Inspect/Retire; a
+  proxy leader and a replica register their `Deliver` — a replica its
+  `Inspect` and the public `QuorumRead` too — and a method a role does not
+  register is refused `EndpointNotFound`), the matchmaker contract
+  (Matchmake/GarbageCollect/Reconfigure) · `rpc/inbound.rs` `Inbound` (a
+  request stream decoded into what the loop steps), `ReplySender` (the
+  one-shot answer; dropping it is the caller's broken promise),
+  `serve_deliveries` (the `Deliver` lane's edge task: ack on enqueue),
+  `rpc_config` · `rpc/client.rs` `NodeClient` (the public client: one
+  at-most-once attempt per call) and the driver's `MatchmakerClient`.
 - `corruption.rs` the CTRL record classification (`classify_log`).
 
 ## Rules local to this crate
@@ -75,5 +86,9 @@ the driver, never in a sim-only path.
 - Storage implementations pass the two contract suites; the faulty fake is
   `paros-sim`'s world-backed store, not a crate here.
 - Deps: `paros-core`, `moonpool-core` (git pin, `default-features = false`,
-  `select`), `moonpool-hyper`, tonic. The pin rev is repeated in
-  `crates/paros-sim/Cargo.toml`; advance all four lines together.
+  `select`), `moonpool-rpc` (same pin, `default-features = false`, `prost`),
+  prost. The pin rev is repeated in `crates/paros-sim/Cargo.toml`; advance
+  all four lines together.
+- Every paros call is one at-most-once attempt (`try_get_reply`): never
+  `get_reply`, whose reconnect retransmission may execute a request twice
+  behind the protocol's back.

@@ -9,15 +9,15 @@
 use std::future::Future;
 use std::time::Duration;
 
-use futures::FutureExt;
+use moonpool_rpc::RpcError;
 use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always};
 use paros::{
-    Compact, InspectReply, InspectRequest, ParosClient, ParosInternalClient, Propose, ProposeAck,
-    QuorumSystem, Reconfigure, ReconfigureMatchmakers, quorum_system_to_proto,
+    Compact, InspectReply, Propose, ProposeAck, QuorumSystem, Reconfigure, ReconfigureMatchmakers,
+    quorum_system_to_proto,
 };
 
 use super::ChainConfig;
-use crate::client::SimChannel;
+use crate::client::SimClient;
 
 pub(super) enum ProposalResult {
     Acked { leader: Option<u64>, slot: u64 },
@@ -28,14 +28,10 @@ pub(super) enum ProposalResult {
 impl ProposalResult {
     /// Judge one `Propose` RPC's answer: a transport error is ambiguous, a
     /// reply is committed or a redirect.
-    fn from_response(
-        response: Result<tonic::Response<ProposeAck>, tonic::Status>,
-        seq: u64,
-    ) -> Self {
-        let Ok(response) = response else {
+    fn from_response(response: Result<ProposeAck, RpcError>, seq: u64) -> Self {
+        let Some(ack) = response.ok() else {
             return Self::Ambiguous;
         };
-        let ack = response.into_inner();
         assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
         if ack.committed {
             Self::Acked {
@@ -94,12 +90,10 @@ pub(super) async fn within<T>(
 /// One `Inspect` probe of `client`, bounded like every other request.
 pub(super) async fn inspect(
     ctx: &SimContext,
-    client: &mut ParosInternalClient<SimChannel>,
+    client: &SimClient,
     timeout: Duration,
 ) -> Option<InspectReply> {
-    let probe = client
-        .inspect(InspectRequest {})
-        .map(|response| response.ok().map(tonic::Response::into_inner));
+    let probe = async { client.inspect().await.ok() };
     within(ctx, timeout, None, probe).await
 }
 
@@ -107,7 +101,7 @@ pub(super) async fn inspect(
 /// `abandon` the client stops listening after 10 ms and records the
 /// observation as ambiguous.
 pub(super) fn propose_once(
-    clients: &[ParosClient<SimChannel>],
+    clients: &[SimClient],
     time: &SimTimeProvider,
     client_id: u64,
     target: usize,
@@ -115,14 +109,15 @@ pub(super) fn propose_once(
     payload: Vec<u8>,
     abandon: bool,
 ) -> impl Future<Output = ProposalResult> + use<> {
-    let mut client = clients[target].clone();
+    let client = clients[target].clone();
     let time = time.clone();
     async move {
-        let call = client.propose(Propose {
+        let request = Propose {
             client: client_id,
             seq,
             command: payload,
-        });
+        };
+        let call = client.propose(&request);
         if abandon {
             moonpool_sim::select! {
                 response = call => ProposalResult::from_response(response, seq),
@@ -137,7 +132,7 @@ pub(super) fn propose_once(
 /// One compaction request up to `up_to`, starting at `target` and following
 /// redirects for at most `config.compact_attempts` asks.
 pub(super) fn compact_once(
-    clients: &[ParosClient<SimChannel>],
+    clients: &[SimClient],
     time: &SimTimeProvider,
     config: &ChainConfig,
     target: usize,
@@ -158,10 +153,10 @@ pub(super) fn compact_once(
         // pre-coupling cadence.
         let mut attempt_target = target;
         for _attempt in 0..config.compact_attempts {
+            let request = Compact { up_to };
             let outcome = moonpool_sim::select! {
-                response = client.compact(Compact { up_to }) => match response {
-                    Ok(response) => {
-                        let ack = response.into_inner();
+                response = client.compact(&request) => match response {
+                    Ok(ack) => {
                         if ack.accepted {
                             CompactResult::Accepted { leader: ack.leader }
                         } else {
@@ -204,7 +199,7 @@ pub(super) fn compact_once(
 /// starting at `target`: redirects are followed, an `unsettled` leader is
 /// re-asked a beat later, every other refusal is terminal.
 pub(super) fn reconfigure_once(
-    clients: &[ParosClient<SimChannel>],
+    clients: &[SimClient],
     time: &SimTimeProvider,
     config: &ChainConfig,
     target: usize,
@@ -228,9 +223,8 @@ pub(super) fn reconfigure_once(
                 cols: wire.cols,
             };
             let outcome = moonpool_sim::select! {
-                response = client.reconfigure(request) => match response {
-                    Ok(response) => {
-                        let ack = response.into_inner();
+                response = client.reconfigure(&request) => match response {
+                    Ok(ack) => {
                         if ack.accepted {
                             ReconfigureResult::Started { leader: ack.leader, round: ack.round.unwrap_or(0) }
                         } else {
@@ -275,7 +269,7 @@ pub(super) fn reconfigure_once(
 /// `busy` reconfigurer is re-asked a beat later, every other refusal is
 /// terminal.
 pub(super) fn reconfigure_matchmakers_once(
-    clients: &[ParosClient<SimChannel>],
+    clients: &[SimClient],
     time: &SimTimeProvider,
     config: &ChainConfig,
     target: usize,
@@ -285,15 +279,14 @@ pub(super) fn reconfigure_matchmakers_once(
     let time = time.clone();
     let config = *config;
     async move {
-        let mut client = clients[target % clients.len()].clone();
+        let client = clients[target % clients.len()].clone();
         for _attempt in 0..config.reconfigure_matchmakers_attempts {
             let request = ReconfigureMatchmakers {
                 members: members.clone(),
             };
             let outcome = moonpool_sim::select! {
-                response = client.reconfigure_matchmakers(request) => match response {
-                    Ok(response) => {
-                        let ack = response.into_inner();
+                response = client.reconfigure_matchmakers(&request) => match response {
+                    Ok(ack) => {
                         if ack.accepted {
                             ReconfigureMatchmakersResult::Started { generation: ack.generation.unwrap_or(0) }
                         } else {

@@ -16,26 +16,23 @@ readme = "../../README.md"
 # spans under them must not depend on the core's default feature set.
 paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"] }
 
-# The driver is generic over moonpool's `Providers` abstraction + gRPC, so
-# the SAME code runs in production (TokioProviders) and simulation (SimProviders).
-# Both Moonpool crates come in without production providers so `paros` stays
-# wasm-safe; a future `native` feature + `parosd` binary layers tokio back on.
-# Pinned to a commit on moonpool's `main` (it evolves fast; not the crates.io
-# release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "0d62b1ac731b02374364fb7d7798b72b86d4d3d2", default-features = false, features = ["select"] }
-moonpool-hyper = { git = "https://github.com/PierreZ/moonpool", rev = "0d62b1ac731b02374364fb7d7798b72b86d4d3d2" }
+# The driver is generic over moonpool's `Providers` abstraction, and speaks
+# moonpool-rpc over those providers, so the SAME code — transport included —
+# runs in production (TokioProviders) and deterministic simulation
+# (SimProviders). Both Moonpool crates come in without production providers so
+# `paros` stays wasm-safe; a future `native` feature + `parosd` binary layers
+# tokio back on. Pinned to a commit on moonpool's `main` (it evolves fast; not
+# the crates.io release) — same rev as paros-sim.
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "0bb9dc14b6e1e3d12e1c04f847ca1d1bd6091927", default-features = false, features = ["select"] }
+# Typed request/reply RPC over the provider traits, protobuf bodies (prost).
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "0bb9dc14b6e1e3d12e1c04f847ca1d1bd6091927", default-features = false, features = ["prost"] }
 
-# Runtime-free tonic core. moonpool-hyper supplies h2 over the provider traits;
-# tonic's tokio-bound `transport` feature remains disabled.
-http = "1"
 prost = "0.14"
-tonic = { version = "0.14", default-features = false, features = ["codegen", "router"] }
-tonic-prost = "0.14"
 # The driver emits standard observability events (node_tick, peer_message_received)
 # and wraps every loop stage in an `#[instrument]` span carrying the node id.
 tracing = "0.1"
-# Runtime-neutral request queues between tonic handlers and the single-owner
-# driver loop. The runtime itself is supplied by the Moonpool providers.
+# Runtime-neutral queues between the RPC edge and the single-owner driver
+# loop. The runtime itself is supplied by the Moonpool providers.
 tokio = { version = "1", features = ["sync"] }
 # `CancellationToken` is the driver's shutdown signal (what `ctx.shutdown()`
 # hands back in sim; production constructs its own).
@@ -47,7 +44,7 @@ tokio-util = "0.7"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+prost-build = "0.14"
 
 [lints]
 workspace = true

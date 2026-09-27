@@ -1,12 +1,11 @@
 //! Driver configuration and the wiring both drivers share: the per-node
-//! tunables, the transport constants they default to, the gRPC keep-alive /
-//! channel shapes, the address parser, and the driver's typed exit ([`RunError`]).
+//! tunables, the transport constants they default to, the address parser, and
+//! the driver's typed exit ([`RunError`]).
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{SimulationError, SimulationResult};
-use moonpool_hyper::{ChannelConfig, KeepAlive};
 
 use crate::hooks::Seam;
 use crate::storage::StorageError;
@@ -14,30 +13,32 @@ use crate::storage::StorageError;
 /// How often a node advances its logical clock.
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
 
-/// h2 liveness detection for peer streams. Both values use provider time, so a
-/// half-open connection is replaced deterministically during the settle tail.
-const GRPC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
-const GRPC_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(1);
-const GRPC_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
+/// RPC liveness pings on peer connections. Both values use provider time, so a
+/// half-open connection is failed deterministically during the settle tail.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(1);
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this is
 /// deliberately bounded and lossy: the consensus driver never waits for
 /// network I/O, and current heartbeats/resends repair anything dropped here.
 /// Overflow evicts the *oldest* undelivered message (see [`PeerMailbox`]).
-const GRPC_PEER_QUEUE_CAPACITY: usize = 4096;
-/// Snapshot offers use an independent h2 request lane so their opaque bytes
+const PEER_QUEUE_CAPACITY: usize = 4096;
+/// Snapshot offers use an independent delivery lane so their opaque bytes
 /// cannot sit in front of heartbeats and normal replication.
-const GRPC_SNAPSHOT_QUEUE_CAPACITY: usize = 4;
-/// Leave headroom below tonic's default 4 MiB decoded-message limit for the
-/// protobuf envelope. The retired transport capped a complete payload at 1 MiB;
-/// this preserves that per-message envelope while allowing compact batches.
-pub(crate) const GRPC_DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
-/// Maximum Paxos messages packed into one protobuf/gRPC request. This keeps
-/// a chatty heartbeat/catch-up round from creating one h2 frame per message.
-pub(crate) const GRPC_DELIVERY_BATCH: usize = 64;
-/// Bounded inboxes between the tonic handlers and the node loop: overload is
-/// visible as backpressure, with ample room for one tick's peer fanout.
-const GRPC_CLIENT_INBOX_CAPACITY: usize = 256;
-const GRPC_PEER_INBOX_CAPACITY: usize = 1024;
+const SNAPSHOT_QUEUE_CAPACITY: usize = 4;
+/// Leave headroom below the RPC runtime's 4 MiB frame limit
+/// (`rpc::inbound`'s `MAX_FRAME_BYTES`) for the protobuf and RPC envelopes.
+/// An earlier transport capped a complete payload at 1 MiB; this preserves
+/// that per-message envelope while allowing compact batches.
+pub(crate) const DELIVERY_BATCH_BYTES: usize = 3 * 1024 * 1024;
+/// Maximum Paxos messages packed into one `Deliver` request. This keeps a
+/// chatty heartbeat/catch-up round from creating one RPC frame per message.
+pub(crate) const DELIVERY_BATCH: usize = 64;
+/// Bounded inboxes between the RPC edge and the node loop: overload is
+/// visible (a refused call, or backpressure on the peer lane), with ample
+/// room for one tick's peer fanout.
+const CLIENT_INBOX_CAPACITY: usize = 256;
+const PEER_INBOX_CAPACITY: usize = 1024;
 
 /// Per-node driver tunables — **born workload-buggified config** (AGENTS.md
 /// prong 2): plain data the harness layer randomizes per seed, FDB knob style,
@@ -62,14 +63,16 @@ pub struct DriverTunables {
     /// candidate abandons its own round before its promises return and no
     /// leader is ever elected.
     pub election_timeout_base: u64,
-    /// h2 PING interval on peer streams (provider time, so a half-open
-    /// connection is replaced deterministically). Floor: non-zero.
+    /// Liveness ping interval on the RPC runtime's connections
+    /// (`PeerPolicy::ping_interval`, provider time, so a half-open
+    /// connection is failed deterministically). Floor: non-zero.
     pub keep_alive_interval: Duration,
-    /// How long a PING may go unanswered before the stream is replaced.
-    /// Floor: non-zero.
+    /// How long a connection may stay silent after a ping before it is
+    /// failed (`PeerPolicy::ping_timeout`). Floor: non-zero.
     pub keep_alive_timeout: Duration,
-    /// How long a peer connect attempt may take before it is retried. Floor:
-    /// non-zero (a reconnecting channel retries forever).
+    /// How long a connect (and its session handshake) may take before the
+    /// attempt fails (`RpcConfig::connect_timeout`); the runtime re-dials with
+    /// backoff for as long as calls need the peer. Floor: non-zero.
     pub connection_timeout: Duration,
     /// How long one peer-delivery RPC may take to get its batch *into the
     /// peer's inbox* before the batch is written off as lost (the mailbox is
@@ -83,13 +86,15 @@ pub struct DriverTunables {
     /// exceed it or no read ever confirms. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
-    /// Capacity of the snapshot offers' independent h2 request lane. Floor 1.
+    /// Capacity of the snapshot offers' independent delivery lane. Floor 1.
     pub snapshot_queue_capacity: usize,
-    /// Capacity of each client-facing inbox (propose, read, compact, inspect)
-    /// between the tonic handlers and the node loop. Floor 1: overload is
-    /// visible as backpressure, never as a lost request.
+    /// Capacity of each client-facing endpoint queue (propose, read, compact,
+    /// inspect, …) between the RPC runtime and the node loop
+    /// (`RpcConfig::endpoint_queue_capacity`). Floor 1: overload is visible as
+    /// a refused call (`Overloaded`, never admitted), never as a lost request.
     pub client_inbox_capacity: usize,
-    /// Capacity of the peer-message inbox. Floor 1, same contract.
+    /// Capacity of the peer-message inbox the `Deliver` lane feeds. Floor 1:
+    /// a full inbox backpressures the lane, never loses a message.
     pub peer_inbox_capacity: usize,
     /// Per-peer in-memory handoff capacity. Like etcd's stream mailbox, this
     /// is deliberately bounded and lossy: the consensus driver never waits for
@@ -99,8 +104,8 @@ pub struct DriverTunables {
     /// [`Audit::dropped_at_mailbox`](crate::Audit::dropped_at_mailbox)
     /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
-    /// Maximum Paxos messages packed into one protobuf/gRPC request. The
-    /// extreme (one per request) maximizes h2 framing pressure and the
+    /// Maximum Paxos messages packed into one `Deliver` request. The
+    /// extreme (one per request) maximizes RPC framing pressure and the
     /// batcher's keep-the-newest overflow shedding.
     pub delivery_batch: usize,
     /// Ticks between re-sends of an open matchmaking request
@@ -177,16 +182,16 @@ impl Default for DriverTunables {
         Self {
             tick_interval: TICK_INTERVAL,
             election_timeout_base: ELECTION_TIMEOUT_BASE,
-            keep_alive_interval: GRPC_KEEP_ALIVE_INTERVAL,
-            keep_alive_timeout: GRPC_KEEP_ALIVE_TIMEOUT,
-            connection_timeout: GRPC_DELIVERY_TIMEOUT,
-            delivery_timeout: GRPC_DELIVERY_TIMEOUT,
+            keep_alive_interval: KEEP_ALIVE_INTERVAL,
+            keep_alive_timeout: KEEP_ALIVE_TIMEOUT,
+            connection_timeout: DELIVERY_TIMEOUT,
+            delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
-            snapshot_queue_capacity: GRPC_SNAPSHOT_QUEUE_CAPACITY,
-            client_inbox_capacity: GRPC_CLIENT_INBOX_CAPACITY,
-            peer_inbox_capacity: GRPC_PEER_INBOX_CAPACITY,
-            peer_queue_capacity: GRPC_PEER_QUEUE_CAPACITY,
-            delivery_batch: GRPC_DELIVERY_BATCH,
+            snapshot_queue_capacity: SNAPSHOT_QUEUE_CAPACITY,
+            client_inbox_capacity: CLIENT_INBOX_CAPACITY,
+            peer_inbox_capacity: PEER_INBOX_CAPACITY,
+            peer_queue_capacity: PEER_QUEUE_CAPACITY,
+            delivery_batch: DELIVERY_BATCH,
             match_resend_ticks: ELECTION_TIMEOUT_BASE,
             gc_resend_ticks: ELECTION_TIMEOUT_BASE,
             reconfigurer_resend_ticks: ELECTION_TIMEOUT_BASE,
@@ -195,22 +200,6 @@ impl Default for DriverTunables {
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
             proxy_round_resends: PROXY_ROUND_RESENDS,
         }
-    }
-}
-
-pub(crate) fn grpc_keep_alive(tunables: &DriverTunables) -> KeepAlive {
-    KeepAlive {
-        interval: tunables.keep_alive_interval,
-        timeout: tunables.keep_alive_timeout,
-        while_idle: false,
-    }
-}
-
-pub(crate) fn grpc_channel_config(tunables: &DriverTunables) -> ChannelConfig {
-    ChannelConfig {
-        connection_timeout: tunables.connection_timeout,
-        keep_alive: Some(grpc_keep_alive(tunables)),
-        ..ChannelConfig::default()
     }
 }
 

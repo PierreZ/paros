@@ -57,20 +57,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
-use crate::driver::edge::{GrpcEdge, edge_reporter};
+use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
 use crate::driver::ready::{
     ParkedRead, ReadPath, crash_if, persist_writes, report_applied, report_snap_recorded,
     storage_fault_crash,
 };
 use crate::driver::reply::answer;
-use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
+use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
-use crate::grpc::{
-    InspectReply, LaneRole, ParosInternalClient, ParosInternalServer, ParosServer, ReadAck,
-    ReplySender, lane_channel, quorum_system_to_proto,
-};
 use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::rpc::{InspectReply, ReadAck, ReplySender, quorum_system_to_proto, well_known};
 use crate::storage::NodeStorage;
 
 /// Walk the retained chosen prefix back through the application on a
@@ -488,34 +485,26 @@ where
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
     let me = Party::Node(NodeId(self_id));
-    let on_reject = edge_reporter(audit, me);
-    let (service, lane) = lane_channel(LaneRole::Replica, tunables.peer_inbox_capacity, on_reject);
-    let mut inbox = lane.deliver;
-    let mut inspects = lane.inspect.ok_or_else(|| {
-        SimulationError::InvalidState("a replica's lane carries an inspect queue".into())
-    })?;
-    let mut quorum_reads = lane.quorum_read.ok_or_else(|| {
-        SimulationError::InvalidState("a replica's lane carries a quorum-read queue".into())
-    })?;
-    let grpc_service = tonic::service::Routes::new(ParosServer::new(service.clone()))
-        .add_service(ParosInternalServer::new(service))
-        .prepare();
-    let mut edge = GrpcEdge::bind(
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "replica", &tunables).await?;
+    let ReplicaInbox {
+        inspect: mut inspects,
+        quorum_read: mut quorum_reads,
+        deliver: mut inbox,
+    } = ReplicaInbox::serve(
         &providers,
-        &local_addr,
-        "paros-replica-grpc-server",
-        "replica",
+        &edge,
         &tunables,
-        grpc_service,
+        me,
+        edge_reporter(audit, me),
         incarnation_shutdown.clone(),
-    )
-    .await?;
+    )?;
 
     let mut replica = ReplicaNode::new(&storage);
     replay_boot_state(&mut replica, &mut storage, self_id, hooks, audit).await?;
 
-    let (_channels, out) = acceptor_lanes(
+    let out = acceptor_lanes(
         &providers,
+        &edge,
         tunables,
         &incarnation_shutdown,
         audit,
@@ -536,7 +525,7 @@ where
     let mut next_tick = time.now() + tunables.tick_interval;
     loop {
         moonpool_core::select! {
-            accepted = edge.serve_next(&providers) => accepted?,
+            error = edge.run() => return Err(error.into()),
             Some(msg) = inbox.recv() => {
                 trace_received(self_id, &msg);
                 replica.step(msg);
@@ -571,17 +560,16 @@ where
 }
 
 /// Open one lane per node of the pool — a replica only ever asks an
-/// acceptor — and the [`Outbound`] over them. The channels are returned so
-/// the caller keeps them alive for the incarnation.
+/// acceptor — and the [`Outbound`] over them, riding `edge`'s runtime.
 fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
     providers: &P,
+    edge: &RpcEdge<P>,
     tunables: DriverTunables,
     shutdown: &CancellationToken,
     audit: &A,
     me: Party,
     members: Vec<(NodeId, String)>,
-) -> SimulationResult<(Channels<P>, Outbound)> {
-    let mut channels = Channels::with_capacity(members.len());
+) -> SimulationResult<Outbound> {
     let lanes = LaneOpener {
         providers,
         tunables,
@@ -592,10 +580,9 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
     let peer_queues = members
         .into_iter()
         .map(|(node, addr)| {
-            let client =
-                channels.connect(providers, &tunables, addr, ParosInternalClient::with_origin)?;
+            let client = well_known(edge.handle(), peer_address(&addr)?);
             let regular = lanes.open(
-                "paros-grpc-replica-catch-up",
+                "paros-replica-catch-up",
                 client,
                 Party::Node(node),
                 tunables.peer_queue_capacity,
@@ -615,7 +602,7 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
         learners: Vec::new(),
         sender: me,
     };
-    Ok((channels, out))
+    Ok(out)
 }
 
 /// Answer an operator's or a probe's `Inspect`: the replica's chosen prefix,

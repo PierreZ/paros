@@ -49,13 +49,13 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    Command, Compact, Control, Entry, InspectReply, InspectRequest, ParosClient, Propose,
-    Reconfigure, Slot, Value, snap_chunk_count,
+    Command, Compact, Control, Entry, InspectReply, Propose, Reconfigure, Slot, Value,
+    snap_chunk_count,
 };
 
 use crate::audit::audit_world;
 use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
-use crate::client::{ClientSet, SimChannel};
+use crate::client::{ClientRuntime, SimClient, default_client_rpc_config};
 use crate::lifecycle;
 use crate::world::{
     corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
@@ -220,9 +220,11 @@ fn user_command(client: u64, seq: u64, bytes: Vec<u8>) -> Command {
     })
 }
 
-/// The corpus's client bundle: one public + one internal gRPC client per node.
+/// The corpus's client bundle: one client per node, over the case's own
+/// client runtime (stopped when the bundle drops).
 struct CorpusClients {
-    clients: ClientSet,
+    clients: Vec<SimClient>,
+    _runtime: ClientRuntime,
 }
 
 /// What one ask came back with, as [`CorpusClients::until_accepted`] reads
@@ -235,8 +237,10 @@ enum Verdict<T> {
 
 impl CorpusClients {
     fn connect(ctx: &SimContext, servers: &[String]) -> SimulationResult<Self> {
+        let runtime = ClientRuntime::start(ctx, default_client_rpc_config())?;
         Ok(Self {
-            clients: ClientSet::connect(ctx, servers, &crate::default_client_channel_config())?,
+            clients: runtime.clients(servers)?,
+            _runtime: runtime,
         })
     }
 
@@ -253,13 +257,13 @@ impl CorpusClients {
         first: usize,
         exclude: Option<usize>,
         deadline: Duration,
-        mut call: impl FnMut(ParosClient<SimChannel>) -> Fut,
+        mut call: impl FnMut(SimClient) -> Fut,
     ) -> Option<T>
     where
         Fut: Future<Output = Option<Verdict<T>>> + Send,
     {
         let time = ctx.time();
-        let count = self.clients.public.len();
+        let count = self.clients.len();
         let mut target = first % count;
         loop {
             if time.now() >= deadline || ctx.shutdown().is_cancelled() {
@@ -269,7 +273,7 @@ impl CorpusClients {
                 target = (target + 1) % count;
                 continue;
             }
-            let client = self.clients.public[target].clone();
+            let client = self.clients[target].clone();
             let response = moonpool_sim::select! {
                 verdict = call(client) => verdict,
                 _ = time.sleep(RPC_TIMEOUT) => None,
@@ -302,16 +306,15 @@ impl CorpusClients {
         deadline: Duration,
     ) -> Option<u64> {
         let first = usize::try_from(seq).unwrap_or(0);
-        self.until_accepted(ctx, first, exclude, deadline, |mut client| async move {
+        self.until_accepted(ctx, first, exclude, deadline, |client| async move {
             let ack = client
-                .propose(Propose {
+                .propose(&Propose {
                     client: client_id,
                     seq,
                     command: bytes.to_vec(),
                 })
                 .await
-                .ok()?
-                .into_inner();
+                .ok()?;
             Some(if ack.committed {
                 Verdict::Accepted(ack.slot)
             } else {
@@ -332,8 +335,8 @@ impl CorpusClients {
         deadline: Duration,
     ) -> bool {
         trace_truncate(up_to);
-        self.until_accepted(ctx, 0, exclude, deadline, |mut client| async move {
-            let ack = client.compact(Compact { up_to }).await.ok()?.into_inner();
+        self.until_accepted(ctx, 0, exclude, deadline, |client| async move {
+            let ack = client.compact(&Compact { up_to }).await.ok()?;
             Some(if ack.accepted {
                 Verdict::Accepted(())
             } else {
@@ -354,15 +357,14 @@ impl CorpusClients {
         members: &[u64],
         deadline: Duration,
     ) -> bool {
-        self.until_accepted(ctx, 0, None, deadline, |mut client| async move {
+        self.until_accepted(ctx, 0, None, deadline, |client| async move {
             let ack = client
-                .reconfigure(Reconfigure {
+                .reconfigure(&Reconfigure {
                     members: members.to_vec(),
                     ..Reconfigure::default()
                 })
                 .await
-                .ok()?
-                .into_inner();
+                .ok()?;
             Some(if ack.accepted {
                 Verdict::Accepted(())
             } else {
@@ -377,11 +379,9 @@ impl CorpusClients {
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
     async fn inspect_reply(&self, ctx: &SimContext, i: usize) -> Option<InspectReply> {
         let time = ctx.time();
-        let mut client = self.clients.internal[i].clone();
+        let client = &self.clients[i];
         moonpool_sim::select! {
-            response = client.inspect(InspectRequest {}) => response
-                .ok()
-                .map(tonic::Response::into_inner),
+            response = client.inspect() => response.ok(),
             _ = time.sleep(RPC_TIMEOUT) => None,
         }
     }
@@ -398,7 +398,7 @@ impl CorpusClients {
     /// the deadline passes (`false`).
     #[tracing::instrument(level = "debug", skip_all)]
     async fn wait_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
-        let all: Vec<usize> = (0..self.clients.internal.len()).collect();
+        let all: Vec<usize> = (0..self.clients.len()).collect();
         self.wait_nodes_at(ctx, &all, want, deadline).await
     }
 
@@ -459,7 +459,7 @@ impl CorpusClients {
         let time = ctx.time();
         let until = time.now() + hold;
         while time.now() < until && !ctx.shutdown().is_cancelled() {
-            for i in 0..self.clients.internal.len() {
+            for i in 0..self.clients.len() {
                 if let Some(state) = self.inspect(ctx, i).await
                     && state != *want
                 {

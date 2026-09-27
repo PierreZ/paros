@@ -10,7 +10,7 @@ use paros_core::{
     ReconfigureRequest, ReconfigureResult, Registration, Slot,
 };
 
-use crate::grpc::internal;
+use crate::rpc::internal;
 
 /// A stable digest of an acceptor configuration (FNV-1a over the sorted
 /// membership and the quorum system), emitted as a trace field so a human

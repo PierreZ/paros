@@ -893,8 +893,8 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, the
   node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
-  + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-hyper` and
-  runtime-free tonic (wasm-safe). No dedicated storage crate: the faulty fake is the harness's
+  + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
+  transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe). No dedicated storage crate: the faulty fake is the harness's
   world-backed store (`crates/paros-sim/src/world/storage.rs`).
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted

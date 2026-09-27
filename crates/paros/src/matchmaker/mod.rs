@@ -5,7 +5,7 @@
 //! Written once over moonpool's `P: Providers`, so the *same* loop runs in
 //! production and deterministic simulation; the harness adapts a moonpool
 //! `Process` to it exactly as it adapts the node. The loop serves the
-//! matchmaker gRPC contract, feeds each request into the core, and drains every
+//! matchmaker RPC contract, feeds each request into the core, and drains every
 //! [`MatchmakerReady`](paros_core::MatchmakerReady) in **persist → fsync →
 //! reply** order: a `Registered` reply leaves only once its registration is
 //! durable, the registry's version of the acceptor's persist-before-`Promise`
@@ -29,11 +29,10 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
-use crate::driver::edge::GrpcEdge;
+use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
 use crate::driver::{DriverTunables, RunError};
-use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::StorageError;
 
@@ -291,9 +290,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 /// Generic over `P: Providers` (production *or* simulation) and
 /// `S: MatchmakerStorage` (the injected durable registry). The loop owns a
 /// [`paros_core::Matchmaker`] built from `config` (its identity and the
-/// deployment's bootstrap set), serves the matchmaker gRPC contract on
+/// deployment's bootstrap set), serves the matchmaker RPC contract on
 /// `local_addr`, and answers each request only once its write is
-/// fsync-durable. `tunables` supplies the h2 keep-alive and inbox shape (the
+/// fsync-durable. `tunables` supplies the RPC liveness and inbox shape (the
 /// matchmaker has no tick and no peers); `hooks` and `audit` are the same
 /// provider-generic seams the node driver takes, with the matchmaker's own
 /// crash locations ([`Seam::MatchBeforeSync`],
@@ -339,22 +338,8 @@ where
         .await
         .map_err(|e| storage_fault_crash(audit, id, e))?;
 
-    let incarnation_shutdown = CancellationToken::new();
-    let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
-
-    let (service, mut inbox): (_, MatchmakerInbox) =
-        matchmaker_channel(tunables.client_inbox_capacity);
-    let grpc_service = tonic::service::Routes::new(ParosMatchmakerServer::new(service)).prepare();
-    let mut edge = GrpcEdge::bind(
-        &providers,
-        &local_addr,
-        "paros-matchmaker-grpc-server",
-        "matchmaker",
-        &tunables,
-        grpc_service,
-        incarnation_shutdown.clone(),
-    )
-    .await?;
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
+    let mut inbox = MatchmakerInbox::serve(&edge)?;
 
     // The sans-IO core, bootstrapped from durable storage through the
     // read-only port (scalars once, then record by record); re-report the
@@ -380,7 +365,7 @@ where
 
     loop {
         moonpool_core::select! {
-            accepted = edge.serve_next(&providers) => accepted?,
+            error = edge.run() => return Err(error.into()),
             Some((request, reply)) = inbox.requests.recv() => {
                 // One request, one batch, one reply: the core answers every
                 // request it is stepped, and the drain hands the reply out

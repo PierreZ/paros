@@ -1,5 +1,5 @@
 //! The client-reply seam: the one place a driver hands an answer back to the
-//! oneshot a tonic handler is holding, consulting the reply-drop hook exactly
+//! reply handle a driver loop is holding, consulting the reply-drop hook exactly
 //! once per reply ([`DriverHooks::drop_client_reply`]) and reporting a drop
 //! the instant it happens — and its mirror, the matchmaker-plane duplicate
 //! ([`DriverHooks::duplicate_client_reply`]).
@@ -8,11 +8,11 @@ use paros_core::{MatchmakerId, NodeId};
 use tokio::sync::mpsc;
 
 use crate::audit::Audit;
-use crate::grpc::ReplySender;
 use crate::hooks::{DriverHooks, Reply};
+use crate::rpc::ReplySender;
 
 /// Consult the reply-drop hook exactly once, after the server state advanced,
-/// and either send `ack` to the held oneshot or report the drop through
+/// and either send `ack` to the held reply handle or report the drop through
 /// `report_drop`, where its trace is emitted.
 fn answer_or_drop<T, H: DriverHooks>(
     hooks: &H,

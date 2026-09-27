@@ -35,8 +35,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
   consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
   corpus's one targeted seam crash, fired once per run, no draw.
-- `client.rs` `ClientSet` (the per-server gRPC client bundle a workload
-  talks through; the corpus builds on it) · `state.rs` `published` (the
+- `client.rs` `ClientRuntime` (a workload's client-only moonpool-rpc
+  runtime, driven on its own task and stopped when the handle drops; one
+  `paros::NodeClient` per server; the corpus builds on it) · `state.rs` `published` (the
   get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a

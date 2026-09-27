@@ -1,58 +1,104 @@
-//! The client bundle a sim workload talks to a cluster through: one public
-//! and one internal gRPC client per server, sharing one
-//! [`ReconnectingChannel`] each, every channel closed when the bundle drops.
+//! The RPC runtime a sim workload talks to a cluster through: one
+//! client-only moonpool-rpc runtime per workload run, and a [`NodeClient`]
+//! per server bound to it.
 //!
 //! The corpus builds its [`CorpusClients`](crate::corpus) on it, and the
 //! chain workload opens one per run.
 
-use moonpool_hyper::ReconnectingChannel;
-use moonpool_sim::{SimContext, SimulationError, SimulationResult};
-use paros::{ParosClient, ParosInternalClient, parse_addr};
+use std::time::Duration;
 
-/// A sim workload's channel to one server.
-pub(crate) type SimChannel = ReconnectingChannel<moonpool_sim::SimProviders, tonic::body::Body>;
+use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
+use moonpool_sim::{SimContext, SimProviders, SimulationError, SimulationResult, TaskProvider};
+use paros::{NodeClient, parse_addr};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
-/// One public and one internal client per server, in `servers` order.
-pub(crate) struct ClientSet {
-    pub(crate) public: Vec<ParosClient<SimChannel>>,
-    pub(crate) internal: Vec<ParosInternalClient<SimChannel>>,
-    channels: Vec<SimChannel>,
+/// A workload's client to one server.
+pub(crate) type SimClient = NodeClient<SimProviders>;
+
+/// A client-only RPC runtime, driven on its own task until this handle
+/// drops: every exit path from a workload stops it (the drop guard cancels
+/// the task, which drops the driver and with it every connection and
+/// pending call).
+///
+/// **Why a detached task is safe here.** The runtime draws moonpool
+/// randomness and BUGGIFY (dial and ping jitter, its request cuts), and a
+/// detached task that outlived a run would shift the next run's stream. This
+/// one cannot: the handle lives in the workload's own `run` scope, so the
+/// cancel lands before `run` returns and the task ends at its next poll,
+/// inside the same run. It consults no paros hook (hooks stay on node
+/// loops). The determinism canary covers it: every seed runs twice and must
+/// reproduce every draw.
+pub(crate) struct ClientRuntime {
+    rpc: RpcHandle<SimProviders>,
+    _stop: DropGuard,
 }
 
-impl ClientSet {
-    /// Open one channel per server under `channel_config` and wrap it in
-    /// both clients.
-    pub(crate) fn connect(
-        ctx: &SimContext,
-        servers: &[String],
-        channel_config: &moonpool_hyper::ChannelConfig,
-    ) -> SimulationResult<Self> {
-        let mut public = Vec::with_capacity(servers.len());
-        let mut internal = Vec::with_capacity(servers.len());
-        let mut channels = Vec::with_capacity(servers.len());
-        for ip in servers {
-            let addr = parse_addr(ip)?;
-            let origin = http::Uri::try_from(format!("http://{addr}"))
-                .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-            let channel = ReconnectingChannel::new(ctx.providers(), addr, channel_config.clone());
-            public.push(ParosClient::with_origin(channel.clone(), origin.clone()));
-            internal.push(ParosInternalClient::with_origin(channel.clone(), origin));
-            channels.push(channel);
-        }
+impl ClientRuntime {
+    /// Start a runtime under `config`.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub(crate) fn start(ctx: &SimContext, config: RpcConfig) -> SimulationResult<Self> {
+        let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), config)
+            .map_err(|e| SimulationError::InvalidState(format!("client RPC runtime: {e}")))?;
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        ctx.task()
+            .spawn_task("paros-client-rpc", async move {
+                moonpool_sim::select! {
+                    biased;
+                    () = cancelled.cancelled() => {}
+                    error = driver.run() => {
+                        tracing::warn!(%error, "client RPC runtime failed");
+                    }
+                }
+            })
+            .detach();
         Ok(Self {
-            public,
-            internal,
-            channels,
+            rpc,
+            _stop: stop.drop_guard(),
         })
     }
+
+    /// One client per server, in `servers` order.
+    pub(crate) fn clients(&self, servers: &[String]) -> SimulationResult<Vec<SimClient>> {
+        servers
+            .iter()
+            .map(|ip| {
+                let addr = parse_addr(ip)?;
+                let addr = addr
+                    .parse()
+                    .map_err(|e| SimulationError::InvalidState(format!("bad address: {e}")))?;
+                Ok(NodeClient::new(&self.rpc, addr))
+            })
+            .collect()
+    }
 }
 
-impl Drop for ClientSet {
-    /// Closing is idempotent and shared by every clone: the channels' connect,
-    /// backoff, and keep-alive tasks stop on every exit path from a workload.
-    fn drop(&mut self) {
-        for channel in &self.channels {
-            channel.close();
-        }
-    }
+/// The client runtime's shape: its connect budget and its liveness pings
+/// (provider time, so a connection left half-open by a node restart is
+/// failed deterministically instead of swallowing requests forever). The
+/// three durations are the chain workload's knobs; the corpus passes the
+/// production defaults through [`default_client_rpc_config`].
+pub(crate) fn client_rpc_config(
+    connect_timeout: Duration,
+    ping_interval: Duration,
+    ping_timeout: Duration,
+) -> RpcConfig {
+    let mut config = RpcConfig {
+        // The nodes' own limit, so a large `Inspect` reply fits.
+        max_frame_bytes: paros::MAX_FRAME_BYTES,
+        connect_timeout,
+        ..RpcConfig::default()
+    };
+    config.peer.ping_interval = ping_interval;
+    config.peer.ping_timeout = ping_timeout;
+    config
+}
+
+/// [`client_rpc_config`] at the production defaults.
+pub(crate) fn default_client_rpc_config() -> RpcConfig {
+    client_rpc_config(
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(1),
+    )
 }

@@ -27,8 +27,8 @@ use paros_core::{
 };
 
 use crate::driver::BootRefusal;
-use crate::grpc::EdgeRejection;
 use crate::hooks::Seam;
+use crate::rpc::EdgeRejection;
 use crate::storage::StorageError;
 
 /// The driver's reaction to a [`StorageError`]. Stage 6 has exactly one honest
@@ -577,7 +577,7 @@ pub trait Audit {
     /// redirect on the spot.
     fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
 
-    /// The gRPC edge of `at` (a node, or a proxy leader) refused an inbound
+    /// The RPC edge of `at` (a node, a proxy leader or a replica) refused an inbound
     /// request before it reached the loop — a peer message that decoded from
     /// the wire but not into a `Message`. The refusal happens at the edge;
     /// nothing inside the process changed.

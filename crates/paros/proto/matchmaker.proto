@@ -11,6 +11,10 @@ import "common.proto";
 //
 // Evolution rule: fields are only ever appended (a matchmaker-set generation
 // tag lands as a new field on every message here, not as a rewrite).
+// The `service` block documents the method set; the transport is
+// moonpool-rpc, not gRPC. Each rpc is a well-known endpoint whose method id
+// and schema version live in `src/rpc/methods.rs`; only the messages are
+// generated from this file.
 service ParosMatchmaker {
   // Register a configuration under a ballot and learn every configuration
   // registered below it (the paper's MatchA / MatchB).

@@ -6,8 +6,8 @@ description: Handle a moonpool limitation paros exposes - decide whether it is r
 # Upstreaming to moonpool
 
 paros depends on moonpool through a **git pin** (`rev = ...` on
-`moonpool-core`, `moonpool-hyper` in `crates/paros/Cargo.toml` and on
-`moonpool-sim`, `moonpool-hyper` in `crates/paros-sim/Cargo.toml`; one rev,
+`moonpool-core`, `moonpool-rpc` in `crates/paros/Cargo.toml` and on
+`moonpool-sim`, `moonpool-rpc` in `crates/paros-sim/Cargo.toml`; one rev,
 four lines, two manifests). When paros work hits a wall in the simulator, the
 question is whose wall it is.
 

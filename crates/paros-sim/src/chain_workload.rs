@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use futures::future::join_all;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
@@ -16,7 +15,7 @@ use paros::{QuorumSystem, Read, RetireRequest, WireQuorumSystem, quorum_system_f
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
-use crate::client::ClientSet;
+use crate::client::{ClientRuntime, client_rpc_config};
 
 mod rpc;
 
@@ -156,15 +155,14 @@ struct ChainConfig {
     /// Matchmaker-set reconfiguration re-asks per operation (a `busy`
     /// reconfigurer a beat later). Floor 1.
     reconfigure_matchmakers_attempts: u8,
-    /// The client channel's connect timeout. Floor 250 ms: one round trip
+    /// The client runtime's connect timeout. Floor 250 ms: one round trip
     /// over the default cross-datacenter link; a shorter one never connects.
     connect_timeout_ms: u64,
-    /// The client channel's h2 PING interval. Floor 250 ms (same bound), and
-    /// below the shortest request deadline so a half-open connection is
-    /// caught within one request.
+    /// The client runtime's liveness-ping interval. Floor 250 ms (same
+    /// bound); a half-open connection is failed once a ping goes unanswered.
     keep_alive_interval_ms: u64,
-    /// How long a PING may go unanswered. Floor 250 ms: a timeout under the
-    /// round trip replaces a healthy stream on every ping.
+    /// How long a connection may stay silent after a ping. Floor 250 ms: a
+    /// timeout under the round trip fails a healthy connection on every ping.
     keep_alive_timeout_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
@@ -764,18 +762,22 @@ impl Workload for ChainWorkload {
         } else {
             1
         };
-        let channel_config = crate::client_channel_config(
-            Duration::from_millis(config.connect_timeout_ms),
-            Duration::from_millis(config.keep_alive_interval_ms),
-            Duration::from_millis(config.keep_alive_timeout_ms),
-        );
-        let clients = ClientSet::connect(ctx, &servers, &channel_config)?;
-        let (public_clients, internal_clients) = (&clients.public, &clients.internal);
+        // The run's own client-only RPC runtime, stopped when `runtime`
+        // drops on any exit path.
+        let runtime = ClientRuntime::start(
+            ctx,
+            client_rpc_config(
+                Duration::from_millis(config.connect_timeout_ms),
+                Duration::from_millis(config.keep_alive_interval_ms),
+                Duration::from_millis(config.keep_alive_timeout_ms),
+            ),
+        )?;
+        let clients = runtime.clients(&servers)?;
         // The replica tier (#144): never proposed to, only probed — a replica
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
-        let replica_clients = ClientSet::connect(ctx, deployment.replicas(), &channel_config)?;
+        let replica_clients = runtime.clients(deployment.replicas())?;
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
@@ -788,7 +790,7 @@ impl Workload for ChainWorkload {
             let time = time.clone();
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
         };
-        let server_count = public_clients.len();
+        let server_count = clients.len();
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let mut next_seq = 0_u64;
         let mut hint = LeaderHint::default();
@@ -805,19 +807,10 @@ impl Workload for ChainWorkload {
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
-            rpc::propose_once(
-                public_clients,
-                &time,
-                client_id,
-                target,
-                seq,
-                payload,
-                abandon,
-            )
+            rpc::propose_once(&clients, &time, client_id, target, seq, payload, abandon)
         };
-        let compact_once = |target: usize, up_to: u64| {
-            rpc::compact_once(public_clients, &time, &config, target, up_to)
-        };
+        let compact_once =
+            |target: usize, up_to: u64| rpc::compact_once(&clients, &time, &config, target, up_to);
         // One compaction request as the trace tells it: the `Truncate` it asks
         // for, then whether the leader accepted it.
         let compact_traced = |target: usize, up_to: u64| {
@@ -830,17 +823,10 @@ impl Workload for ChainWorkload {
             }
         };
         let reconfigure_once = |target: usize, members: Vec<u64>, quorum_system: QuorumSystem| {
-            rpc::reconfigure_once(
-                public_clients,
-                &time,
-                &config,
-                target,
-                members,
-                quorum_system,
-            )
+            rpc::reconfigure_once(&clients, &time, &config, target, members, quorum_system)
         };
         let reconfigure_matchmakers_once = |target: usize, members: Vec<u64>| {
-            rpc::reconfigure_matchmakers_once(public_clients, &time, &config, target, members)
+            rpc::reconfigure_matchmakers_once(&clients, &time, &config, target, members)
         };
 
         // Start with a small concurrent batch when proposals are enabled. This
@@ -1329,7 +1315,7 @@ impl Workload for ChainWorkload {
                     // A quorum read may be asked of a replica (§3.4: the
                     // paper's reader): indices past the pool name the
                     // replica tier, drawn from the target draw's high bits.
-                    let replica_count = replica_clients.public.len();
+                    let replica_count = replica_clients.len();
                     let mut attempt_target = if quorum {
                         let span = u64::try_from(server_count + replica_count).unwrap_or(1);
                         let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
@@ -1347,28 +1333,23 @@ impl Workload for ChainWorkload {
                             break None;
                         }
                         attempts += 1;
-                        let mut client = match attempt_target.checked_sub(server_count) {
-                            Some(replica) => replica_clients.public[replica].clone(),
-                            None => public_clients[attempt_target].clone(),
+                        let client = match attempt_target.checked_sub(server_count) {
+                            Some(replica) => replica_clients[replica].clone(),
+                            None => clients[attempt_target].clone(),
                         };
                         let request = Read {
                             client: client_id,
                             seq,
                         };
                         let call = async move {
-                            if quorum {
-                                client.quorum_read(request).await
+                            let response = if quorum {
+                                client.quorum_read(&request).await
                             } else {
-                                client.read(request).await
-                            }
+                                client.read(&request).await
+                            };
+                            response.ok()
                         };
-                        let attempt = within(
-                            ctx,
-                            remaining,
-                            None,
-                            call.map(|response| response.ok().map(tonic::Response::into_inner)),
-                        )
-                        .await;
+                        let attempt = within(ctx, remaining, None, call).await;
                         match attempt {
                             Some(ack) => {
                                 assert_always!(
@@ -1451,16 +1432,16 @@ impl Workload for ChainWorkload {
                 READ_STATE => {
                     // On a bare seed the application lives on the replicas:
                     // the probe reads one of them instead.
-                    let mut client = if bare {
-                        let span = replica_clients.internal.len().max(1);
-                        match replica_clients.internal.get(target % span) {
+                    let client = if bare {
+                        let span = replica_clients.len().max(1);
+                        match replica_clients.get(target % span) {
                             Some(replica) => replica.clone(),
-                            None => internal_clients[target].clone(),
+                            None => clients[target].clone(),
                         }
                     } else {
-                        internal_clients[target].clone()
+                        clients[target].clone()
                     };
-                    if let Some(state) = inspect(ctx, &mut client, request_timeout)
+                    if let Some(state) = inspect(ctx, &client, request_timeout)
                         .await
                         .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
                     {
@@ -1493,19 +1474,17 @@ impl Workload for ChainWorkload {
                     // request refused (`unchanged`, `unknown_member`) — an
                     // operating condition, never a wrong state.
                     let probe_target = hint.current.unwrap_or(target);
-                    let mut probe = internal_clients[probe_target].clone();
-                    let in_force = inspect(ctx, &mut probe, request_timeout)
-                        .await
-                        .map(|reply| {
-                            let wire = WireQuorumSystem {
-                                quorum_system: reply.quorum_system,
-                                phase1_quorum: reply.phase1_quorum,
-                                phase2_quorum: reply.phase2_quorum,
-                                rows: reply.rows,
-                                cols: reply.cols,
-                            };
-                            (reply.members, quorum_system_from_proto(&wire).ok())
-                        });
+                    let probe = clients[probe_target].clone();
+                    let in_force = inspect(ctx, &probe, request_timeout).await.map(|reply| {
+                        let wire = WireQuorumSystem {
+                            quorum_system: reply.quorum_system,
+                            phase1_quorum: reply.phase1_quorum,
+                            phase2_quorum: reply.phase2_quorum,
+                            rows: reply.rows,
+                            cols: reply.cols,
+                        };
+                        (reply.members, quorum_system_from_proto(&wire).ok())
+                    });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
@@ -1688,11 +1667,10 @@ impl Workload for ChainWorkload {
                     // step's target and ask that same node. A stale answer
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
-                    let mut probe = internal_clients[target].clone();
-                    let current: Option<(u64, Vec<u64>)> =
-                        inspect(ctx, &mut probe, request_timeout)
-                            .await
-                            .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
+                    let probe = clients[target].clone();
+                    let current: Option<(u64, Vec<u64>)> = inspect(ctx, &probe, request_timeout)
+                        .await
+                        .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
@@ -1787,14 +1765,14 @@ impl Workload for ChainWorkload {
                     // a follower answers an empty list and the step is a
                     // no-op.
                     let probe_target = hint.current.unwrap_or(target);
-                    let mut probe = internal_clients[probe_target].clone();
+                    let probe = clients[probe_target].clone();
                     // The retirable list, the configuration in force and the
                     // effective GC watermark come from the *same* reply: the
                     // world can hold the protocol to "a retirable node is
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = inspect(ctx, &mut probe, request_timeout).await;
+                    let inspected = inspect(ctx, &probe, request_timeout).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -1846,18 +1824,16 @@ impl Workload for ChainWorkload {
                         };
                         if reserved {
                             tracing::info!(node = victim as u64, "chain_retire_request");
-                            let mut client = internal_clients[victim].clone();
-                            let accepted: Option<bool> = within(
-                                ctx,
-                                request_timeout,
-                                None,
-                                client
-                                    .retire(RetireRequest { gc_watermark })
-                                    .map(|response| {
-                                        response.ok().map(|response| response.into_inner().accepted)
-                                    }),
-                            )
-                            .await;
+                            let client = clients[victim].clone();
+                            let accepted: Option<bool> =
+                                within(ctx, request_timeout, None, async {
+                                    client
+                                        .retire(&RetireRequest { gc_watermark })
+                                        .await
+                                        .ok()
+                                        .map(|ack| ack.accepted)
+                                })
+                                .await;
                             tracing::info!(node = victim as u64, accepted = ?accepted, "chain_retire_outcome");
                             match accepted {
                                 Some(true) => self.adversarial.retired = true,
@@ -1882,6 +1858,12 @@ impl Workload for ChainWorkload {
                                         );
                                     self.adversarial.retire_released |= released;
                                 }
+                                // Ambiguous: the park stands for good (an
+                                // honored retirement must never come back),
+                                // so the audit excuses the identity now
+                                // rather than at a boot that may never come.
+                                None if !aim_at_member => audit
+                                    .note_retired_parked(u64::try_from(victim).unwrap_or(u64::MAX)),
                                 None => {}
                             }
                         }
@@ -2050,16 +2032,16 @@ impl Workload for ChainWorkload {
             // chosen prefix is the audit's convergence claim.
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !bare && !parked.contains(&servers[*i]))
-                .chain(server_count..server_count + replica_clients.internal.len())
+                .chain(server_count..server_count + replica_clients.len())
                 .collect();
             let mut observed: Vec<(usize, ChainState)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
-                let mut client = match node.checked_sub(server_count) {
-                    Some(replica) => replica_clients.internal[replica].clone(),
-                    None => internal_clients[node].clone(),
+                let client = match node.checked_sub(server_count) {
+                    Some(replica) => replica_clients[replica].clone(),
+                    None => clients[node].clone(),
                 };
-                let state = inspect(ctx, &mut client, request_timeout)
+                let state = inspect(ctx, &client, request_timeout)
                     .await
                     .and_then(|reply| ChainState::decode(&reply.snapshot).ok());
                 let Some(state) = state else {
@@ -2091,8 +2073,8 @@ impl Workload for ChainWorkload {
                 (true, Some((_, reference))) if !unanswered => {
                     let mut lagging = false;
                     for i in (0..server_count).filter(|i| !parked.contains(&servers[*i])) {
-                        let mut client = internal_clients[i].clone();
-                        let chosen = inspect(ctx, &mut client, request_timeout)
+                        let client = clients[i].clone();
+                        let chosen = inspect(ctx, &client, request_timeout)
                             .await
                             .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
                         if chosen != Some(reference.applied_count) {

@@ -30,11 +30,11 @@
 mod audit;
 mod corruption;
 mod driver;
-mod grpc;
 mod hooks;
 mod matchmaker;
 mod proxy;
 mod replica_tier;
+mod rpc;
 mod storage;
 
 pub use audit::{Audit, DelegationOutcome, Deployment, HistoryPage, NoAudit, StorageFaultDecision};
@@ -45,12 +45,18 @@ pub use driver::{
     BootKind, BootRefusal, DriverTunables, RunError, command_hash, message_kind, parse_addr,
     registration_history_hash, run_node,
 };
-pub use grpc::{
-    Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, ParosClient,
-    ParosInternalClient, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
-    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, WireQuorumSystem,
+pub use rpc::{
+    Compact, CompactAck, EdgeRejection, InspectReply, InspectRequest, MAX_FRAME_BYTES, NodeClient,
+    Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    ReconfigureMatchmakersAck, RetireAck, RetireRequest, WireQuorumSystem,
     quorum_system_from_proto, quorum_system_to_proto,
 };
+/// The wire contract: the RPC method markers ([`rpc::methods`]) and the
+/// generated protobuf bodies.
+pub mod wire {
+    pub use crate::rpc::methods;
+    pub use crate::rpc::{common, internal, matchmaker, public};
+}
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,

@@ -1,27 +1,27 @@
 //! The driver's outbound peer transport: the bounded, lossy, keep-newest
 //! per-peer mailboxes, the [`Outbound`] handle the rest of the driver sends
-//! through, and the detached delivery task that feeds bounded batches over one
-//! reconnecting h2 channel per peer.
+//! through, and the detached delivery task that feeds bounded batches to each
+//! peer's well-known `Deliver` endpoint.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
-use moonpool_hyper::ReconnectingChannel;
+use moonpool_rpc::ServiceClient;
 use paros_core::{Audience, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::grpc::{ParosInternalClient, internal, message_to_proto};
 use crate::hooks::DriverHooks;
+use crate::rpc::methods::DeliverRpc;
+use crate::rpc::{internal, message_to_proto};
 
-use super::config::{
-    DriverTunables, GRPC_DELIVERY_BATCH, GRPC_DELIVERY_BATCH_BYTES, grpc_channel_config,
-};
+use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
 /// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
@@ -381,58 +381,21 @@ impl Outbound {
                     from = %self.sender,
                     to = %to,
                     kind = evicted_kind,
-                    "evicted oldest Paxos message from a full peer gRPC mailbox"
+                    "evicted oldest Paxos message from a full peer mailbox"
                 );
             }
         }
     }
 }
 
-/// One reconnecting h2 channel per remote party, as a driver opens them:
-/// every channel this bundle connected is **closed when the bundle drops**.
-/// `close` is terminal and shared by every clone held by tonic clients, so
-/// it cancels connect/backoff/keepalive work immediately when the incarnation
-/// exits, including simulated durability crashes that return via `?`.
-pub(crate) struct Channels<P: Providers> {
-    channels: Vec<ReconnectingChannel<P, tonic::body::Body>>,
-}
-
-impl<P: Providers> Channels<P> {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            channels: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Open one reconnecting channel toward `addr` and hand it, with the
-    /// origin its requests carry, to `make` — the generated client
-    /// constructor (`with_origin`). The channel stays registered here for the
-    /// close on drop.
-    ///
-    /// # Errors
-    ///
-    /// A malformed address (not a valid `http://` origin).
-    pub(crate) fn connect<C>(
-        &mut self,
-        providers: &P,
-        tunables: &DriverTunables,
-        addr: String,
-        make: impl FnOnce(ReconnectingChannel<P, tonic::body::Body>, http::Uri) -> C,
-    ) -> SimulationResult<C> {
-        let origin = http::Uri::try_from(format!("http://{addr}"))
-            .map_err(|e| SimulationError::InvalidState(format!("bad gRPC origin: {e}")))?;
-        let channel = ReconnectingChannel::new(providers, addr, grpc_channel_config(tunables));
-        self.channels.push(channel.clone());
-        Ok(make(channel, origin))
-    }
-}
-
-impl<P: Providers> Drop for Channels<P> {
-    fn drop(&mut self) {
-        for channel in &self.channels {
-            channel.close();
-        }
-    }
+/// The resolved address of a deployment-map entry (`ip:port`).
+///
+/// # Errors
+///
+/// An entry that is not a numeric socket address.
+pub(crate) fn peer_address(addr: &str) -> SimulationResult<SocketAddr> {
+    addr.parse()
+        .map_err(|e| SimulationError::InvalidState(format!("bad peer address {addr}: {e}")))
 }
 
 /// What every outbound lane a driver opens shares: the providers it spawns
@@ -456,7 +419,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
     pub(crate) fn open(
         &self,
         task: &'static str,
-        client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
+        client: ServiceClient<P, DeliverRpc>,
         to: Party,
         capacity: usize,
     ) -> PeerMailbox {
@@ -481,7 +444,8 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
     }
 }
 
-/// Feed bounded unary batches over one reconnecting h2 channel per peer. While
+/// Feed bounded batches to one peer's `Deliver` endpoint, one at-most-once
+/// attempt each (the runtime re-dials a lost connection on its own). While
 /// a batch is in flight, new protocol messages accumulate for the next batch;
 /// on failure Paxos heartbeats/resends repair anything lost with that RPC. A
 /// batch is "in flight" only until the peer has *enqueued* it (its `Deliver`
@@ -494,7 +458,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
 async fn run_peer_delivery<P: Providers, A: Audit>(
-    client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
+    client: ServiceClient<P, DeliverRpc>,
     time: P::Time,
     shutdown: CancellationToken,
     messages: PeerMailbox,
@@ -528,24 +492,16 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
                 _ = time.sleep(tunables.tick_interval) => {}
             }
         }
-        let mut attempt_client = client.clone();
         let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, from, to);
         carried = next;
         let outcome = moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => return,
-            result = time.timeout(tunables.delivery_timeout, attempt_client.deliver(batch)) => result,
+            result = client.try_get_reply_within(&batch, tunables.delivery_timeout) => result,
         };
-        match outcome {
-            Ok(Ok(_)) => {}
-            Ok(Err(status)) => {
-                audit.delivery_failed(from, to);
-                tracing::debug!(%status, "peer gRPC delivery failed");
-            }
-            Err(_) => {
-                audit.delivery_failed(from, to);
-                tracing::debug!("peer gRPC delivery timed out");
-            }
+        if let Err(error) = outcome {
+            audit.delivery_failed(from, to);
+            tracing::debug!(%error, "peer delivery failed");
         }
     }
 }
@@ -573,7 +529,7 @@ fn delivery_batch<A: Audit>(
     // that no repair path can outrun (an adversary dropping every message of
     // one kind forever defeats eventual synchrony, which the knob's extreme
     // must not do).
-    while messages.len() >= batch_limit.max(GRPC_DELIVERY_BATCH) {
+    while messages.len() >= batch_limit.max(DELIVERY_BATCH) {
         let Some(newer) = messages.try_pop() else {
             break;
         };
@@ -595,7 +551,7 @@ fn delivery_batch<A: Audit>(
         let Some(message) = messages.try_pop() else {
             break;
         };
-        if batch_bytes.saturating_add(message.encoded_len()) > GRPC_DELIVERY_BATCH_BYTES {
+        if batch_bytes.saturating_add(message.encoded_len()) > DELIVERY_BATCH_BYTES {
             carried = Some(message);
             break;
         }
